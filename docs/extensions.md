@@ -719,11 +719,22 @@ pi.registerAssistantThinkingRenderer((context, theme) => {
   container.addChild(
     new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0),
   );
-  return container;
+  return container; // legacy shorthand for { type: "append", component: container }
 });
 ```
 
-Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return a component are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
+Used by interactive rendering to customize each visible assistant thinking block. The renderer receives parent assistant message metadata, provider thinking content metadata, the current full trimmed thinking text snapshot, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. `requestRender()` repaints already-mounted renderer output; if the renderer returned `undefined`, it re-runs this thinking block's renderers and schedules a repaint so async work can later mount `{ type: "append" }` or `{ type: "replace" }` output. Renderers must not mutate messages; the thinking block remains the provider/session source of truth.
+
+`context.message.timestamp` is stable across streaming partials and is the recommended anchor for renderer-local async state keys. `context.message.responseId` may be absent or appear only after provider finalization; do not key streaming state on `responseId` alone. `context.content.itemId` and `context.content.thinkingSignature` identify provider-native reasoning items when available; fall back to `contentIndex` and `thinkingIndex` otherwise.
+
+Renderer results:
+
+- `Component`: legacy shorthand for appending supplemental UI below the original thinking Markdown.
+- `{ type: "append", component: Component }`: explicit append behavior, equivalent to returning a bare component.
+- `{ type: "replace", component: Component }`: suppresses the default thinking Markdown and renders the replacement component instead.
+- `undefined`: renders nothing extra and leaves the default thinking Markdown visible.
+
+If multiple renderers return `{ type: "replace", component }`, the first replacement wins and later replacements are ignored with a warning. Append renderers still run after a replacement, in registration order.
 
 ## Tool call/result renderer
 

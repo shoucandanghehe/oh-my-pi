@@ -192,7 +192,64 @@ describe("AssistantMessageComponent mermaid markdown", () => {
 
 describe("AssistantMessageComponent thinking renderers", () => {
 	it("renders all extension outputs below visible thinking blocks in registration order", () => {
-		const contexts: Array<{ contentIndex: number; thinkingIndex: number; text: string }> = [];
+		const contexts: Array<{
+			message: { timestamp: number; responseId?: string; api: string; provider: string; model: string };
+			content: { itemId?: string; thinkingSignature?: string };
+			contentIndex: number;
+			thinkingIndex: number;
+			text: string;
+		}> = [];
+		const message = {
+			...createAssistantMessage(""),
+			responseId: "resp-1",
+			content: [
+				{
+					type: "thinking" as const,
+					thinking: "I should inspect the input.",
+					itemId: "item-1",
+					thinkingSignature: "sig-1",
+				},
+			],
+		};
+		const component = new AssistantMessageComponent(message, false, undefined, [
+			context => {
+				contexts.push({
+					message: context.message,
+					content: context.content,
+					contentIndex: context.contentIndex,
+					thinkingIndex: context.thinkingIndex,
+					text: context.text,
+				});
+				return new Text("first note", 1, 0);
+			},
+			() => new Text("second note", 1, 0),
+		]);
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(rendered).toContain("I should inspect the input.");
+		expect(rendered.indexOf("I should inspect the input.")).toBeLessThan(rendered.indexOf("first note"));
+		expect(rendered.indexOf("first note")).toBeLessThan(rendered.indexOf("second note"));
+		expect(contexts).toEqual([
+			{
+				message: {
+					timestamp: message.timestamp,
+					responseId: "resp-1",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+				},
+				content: {
+					itemId: "item-1",
+					thinkingSignature: "sig-1",
+				},
+				contentIndex: 0,
+				thinkingIndex: 0,
+				text: "I should inspect the input.",
+			},
+		]);
+	});
+
+	it("preserves legacy component returns that define structured result fields", () => {
 		const component = new AssistantMessageComponent(
 			{
 				...createAssistantMessage(""),
@@ -201,23 +258,62 @@ describe("AssistantMessageComponent thinking renderers", () => {
 			false,
 			undefined,
 			[
-				context => {
-					contexts.push({
-						contentIndex: context.contentIndex,
-						thinkingIndex: context.thinkingIndex,
-						text: context.text,
-					});
-					return new Text("first note", 1, 0);
-				},
-				() => new Text("second note", 1, 0),
+				() =>
+					Object.assign(new Text("legacy component with structured fields", 1, 0), {
+						type: "replace",
+						component: new Text("wrong structured replacement", 1, 0),
+					}),
 			],
 		);
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 		expect(rendered).toContain("I should inspect the input.");
-		expect(rendered.indexOf("I should inspect the input.")).toBeLessThan(rendered.indexOf("first note"));
-		expect(rendered.indexOf("first note")).toBeLessThan(rendered.indexOf("second note"));
-		expect(contexts).toEqual([{ contentIndex: 0, thinkingIndex: 0, text: "I should inspect the input." }]);
+		expect(rendered).toContain("legacy component with structured fields");
+		expect(rendered).not.toContain("wrong structured replacement");
+	});
+
+	it("lets extension renderers replace the default thinking block while preserving appenders", () => {
+		const component = new AssistantMessageComponent(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "thinking", thinking: "Sensitive chain of thought." }],
+			},
+			false,
+			undefined,
+			[
+				() => ({ type: "append", component: new Text("early audit note", 1, 0) }),
+				() => ({ type: "replace", component: new Text("redacted outline", 1, 0) }),
+				() => new Text("legacy appended note", 1, 0),
+			],
+		);
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(rendered).not.toContain("Sensitive chain of thought.");
+		expect(rendered).toContain("redacted outline");
+		expect(rendered).toContain("early audit note");
+		expect(rendered).toContain("legacy appended note");
+		expect(rendered.indexOf("redacted outline")).toBeLessThan(rendered.indexOf("early audit note"));
+		expect(rendered.indexOf("early audit note")).toBeLessThan(rendered.indexOf("legacy appended note"));
+	});
+
+	it("uses the first replacement renderer when multiple extensions try to replace thinking", () => {
+		const component = new AssistantMessageComponent(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "thinking", thinking: "Original thinking." }],
+			},
+			false,
+			undefined,
+			[
+				() => ({ type: "replace", component: new Text("first replacement", 1, 0) }),
+				() => ({ type: "replace", component: new Text("second replacement", 1, 0) }),
+			],
+		);
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(rendered).not.toContain("Original thinking.");
+		expect(rendered).toContain("first replacement");
+		expect(rendered).not.toContain("second replacement");
 	});
 
 	it("keeps original thinking visible when an extension renderer throws", () => {
@@ -240,7 +336,7 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(rendered).not.toContain("renderer failed");
 	});
 
-	it("keeps async renderer components mounted when they request a render", () => {
+	it("keeps async renderer components mounted when they request a render", async () => {
 		let renderRequests = 0;
 		let rendererCalls = 0;
 		let mountedNote: Text | undefined;
@@ -268,12 +364,51 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("translation loading");
 		mountedNote?.setText("translation ready");
 		requestRender?.();
+		await Promise.resolve();
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 		expect(renderRequests).toBe(1);
 		expect(rendererCalls).toBe(1);
 		expect(rendered).toContain("translation ready");
 		expect(rendered).not.toContain("translation loading");
+	});
+
+	it("mounts a replacement when an async renderer becomes ready after streaming stops", async () => {
+		let ready = false;
+		let renderRequests = 0;
+		let rendererCalls = 0;
+		let requestRender: (() => void) | undefined;
+		const component = new AssistantMessageComponent(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "thinking", thinking: "Sensitive async thinking." }],
+			},
+			false,
+			() => {
+				renderRequests += 1;
+			},
+			[
+				context => {
+					rendererCalls += 1;
+					requestRender = context.requestRender;
+					if (!ready) return undefined;
+					return { type: "replace", component: new Text(`redacted ${context.text.length}`, 1, 0) };
+				},
+			],
+		);
+
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Sensitive async thinking.");
+		expect(rendererCalls).toBe(1);
+
+		ready = true;
+		requestRender?.();
+		await Promise.resolve();
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(renderRequests).toBe(1);
+		expect(rendererCalls).toBe(2);
+		expect(rendered).toContain("redacted 25");
+		expect(rendered).not.toContain("Sensitive async thinking.");
 	});
 
 	it("does not invoke extension renderers when thinking is hidden", () => {

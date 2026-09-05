@@ -447,6 +447,7 @@ describe("SelectList.routeMouse", () => {
 		wheel: null,
 		motion: false,
 		leftClick: false,
+		rightClick: false,
 	};
 
 	function makeList() {
