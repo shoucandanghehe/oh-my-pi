@@ -24,8 +24,8 @@ import {
 	type SkillWarning,
 	setActiveSkills,
 } from "../extensibility/skills";
-import { type LocalProtocolOptions } from "../internal-urls";
-import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
+import type { LocalProtocolOptions } from "../internal-urls";
+import { parseXdUrl, stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -38,6 +38,7 @@ import sessionAgentNoticePrompt from "../prompts/system/session-agent-notice.md"
 import skillNoticePrompt from "../prompts/system/skill-notice.md" with { type: "text" };
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
+import { resolveToolTier } from "../tools/approval";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import {
 	approvalRestrictions,
@@ -49,6 +50,7 @@ import {
 import { getApprovalGrants } from "../tools/approval-cache";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
+import { unwrapHashlineHeaderPath } from "../tools/plan-mode-guard";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -62,6 +64,7 @@ import {
 } from "../tools/xdev";
 import type { EditModeSetting } from "../edit/settings";
 import { resolveEditMode } from "../utils/edit-mode";
+import { resolveXdevTool } from "../tools/xdev";
 import {
 	extractPermissionLocations,
 	getPermissionIntent,
@@ -95,6 +98,18 @@ import {
 	cfgToolsXdevInlineDevices,
 	cfgToolsXdevNotices,
 } from "../tools/settings";
+
+// Approval tier "read" also covers session mutations such as todo, retain and
+// resolve. Only investigation tools belong in the side-thread allowlist.
+const SIDE_READ_ONLY_TOOL_NAMES: Record<string, true> = {
+	read: true,
+	glob: true,
+	grep: true,
+	ast_grep: true,
+	web_search: true,
+	recall: true,
+	reflect: true,
+};
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
@@ -905,6 +920,32 @@ export class SessionTools {
 		return resolveMCPToolAlias(bareName, candidate => this.#toolRegistry.get(candidate));
 	}
 
+	/** Restrict side threads by operation, including tools reached through xd://. */
+	isReadOnlySideToolCall(tool: AgentTool, args: Record<string, unknown>): boolean {
+		if (tool.name === "write") {
+			if (!this.#xdev || typeof args.path !== "string" || typeof args.content !== "string") return false;
+			const target = parseXdUrl(unwrapHashlineHeaderPath(args.path));
+			const device = target?.name ? resolveXdevTool(this.#xdev, target.name) : undefined;
+			if (!device) return false;
+			let decoded: unknown;
+			try {
+				decoded = JSON.parse(args.content);
+			} catch {
+				return false;
+			}
+			if (!isRecord(decoded)) return false;
+			tool = device;
+			args = decoded;
+		}
+		if (Object.hasOwn(SIDE_READ_ONLY_TOOL_NAMES, tool.name)) return true;
+		if (tool.name !== "lsp" && tool.name !== "github") return false;
+		try {
+			return resolveToolTier(tool, args) === "read";
+		} catch {
+			return false;
+		}
+	}
+
 	/**
 	 * Looks up an enabled tool through the same ACP permission gate as direct calls.
 	 *
@@ -1053,7 +1094,8 @@ export class SessionTools {
 		});
 	}
 
-	#wrapRuntimeTool(tool: AgentTool): AgentTool {
+	/** Apply the ordinary output, extension, and approval wrappers to a transient tool. */
+	wrapRuntimeTool(tool: AgentTool): AgentTool {
 		const wrapped = wrapToolWithMetaNotice(tool);
 		const extensionRunner = this.#host.extensionRunner();
 		return extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped;
@@ -1075,7 +1117,7 @@ export class SessionTools {
 
 			for (const tool of tools) {
 				if (this.#toolRegistry.has(tool.name)) continue;
-				this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));
+				this.#toolRegistry.set(tool.name, this.wrapRuntimeTool(tool));
 				this.#builtInToolNames.add(tool.name);
 				this.#installedVibeToolNames.add(tool.name);
 			}
@@ -2455,7 +2497,7 @@ export class SessionTools {
 				if (!MEMORY_BACKEND_TOOL_NAMES.some(name => name === tool.name) || this.#toolRegistry.has(tool.name)) {
 					continue;
 				}
-				const wrapped = this.#wrapRuntimeTool(tool);
+				const wrapped = this.wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 				nextActive.push(wrapped.name);
@@ -2489,7 +2531,7 @@ export class SessionTools {
 			if (!this.#toolRegistry.has("think")) {
 				const tool = await this.#createThinkTool?.();
 				if (tool?.name !== "think") return false;
-				const wrapped = this.#wrapRuntimeTool(tool);
+				const wrapped = this.wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 			}

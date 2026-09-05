@@ -15,7 +15,6 @@ import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
-import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -31,40 +30,30 @@ function makeJsonlSessionFile(dirPath: string, entries: object[]): string {
 	return filePath;
 }
 
-function makeSubagentRegistry(sessions: ObservableSession[]) {
-	return {
-		getSessions: () => sessions,
-		getSession: (id: string) => sessions.find(session => session.id === id),
-		onChange: () => () => {},
-		setMainSession: () => {},
-		getActiveSubagentCount: () => sessions.filter(s => s.status === "active").length,
-	} as unknown as import("@oh-my-pi/pi-tui/overlays/session-observer-registry").SessionObserverRegistry;
-}
-
-function makeViewer(sessionFile: string, observed: ObservableSession[]): AgentTranscriptViewer {
+function makeViewer(sessionFile: string): AgentTranscriptViewer {
 	const agents = new AgentRegistry();
 	agents.register({
 		id: SESSION_ID,
 		displayName: SESSION_ID,
 		kind: "sub",
 		parentId: "Main",
-		session: null,
+		session: {} as never,
 		sessionFile,
-		status: "parked",
+		status: "idle",
 	});
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 	return new AgentTranscriptViewer({
 		transcript: agentTranscriptSource,
 		agentId: SESSION_ID,
 		registry: agents,
-		observers: makeSubagentRegistry(observed),
 		ui,
 		cwd: path.dirname(sessionFile),
 		expandKeys: ["ctrl+o"],
 		hubKeys: ["ctrl+s"],
+		createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0, revision: 0 }), dispose: () => {} }),
 		requestRender: () => {},
 		onClose: () => {},
-		onHubClose: () => {},
+		onHubToggle: () => {},
 	});
 }
 
@@ -122,16 +111,7 @@ describe("Agent hub silent-abort regression", () => {
 			},
 		]);
 
-		const viewer = makeViewer(sessionFile, [
-			{
-				id: SESSION_ID,
-				kind: "subagent",
-				label: "Test Subagent",
-				status: "active",
-				sessionFile,
-				lastUpdate: Date.now(),
-			},
-		]);
+		const viewer = makeViewer(sessionFile);
 
 		const rendered = viewer.render(120);
 		viewer.dispose();
@@ -179,16 +159,7 @@ describe("Agent hub silent-abort regression", () => {
 			},
 		]);
 
-		const viewer = makeViewer(sessionFile, [
-			{
-				id: SESSION_ID,
-				kind: "subagent",
-				label: "Test Subagent",
-				status: "active",
-				sessionFile,
-				lastUpdate: Date.now(),
-			},
-		]);
+		const viewer = makeViewer(sessionFile);
 
 		const rendered = viewer.render(120);
 		viewer.dispose();
@@ -231,16 +202,7 @@ describe("Agent hub silent-abort regression", () => {
 			},
 		]);
 
-		const viewer = makeViewer(sessionFile, [
-			{
-				id: SESSION_ID,
-				kind: "subagent",
-				label: "Test Subagent",
-				status: "failed",
-				sessionFile,
-				lastUpdate: Date.now(),
-			},
-		]);
+		const viewer = makeViewer(sessionFile);
 
 		const rendered = viewer.render(120);
 		viewer.dispose();

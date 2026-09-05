@@ -104,6 +104,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			restorePendingToolResults() {},
 			runSerialized: (run: () => Promise<void>) => run(),
 			markViewIdle() {},
+			resetTerminalActivity: () => {},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {

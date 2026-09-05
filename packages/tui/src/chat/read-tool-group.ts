@@ -434,6 +434,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#updateDisplay();
 	}
 
+	override measureRows(width: number): number {
+		return this.#toolActivityVisible ? super.measureRows(width) : 0;
+	}
+
 	/**
 	 * Reads a presenter leaves full draw as the group, at the first full read's place; a compact
 	 * read is a row of its own; hidden draws nothing.

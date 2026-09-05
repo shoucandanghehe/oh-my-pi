@@ -5,9 +5,9 @@
 import { viewportRange } from "../components/scroll-viewport";
 import { Text } from "../components/text";
 export interface VisualTruncateResult {
-	/** The visual lines to display */
+	/** The visual lines to display. */
 	visualLines: readonly string[];
-	/** Number of visual lines that were skipped (hidden) */
+	/** Number of visual lines hidden before the returned tail. */
 	skippedCount: number;
 }
 
@@ -27,7 +27,6 @@ function getCachedText(cacheKeyValue: string, paddingX: number): Text {
 	}
 	return text;
 }
-
 /**
  * Truncate text to a maximum number of visual lines (from the end).
  * This accounts for line wrapping based on terminal width.
@@ -46,7 +45,7 @@ export function truncateToVisualLines(
 	width: number,
 	paddingX: number = 0,
 ): VisualTruncateResult {
-	if (!text) {
+	if (!text || !text.trim()) {
 		return { visualLines: [], skippedCount: 0 };
 	}
 
