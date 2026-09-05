@@ -24,6 +24,7 @@ describe("parseSgrMouse", () => {
 			wheel: null,
 			motion: false,
 			leftClick: true,
+			rightClick: false,
 		});
 	});
 
@@ -31,6 +32,7 @@ describe("parseSgrMouse", () => {
 		const event = parseSgrMouse("\x1b[<0;5;9m");
 		expect(event?.release).toBe(true);
 		expect(event?.leftClick).toBe(false);
+		expect(event?.rightClick).toBe(false);
 	});
 
 	it("decodes wheel direction from the low button bit", () => {
@@ -50,6 +52,12 @@ describe("parseSgrMouse", () => {
 		}
 		// Modifier bits on a vertical wheel still decode as a direction.
 		expect(parseSgrMouse("\x1b[<69;1;1M")?.wheel).toBe(1);
+	});
+
+	it("decodes right clicks", () => {
+		const event = parseSgrMouse("\x1b[<2;5;9M");
+		expect(event?.rightClick).toBe(true);
+		expect(event?.leftClick).toBe(false);
 	});
 
 	it("decodes motion reports without treating them as clicks", () => {
@@ -106,6 +114,7 @@ describe("routeSelectListMouse", () => {
 		wheel: null,
 		motion: false,
 		leftClick: false,
+		rightClick: false,
 	};
 
 	it("forwards wheel notches", () => {

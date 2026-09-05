@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type TerminalFrameProvider, TUI } from "@oh-my-pi/pi-tui";
 import { emergencyTerminalRestore, ProcessTerminal, setAltScreenActive } from "@oh-my-pi/pi-tui/terminal";
+import * as tuiUtils from "@oh-my-pi/pi-tui/utils";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
 // Regression coverage for the Windows shell-handoff corruption on exit:
@@ -55,6 +56,7 @@ function startCapturedTerminal() {
 
 describe("emergencyTerminalRestore alt-screen gating", () => {
 	beforeEach(() => {
+		vi.spyOn(tuiUtils, "setHangulCompatibilityJamoWidth").mockReturnValue(false);
 		previousHeadless = setTerminalHeadless(false);
 	});
 
@@ -65,6 +67,29 @@ describe("emergencyTerminalRestore alt-screen gating", () => {
 		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
 		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
 		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
+	});
+
+	it("probes SGR pixel mouse support before TUI enables pixel coordinates", () => {
+		const { terminal, writes } = startCapturedTerminal();
+		try {
+			expect(writes.join("")).toContain("\x1b[?1016$p");
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("disables app viewport mouse reporting during emergency restoration", () => {
+		const { terminal, writes } = startCapturedTerminal();
+		// The app viewport owns these modes while it is active; a fatal exit can
+		// reach the terminal-level restore without first calling TUI.stop().
+		terminal.write("\x1b[?1002h\x1b[?1006h\x1b[?1016h");
+		writes.length = 0;
+
+		emergencyTerminalRestore();
+
+		const restored = writes.join("");
+		expect(restored).toContain("\x1b[?1016l");
+		expect(restored).toContain("\x1b[?1002l");
 	});
 
 	it("never writes after graceful stop has handed output back to the shell", () => {
