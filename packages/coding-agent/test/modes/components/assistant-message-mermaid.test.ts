@@ -1,7 +1,10 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { AssistantThinkingRenderer } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/render-types";
+import type {
+	AssistantThinkingRenderContext,
+	AssistantThinkingRenderer,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/render-types";
 import { signal } from "@oh-my-pi/pi-tui";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import "../../../src/ui/styles/messages";
@@ -113,28 +116,73 @@ describe("assistant message markdown look", () => {
 });
 
 describe("assistant message thinking renderers", () => {
-	it("renders all extension outputs below visible thinking blocks in registration order", () => {
-		const contexts: Array<{ contentIndex: number; thinkingIndex: number; text: string }> = [];
+	it("supplies provider metadata and renders append outputs in registration order", () => {
+		const message: AssistantMessage = {
+			...createAssistantMessage(""),
+			responseId: "resp-1",
+			content: [
+				{
+					type: "thinking",
+					thinking: "I should inspect the input.",
+					itemId: "item-1",
+					thinkingSignature: "sig-1",
+				},
+			],
+		};
+		const contexts: Omit<AssistantThinkingRenderContext, "requestRender">[] = [];
 		const renderers: AssistantThinkingRenderer[] = [
-			context => {
-				contexts.push({
-					contentIndex: context.contentIndex,
-					thinkingIndex: context.thinkingIndex,
-					text: context.text,
-				});
+			({ requestRender: _, ...context }) => {
+				contexts.push(context);
 				return note("first note");
 			},
-			() => note("second note"),
+			() => ({ type: "append", component: note("second note") }),
 		];
-		const rendered = render(thinkingMessage("I should inspect the input."), {
-			thinkingRenderers: signal(renderers),
+		const rendered = render(message, { thinkingRenderers: signal(renderers), expandThinking: signal(true) });
+
+		expect(rendered).toMatch(/I should inspect the input\.[\s\S]*first note[\s\S]*second note/);
+		expect(contexts).toEqual([
+			{
+				message: {
+					timestamp: message.timestamp,
+					responseId: "resp-1",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+				},
+				content: { itemId: "item-1", thinkingSignature: "sig-1" },
+				contentIndex: 0,
+				thinkingIndex: 0,
+				text: "I should inspect the input.",
+			},
+		]);
+	});
+
+	it("retains a rows renderer with extra fields as append output", () => {
+		const rendered = render(thinkingMessage("Original thinking."), {
+			thinkingRenderers: signal<readonly AssistantThinkingRenderer[]>([
+				() => Object.assign(note("rows note"), { type: "replace", component: note("wrong replacement") }),
+			]),
 			expandThinking: signal(true),
 		});
 
-		expect(rendered).toContain("I should inspect the input.");
-		expect(rendered.indexOf("I should inspect the input.")).toBeLessThan(rendered.indexOf("first note"));
-		expect(rendered.indexOf("first note")).toBeLessThan(rendered.indexOf("second note"));
-		expect(contexts).toEqual([{ contentIndex: 0, thinkingIndex: 0, text: "I should inspect the input." }]);
+		expect(rendered).toMatch(/Original thinking\.[\s\S]*rows note/);
+		expect(rendered).not.toContain("wrong replacement");
+	});
+
+	it("replaces default thinking once while preserving appenders", () => {
+		const rendered = render(thinkingMessage("Original thinking."), {
+			thinkingRenderers: signal<readonly AssistantThinkingRenderer[]>([
+				() => ({ type: "append", component: note("early note") }),
+				() => ({ type: "replace", component: note("first replacement") }),
+				() => ({ type: "replace", component: note("second replacement") }),
+				() => note("last note"),
+			]),
+			expandThinking: signal(true),
+		});
+
+		expect(rendered).toMatch(/first replacement[\s\S]*early note[\s\S]*last note/);
+		expect(rendered).not.toContain("Original thinking.");
+		expect(rendered).not.toContain("second replacement");
 	});
 
 	it("keeps original thinking visible when an extension renderer throws", () => {
@@ -151,30 +199,59 @@ describe("assistant message thinking renderers", () => {
 		expect(rendered).not.toContain("renderer failed");
 	});
 
-	it("redraws a renderer's output when it requests a render", () => {
-		let text = "translation loading";
+	it("repaints the mounted rows without calling the renderer again", () => {
 		let requestRender: (() => void) | undefined;
-		const renderers: AssistantThinkingRenderer[] = [
-			context => {
-				requestRender = context.requestRender;
-				return { render: () => [text] };
-			},
-		];
+		let updateMounted: (() => void) | undefined;
 		const model: AssistantMessageModel = {
 			message: signal(thinkingMessage("I should inspect the input.")),
 			finalized: signal(true),
 			expandThinking: signal(true),
-			thinkingRenderers: signal(renderers),
+			thinkingRenderers: signal<readonly AssistantThinkingRenderer[]>([
+				context => {
+					let text = "translation loading";
+					requestRender = context.requestRender;
+					updateMounted = () => {
+						text = "translation ready";
+					};
+					return { render: () => [text] };
+				},
+			]),
 		};
 		const term = createTestTerminal(() => ({ main: AssistantMessageBlock({ model }) }), { columns: 120, rows: 40 });
 		try {
 			expect(term.screen().join("\n")).toContain("translation loading");
-			text = "translation ready";
+			updateMounted?.();
+			requestRender?.();
+			term.render();
+			expect(term.screen().join("\n")).toContain("translation ready");
+		} finally {
+			term.dispose();
+		}
+	});
+
+	it("mounts a replacement when an async renderer becomes ready after streaming stops", () => {
+		let ready = false;
+		let requestRender: (() => void) | undefined;
+		const model: AssistantMessageModel = {
+			message: signal(thinkingMessage("Original thinking.")),
+			finalized: signal(true),
+			expandThinking: signal(true),
+			thinkingRenderers: signal<readonly AssistantThinkingRenderer[]>([
+				context => {
+					requestRender = context.requestRender;
+					return ready ? { type: "replace", component: note("translated outline") } : undefined;
+				},
+			]),
+		};
+		const term = createTestTerminal(() => ({ main: AssistantMessageBlock({ model }) }), { columns: 120, rows: 40 });
+		try {
+			expect(term.screen().join("\n")).toContain("Original thinking.");
+			ready = true;
 			requestRender?.();
 			term.render();
 			const rendered = term.screen().join("\n");
-			expect(rendered).toContain("translation ready");
-			expect(rendered).not.toContain("translation loading");
+			expect(rendered).toContain("translated outline");
+			expect(rendered).not.toContain("Original thinking.");
 		} finally {
 			term.dispose();
 		}

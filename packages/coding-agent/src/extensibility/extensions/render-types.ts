@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ThinkingContent } from "@oh-my-pi/pi-ai";
 import type { JSXNode } from "@oh-my-pi/pi-tui";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import type { TspText } from "@oh-my-pi/pi-wire";
@@ -81,17 +81,26 @@ export type MessageRenderer<T = unknown> = (
 ) => ExtensionRender | undefined;
 
 export interface AssistantThinkingRenderContext {
+	/** Stable parent message metadata for renderer-local async state. */
+	message: Readonly<Pick<AssistantMessage, "timestamp" | "responseId" | "api" | "provider" | "model">>;
+	/** Provider-native reasoning identity; fall back to the block indices. */
+	content: Readonly<Pick<ThinkingContent, "itemId" | "thinkingSignature">>;
 	contentIndex: number;
 	thinkingIndex: number;
 	text: string;
 	requestRender(): void;
 }
 
-/** Draws under an assistant thinking block; `undefined` (or a throw) draws nothing. */
+export type AssistantThinkingRenderResult =
+	| ExtensionRender
+	| { type: "append" | "replace"; component: ExtensionRender }
+	| undefined;
+
+/** Customize visible thinking: plain output appends; an explicit replacement takes the place of the thinking Markdown. */
 export type AssistantThinkingRenderer = (
 	context: AssistantThinkingRenderContext,
 	theme: ExtensionTheme,
-) => ExtensionRender | undefined;
+) => AssistantThinkingRenderResult;
 
 export interface AssistantTextRenderContext {
 	/**

@@ -1457,7 +1457,9 @@ pi.registerAssistantThinkingRenderer(context => (
 ));
 ```
 
-Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return something are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
+Customize the display of each visible thinking block. The renderer receives the displayed text, the content and thinking indexes, the theme, and `requestRender()` for async updates. `context.message.timestamp` is stable during streaming; `responseId` can arrive later. `context.content.itemId` and `thinkingSignature` identify a provider reasoning item when available.
+
+Return output directly or as `{ type: "append", component }` to draw it below the thinking block. `{ type: "replace", component }` replaces the default thinking Markdown. The first replacement wins; all append outputs appear in registration order. An `undefined` result contributes no output and can call `requestRender()` later to try again. The provider and session keep the original reasoning.
 
 ## Assistant text renderer
 

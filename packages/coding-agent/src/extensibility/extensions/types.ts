@@ -32,6 +32,7 @@ export type {
 export {
 	type MessageRenderOptions,
 	type AssistantThinkingRenderContext,
+	type AssistantThinkingRenderResult,
 	type AssistantTextRenderContext,
 	type AssistantTextRenderer,
 	type TranscriptBlock,
@@ -2192,7 +2193,7 @@ export interface ExtensionAPI {
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
 
-	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
+	/** Register display-only append or replacement output for visible assistant thinking blocks. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
 
 	/**

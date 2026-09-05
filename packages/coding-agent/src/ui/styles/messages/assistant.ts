@@ -253,11 +253,16 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 		} else if (child.kind === "section" && role.startsWith("omp.thinking")) {
 			const term = termOf<SectionTerm>(child);
 			if (term.hidden) continue;
-			const body = child.children().find(c => c.kind === "md");
-			if (body) {
+			const body = child.children().find(c => c.key() === "body");
+			if (body?.kind === "md") {
 				const frame = markdownRows(body, cx, true);
 				streamed(frame, propsOf<{ stream: boolean }>(body).stream === true);
 				rendered ||= frame.rows.length > 0;
+			} else if (body) {
+				const block = cx.paint(body, cx.width);
+				for (const hit of block.hits ?? []) hits.push({ ...hit, row: rows.length + hit.row });
+				rows.push(...block.rows);
+				rendered ||= block.rows.length > 0;
 			}
 			if (term.spaceAfter) rows.push("");
 		} else if (role === "omp.thinking.extension") {

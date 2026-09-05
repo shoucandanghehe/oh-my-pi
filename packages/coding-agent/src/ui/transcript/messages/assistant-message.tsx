@@ -51,8 +51,12 @@ import {
 	hasDisplayableThinking,
 } from "../../../session/transcript/thinking-display";
 import { resolveAssistantErrorPresentation } from "../../../session/transcript/transcript-render-helpers";
-import type { AssistantTextRenderer, AssistantThinkingRenderer } from "../../../extensibility/extensions/render-types";
-import { extensionTheme, renderExtension } from "../../extensions/render-output";
+import type {
+	AssistantTextRenderer,
+	AssistantThinkingRenderContext,
+	AssistantThinkingRenderer,
+} from "../../../extensibility/extensions/render-types";
+import { extensionTheme, isExtensionRows, renderExtension } from "../../extensions/render-output";
 import { type EmbedHost, EmbedFigure, parseEmbed } from "../figures/embed";
 import { figureSegments, mightHaveFigures, SvgFence } from "../figures/figure-markdown";
 import type { FigureCell } from "../figures/svg";
@@ -191,13 +195,7 @@ type Part =
 			end?: number;
 			hidden: boolean;
 			spaceAfter: boolean;
-	  }
-	| {
-			kind: "thinkingExtension";
-			/** The thinking block's index in the full reply, and among the reply's thinking blocks. */
-			contentIndex: number;
-			thinkingIndex: number;
-			text: string;
+			renderContext?: Omit<AssistantThinkingRenderContext, "requestRender">;
 	  }
 	| { kind: "image"; image: ImageContent; tool: boolean; path?: string }
 	| { kind: "media"; path: string }
@@ -379,7 +377,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		const toggles = toggled();
 		const tokens = answer.usage.reasoningTokens ?? answer.usage.output;
 		const textRenderers = read(model.textRenderers) ?? [];
-		const thinkingRenderers = read(model.thinkingRenderers) ?? [];
+		const hasThinkingRenderers = (read(model.thinkingRenderers)?.length ?? 0) > 0;
 		const offset = model.contentOffset ?? 0;
 		let view: AssistantMessage | undefined;
 		let thinkingIndex = 0;
@@ -478,15 +476,23 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 					end: clock?.end,
 					hidden: hide,
 					spaceAfter: visibleAfter(i),
+					renderContext:
+						!hide && hasThinkingRenderers
+							? {
+									message: {
+										timestamp: answer.timestamp,
+										responseId: answer.responseId,
+										api: answer.api,
+										provider: answer.provider,
+										model: answer.model,
+									},
+									content: { itemId: content.itemId, thinkingSignature: content.thinkingSignature },
+									contentIndex: offset + i,
+									thinkingIndex: thinkingIndex - 1,
+									text: text.trim(),
+								}
+							: undefined,
 				});
-				if (!hide && thinkingRenderers.length > 0) {
-					out.set(`x${i}`, {
-						kind: "thinkingExtension",
-						contentIndex: offset + i,
-						thinkingIndex: thinkingIndex - 1,
-						text: content.thinking,
-					});
-				}
 			} else if (content.type === "image" && content.data && content.mimeType && showImages) {
 				out.set(`i${i}`, { kind: "image", image: content, tool: false });
 			}
@@ -733,76 +739,116 @@ function ReplyPart(props: {
 			const tokens = thinking()?.tokens ?? 0;
 			return tokens > 0 ? `${formatNumber(tokens)} tokens` : undefined;
 		};
-		return (
-			<section
-				key={slot}
-				role={() => (live() ? "omp.thinking.live" : "omp.thinking")}
-				collapsible
-				collapsed={() => thinking()?.collapsed ?? true}
-				took={() => {
-					const part = thinking();
-					return part?.end === undefined || part.start === undefined
-						? undefined
-						: Math.max(0, Math.round(part.end - part.start));
-				}}
-				term={() => ({
-					hidden: thinking()?.hidden,
-					spaceAfter: thinking()?.spaceAfter,
-				})}
-			>
-				{() =>
-					live() ? (
-						<row key="head" gap="sm" title={title}>
-							<spinner style="starburst" role="omp.thinking.spin" />
-							<text spans={[{ t: "Thinking…", s: "muted" }]} />
-							<elapsed
-								age={() => {
-									const start = thinking()?.start;
-									return start === undefined ? 0 : Math.max(0, untrack(props.now) - start);
-								}}
-								format="short"
-							/>
-							{() => {
-								const rate = Math.round(props.rate() * 10) / 10;
-								return rate >= 0.05 && <rate value={rate} unit="tok/s" />;
-							}}
-						</row>
-					) : (
-						<text key="head" spans={() => [{ t: thoughtLabel(thinking()), s: "muted" }]} title={title} />
-					)
-				}
-				<md
-					key="body"
-					text={() => {
-						const part = thinking();
-						return part?.stream ? speculativeStreamingSource(part.text) : (part?.text ?? "");
-					}}
-					stream={() => (thinking()?.stream ? true : undefined)}
-					term={() => ({ source: thinking()?.text })}
-				/>
-			</section>
-		);
-	}
-	if (kind === "thinkingExtension") {
-		// A renderer's `requestRender` draws it again.
 		const revision = signal(0);
-		const requestRender = (): void => revision.set(untrack(revision) + 1);
+		const paintRevision = signal(0);
+		const extensions = computed(() => {
+			const context = thinking()?.renderContext;
+			if (!context) return undefined;
+			const renderers = props.thinkingRenderers();
+			if (renderers.length === 0) return undefined;
+			revision();
+			const theme = extensionTheme(currentTheme());
+			const append: JSXNode[] = [];
+			let replace: JSXNode | undefined;
+			for (const renderer of renderers) {
+				let placement: "append" | "replace" = "append";
+				let rows = false;
+				const output = renderExtension(
+					() => {
+						const result = renderer(
+							{
+								...context,
+								requestRender: () => {
+									const target = rows ? paintRevision : revision;
+									target.set(target.peek() + 1);
+								},
+							},
+							theme,
+						);
+						let component = result;
+						if (
+							result &&
+							typeof result === "object" &&
+							!isExtensionRows(result) &&
+							"type" in result &&
+							"component" in result
+						) {
+							placement = result.type;
+							component = result.component;
+						}
+						rows = isExtensionRows(component);
+						return component;
+					},
+					{ revision: paintRevision },
+				);
+				if (output === undefined) continue;
+				if (placement === "append") append.push(output);
+				else if (replace === undefined) replace = output;
+				else logger.warn("Assistant thinking replacement renderer ignored because one is already active");
+			}
+			return { append, replace };
+		});
 		return (
-			<col key={slot} role="omp.thinking.extension">
+			<>
+				<section
+					key={slot}
+					role={() => (live() ? "omp.thinking.live" : "omp.thinking")}
+					collapsible
+					collapsed={() => thinking()?.collapsed ?? true}
+					took={() => {
+						const part = thinking();
+						return part?.end === undefined || part.start === undefined
+							? undefined
+							: Math.max(0, Math.round(part.end - part.start));
+					}}
+					term={() => ({
+						hidden: thinking()?.hidden,
+						spaceAfter: thinking()?.spaceAfter,
+					})}
+				>
+					{() =>
+						live() ? (
+							<row key="head" gap="sm" title={title}>
+								<spinner style="starburst" role="omp.thinking.spin" />
+								<text spans={[{ t: "Thinking…", s: "muted" }]} />
+								<elapsed
+									age={() => {
+										const start = thinking()?.start;
+										return start === undefined ? 0 : Math.max(0, untrack(props.now) - start);
+									}}
+									format="short"
+								/>
+								{() => {
+									const rate = Math.round(props.rate() * 10) / 10;
+									return rate >= 0.05 && <rate value={rate} unit="tok/s" />;
+								}}
+							</row>
+						) : (
+							<text key="head" spans={() => [{ t: thoughtLabel(thinking()), s: "muted" }]} title={title} />
+						)
+					}
+					{() => {
+						const replace = extensions()?.replace;
+						return replace === undefined ? (
+							<md
+								key="body"
+								text={() => {
+									const part = thinking();
+									return part?.stream ? speculativeStreamingSource(part.text) : (part?.text ?? "");
+								}}
+								stream={() => (thinking()?.stream ? true : undefined)}
+								term={() => ({ source: thinking()?.text })}
+							/>
+						) : (
+							<col key="body">{replace}</col>
+						);
+					}}
+				</section>
 				{() => {
-					revision();
-					const part = props.part();
-					if (part?.kind !== "thinkingExtension") return undefined;
-					const theme = extensionTheme(currentTheme());
-					const context = {
-						contentIndex: part.contentIndex,
-						thinkingIndex: part.thinkingIndex,
-						text: part.text,
-						requestRender,
-					};
-					return props.thinkingRenderers().map(renderer => renderExtension(() => renderer(context, theme)));
+					const append = extensions()?.append;
+					return append?.length ? <col role="omp.thinking.extension">{append}</col> : undefined;
 				}}
-			</col>
+			</>
 		);
 	}
 	if (initial?.kind === "media") {
