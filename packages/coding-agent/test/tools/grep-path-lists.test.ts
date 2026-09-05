@@ -9,10 +9,6 @@ import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import type {
-	ObservableSession,
-	SessionObserverRegistry,
-} from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import type { Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -88,16 +84,6 @@ async function makeJsonlSessionFile(dirPath: string, entries: object[]): Promise
 	const filePath = path.join(dirPath, "session.jsonl");
 	await Bun.write(filePath, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
 	return filePath;
-}
-
-function makeSubagentRegistry(sessions: ObservableSession[]): SessionObserverRegistry {
-	return {
-		getSessions: () => sessions,
-		getSession: (id: string) => sessions.find(session => session.id === id),
-		onChange: () => () => {},
-		setMainSession: () => {},
-		getActiveSubagentCount: () => sessions.filter(session => session.status === "active").length,
-	} as unknown as SessionObserverRegistry;
 }
 
 let treeEntryCounter = 0;
@@ -345,38 +331,28 @@ describe("tool path arrays", () => {
 				},
 			},
 		]);
-		const observers = makeSubagentRegistry([
-			{
-				id: "search-overlay-session",
-				kind: "subagent",
-				label: "Search Overlay",
-				status: "active",
-				sessionFile,
-				lastUpdate: Date.now(),
-			},
-		]);
 		const agents = new AgentRegistry();
 		agents.register({
 			id: "search-overlay-session",
 			displayName: "search-overlay-session",
 			kind: "sub",
 			parentId: "Main",
-			session: null,
+			session: {} as never,
 			sessionFile,
-			status: "parked",
+			status: "idle",
 		});
 
 		const viewer = new AgentTranscriptViewer({
 			agentId: "search-overlay-session",
 			registry: agents,
-			observers,
 			ui: { requestRender: () => {}, requestComponentRender: () => {} } as never,
 			cwd: tmp,
 			expandKeys: ["ctrl+o"],
 			hubKeys: ["ctrl+s"],
+			createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0 }), dispose: () => {} }),
 			requestRender: () => {},
 			onClose: () => {},
-			onHubClose: () => {},
+			onHubToggle: () => {},
 		});
 		const rendered = Bun.stripANSI(viewer.render(120).join("\n"));
 		viewer.dispose();

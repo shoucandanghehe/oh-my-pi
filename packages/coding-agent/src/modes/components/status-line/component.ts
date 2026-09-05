@@ -12,13 +12,14 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
 	type ComposerStyle,
+	type EditorTopBorder,
 	claudeComposerStyle,
 	padding,
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
-import { settings } from "../../../config/settings";
+import { isSettingsInitialized, settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
@@ -399,6 +400,8 @@ export class StatusLineComponent implements Component {
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
+	#owner: StatusLineComponent | undefined;
+	readonly #peers = new Set<StatusLineComponent>();
 	#autoCompactEnabled: boolean = true;
 	/** Pulse timer for the running-speculation indicator; live only while speculation runs. */
 	#speculationBlinkTimer: NodeJS.Timeout | undefined;
@@ -521,6 +524,40 @@ export class StatusLineComponent implements Component {
 		};
 	}
 
+	static getErrorTopBorder(message: string, availableWidth: number): EditorTopBorder {
+		const width = Math.max(0, Math.trunc(availableWidth));
+		if (width === 0) return { content: "", width: 0 };
+		const content = truncateToWidth(theme.fg("error", ` ${sanitizeStatusText(message)} `), width);
+		const transparent = isSettingsInitialized() && settings.get("statusLine.transparent");
+		const styled = transparent ? content : theme.bg("statusLineBg", content);
+		return { content: styled, width: visibleWidth(styled) };
+	}
+
+	/**
+	 * Create an independently cached status line for another pane while keeping
+	 * every visual/runtime setting synchronized with this instance.
+	 */
+	createPeer(session: AgentSession, focusedAgentId?: string): StatusLineComponent {
+		if (this.#disposed) throw new Error("Cannot create a peer from a disposed status line");
+		const peer = new StatusLineComponent(session);
+		peer.#settings = this.#settings;
+		peer.#effectiveSettings = undefined;
+		peer.#autoCompactEnabled = this.#autoCompactEnabled;
+		peer.#hookStatuses = new Map(this.#hookStatuses);
+		peer.#subagentCount = this.#subagentCount;
+		peer.#runningSubagentIds = new Set(this.#runningSubagentIds);
+		peer.#activeMeters = this.#activeMeters;
+		peer.#planModeStatus = this.#planModeStatus;
+		peer.#loopModeStatus = this.#loopModeStatus;
+		peer.#goalModeStatus = this.#goalModeStatus;
+		peer.#vibeModeStatus = this.#vibeModeStatus;
+		peer.#vibeWorkerTokenRate = this.#vibeWorkerTokenRate;
+		peer.#collabStatus = this.#collabStatus;
+		peer.#owner = this;
+		this.#peers.add(peer);
+		if (focusedAgentId) peer.setSession(session, focusedAgentId);
+		return peer;
+	}
 	#gitEnabled(): boolean {
 		return settings.get("git.enabled");
 	}
@@ -602,6 +639,7 @@ export class StatusLineComponent implements Component {
 		this.#effectiveSettings = undefined;
 		if (this.#onBranchChange) this.#setupGitWatcher();
 		this.#syncPricingTimer();
+		for (const peer of this.#peers) peer.updateSettings(settings);
 	}
 
 	getEffectiveSettingsForTest(): EffectiveStatusLineSettings {
@@ -610,11 +648,13 @@ export class StatusLineComponent implements Component {
 
 	setAutoCompactEnabled(enabled: boolean): void {
 		this.#autoCompactEnabled = enabled;
+		for (const peer of this.#peers) peer.setAutoCompactEnabled(enabled);
 	}
 
 	setRunningSubagents(agentIds: readonly string[]): void {
 		this.#subagentCount = agentIds.length;
 		this.#runningSubagentIds = new Set(agentIds);
+		for (const peer of this.#peers) peer.setRunningSubagents(agentIds);
 	}
 
 	/**
@@ -718,18 +758,22 @@ export class StatusLineComponent implements Component {
 
 	setPlanModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
 		this.#planModeStatus = status ?? null;
+		for (const peer of this.#peers) peer.setPlanModeStatus(status);
 	}
 
 	setLoopModeStatus(status: NonNullable<SegmentContext["loopMode"]> | undefined): void {
 		this.#loopModeStatus = status ?? null;
+		for (const peer of this.#peers) peer.setLoopModeStatus(status);
 	}
 
 	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
 		this.#goalModeStatus = status ?? null;
+		for (const peer of this.#peers) peer.setGoalModeStatus(status);
 	}
 
 	setVibeModeStatus(status: { enabled: boolean } | undefined): void {
 		this.#vibeModeStatus = status ?? null;
+		for (const peer of this.#peers) peer.setVibeModeStatus(status);
 	}
 
 	/** Mirror of the editor's modal state; `undefined` clears it (Vim mode off). */
@@ -746,10 +790,12 @@ export class StatusLineComponent implements Component {
 	 */
 	setVibeWorkerTokenRateProvider(provider: (() => number | null) | undefined): void {
 		this.#vibeWorkerTokenRate = provider ?? null;
+		for (const peer of this.#peers) peer.setVibeWorkerTokenRateProvider(provider);
 	}
 
 	setCollabStatus(status: CollabStatus | null): void {
 		this.#collabStatus = status;
+		for (const peer of this.#peers) peer.setCollabStatus(status);
 	}
 
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
@@ -767,6 +813,7 @@ export class StatusLineComponent implements Component {
 		this.#sortedHookStatuses = Array.from(this.#hookStatuses.entries())
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([, status]) => status);
+		for (const peer of this.#peers) peer.setHookStatus(key, text);
 	}
 
 	watchBranch(onBranchChange: () => void): void {
@@ -815,10 +862,15 @@ export class StatusLineComponent implements Component {
 	}
 
 	dispose(): void {
+		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#branchResolveActive?.controller.abort();
 		this.#branchResolveActive = undefined;
 		this.#resetJjRequests();
+		if (this.#owner) this.#owner.#peers.delete(this);
+		this.#owner = undefined;
+		for (const peer of [...this.#peers]) peer.dispose();
+		this.#peers.clear();
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
@@ -984,6 +1036,7 @@ export class StatusLineComponent implements Component {
 		// A tool may open, close, or merge a PR without moving HEAD. Expire the
 		// settled PR context on ordinary activity while leaving HEAD work intact.
 		this.#cachedPrContext = undefined;
+		for (const peer of this.#peers) peer.invalidate();
 	}
 	#invalidateSessionCaches(): void {
 		this.#clearUsageStartTimer();
@@ -1023,6 +1076,7 @@ export class StatusLineComponent implements Component {
 		this.#cachedJjStatus = null;
 		this.#jjStatusLastFetch = 0;
 		this.#jjCacheGeneration++;
+		for (const peer of this.#peers) peer.invalidateGitCaches();
 	}
 
 	/**

@@ -1,15 +1,6 @@
 /**
- * Builds transcript components from persisted session message entries — the
- * file/remote-backed counterpart to {@link UiHelpers.addMessageToChat} (which is
- * bound to the live InteractiveModeContext). Used by the fullscreen transcript
- * viewer ({@link AgentTranscriptViewer}) to render a parked subagent / advisor /
- * collab-guest transcript that has no live session.
- *
- * Unlike the old incremental hub sync, {@link ChatTranscriptBuilder.rebuild}
- * always discards prior components and rebuilds the whole transcript from the
- * supplied entries. Re-rendering a growing transcript is therefore O(n) in the
- * entry count, but it cannot duplicate or misorder rows the way incremental
- * component reuse could.
+ * Builds transcript components from ordered agent messages for detached
+ * transcript panes. Callers own message loading; this module owns rendering.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
@@ -19,6 +10,7 @@ import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../coll
 import { settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
+import type { SessionMessageEntry } from "../../session/session-entries";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
@@ -27,7 +19,6 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
-import type { SessionMessageEntry } from "../../session/session-entries";
 import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
@@ -100,6 +91,7 @@ export class ChatTranscriptBuilder {
 	#waitingPoll: ToolExecutionComponent | null = null;
 	#todoSnapshot: ToolExecutionComponent | null = null;
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
+	#syntheticExpandables: CollapsedSyntheticMessageComponent[] = [];
 	#expanded = false;
 	#entryComponents = new Map<string, Component[]>();
 
@@ -112,30 +104,43 @@ export class ChatTranscriptBuilder {
 		return this.container.children.length === 0;
 	}
 
-	/** Discard all components and rebuild the whole transcript from `entries`. */
-	rebuild(entries: SessionMessageEntry[]): void {
+	/** Discard all components and rebuild the whole transcript. */
+	rebuild(messages: readonly AgentMessage[]): void {
+		this.reset();
+		for (const message of messages) this.#appendChatMessage(message);
+		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
+	}
+
+	/** Append messages without rebuilding already rendered rows. */
+	append(messages: readonly AgentMessage[]): void {
+		for (const message of messages) this.#appendChatMessage(message);
+		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
+	}
+
+	/** Rebuild from persisted entries while retaining entry-to-row identity. */
+	rebuildEntries(entries: readonly SessionMessageEntry[]): void {
 		this.reset();
 		for (const entry of entries) this.#appendEntry(entry);
-		// Flush the trailing turn's usage row only once its tools are materialized
-		// (a read whose result has not arrived stays pending); otherwise the row
-		// would sit above its tools. The drain happens here at the end of the pass.
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
-	/** Append newly persisted entries without rebuilding already rendered rows. */
-	append(entries: SessionMessageEntry[]): void {
+	/** Append persisted entries without rebuilding already rendered rows. */
+	appendEntries(entries: readonly SessionMessageEntry[]): void {
 		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
-	/** Toggle tool-output expansion across every expandable component. */
-	setExpanded(expanded: boolean): void {
+	/** Toggle normal expandables globally and one viewport-anchored synthetic replay dump. */
+	toggleExpanded(startRow: number, endRow: number, preferLast: boolean): void {
+		const visibleBlocks = new Set(this.container.getBlocksInRowRange(startRow, endRow));
+		const visibleSynthetic = this.#syntheticExpandables.filter(component => visibleBlocks.has(component));
+		const target = preferLast ? visibleSynthetic[visibleSynthetic.length - 1] : visibleSynthetic[0];
+		const expanded = target ? !target.expanded : !this.#expanded;
 		this.#expanded = expanded;
 		for (const component of this.#expandables) component.setExpanded(expanded);
-	}
-
-	get expanded(): boolean {
-		return this.#expanded;
+		for (const component of this.#syntheticExpandables) {
+			component.setExpanded(expanded && component === target);
+		}
 	}
 
 	/** Rendered row where a persisted entry begins, after the container has painted once. */
@@ -165,6 +170,7 @@ export class ChatTranscriptBuilder {
 		this.#todoSnapshot = null;
 		this.#expandables = [];
 		this.#entryComponents.clear();
+		this.#syntheticExpandables = [];
 		this.container.dispose();
 		this.container.clear();
 	}
@@ -302,13 +308,12 @@ export class ChatTranscriptBuilder {
 				if (textContent) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					// Synthetic (agent-attributed) inputs — chiefly the advisor's `Session
-					// update` replay dumps — can be hundreds of KiB of Markdown each.
-					// Rendering their full body on cold open blocked the TUI (issue #6308);
-					// collapse them behind a compact summary that builds Markdown only on
-					// ctrl+o expand. Real user prompts stay fully rendered.
+					// update` replay dumps — can be hundreds of KiB each. Collapse them
+					// behind a compact summary on cold open; ctrl+o renders one anchored
+					// replay as Markdown instead of every historical copy at once.
 					if (isSynthetic) {
 						const collapsed = new CollapsedSyntheticMessageComponent(textContent);
-						this.#trackExpandable(collapsed);
+						this.#syntheticExpandables.push(collapsed);
 						this.container.addChild(collapsed);
 					} else {
 						this.container.addChild(new UserMessageComponent(textContent, false));
