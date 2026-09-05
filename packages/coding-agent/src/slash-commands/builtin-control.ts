@@ -1,4 +1,5 @@
 import { runPauseScreen } from "../modes/components/pause-screen";
+import { previewLine, TRUNCATE_LENGTHS } from "../tools/render-utils";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -66,10 +67,44 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "pause",
 		icon: "pause",
-		description: "Freeze all agents (main, subagents, advisor) until resumed",
+		description: "Freeze all agents before the next model call; exit with q when ready, resume later via /continue",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
-			await runPauseScreen(runtime.ctx);
+			await runPauseScreen({
+				ui: runtime.ctx.ui,
+				showStatus: (message, options) => runtime.ctx.showStatus(message, options),
+				sessionName: runtime.ctx.sessionName,
+				session: runtime.ctx.session,
+				quitAfterPausedExit: async () => {
+					await runtime.ctx.shutdownAfterPausedExit?.();
+				},
+			});
+		},
+	},
+	{
+		name: "continue",
+		description: "Continue agents after a barrier pause (same process or after session resume)",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			if (!runtime.ctx.session.hasPausedAgents()) {
+				runtime.ctx.showStatus("Nothing to continue — no agents_paused marker on this session");
+				return;
+			}
+			const result = await runtime.ctx.session.continuePausedAgents();
+			const detail = result.skipped.length > 0 ? ` (${result.skipped.join("; ")})` : "";
+			const showContinueStatus = (message: string): void => {
+				runtime.ctx.showStatus(previewLine(message, TRUNCATE_LENGTHS.LONG));
+			};
+			if (!result.complete) {
+				showContinueStatus(`Continue incomplete${detail}`);
+				return;
+			}
+			if (result.continued === 0) {
+				showContinueStatus(`Pause cleared${detail}`);
+				return;
+			}
+			const agentLabel = result.continued === 1 ? "agent" : "agents";
+			showContinueStatus(`Continued ${result.continued} ${agentLabel}${detail}`);
 		},
 	},
 	{

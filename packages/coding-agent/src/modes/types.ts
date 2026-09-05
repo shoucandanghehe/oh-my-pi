@@ -41,6 +41,7 @@ import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { TranscriptContainer } from "./components/transcript-container";
 import type { RecentSession } from "./components/welcome";
 import type { EventController } from "./controllers/event-controller";
+import type { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import type { LoopConditionConfig } from "./loop-condition";
 import type { LoopLimitRuntime } from "./loop-limit";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
@@ -135,6 +136,7 @@ export interface InteractiveModeContext {
 	statusLine: StatusLineComponent;
 	syncComposerShape(): void;
 	syncEditorSpelling(): void;
+	terminalActivity: TerminalActivityController;
 
 	// Session access
 	session: AgentSession;
@@ -254,6 +256,11 @@ export interface InteractiveModeContext {
 	shutdown(): Promise<void>;
 	/** Tear down like {@link shutdown}, then relaunch the CLI with the original launch flags, resuming this session. */
 	restart(): Promise<void>;
+	/**
+	 * Finish TUI teardown and exit after `/pause` already disposed the session
+	 * with `pausedExit`. Must not dispose again.
+	 */
+	shutdownAfterPausedExit(): Promise<void>;
 	checkShutdownRequested(): Promise<void>;
 
 	// Extension UI integration

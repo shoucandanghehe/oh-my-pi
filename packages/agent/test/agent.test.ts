@@ -579,6 +579,39 @@ describe("Agent", () => {
 		expect(dequeueSignals.every(signal => signal?.aborted === true)).toBe(true);
 	});
 
+	it("continue() resumes a non-terminal pause_turn assistant tail", async () => {
+		const mock = createMockModel({ responses: [{ content: ["resumed"] }] });
+		const paused = {
+			...createAssistantMessage([{ type: "text", text: "progress" }]),
+			stopDetails: { type: "pause_turn" as const },
+		};
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [
+					{
+						role: "user",
+						content: [{ type: "text", text: "work" }],
+						timestamp: Date.now() - 10,
+					},
+					paused,
+				],
+			},
+			streamFn: mock.stream,
+		});
+
+		await expect(agent.continue()).resolves.toBeUndefined();
+
+		expect(mock.calls).toHaveLength(1);
+		const last = agent.state.messages.at(-1);
+		expect(last?.role).toBe("assistant");
+		if (last?.role === "assistant") {
+			expect(last.content).toContainEqual({ type: "text", text: "resumed" });
+		}
+	});
+
 	it("delivers a steer that lands at the yield boundary instead of stranding it", async () => {
 		// Regression: a steering message queued after the stop-boundary dequeue
 		// (e.g. while onBeforeYield runs) was silently stranded in the queue until

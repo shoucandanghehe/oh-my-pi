@@ -7,6 +7,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createSessionTeardown } from "@oh-my-pi/pi-coding-agent/modes/session-teardown";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -204,6 +205,49 @@ describe("session exit diagnostics", () => {
 		expect(exitEntry.data).toMatchObject({
 			reason: "sigterm",
 			kind: "signal",
+		});
+	});
+	it("preserves pausedExit through the SDK dispose wrapper", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-paused-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model to exist");
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const created = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			authStorage,
+			modelRegistry,
+			model,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		session = created.session;
+		sessionManager.appendMessage({
+			role: "user",
+			content: "pause me",
+			timestamp: Date.now(),
+		});
+
+		await session.dispose({ pausedExit: true });
+		session = undefined;
+
+		const exitEntry = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
+		expect(exitEntry.data).toMatchObject({
+			reason: "agents_paused",
+			kind: "paused",
 		});
 	});
 
