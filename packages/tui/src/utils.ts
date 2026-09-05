@@ -14,6 +14,12 @@ export { Ellipsis } from "@oh-my-pi/pi-natives";
 
 export { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
 
+/** Close SGR and OSC 8 state at a logical terminal-content boundary. */
+export const TERMINAL_STATE_TERMINATOR = "\x1b[0m\x1b]8;;\x07";
+
+/** Internal zero-width sentinel emitted by focused components for cursor placement. */
+export const CURSOR_MARKER = "\x1b_pi:c\x07";
+
 export type HangulCompatibilityJamoWidth = "platform" | "unicode" | 1 | 2;
 
 let hangulCompatibilityJamoWidth: HangulCompatibilityJamoWidth = "platform";

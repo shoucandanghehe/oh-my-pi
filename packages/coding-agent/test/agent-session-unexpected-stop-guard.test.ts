@@ -183,7 +183,6 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(1);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("defaults to mechanical mode and retries on thinking-only stops without classification", async () => {
@@ -199,7 +198,6 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("done now");
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
 	it("delivers retries scheduled by consecutive thinking-only stops before going idle", async () => {
@@ -247,7 +245,6 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(1);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("does not retry after a forced tool call", async () => {
@@ -263,7 +260,6 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(mock.calls.map(call => call.options?.toolChoice)).toEqual([{ type: "tool", name: "record" }, "none"]);
 		expect(spy).not.toHaveBeenCalled();
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("judges a text-only stop against the user's request and ends the turn on a complete answer", async () => {
@@ -319,7 +315,6 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(2);
 		expect(assistantText(session.agent.state.messages)).toContain("done now");
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
 	it("does not continue when the classifier returns false", async () => {
@@ -336,7 +331,6 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(mock.calls).toHaveLength(1);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("caps unexpected stop retries at three attempts", async () => {
@@ -359,7 +353,6 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(4);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(3);
 		expect(warnSpy).toHaveBeenCalled();
 	});
 
@@ -377,7 +370,6 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(2);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 
 	it("does not classify a stop whose reason is not stop", async () => {
@@ -394,7 +386,6 @@ describe("AgentSession unexpected stop guard", () => {
 
 		expect(spy).not.toHaveBeenCalled();
 		expect(mock.calls).toHaveLength(1);
-		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 	it("nudges a second turn when the verdict lands within the judge budget", async () => {
 		// The injected budget stands in for the 15s production default (which

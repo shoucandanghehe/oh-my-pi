@@ -52,7 +52,7 @@ describe("InteractiveMode long shutdown status", () => {
 		resetSettingsForTest();
 	});
 
-	it.each(["live command", "BTW history", "main session"] as const)(
+	it.each(["live command", "BTW threads", "main session"] as const)(
 		"shows progress before and during pending %s cleanup",
 		async pendingCleanup => {
 			vi.useFakeTimers();
@@ -66,8 +66,8 @@ describe("InteractiveMode long shutdown status", () => {
 			const dispose = vi.spyOn(session, "dispose").mockResolvedValue(undefined);
 			if (pendingCleanup === "live command") {
 				vi.spyOn(LiveCommandController.prototype, "stop").mockImplementation(holdCleanup);
-			} else if (pendingCleanup === "BTW history") {
-				vi.spyOn(BtwController.prototype, "flush").mockImplementation(holdCleanup);
+			} else if (pendingCleanup === "BTW threads") {
+				vi.spyOn(BtwController.prototype, "dispose").mockImplementation(holdCleanup);
 			} else {
 				dispose.mockImplementation(holdCleanup);
 			}
@@ -117,24 +117,24 @@ describe("InteractiveMode long shutdown status", () => {
 		expect(showStatus).toHaveBeenCalledTimes(1);
 	});
 
-	it("cancels progress after a BTW flush failure and allows shutdown to retry", async () => {
+	it("cancels progress after BTW cleanup fails and allows shutdown to retry", async () => {
 		vi.useFakeTimers();
 		const showStatus = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 		const showError = vi.spyOn(mode, "showError").mockImplementation(() => {});
 		const stop = vi.spyOn(mode, "stop");
 		const dispose = vi.spyOn(session, "dispose").mockResolvedValue(undefined);
 		const entered = Promise.withResolvers<void>();
-		const flush = Promise.withResolvers<void>();
-		vi.spyOn(BtwController.prototype, "flush").mockImplementationOnce(() => {
+		const cleanup = Promise.withResolvers<void>();
+		vi.spyOn(BtwController.prototype, "dispose").mockImplementationOnce(() => {
 			entered.resolve();
-			return flush.promise;
+			return cleanup.promise;
 		});
 
 		const shutdown = mode.shutdown();
 		await entered.promise;
 		expect(showStatus).toHaveBeenCalledTimes(1);
-		const failure = new Error("history storage unavailable");
-		flush.reject(failure);
+		const failure = new Error("thread journal unavailable");
+		cleanup.reject(failure);
 		await shutdown;
 		expect(showError).toHaveBeenCalledWith(expect.stringContaining(failure.message));
 		expect(mode.isShuttingDown).toBe(false);

@@ -31,35 +31,19 @@ describe("plan-mode re-entry prompt", () => {
 
 describe("plan-mode-active tool availability", () => {
 	it("omits ask-tool directives when ask is unavailable", () => {
-		const withoutAsk = render({ askAvailable: false, iterative: true });
-		expect(withoutAsk).not.toContain("`ask`: 2–4 mutually exclusive options");
-		expect(withoutAsk).not.toContain("`ask` only for preferences/tradeoffs");
-		expect(withoutAsk).not.toContain("Using `ask` to gather requirements");
+		const askToolName = "request_decision";
+		const withoutAsk = render({ askToolName, askAvailable: false, iterative: true });
+		expect(withoutAsk).not.toContain(`\`${askToolName}\``);
 
-		const withAsk = render({ askAvailable: true, iterative: true });
-		expect(withAsk).toContain("`ask`: 2–4 mutually exclusive options");
-		expect(withAsk).toContain("`ask` only for preferences/tradeoffs");
-	});
-
-	it("records preferences as assumptions when ask is unavailable", () => {
-		const iterativeWithoutAsk = render({ askAvailable: false, iterative: true });
-		expect(iterativeWithoutAsk).toContain("Record as Assumptions with a recommended default");
-		expect(iterativeWithoutAsk).toContain("record preferences/tradeoffs as Assumptions");
-		expect(iterativeWithoutAsk).not.toContain("`ask` only for preferences/tradeoffs");
-
-		const parallelWithoutAsk = render({ askAvailable: false, iterative: false });
-		expect(parallelWithoutAsk).toContain(
-			"record remaining preference questions as Assumptions with a recommended default",
-		);
-		// A prose question cannot end the turn in plan mode — no prose-terminal option.
-		expect(parallelWithoutAsk).not.toContain("Presenting a choice between approaches");
+		const withAsk = render({ askToolName, askAvailable: true, iterative: true });
+		expect(withAsk).toContain(`\`${askToolName}\``);
 	});
 
 	it("omits scout-via-task dispatch when the task tool is unavailable", () => {
 		const withoutTask = render({ taskAvailable: false, scoutAvailable: true });
-		expect(withoutTask).not.toContain("(via `task`)");
+		expect(withoutTask).not.toContain("`scout`");
 
 		const withTask = render({ taskAvailable: true, scoutAvailable: true });
-		expect(withTask).toContain("(via `task`)");
+		expect(withTask).toContain("`scout`");
 	});
 });

@@ -397,9 +397,10 @@ async function resolveCodexSearchTransport(
 	}
 
 	const hostedUrl = resolveCodexResponsesUrl(baseUrl);
-	const headers = modelRegistry && registryModel
-		? await modelRegistry.resolveModelHeaders(registryModel)
-		: await modelRegistry?.getProviderHeaders("openai-codex");
+	const headers =
+		modelRegistry && registryModel
+			? await modelRegistry.resolveModelHeaders(registryModel)
+			: await modelRegistry?.getProviderHeaders("openai-codex");
 	return {
 		baseUrl,
 		hostedUrl,
@@ -571,7 +572,7 @@ async function callCodexHostedSearch(
 ): Promise<CodexSearchResult> {
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
-	const requestedModel = options.modelId;
+	const requestedModel = options.model.modelId;
 
 	const body: Record<string, unknown> = {
 		model: requestedModel,
@@ -826,14 +827,13 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 	const runSearch = async (auth: { accessToken: string; accountId?: string }): Promise<CodexSearchResult> => {
 		// Re-resolved per attempt so a retried or rotated credential sees the
 		// registry headers current at call time.
-		const requestTransport = await resolveCodexSearchTransport(params);
-		return callCodexSearch(auth, query, {
-			signal: params.signal,
-			timeoutMs: params.timeoutMs,
-			systemPrompt: params.systemPrompt,
-			searchContextSize: "high",
-			modelId: params.model.id,
-			fetch: params.fetch,
+		const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
+		return runCodexSearchCandidates({
+			auth,
+			params,
+			query,
+			modelCandidates,
+			modelWasConfigured: configuredModel !== undefined,
 			transport: requestTransport,
 		});
 	};

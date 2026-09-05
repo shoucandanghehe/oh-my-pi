@@ -94,6 +94,25 @@ describe("ToolExecutionComponent custom-renderer repaint seams", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("delegates painted topology changes to the backend-aware reconciliation seam", () => {
+		const resetDisplay = vi.fn();
+		const reconcileRenderTopology = vi.fn();
+		const ui = {
+			requestRender() {},
+			requestComponentRender() {},
+			resetDisplay,
+			reconcileRenderTopology,
+		} as unknown as TUI;
+		const component = new ToolExecutionComponent("fake_device", { __partialJson: '{"host"' }, {}, makeFakeTool(), ui);
+		components.push(component);
+		component.render(80);
+
+		component.updateResult(toolResult("partial output"), true);
+
+		expect(reconcileRenderTopology).toHaveBeenCalledTimes(1);
+		expect(resetDisplay).not.toHaveBeenCalled();
+	});
+
 	it("does not repaint when the streamed placeholder never reaches the terminal", () => {
 		const { component, requestRender } = makeComponent({ __partialJson: '{"host"' });
 		// The placeholder shape was built in memory but never painted — a

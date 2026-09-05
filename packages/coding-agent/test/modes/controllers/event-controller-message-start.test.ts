@@ -186,6 +186,7 @@ function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
 			isTranscriptBlockFinalized: () => false,
 		} as Component);
 	}
+
 	const helpers = new UiHelpers(ctx);
 	ctx.addMessageToChat = vi.fn((message, options) => helpers.addMessageToChat(message, options));
 	return {
