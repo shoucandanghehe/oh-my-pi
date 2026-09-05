@@ -80,6 +80,21 @@ export interface AgentSessionDisposeOptions {
 	 * `omp --restore` goes on with it. `SIGINT` and `MANUAL` stop it, as a quit does.
 	 */
 	reason?: postmortem.Reason;
+	/**
+	 * Dispose after every live agent parked at the model-call boundary. Records
+	 * `session_exit.kind = "paused"` and aborts in-memory loops with the
+	 * pause-shutdown reason so no aborted assistant turn is synthesized.
+	 */
+	pausedExit?: boolean;
+}
+
+export interface ContinuePausedAgentsResult {
+	/** Number of recorded agents whose continuation turn completed. */
+	continued: number;
+	/** Benign no-ops and failures, rendered by the interactive host. */
+	skipped: string[];
+	/** True when every recorded agent settled and the durable pause marker was cleared. */
+	complete: boolean;
 }
 
 /** Listener notified when command metadata changes. */

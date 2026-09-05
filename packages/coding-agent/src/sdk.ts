@@ -206,6 +206,7 @@ import {
 } from "./secrets";
 import {
 	AgentSession,
+	type AgentSessionDisposeOptions,
 	type InitialRetryFallbackState,
 	MCP_DISCOVERY_TURN_WAIT_MS,
 	type PlanYolo,

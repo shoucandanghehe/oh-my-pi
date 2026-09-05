@@ -1862,7 +1862,10 @@ export class Agent {
 				}
 
 				if (!literalTail) throw new Error("No messages to continue from");
-				if (literalTail === tail) throw new Error("Cannot continue from message role: assistant");
+				// A durable pause can resume even when the visible tail is an assistant message.
+				if (literalTail === tail && tail.stopDetails?.type !== "pause_turn") {
+					throw new Error("Cannot continue from message role: assistant");
+				}
 			}
 
 			await this.#runLoop(undefined, undefined, signal, true);

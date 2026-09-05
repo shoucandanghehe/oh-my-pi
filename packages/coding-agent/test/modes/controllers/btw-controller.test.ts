@@ -93,6 +93,7 @@ function makeCtx(
 			terminal: { rows: 30 },
 		} as unknown as TUI,
 		keybindings: KeybindingsManager.inMemory(),
+		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		btwContainer,
 		editor,
 		editorContainer,
