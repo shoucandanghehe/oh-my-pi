@@ -177,6 +177,9 @@
 
 - Fixed an issue where response-only usage records were incorrectly treated as authoritative context anchors, while ensuring prompt and total-only provider telemetry remains preserved.
 - Fixed context compaction summaries growing excessively with large context windows by capping the summary output budget to 16,384 tokens, ensuring conversations are properly compressed rather than duplicated.
+### Added
+
+- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
 
 ## [17.2.0] - 2026-07-30
 

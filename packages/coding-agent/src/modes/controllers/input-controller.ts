@@ -192,6 +192,7 @@ export class InputController {
 	#draftText: string | undefined;
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
+	#btwContinueListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
@@ -271,6 +272,17 @@ export class InputController {
 				if (!matchesKey(data, "left")) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				this.#handleFocusedLeftTap();
+				return { consume: true };
+			});
+		}
+		if (!this.#btwContinueListenerInstalled) {
+			this.#btwContinueListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => {
+				if (!matchesKey(data, "enter")) return undefined;
+				if (!this.ctx.canContinueBtw()) return undefined;
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (this.ctx.editor.getText().trim()) return undefined;
+				void this.ctx.handleBtwContinueKey();
 				return { consume: true };
 			});
 		}

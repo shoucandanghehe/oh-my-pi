@@ -36,7 +36,7 @@ import {
 	resolveOwnedDialectFromEnv,
 	unpairedToolCallTail,
 } from "./agent-loop";
-import type { AppendOnlyContextManager } from "./append-only-context";
+import { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
 import type {
@@ -336,6 +336,26 @@ export interface AgentOptions {
 	appendOnlyContext?: AppendOnlyContextManager;
 }
 
+export interface AgentChildOptions {
+	initialState?: Partial<AgentState>;
+	sessionId: string;
+	promptCacheKey?: string;
+	streamFn?: StreamFn;
+	convertToLlm?: AgentOptions["convertToLlm"];
+	transformContext?: AgentOptions["transformContext"];
+	transformProviderContext?: AgentOptions["transformProviderContext"];
+	providerSessionState?: AgentOptions["providerSessionState"];
+	getApiKey?: AgentOptions["getApiKey"];
+	onPayload?: AgentOptions["onPayload"];
+	onResponse?: AgentOptions["onResponse"];
+	onSseEvent?: AgentOptions["onSseEvent"];
+	preferWebsockets?: AgentOptions["preferWebsockets"];
+	serviceTier?: AgentOptions["serviceTier"];
+	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
+	afterToolCall?: AgentLoopConfig["afterToolCall"];
+	transformAssistantMessage?: AgentLoopConfig["transformAssistantMessage"];
+}
+
 export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
 }
@@ -511,6 +531,73 @@ export class Agent {
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
 		this.#transformProviderContext = opts.transformProviderContext;
+	}
+	/**
+	 * Fork provider-facing configuration into an isolated agent loop.
+	 *
+	 * The child gets an independent transcript, queues, abort controller, and
+	 * append-only cache state. Provider routing, request shaping, credentials,
+	 * sampling, tool schemas, and telemetry retain the parent's configuration.
+	 * Lifecycle hooks and server-executed Cursor tools are intentionally not
+	 * inherited because they belong to the parent session.
+	 */
+	createChild(options: AgentChildOptions): Agent {
+		const child = new Agent({
+			initialState: {
+				...this.#state,
+				...options.initialState,
+				messages: options.initialState?.messages ?? this.#state.messages,
+				isStreaming: false,
+				streamMessage: null,
+				pendingToolCalls: new Set(),
+				error: undefined,
+			},
+			convertToLlm: options.convertToLlm ?? this.#convertToLlm,
+			transformContext: options.transformContext ?? this.#transformContext,
+			transformProviderContext: options.transformProviderContext ?? this.#transformProviderContext,
+			steeringMode: this.#steeringMode,
+			followUpMode: this.#followUpMode,
+			interruptMode: this.#interruptMode,
+			kimiApiFormat: this.#kimiApiFormat,
+			preferWebsockets: options.preferWebsockets ?? this.#preferWebsockets,
+			streamFn: options.streamFn ?? this.streamFn,
+			deadline: this.#deadline,
+			sessionId: options.sessionId,
+			promptCacheKey: options.promptCacheKey ?? this.#promptCacheKey,
+			providerSessionState: options.providerSessionState ?? this.#providerSessionState,
+			getApiKey: options.getApiKey ?? this.getApiKey,
+			onPayload: options.onPayload ?? this.#onPayload,
+			onResponse: options.onResponse ?? this.#onResponse,
+			onSseEvent: options.onSseEvent ?? this.#onSseEvent,
+			onHarmonyLeak: this.#onHarmonyLeak,
+			thinkingBudgets: this.#thinkingBudgets,
+			temperature: this.#temperature,
+			topP: this.#topP,
+			topK: this.#topK,
+			minP: this.#minP,
+			presencePenalty: this.#presencePenalty,
+			repetitionPenalty: this.#repetitionPenalty,
+			serviceTier: options.serviceTier ?? this.#serviceTier,
+			serviceTierResolver: this.#serviceTierResolver,
+			hideThinkingSummary: this.#hideThinkingSummary,
+			maxRetryDelayMs: this.#maxRetryDelayMs,
+			getToolContext: this.#getToolContext,
+			transformToolCallArguments: this.#transformToolCallArguments,
+			resolveFallbackTool: this.#resolveFallbackTool,
+			intentTracing: this.#intentTracing,
+			pruneToolDescriptions: this.#pruneToolDescriptions,
+			dialect: this.#dialect,
+			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
+			cwd: this.#cwd,
+			cwdResolver: this.#cwdResolver,
+			beforeToolCall: options.beforeToolCall,
+			afterToolCall: options.afterToolCall,
+			transformAssistantMessage: options.transformAssistantMessage,
+			telemetry: this.#telemetry,
+			appendOnlyContext: this.#appendOnlyContext ? new AppendOnlyContextManager() : undefined,
+		});
+		child.setMetadataResolver(provider => this.metadataForProvider(provider));
+		return child;
 	}
 
 	/**
@@ -1273,7 +1360,8 @@ export class Agent {
 
 				// Durable pause: a turn parked on `pause_turn` is resumable, unlike
 				// a finished assistant tail.
-				if (messages[messages.length - 1].stopDetails?.type === "pause_turn") {
+				const lastMessage = messages[messages.length - 1];
+				if ("stopDetails" in lastMessage && lastMessage.stopDetails?.type === "pause_turn") {
 					await this.#runLoop(undefined, undefined, signal, true);
 					return;
 				}
@@ -1295,7 +1383,6 @@ export class Agent {
 				}
 			}
 		}
-
 	}
 
 	/**

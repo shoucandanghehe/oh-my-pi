@@ -33,6 +33,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import sideChannelNoToolsReminder from "../src/prompts/system/side-channel-no-tools.md" with { type: "text" };
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 function createAgent(): Agent {
@@ -463,7 +464,7 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.providerSessionState).toBe(session.providerSessionState);
 	});
 
-	it("runs ephemeral side-channel requests through the configured side stream function", async () => {
+	it("snapshots each side conversation on its first prompt and keeps one provider lineage", async () => {
 		const model = buildModel({
 			id: "side-stream-model",
 			name: "Side Stream Model",
@@ -476,15 +477,16 @@ describe("AgentSession message pipeline", () => {
 			contextWindow: 4096,
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
-		let capturedOptions: SimpleStreamOptions | undefined;
-		let capturedContext: Context | undefined;
+		const capturedOptions: SimpleStreamOptions[] = [];
+		const capturedContexts: Context[] = [];
 		const sideStreamFn: StreamFn = (_model, context, options) => {
-			capturedContext = context;
-			capturedOptions = options;
+			capturedContexts.push(context);
+			capturedOptions.push(options ?? {});
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
-				const message = createAssistantMessage("Side answer");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "Side answer", partial: message });
+				const text = `Side answer ${capturedContexts.length}`;
+				const message = createAssistantMessage(text);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
 				stream.push({ type: "done", reason: "stop", message });
 			});
 			return stream;
@@ -505,11 +507,214 @@ describe("AgentSession message pipeline", () => {
 		});
 		sessions.push(session);
 
-		const result = await session.runEphemeralTurn({ promptText: "Question?" });
+		const conversation = session.createEphemeralConversation("side instructions");
+		const first = await conversation.prompt("Question 1?");
+		const refreshedConversation = session.createEphemeralConversation("side instructions");
+		session.agent.appendMessage({ role: "user", content: "late main turn", timestamp: Date.now() });
+		const second = await conversation.prompt("Question 2?");
+		const refreshed = await refreshedConversation.prompt("Question after refresh?");
 
-		expect(result.replyText).toBe("Side answer");
-		expect(capturedContext?.messages.at(-1)?.content).toEqual([{ type: "text", text: "Question?" }]);
-		expect(capturedOptions?.sessionId).toStartWith(`${session.sessionId}:side:`);
+		expect(first.replyText).toBe("Side answer 1");
+		expect(second.replyText).toBe("Side answer 2");
+		expect(conversation.turns.map(turn => turn.input)).toEqual(["Question 1?", "Question 2?"]);
+		expect(refreshed.replyText).toBe("Side answer 3");
+		expect(capturedOptions[0]?.sessionId).toStartWith(`${session.sessionId}:side:`);
+		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts).toHaveLength(3);
+		const [firstContext, secondContext] = capturedContexts;
+		if (!firstContext || !secondContext) throw new Error("Expected both side-conversation provider contexts");
+		expect(secondContext.messages.slice(0, firstContext.messages.length)).toEqual(firstContext.messages);
+		const secondUsers = capturedContexts[1]?.messages.filter(
+			(message): message is Extract<Message, { role: "user" }> => message.role === "user",
+		);
+		expect(secondUsers?.map(getConvertedUserText)).toEqual(["Question 1?", "Question 2?"]);
+		expect(capturedContexts[1]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
+			false,
+		);
+		expect(capturedContexts[2]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
+			true,
+		);
+	});
+
+	it("denies side-conversation tools through the agent loop and preserves the rejection across restore", async () => {
+		const model = buildModel({
+			id: "kimi-k3.5",
+			name: "Kimi K3.5",
+			api: "anthropic-messages",
+			provider: "kimi-code",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const capturedContexts: Context[] = [];
+		const capturedOptions: SimpleStreamOptions[] = [];
+		const deltas: string[] = [];
+		let executions = 0;
+		const sideStreamFn: StreamFn = (_model, context, options) => {
+			capturedContexts.push(context);
+			capturedOptions.push(options ?? {});
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (capturedContexts.length === 1) {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "side-call-1",
+						name: "side_tool",
+						arguments: {},
+					};
+					const message = createAssistantMessage("");
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+				const text = capturedContexts.length === 2 ? "Recovered without tools" : "Follow-up answer";
+				const message = createAssistantMessage(text);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const tool: AgentTool = {
+			name: "side_tool",
+			label: "Side Tool",
+			description: "Must remain unavailable in side conversations",
+			parameters: { type: "object", properties: {} },
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "executed" }], details: {} };
+			},
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [tool],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		const conversation = session.createEphemeralConversation("side instructions");
+		const first = await conversation.prompt("Question?", { onTextDelta: delta => deltas.push(delta) });
+
+		expect(first.replyText).toBe("Recovered without tools");
+		expect(deltas).toEqual(["Recovered without tools"]);
+		expect(executions).toBe(0);
+		expect(capturedContexts).toHaveLength(2);
+		expect(capturedContexts[0]?.tools?.map(tool => tool.name)).toEqual(["side_tool"]);
+		expect(capturedOptions[0]?.promptCacheKey).toBe(session.sessionId);
+		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts[1]?.messages.find(message => message.role === "toolResult")).toMatchObject({
+			role: "toolResult",
+			toolCallId: "side-call-1",
+			toolName: "side_tool",
+			isError: true,
+		});
+		const checkpoint = conversation.checkpoint();
+		expect(checkpoint.turns[0]?.intermediateMessages).toHaveLength(2);
+
+		const restored = session.createEphemeralConversation("side instructions", checkpoint);
+		await restored.prompt("Follow up?");
+
+		expect(capturedContexts).toHaveLength(3);
+		expect(capturedOptions[2]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts[2]?.messages.find(message => message.role === "toolResult")).toMatchObject({
+			toolCallId: "side-call-1",
+			isError: true,
+		});
+	});
+
+	it("migrates a legacy side-conversation checkpoint without refreshing Main context or provider lineage", async () => {
+		const model = buildModel({
+			id: "restored-side-model",
+			name: "Restored Side Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const capturedOptions: SimpleStreamOptions[] = [];
+		const capturedContexts: Context[] = [];
+		const sideStreamFn: StreamFn = (_model, context, options) => {
+			capturedContexts.push(context);
+			capturedOptions.push(options ?? {});
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const text = `Restored answer ${capturedContexts.length}`;
+				const message = createAssistantMessage(text);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [{ role: "user", content: "anchor main turn", timestamp: Date.now() }],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		const original = session.createEphemeralConversation("side instructions");
+		await original.prompt("Question 1?", { dedupeReply: false });
+		const checkpoint = original.checkpoint();
+		const legacyCheckpoint = {
+			...checkpoint,
+			baseMessages: checkpoint.baseMessages.filter(
+				message =>
+					!("content" in message) ||
+					JSON.stringify(message.content) !== JSON.stringify([{ type: "text", text: sideChannelNoToolsReminder }]),
+			),
+		};
+		expect(legacyCheckpoint.baseMessages).toHaveLength(checkpoint.baseMessages.length - 1);
+		session.agent.appendMessage({ role: "user", content: "late main turn", timestamp: Date.now() });
+		const restored = session.createEphemeralConversation("side instructions", legacyCheckpoint);
+		await restored.prompt("Question 2?", { dedupeReply: false });
+		const firstMessages = capturedContexts[0]?.messages ?? [];
+		const restoredPrefix = (capturedContexts[1]?.messages ?? []).slice(0, firstMessages.length);
+		expect(restoredPrefix.map(({ timestamp: _timestamp, ...message }) => message)).toEqual(
+			firstMessages.map(({ timestamp: _timestamp, ...message }) => message),
+		);
+		expect(
+			capturedContexts[1]?.messages.some(
+				message =>
+					message.role === "developer" &&
+					JSON.stringify(message.content) === JSON.stringify([{ type: "text", text: sideChannelNoToolsReminder }]),
+			),
+		).toBe(true);
+		expect(restored.turns.map(turn => turn.input)).toEqual(["Question 1?", "Question 2?"]);
+		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts[1]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
+			false,
+		);
+		const restoredUsers = capturedContexts[1]?.messages.filter(
+			(message): message is Extract<Message, { role: "user" }> => message.role === "user",
+		);
+		expect(restoredUsers?.map(getConvertedUserText)).toEqual(["anchor main turn", "Question 1?", "Question 2?"]);
 	});
 
 	it("rotates ephemeral side-channel credentials on Google Resource exhausted", async () => {

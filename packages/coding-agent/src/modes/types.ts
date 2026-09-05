@@ -20,6 +20,7 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
@@ -152,6 +153,16 @@ export interface InteractiveModeContext {
 	focusParentSession(): Promise<void>;
 	/** Return the view to the main session (delegates to SessionFocusController.unfocus). */
 	unfocusSession(): Promise<void>;
+	/** Whether the main view is mounted in the app-viewport multi-pane workspace. */
+	readonly workspaceEnabled: boolean;
+	/** Create or focus a persistent transcript pane for an agent. */
+	openAgentWorkspacePane(id: string): Promise<void>;
+	/** Create or focus the session-scoped ephemeral /btw pane. */
+	openBtwWorkspacePane(component: Component): boolean;
+	/** Close only the /btw view; its side conversation remains in memory. */
+	closeBtwWorkspacePane(): boolean;
+	/** Restore keyboard focus and the active workspace marker to the main pane. */
+	focusMainWorkspacePane(): void;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
 	clearTransientSessionUi(): void;
 	settings: Settings;
@@ -321,6 +332,7 @@ export interface InteractiveModeContext {
 		display?: boolean;
 		streamingBehavior?: "steer" | "followUp";
 	}): SubmittedUserInput;
+	submitMainMessage(text: string, streamingBehavior: "steer" | "followUp"): boolean;
 	cancelPendingSubmission(): boolean;
 	markPendingSubmissionStarted(input: SubmittedUserInput): boolean;
 	finishPendingSubmission(input: SubmittedUserInput): void;
@@ -482,17 +494,14 @@ export interface InteractiveModeContext {
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
+	canContinueBtw(): boolean;
+	handleBtwContinueKey(): Promise<boolean>;
 	handleBtwBranchKey(): Promise<boolean>;
 	canBranchBtw(): boolean;
 	handlesBtwBranchKey(): boolean;
 	canCopyBtw(): boolean;
 	handleBtwCopyKey(): Promise<boolean>;
-	handleBtwBranch(
-		question: string,
-		assistantMessage: AssistantMessage,
-		leafId: string,
-		sessionId: string,
-	): Promise<void>;
+	handleBtwBranch(request: BtwPromotionRequest, lifecycle?: BtwPromotionLifecycle): Promise<boolean>;
 	handleOmfgCommand(complaint: string): Promise<void>;
 	hasActiveOmfg(): boolean;
 	handleOmfgEscape(): boolean;

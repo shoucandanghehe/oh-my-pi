@@ -1,3 +1,9 @@
+import {
+	extractMappedTextSelection,
+	mapLogicalTextSelectionRows,
+	type RenderedTextSelectionRow,
+	type TextSelectionRange,
+} from "../text-selection";
 import type { Component } from "../tui";
 import {
 	applyBackgroundToLine,
@@ -39,6 +45,8 @@ export class Text implements Component {
 	#cachedWidth?: number;
 	#cachedWidthConfigEpoch?: number;
 	#cachedLines?: string[];
+	#selectionRows: readonly RenderedTextSelectionRow[] = [];
+	#selectionInset = 0;
 
 	constructor(text: string = "", paddingX: number = 1, paddingY: number = 1, customBgFn?: (text: string) => string) {
 		this.#text = text;
@@ -60,6 +68,18 @@ export class Text implements Component {
 
 	getText(): string {
 		return this.#text;
+	}
+
+	getTextSelection(selection: TextSelectionRange): string | undefined {
+		return extractMappedTextSelection(this.#selectionRows, selection);
+	}
+
+	getTextSelectionInset(_row: number): number {
+		return this.#selectionInset;
+	}
+
+	getTextSelectionRightInset(_row: number): number {
+		return this.#selectionInset;
 	}
 
 	setText(text: string): boolean {
@@ -122,6 +142,8 @@ export class Text implements Component {
 			this.#cachedWidth = width;
 			this.#cachedWidthConfigEpoch = getWidthConfigEpoch();
 			this.#cachedLines = result;
+			this.#selectionRows = [];
+			this.#selectionInset = 0;
 			return result;
 		}
 
@@ -133,6 +155,14 @@ export class Text implements Component {
 		const contentWidth = Math.max(1, width - paddingX * 2);
 		// Wrap text (this preserves ANSI codes but does NOT pad)
 		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
+		const logicalLines = normalizedText.split("\n");
+		const contentSelectionRows = mapLogicalTextSelectionRows(
+			logicalLines,
+			contentWidth,
+			paddingX,
+			wrappedLines,
+			this.#paddingY,
+		);
 
 		// Add margins and background to each line
 		const leftMargin = padding(paddingX);
@@ -167,6 +197,23 @@ export class Text implements Component {
 		}
 
 		const result = [...emptyLines, ...contentLines, ...emptyLines];
+		const topSelectionRows: RenderedTextSelectionRow[] = emptyLines.map((_line, index) => ({
+			logicalLine: index,
+			source: "",
+			sourceStart: 0,
+			sourceEnd: 0,
+			contentStartCol: 0,
+		}));
+		const bottomLogicalLine = this.#paddingY + logicalLines.length;
+		const bottomSelectionRows: RenderedTextSelectionRow[] = emptyLines.map((_line, index) => ({
+			logicalLine: bottomLogicalLine + index,
+			source: "",
+			sourceStart: 0,
+			sourceEnd: 0,
+			contentStartCol: 0,
+		}));
+		this.#selectionRows = [...topSelectionRows, ...contentSelectionRows, ...bottomSelectionRows];
+		this.#selectionInset = paddingX;
 		if (resultWidths !== undefined) {
 			// oxlint-disable-next-line unicorn/no-new-array -- line-width allocation
 			const emptyWidths = new Array<number>(emptyLines.length).fill(width);

@@ -101,6 +101,33 @@ describe("StatusLineComponent effective settings cache", () => {
 		}
 	});
 
+	it("creates a peer with byte-identical rendering and live settings", () => {
+		const session = makeSession("Peer Session");
+		const component = new StatusLineComponent(session);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "model", "context_pct", "path"],
+			rightSegments: ["session_name", "token_total"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+		});
+		const peer = component.createPeer(session);
+		try {
+			expect(peer.getTopBorder(120)).toEqual(component.getTopBorder(120));
+
+			component.updateSettings({
+				preset: "minimal",
+				separator: "slash",
+				sessionAccent: false,
+				transparent: true,
+			});
+			expect(peer.getTopBorder(80)).toEqual(component.getTopBorder(80));
+		} finally {
+			peer.dispose();
+			component.dispose();
+		}
+	});
+
 	it("invalidates on updateSettings and reflects hook visibility changes", () => {
 		const component = makeComponent({
 			preset: "custom",
