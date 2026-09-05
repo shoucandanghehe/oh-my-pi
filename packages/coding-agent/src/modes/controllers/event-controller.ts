@@ -65,7 +65,6 @@ import {
 	cfgErrorNotify,
 	cfgRecap,
 	cfgTerminalShowImages,
-	cfgTerminalShowProgress,
 } from "../settings";
 import { cfgCompaction } from "../../session/context-settings";
 import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
@@ -278,6 +277,9 @@ export class EventController {
 	// once instead of twice.
 	#vocalizedMessageUpdates = new WeakSet<object>();
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
+	readonly #agentTerminalActivityOwner = {};
+	readonly #maintenanceTerminalActivityOwner = {};
+	readonly #attentionTerminalActivityOwner = {};
 
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
@@ -419,7 +421,7 @@ export class EventController {
 		this.#toolArgsReveal.stop();
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.#setTerminalProgress(false);
+		this.resetTerminalActivity();
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}
@@ -887,20 +889,10 @@ export class EventController {
 		await run(event);
 	}
 
-	#setTerminalProgress(active: boolean): void {
-		if (active) {
-			if (
-				this.#terminalProgressActive ||
-				(this.ctx.settings ? cfgTerminalShowProgress.get(this.ctx.settings) : undefined) !== true
-			)
-				return;
-			this.ctx.ui.terminal.setProgress(true);
-			this.#terminalProgressActive = true;
-			return;
-		}
-		if (!this.#terminalProgressActive) return;
-		this.ctx.ui.terminal.setProgress(false);
-		this.#terminalProgressActive = false;
+	resetTerminalActivity(): void {
+		this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
+		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 	}
 
 	#trackRetrySupersededAssistantComponent(component: AssistantMessageComponent | undefined): void {
@@ -990,9 +982,9 @@ export class EventController {
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.ctx.statusLine.markActivityStart();
-		this.#setTerminalProgress(true);
+		this.ctx.terminalActivity.set(this.#agentTerminalActivityOwner, "working");
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 		this.ctx.ensureLoadingAnimation();
-		setTerminalTitleState("working");
 		this.ctx.ui.requestRender();
 	}
 
@@ -1740,7 +1732,7 @@ export class EventController {
 		const renderToolName = toolRenderName(event.toolName, tool);
 		if (renderToolName === "ask" || this.#toolWillPromptForApproval(renderToolName, event.args)) {
 			this.#approvalAttentionToolCallIds.add(event.toolCallId);
-			setTerminalTitleState("attention");
+			this.ctx.terminalActivity.set(this.#attentionTerminalActivityOwner, "attention");
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
@@ -1962,7 +1954,7 @@ export class EventController {
 			this.#approvalAttentionToolCallIds.delete(event.toolCallId) &&
 			this.#approvalAttentionToolCallIds.size === 0
 		) {
-			setTerminalTitleState("working");
+			this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 		}
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
@@ -2142,7 +2134,6 @@ export class EventController {
 			this.ctx.flushPendingCommandOutput();
 			return;
 		}
-		setTerminalTitleState("idle");
 
 		await this.#finishAgentEnd(event);
 		// This settle may belong to an extension-started turn while the main
@@ -2184,7 +2175,16 @@ export class EventController {
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
-		this.#setTerminalProgress(false);
+		// A non-terminal agent_end is only a scheduling boundary: maintenance,
+		// retries, queued work, or an async wake will continue the main session.
+		// Reassert the owner because auto-compaction may have released it; otherwise
+		// a concurrent /btw finishing in this gap would make the terminal look idle.
+		if (event.isTerminal === false) {
+			this.ctx.terminalActivity.set(this.#agentTerminalActivityOwner, "working");
+		} else {
+			this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
+		}
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();
 		this.#streamingReveal.stop();
@@ -2269,7 +2269,9 @@ export class EventController {
 	): Promise<void> {
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.#setTerminalProgress(true);
+		this.ctx.terminalActivity.set(this.#maintenanceTerminalActivityOwner, "working");
+		this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
 		const reasonText =
@@ -2314,7 +2316,7 @@ export class EventController {
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.#setTerminalProgress(false);
+		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();
 			this.ctx.autoCompactionLoader = undefined;
