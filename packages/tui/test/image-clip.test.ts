@@ -7,6 +7,7 @@ import {
 	getCellDimensions,
 	ImageProtocol,
 	parseKittyDirectPlacementLine,
+	parseKittyDirectPlacementSegment,
 	setCellDimensions,
 	TERMINAL,
 	wrapTmuxPassthrough,
@@ -80,6 +81,27 @@ describe("kitty direct-placement wire format", () => {
 	it("recognizes passthrough placements so tmux redraws can delete the old image", () => {
 		const line = `\x1b7\x1b[3A${wrapTmuxPassthrough("\x1b_Ga=p,q=2,C=1,i=5,p=5,c=4,r=4\x1b\\")}\x1b8`;
 		expect(parseKittyDirectPlacementLine(line)).toEqual({ imageId: 5, placementId: 5, columns: 4, rows: 4 });
+	});
+
+	it("parses and re-encodes a tmux-wrapped placement without losing its envelope", () => {
+		const apc = "\x1b_Ga=p,q=2,C=1,i=5,p=5,c=4,r=4\x1b\\";
+		const line = `\x1b7\x1b[3A${wrapTmuxPassthrough(apc)}\x1b8suffix`;
+		const parsed = parseKittyDirectPlacementSegment(line);
+		expect(parsed).not.toBeNull();
+		expect(parsed?.tmuxPassthrough).toBe(true);
+		expect(parsed?.suffix).toBe("suffix");
+		expect(
+			encodeKittyPlacementLine({
+				imageId: 5,
+				placementId: 6,
+				columns: 4,
+				rows: 4,
+				screenRow: 9,
+				maxRowsAbove: 1,
+				imageHeightPx: 40,
+				tmuxPassthrough: true,
+			}),
+		).toBe(`\x1b7\x1b[1A${wrapTmuxPassthrough("\x1b_Ga=p,q=2,C=1,i=5,p=6,c=4,r=2,y=20,h=20\x1b\\")}\x1b8`);
 	});
 
 	it("encodes the anchored, clipped, and last-row-only placement forms", () => {

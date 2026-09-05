@@ -116,6 +116,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			showAsyncWait() {
 				asyncWaitShows++;
 			},
+			resetTerminalActivity: () => {},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {

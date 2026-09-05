@@ -1,6 +1,7 @@
 import type { TabBarTheme } from "../components/tab-bar";
 import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { theme } from "../theme/index";
+import { truncateToWidth } from "../render/render-utils";
 // ═══════════════════════════════════════════════════════════════════════════
 // Text Sanitization
 // ═══════════════════════════════════════════════════════════════════════════
@@ -172,6 +173,13 @@ export function sanitizeInlineStatusText(input: string, inherit: InlineStatusInh
 	if (!text.includes("\x1b")) return text;
 	const state: InlineSgrState = { fg: false, off: new Set<number>(), inherit };
 	return text.replace(/\x1b\[([0-9;:]*)m/g, (_, body: string) => rewriteInlineSgr(body, state));
+}
+
+/** Shared focus marker and title treatment for app-viewport workspace panes. */
+export function renderWorkspacePaneHeader(title: string, width: number, focused: boolean, suffix = ""): string {
+	const indicator = focused ? theme.fg("accent", "●") : theme.fg("muted", "○");
+	const styledTitle = focused ? theme.fg("accent", theme.bold(title)) : theme.fg("muted", title);
+	return truncateToWidth(`${indicator} ${styledTitle}${suffix}`, Math.max(1, width));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

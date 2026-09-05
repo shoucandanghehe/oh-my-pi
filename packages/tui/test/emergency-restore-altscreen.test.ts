@@ -19,6 +19,7 @@ import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+const previousRenderBackend = Bun.env.PI_TUI_RENDER_BACKEND;
 // This suite asserts the real emergencyTerminalRestore() write path, so it opts
 // out of the test-default headless suppression, restoring it in afterEach.
 let previousHeadless = false;
@@ -56,11 +57,14 @@ function startCapturedTerminal() {
 
 describe("emergencyTerminalRestore alt-screen gating", () => {
 	beforeEach(() => {
+		delete Bun.env.PI_TUI_RENDER_BACKEND;
 		vi.spyOn(tuiUtils, "setHangulCompatibilityJamoWidth").mockReturnValue(false);
 		previousHeadless = setTerminalHeadless(false);
 	});
 
 	afterEach(() => {
+		if (previousRenderBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+		else Bun.env.PI_TUI_RENDER_BACKEND = previousRenderBackend;
 		setAltScreenActive(false);
 		setTerminalHeadless(previousHeadless);
 		vi.restoreAllMocks();

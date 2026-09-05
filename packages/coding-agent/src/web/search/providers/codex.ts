@@ -461,7 +461,7 @@ async function callCodexHostedSearch(
 ): Promise<CodexSearchResult> {
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
-	const requestedModel = options.modelId;
+	const requestedModel = options.model.modelId;
 
 	const body: Record<string, unknown> = {
 		model: requestedModel,

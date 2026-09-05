@@ -29,6 +29,13 @@ export async function sleepLong(delayMs: number, signal?: AbortSignal): Promise<
 	}
 }
 
+/** Yield to I/O and terminal input between bounded CPU-work batches. */
+export function waitForImmediate(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
+}
+
 /**
  * Wait for a wall-clock deadline, including time spent suspended. Some platforms
  * exclude suspend from relative timers, so recheck at least once per second.

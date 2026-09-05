@@ -27,6 +27,7 @@ interface BtwPanelComponentOptions {
 	 * prose, and the inject key (`app.btw.inject`) is offered while this returns true.
 	 */
 	canInject?: () => boolean;
+	canOpenThread?: boolean;
 }
 
 export class BtwPanelComponent extends OverlayPanel {
@@ -34,6 +35,7 @@ export class BtwPanelComponent extends OverlayPanel {
 	#canBranch: (() => boolean) | undefined;
 	#canFollowUp: (() => boolean) | undefined;
 	#canInject: (() => boolean) | undefined;
+	#canOpenThread: boolean;
 	#state: BtwPanelState = "running";
 	#answer = "";
 	#errorMessage: string | undefined;
@@ -58,6 +60,7 @@ export class BtwPanelComponent extends OverlayPanel {
 			footer: () => this.#footerLine(),
 		}));
 		this.addChild(this.#content);
+		this.#canOpenThread = options.canOpenThread === true;
 		this.#rebuild();
 	}
 
@@ -74,6 +77,13 @@ export class BtwPanelComponent extends OverlayPanel {
 		this.#answer = text;
 		this.#visibleAnswer = replaceTabs(text).trim();
 		this.#setCopied(false);
+		this.#rebuild();
+	}
+
+	markRunning(): void {
+		if (this.#closed) return;
+		this.#state = "running";
+		this.#errorMessage = undefined;
 		this.#rebuild();
 	}
 
@@ -241,18 +251,22 @@ export class BtwPanelComponent extends OverlayPanel {
 	#footerLine(): string {
 		// The main editor routes `app.interrupt` (Escape by default) to the panel.
 		const esc = interruptKey();
+		const open = this.#canOpenThread ? `${formatKeyHint("enter")} open thread · ` : "";
 		switch (this.#state) {
 			case "running":
-				return theme.fg("muted", `${esc} to cancel`);
+				return theme.fg("muted", `${open}${esc} to cancel`);
 			case "complete": {
 				const actions: string[] = [];
+				if (this.#canOpenThread) actions.push(`${formatKeyHint("enter")} open thread`);
 				const copyKey = formatKeyHint("c");
 				const injectKey = this.#injectKey();
 				if (injectKey) actions.push(`${formatKeyHint(injectKey)} to inject`);
 				if (this.isCopyable()) actions.push(this.#copied ? `${copyKey} to copy again` : `${copyKey} to copy`);
 				if (this.#canFollowUp?.()) actions.push(`${formatKeyHint("f")} to follow up`);
-				if (this.#canBranch?.() ?? this.isBranchable()) actions.push(`${formatKeyHint("b")} to branch`);
-				actions.push(`${esc} to close`);
+				if (this.#canBranch?.() ?? this.isBranchable()) {
+					actions.push(`${formatKeyHint("b")} ${this.#canOpenThread ? "promote to chat" : "branch to chat"}`);
+				}
+				actions.push(`${esc} dismiss`);
 				if (this.#copied) {
 					return `${theme.fg("success", "✓ Copied to clipboard")}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
 				}
@@ -261,9 +275,9 @@ export class BtwPanelComponent extends OverlayPanel {
 			case "branching":
 				return theme.fg("muted", `${theme.status.pending} Branching to chat…`);
 			case "aborted":
-				return theme.fg("warning", `${theme.status.warning} Cancelled · ${esc} to close`);
+				return theme.fg("warning", `${theme.status.warning} Cancelled · ${open}${esc} to close`);
 			case "error":
-				return theme.fg("error", `${theme.status.error} Error · ${esc} to close`);
+				return theme.fg("error", `${theme.status.error} Error · ${open}${esc} to close`);
 		}
 	}
 

@@ -8,16 +8,16 @@
  *
  * The fix adds adaptive backpressure: the next render's delay is inflated to
  * (at minimum) the previous frame's cost, capped so responsiveness never
- * degrades below ~5 fps. A fast frame keeps the ~30 fps cadence untouched;
- * a slow frame idles proportionally.
+ * degrades below ~5 fps. Native scrollback retains the ~30 fps cadence;
+ * app-viewport uses only measured frame cost and output backpressure.
  *
  * Contract this test defends:
- * 1. Fast frames leave the cadence delay at the plain min-interval floor.
+ * 1. Cheap app frames avoid a fixed cadence; native frames retain it.
  * 2. A slow frame inflates the following delay to at least its measured cost.
  * 3. The inflated delay is capped so a pathological frame doesn't stall the
  *    UI indefinitely.
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type Component, type RenderTimer, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -26,6 +26,7 @@ const MAX_ADAPTIVE_RENDER_MS = 200;
 
 class ScriptedFrameCost implements Component {
 	#nextCostMs: number | null = null;
+	text = "probe";
 	scheduler!: { nowMs: number };
 
 	/** Program the next render() to virtually consume `costMs` on the scheduler clock. */
@@ -40,7 +41,7 @@ class ScriptedFrameCost implements Component {
 			this.scheduler.nowMs += this.#nextCostMs;
 			this.#nextCostMs = null;
 		}
-		return ["probe"];
+		return [this.text];
 	}
 }
 
@@ -78,8 +79,20 @@ function stepRender(scheduler: DeferredRenderScheduler): number | null {
 	return timer.delayMs;
 }
 
-describe("TUI adaptive render backpressure (#4145)", () => {
-	it("keeps the plain min-interval cadence when frames are cheap", () => {
+describe.each(["native-scrollback", "app-viewport"])("TUI adaptive render backpressure (%s)", backend => {
+	let previousBackend: string | undefined;
+
+	beforeEach(() => {
+		previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = backend;
+	});
+
+	afterEach(() => {
+		if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+		else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+	});
+
+	it("coalesces cheap updates without imposing a fixed cadence on app frames", async () => {
 		const term = new VirtualTerminal(20, 4);
 		const scheduler = new DeferredRenderScheduler();
 		const probe = new ScriptedFrameCost();
@@ -88,24 +101,22 @@ describe("TUI adaptive render backpressure (#4145)", () => {
 		tui.addChild(probe);
 
 		try {
+			probe.scheduleCost(1);
 			tui.start();
-			// Drain the initial start-time render.
 			stepRender(scheduler);
-			scheduler.timers.length = 0;
 
-			// Three cheap (1ms) renders back-to-back: each next delay hugs the
-			// 33ms floor (not zero — the previous frame ended right before), so
-			// they arrive at the throttled cadence.
-			for (let i = 0; i < 3; i++) {
-				probe.scheduleCost(1);
-				tui.requestRender();
-				const delay = stepRender(scheduler);
-				expect(delay).not.toBeNull();
-				// The cadence floor is min-interval; adaptive floor is
-				// max(1ms) which is well below it, so delay ≈ min-interval.
-				expect(delay!).toBeGreaterThanOrEqual(0);
-				expect(delay!).toBeLessThanOrEqual(MIN_RENDER_INTERVAL_MS + 1);
-			}
+			probe.text = "superseded";
+			tui.requestRender();
+			probe.text = "latest";
+			tui.requestRender();
+			const delay = stepRender(scheduler);
+			expect(delay).not.toBeNull();
+			expect(delay!).toBeCloseTo(backend === "app-viewport" ? 1 : MIN_RENDER_INTERVAL_MS - 1);
+			await term.flush();
+			expect(term.getViewport().join("\n")).toContain("latest");
+			expect(term.getViewport().join("\n")).not.toContain("superseded");
+			// A burst produces one frame; an idle component doesn't drive another.
+			expect(stepRender(scheduler)).toBeNull();
 		} finally {
 			tui.stop();
 		}
@@ -136,8 +147,8 @@ describe("TUI adaptive render backpressure (#4145)", () => {
 			tui.requestRender();
 			const delay = stepRender(scheduler);
 			expect(delay).not.toBeNull();
-			// `elapsed` at scheduling time is 0 (last render just ended), so
-			// the adaptive floor equals the recorded 100ms cost directly.
+			// Scheduling begins at frame end, so the remaining adaptive wait
+			// equals the recorded 100ms frame cost.
 			expect(delay!).toBeGreaterThanOrEqual(slowFrameCostMs);
 		} finally {
 			tui.stop();

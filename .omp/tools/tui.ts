@@ -103,16 +103,15 @@ export interface TuiParams {
 
 // ─── VT screen emulator ──────────────────────────────────────────────────────
 
-/** Lazily loaded kitty-vt-wasm module: a missing install degrades `start`, not module load. */
+/** Runtime-resolved because compiled OMP hosts cannot resolve project packages while importing custom tools. */
 let vtApi: Promise<typeof KittyVt> | null = null;
 
-function loadVt() {
-	// Lazy import: a missing optional install must degrade `start`, not fail tool load.
-	vtApi ??= import("kitty-vt-wasm").catch((error) => {
+export function loadVt(
+	modulePath = resolve(import.meta.dir, "../../node_modules/kitty-vt-wasm/dist/index.js"),
+): Promise<typeof KittyVt> {
+	vtApi ??= (import(modulePath) as Promise<typeof KittyVt>).catch(error => {
 		vtApi = null;
-		throw new Error(
-			`screen emulation needs kitty-vt-wasm — run \`bun install\` in .omp/tools (${error})`,
-		);
+		throw new Error(`screen emulation needs kitty-vt-wasm — run \`bun install\` in the project root (${error})`);
 	});
 	return vtApi;
 }
@@ -194,11 +193,12 @@ async function loadCanvas() {
 	if (canvasApi) return canvasApi;
 	let mod: typeof CanvasModule;
 	try {
-		// Lazy import: a missing optional install must degrade `shot`, not fail tool load.
-		mod = await import("@napi-rs/canvas");
+		// Canvas stays optional, but compiled hosts still need an absolute project dependency path.
+		const modulePath = resolve(import.meta.dir, "../../node_modules/@napi-rs/canvas/index.js");
+		mod = (await import(modulePath)) as typeof CanvasModule;
 	} catch (error) {
 		throw new Error(
-			`shot needs @napi-rs/canvas — run \`bun install\` in .omp/tools (${error})`,
+			`shot needs @napi-rs/canvas — run \`bun install\` at the repository root (${error})`,
 		);
 	}
 	const families = mod.GlobalFonts.families.map((entry) => entry.family);
@@ -270,7 +270,7 @@ export class Screen {
 		this.#term = term;
 	}
 
-	/** Loads the wasm module (cached process-wide) and allocates a terminal. */
+	/** Loads the project-resolved wasm module once and allocates a terminal. */
 	static async create(cols: number, rows: number): Promise<Screen> {
 		const vt = await loadVt();
 		const term = await vt.KittyTerminal.create({

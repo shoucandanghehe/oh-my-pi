@@ -128,19 +128,19 @@ describe("issue #10510: prewalk + eager-todo conflict", () => {
 
 	it("suppresses the forced eager-todo prelude while prewalk is armed", async () => {
 		const text = await collectInjectedText({ prewalk: "handoff" });
-		expect(text.includes("write complete plan")).toBe(true);
+		expect(text.includes("Consolidate the investigation into an execution plan")).toBe(true);
 		expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(false);
 	});
 
 	it("still injects the forced eager-todo prelude when prewalk is not armed", async () => {
 		const text = await collectInjectedText({ prewalk: "off" });
-		expect(text.includes("write complete plan")).toBe(false);
+		expect(text.includes("Consolidate the investigation into an execution plan")).toBe(false);
 		expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
 	});
 
 	it("keeps the forced eager-todo prelude when the armed prewalk is a no-op", async () => {
 		const text = await collectInjectedText({ prewalk: "noop" });
-		expect(text.includes("write complete plan")).toBe(false);
+		expect(text.includes("Consolidate the investigation into an execution plan")).toBe(false);
 		expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
 	});
 });

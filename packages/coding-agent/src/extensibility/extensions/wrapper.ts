@@ -413,6 +413,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
 			if (
+				context?.toolApprovalPreview !== "never" &&
 				scheduledCall?.id === toolCallId &&
 				(scheduledCall.name === this.tool.name || scheduledCall.name === this.tool.customWireName)
 			) {

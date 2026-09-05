@@ -6,15 +6,14 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 describe("InputController tool output expansion", () => {
-	it("expands children and forces a full repaint so every live block re-renders", () => {
-		const expandable = { setExpanded: vi.fn() };
-		const inert = { render: vi.fn(() => []) };
+	it("expands the transcript and pending shell runs and forces a full repaint", () => {
+		const setExpanded = vi.fn();
 		const pendingShell = { setExpanded: vi.fn() };
 		const requestRender = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
-			chatContainer: { children: [expandable, inert] },
+			chatContainer: { setExpanded },
 			pendingShellContainer: { children: [pendingShell] },
 			ui: { requestRender },
 			showStatus,
@@ -23,10 +22,8 @@ describe("InputController tool output expansion", () => {
 		new InputController(ctx).toggleToolOutputExpansion();
 
 		expect(ctx.toolOutputExpanded).toBe(true);
-		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
+		expect(setExpanded).toHaveBeenCalledWith(true);
 		expect(pendingShell.setExpanded).toHaveBeenCalledWith(true);
-		// Expansion mutates every live block; the forced repaint re-renders them
-		// at their new heights in the same frame.
 		expect(requestRender).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledWith(true);
 		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");

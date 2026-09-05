@@ -35,6 +35,8 @@ import type { AgentSession } from "../session/agent-session";
 import type { BlockedKind } from "../utils/run-status";
 import type { DroppedPrompt } from "../session/agent-session-types";
 import type { AgentViewSession } from "../session/agent-session-handle";
+import type { PausedExitParticipant } from "../session/agent-session-types";
+import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
@@ -291,6 +293,20 @@ export interface InteractiveModeContext {
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
 	setClickHoverId(id: string | undefined): void;
+	/** Whether the main view is mounted in the app-viewport multi-pane workspace. */
+	readonly workspaceEnabled: boolean;
+	/** Create or focus a persistent transcript pane for an agent. */
+	openAgentWorkspacePane(id: string): Promise<void>;
+	/** Open a local fake pane and play the real subagent petrification/close path. */
+	previewSubagentExitAnimation(): void;
+	/** Create or focus the session-scoped ephemeral /btw pane. */
+	openBtwWorkspacePane(component: Component): boolean;
+	/** Close only the /btw view; its side conversation remains in memory. */
+	closeBtwWorkspacePane(): boolean;
+	/** Restore keyboard focus and the active workspace marker to the main pane. */
+	focusMainWorkspacePane(): void;
+	/** Whether the Main pane currently owns app-viewport workspace focus. */
+	isMainWorkspacePaneFocused(): boolean;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. `viewOnly`
 	 *  (focus switch, main session unchanged) keeps the main session's compaction queues. */
 	clearTransientSessionUi(options?: { viewOnly?: boolean }): void;
@@ -626,7 +642,6 @@ export interface InteractiveModeContext {
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	/** `/wt`: fork the checkout into a new worktree (keeping changes unless `keepChanges` is false) and move there. */
 	handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void>;
-	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
 	handleSTTToggle(): Promise<void>;
@@ -701,8 +716,9 @@ export interface InteractiveModeContext {
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
 	): Promise<void>;
-	/** `title` heads the side question instead of its text, e.g. a side file command's `/sitrep the migration`. */
+	/** `title` heads the side question instead of its text. */
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean>;
+	getPausedExitParticipants?(): readonly PausedExitParticipant[];
 	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
@@ -712,22 +728,18 @@ export interface InteractiveModeContext {
 	readonly isBtwFocused: boolean;
 	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */
 	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean>;
+	handlesBtwOpenThreadKey(): boolean;
+	handleBtwOpenThreadKey(): Promise<boolean>;
 	handleBtwBranchKey(): Promise<boolean>;
 	canBranchBtw(): boolean;
 	handlesBtwBranchKey(): boolean;
-	canCopyBtw(): boolean;
+	handlesBtwCopyKey(): boolean;
 	handleBtwCopyKey(): Promise<boolean>;
 	canFollowUpBtw(): boolean;
 	handleBtwFollowUpKey(): boolean;
-	/** The inject key (`app.btw.inject`, Alt+I): steer the main session with the completed /btw answer's `<inject>` block (`btw.inject`). */
+	/** Steer Main with the completed /btw answer's `<inject>` block (`btw.inject`). */
 	handleBtwInjectKey(): boolean;
-	handleBtwBranch(
-		question: string,
-		assistantMessage: AssistantMessage,
-		leafId: string,
-		sessionId: string,
-		images?: ImageContent[],
-	): Promise<void>;
+	handleBtwBranch(request: BtwPromotionRequest, lifecycle?: BtwPromotionLifecycle): Promise<boolean>;
 	handleOmfgCommand(complaint: string): Promise<void>;
 	hasActiveOmfg(): boolean;
 	handleOmfgEscape(): boolean;

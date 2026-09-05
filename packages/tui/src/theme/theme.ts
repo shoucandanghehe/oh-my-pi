@@ -33,6 +33,7 @@ export {
 	highlightCode,
 	isHighlightLanguage,
 	setMarkdownColorful,
+	withCodeHighlightingDisabledForLayout,
 	setMarkdownMermaidRendering,
 	warmHighlighter,
 } from "./tui-adapters";
