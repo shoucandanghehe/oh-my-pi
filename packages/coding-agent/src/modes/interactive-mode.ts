@@ -429,7 +429,6 @@ export interface InteractiveModeOptions {
 
 export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 
-
 class TodoHudContainer extends AnchoredLiveContainer {
 	constructor(private readonly mode: InteractiveMode) {
 		super();
@@ -4993,12 +4992,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #finishShutdown(options: {
 		status: string;
-		disposeSession?: () => Promise<void>;
+		disposeSession: boolean;
 		resumeHint: (sessionId: string) => string;
 	}): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
-		await this.#teardown();
+		await this.#teardown(options.status, options.disposeSession);
 
 		// Print resumption hint only if the session was actually materialized to
 		// durable storage — `--resume <id>` fails on a never-written file (see
@@ -5025,7 +5024,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async restart(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
-		await this.#teardown();
+		await this.#teardown("Closing session…", true);
 
 		const cmd = [...resolveCliEntryCmd(), ...restartArgv(process.argv.slice(2), this.#resumableSessionId())];
 		await postmortem.cleanup();
@@ -5054,21 +5053,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
 	}
 
-	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
-	async #teardown(): Promise<void> {
+	/** Shared shutdown/restart teardown: optionally dispose the session, then hand the terminal back. */
+	async #teardown(status: string, disposeSession: boolean): Promise<void> {
 		await this.#liveCommandController.stop();
 
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
 		this.#focusController.dispose();
-		this.showStatus(options.status);
-		if (options.disposeSession) {
+		this.showStatus(status);
+		if (disposeSession) {
+			// Persist the draft and dispose through the promise-memoized signal
+			// teardown so concurrent shutdown paths share one lifecycle.
 			const stillClosingTimer = setTimeout(() => {
 				this.showStatus("Still closing… (flushing memory backend / network)");
 			}, STILL_CLOSING_DELAY_MS);
 			try {
-				await options.disposeSession();
+				if (this.#signalTeardown) {
+					await this.#signalTeardown();
+				} else {
+					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+				}
 			} finally {
 				clearTimeout(stillClosingTimer);
 			}
@@ -5087,23 +5092,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeTerminalTitleState();
 		popTerminalTitle();
 		this.stop();
-
 	}
 
 	async shutdown(): Promise<void> {
 		await this.#finishShutdown({
 			status: "Closing session…",
-			disposeSession: async () => {
-				// Persist the draft and dispose the session through the shared teardown
-				// so a signal that arrives mid-shutdown cannot fire a second dispose.
-				// The teardown is registered lazily in `init()` — a `/exit` reached
-				// before `init()` completed falls back to a direct dispose.
-				if (this.#signalTeardown) {
-					await this.#signalTeardown();
-				} else {
-					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
-				}
-			},
+			disposeSession: true,
 			resumeHint: sessionId => `Resume this session with ${APP_NAME} --resume ${sessionId}`,
 		});
 	}
@@ -5115,6 +5109,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async shutdownAfterPausedExit(): Promise<void> {
 		await this.#finishShutdown({
 			status: "Exiting paused — resume with --resume, then /continue",
+			disposeSession: false,
 			resumeHint: sessionId => `Paused session. Resume with ${APP_NAME} --resume ${sessionId}, then /continue`,
 		});
 	}
@@ -5141,6 +5136,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const nextEditor = factory
 			? factory(this.ui, getEditorTheme(), this.keybindings)
 			: new CustomEditor(getEditorTheme());
+		if (!factory) this.ui.enableScopedInputRender(nextEditor);
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(this.settings.get("tui.imeSafeCursor"));
 		nextEditor.setAutocompleteMaxVisible(this.settings.get("autocompleteMaxVisible"));
@@ -5472,6 +5468,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// status rows so the interrupt glyph reads as indented.
 				[` ${theme.icon.esc}`],
 			);
+			this.loadingAnimation.setAdditionalRepaintTarget(this.#mainStickyRoot ?? this.statusLine);
 			this.loadingAnimation.setTrailer(() => this.#workingTitleTrailer());
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
@@ -6047,6 +6044,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwCommand(question: string): Promise<void> {
 		return this.#btwController.start(question);
+	}
+
+	getPausedExitParticipants(): readonly BtwController[] {
+		return [this.#btwController];
 	}
 
 	handleTanCommand(work: string): Promise<void> {

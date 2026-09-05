@@ -7,9 +7,12 @@ use std::{
 	process::Command,
 };
 
+use syntect::parsing::{SyntaxDefinition, SyntaxSet};
+
 fn main() {
 	napi_build::setup();
 	build_oauth_callback_helper();
+	generate_syntax_set();
 	generate_minimizer_builtin_filters();
 }
 
@@ -140,6 +143,64 @@ fn build_darwin_oauth_callback_helper() {
 fn target_linker(target: &str) -> Option<OsString> {
 	let target_key = target.replace(['-', '.'], "_").to_ascii_uppercase();
 	env::var_os(format!("CARGO_TARGET_{target_key}_LINKER")).or_else(|| env::var_os("RUSTC_LINKER"))
+}
+
+fn generate_syntax_set() {
+	const UPDATE_ENV: &str = "PI_NATIVES_UPDATE_SYNTAX_SET";
+
+	let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
+	let syntaxes_dir = Path::new(&manifest_dir).join("src").join("syntaxes");
+	let bundled_path = syntaxes_dir.join("syntax_set.packdump");
+	let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR should be set"));
+	let generated_path = out_dir.join("syntax_set.packdump");
+
+	println!("cargo:rerun-if-changed={}", syntaxes_dir.display());
+	println!("cargo:rerun-if-env-changed={UPDATE_ENV}");
+
+	let mut entries = Vec::new();
+	for entry in fs::read_dir(&syntaxes_dir)
+		.unwrap_or_else(|error| panic!("failed to read {}: {error}", syntaxes_dir.display()))
+	{
+		let path = entry
+			.unwrap_or_else(|error| {
+				panic!("failed to read entry in {}: {error}", syntaxes_dir.display())
+			})
+			.path();
+		if path.extension().and_then(|extension| extension.to_str()) == Some("sublime-syntax") {
+			entries.push(path);
+		}
+	}
+	entries.sort();
+
+	let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+	for path in entries {
+		println!("cargo:rerun-if-changed={}", path.display());
+		let source = fs::read_to_string(&path)
+			.unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+		let definition = SyntaxDefinition::load_from_str(&source, true, None)
+			.unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()));
+		builder.add(definition);
+	}
+
+	let syntax_set = builder.build();
+	syntect::dumps::dump_to_uncompressed_file(&syntax_set, &generated_path)
+		.unwrap_or_else(|error| panic!("failed to write {}: {error}", generated_path.display()));
+
+	if matches!(env::var(UPDATE_ENV).as_deref(), Ok("1")) {
+		fs::copy(&generated_path, &bundled_path)
+			.unwrap_or_else(|error| panic!("failed to update {}: {error}", bundled_path.display()));
+		return;
+	}
+
+	let generated = fs::read(&generated_path)
+		.unwrap_or_else(|error| panic!("failed to read {}: {error}", generated_path.display()));
+	let bundled = fs::read(&bundled_path)
+		.unwrap_or_else(|error| panic!("failed to read {}: {error}", bundled_path.display()));
+	assert!(
+		generated == bundled,
+		"{} is stale; regenerate it with `{UPDATE_ENV}=1 cargo check -p pi-natives`",
+		bundled_path.display()
+	);
 }
 
 fn generate_minimizer_builtin_filters() {

@@ -54,12 +54,15 @@ interface TreeSummaryHarness {
 	navigation: Promise<void>;
 	selector(): { handleInput(key: string): void };
 	showHookSelector: Mock<ShowHookSelector>;
+	renderNow: Mock<() => void>;
 }
 
 function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 	const navigation = Promise.withResolvers<void>();
 	const root = userNode("root", null, "Root prompt");
 	const showHookSelector = vi.fn<ShowHookSelector>(async () => summaryChoice);
+	const requestRender = vi.fn();
+	const renderNow = vi.fn();
 	const navigateTree = vi.fn<NavigateTree>(async () => {
 		navigation.resolve();
 		return { cancelled: false };
@@ -74,8 +77,9 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 		ui: {
 			terminal: { rows: 40 },
 			setFocus: vi.fn(),
-			requestRender: vi.fn(),
+			requestRender,
 			requestComponentRender: vi.fn(),
+			renderNow,
 		},
 		editorContainer: {
 			clear: vi.fn(),
@@ -116,6 +120,7 @@ function createHarness(summaryChoice = "No summary"): TreeSummaryHarness {
 			return selector;
 		},
 		showHookSelector,
+		renderNow,
 	};
 }
 
@@ -133,6 +138,16 @@ describe("SelectorController tree branch summaries", () => {
 			customInstructions: undefined,
 			allowAskReopen: true,
 		});
+	});
+
+	it("repaints immediately after selection before rebuilding the selected branch", async () => {
+		const harness = createHarness();
+
+		harness.controller.showTreeSelector();
+		harness.selector().handleInput("\r");
+		await harness.navigation;
+
+		expect(harness.renderNow).toHaveBeenCalledTimes(1);
 	});
 
 	it("summarizes and switches on shift+enter without showing the prompt", async () => {

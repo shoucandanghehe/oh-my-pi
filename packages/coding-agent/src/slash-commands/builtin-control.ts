@@ -75,6 +75,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				showStatus: (message, options) => runtime.ctx.showStatus(message, options),
 				sessionName: runtime.ctx.sessionName,
 				session: runtime.ctx.session,
+				pausedExitParticipants: runtime.ctx.getPausedExitParticipants?.(),
 				quitAfterPausedExit: async () => {
 					await runtime.ctx.shutdownAfterPausedExit?.();
 				},
@@ -90,7 +91,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.showStatus("Nothing to continue — no agents_paused marker on this session");
 				return;
 			}
-			const result = await runtime.ctx.session.continuePausedAgents();
+			const result = await runtime.ctx.session.continuePausedAgents(runtime.ctx.getPausedExitParticipants?.());
 			const detail = result.skipped.length > 0 ? ` (${result.skipped.join("; ")})` : "";
 			const showContinueStatus = (message: string): void => {
 				runtime.ctx.showStatus(previewLine(message, TRUNCATE_LENGTHS.LONG));

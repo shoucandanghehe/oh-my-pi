@@ -61,6 +61,7 @@ function createFixture(
 	const ctx = createInteractiveModeContext({
 		session: { getToolByName: toolByName },
 		hideToolActivity,
+
 		noteDisplayableThinkingContent: vi.fn((message: AssistantMessage) => {
 			const hasThinking = message.content.some(
 				content => content.type === "thinking" && content.thinking.trim() !== "",

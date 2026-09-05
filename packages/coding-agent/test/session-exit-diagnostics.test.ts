@@ -213,7 +213,7 @@ describe("session exit diagnostics", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const created = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
@@ -241,10 +241,14 @@ describe("session exit diagnostics", () => {
 		await session.dispose({ pausedExit: true });
 		session = undefined;
 
-		const exitEntry = sessionManager
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		const exitEntry = reopened
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
 		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
+		await reopened.close();
 		expect(exitEntry.data).toMatchObject({
 			reason: "agents_paused",
 			kind: "paused",

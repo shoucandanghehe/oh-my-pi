@@ -95,6 +95,7 @@ export class ChatTranscriptBuilder {
 	#syntheticExpandables: CollapsedSyntheticMessageComponent[] = [];
 	#expanded = false;
 	#entryComponents = new Map<string, Component[]>();
+	#streamingAssistantComponent: AssistantMessageComponent | undefined;
 
 	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
@@ -131,23 +132,45 @@ export class ChatTranscriptBuilder {
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
+	/** Update the mutable assistant block at the transcript tail without rebuilding prior messages. */
+	updateStreamingAssistant(
+		message: Extract<AgentMessage, { role: "assistant" }>,
+	): AssistantMessageComponent | undefined {
+		const component = this.#streamingAssistantComponent;
+		if (!component || message.content.some(content => content.type === "toolCall")) return undefined;
+		component.updateContent(message, { transient: true });
+		return component;
+	}
+
+	/** Seal the mutable assistant tail in place so its measured viewport extent survives stream completion. */
+	finalizeStreamingAssistant(
+		message: Extract<AgentMessage, { role: "assistant" }>,
+	): AssistantMessageComponent | undefined {
+		const component = this.#streamingAssistantComponent;
+		if (!component || message.content.some(content => content.type === "toolCall")) return undefined;
+		component.updateContent(message);
+		if (!component.isTranscriptBlockFinalized()) component.markTranscriptBlockFinalized();
+		return component;
+	}
+
 	/** Toggle normal expandables globally and one viewport-anchored synthetic replay dump. */
-	toggleExpanded(startRow: number, endRow: number, preferLast: boolean): void {
-		const visibleBlocks = new Set(this.container.getBlocksInRowRange(startRow, endRow));
-		const visibleSynthetic = this.#syntheticExpandables.filter(component => visibleBlocks.has(component));
+	toggleExpanded(visibleBlocks: readonly Component[], preferLast: boolean): void {
+		const visible = new Set(visibleBlocks);
+		const visibleSynthetic = this.#syntheticExpandables.filter(component => visible.has(component));
 		const target = preferLast ? visibleSynthetic[visibleSynthetic.length - 1] : visibleSynthetic[0];
 		const expanded = target ? !target.expanded : !this.#expanded;
 		this.#expanded = expanded;
 		for (const component of this.#expandables) component.setExpanded(expanded);
 		for (const component of this.#syntheticExpandables) {
-			component.setExpanded(expanded && component === target);
+			component.setBodyExpanded(expanded && component === target);
 		}
+		this.container.invalidate();
 	}
 
-	/** Rendered row where a persisted entry begins, after the container has painted once. */
-	rowForEntry(entryId: string): number | undefined {
+	/** Rendered row where a persisted entry begins in the transcript at `width`. */
+	rowForEntry(entryId: string, width?: number): number | undefined {
 		for (const component of this.#entryComponents.get(entryId) ?? []) {
-			const row = this.container.getChildStartRow(component);
+			const row = this.container.getChildStartRow(component, width);
 			if (row !== undefined) return row;
 		}
 		return undefined;
@@ -169,6 +192,7 @@ export class ChatTranscriptBuilder {
 		this.#lastAssistantUsage = undefined;
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
+		this.#streamingAssistantComponent = undefined;
 		this.#expandables = [];
 		this.#entryComponents.clear();
 		this.#syntheticExpandables = [];
@@ -272,6 +296,7 @@ export class ChatTranscriptBuilder {
 	}
 
 	#appendChatMessage(message: AgentMessage): void {
+		this.#streamingAssistantComponent = undefined;
 		if (message.role !== "toolResult") this.#flushPendingUsage();
 		if (message.role !== "assistant" && message.role !== "toolResult") {
 			this.#readGroup?.seal();
@@ -397,6 +422,9 @@ export class ChatTranscriptBuilder {
 		this.#trackExpandable(assistantComponent);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
+		if (!message.content.some(content => content.type === "toolCall")) {
+			this.#streamingAssistantComponent = assistantComponent;
+		}
 
 		if (settings.get("display.cacheMissMarker")) {
 			const invalidation = detectCacheInvalidation(this.#lastAssistantUsage, message.usage);
