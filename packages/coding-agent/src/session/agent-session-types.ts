@@ -77,6 +77,13 @@ export interface ContinuePausedAgentsResult {
 	complete: boolean;
 }
 
+/** A non-registry agent-loop owner that participates in durable pause/continue. */
+export interface PausedExitParticipant {
+	readonly label: string;
+	prepareForPausedExit(): void;
+	continuePaused(): Promise<ContinuePausedAgentsResult>;
+}
+
 /** Listener notified when command metadata changes. */
 export type CommandMetadataChangedListener = () => void | Promise<void>;
 /** Public summary of an asynchronous job. */

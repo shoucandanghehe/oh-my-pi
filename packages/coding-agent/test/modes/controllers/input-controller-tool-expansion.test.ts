@@ -4,14 +4,13 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 describe("InputController tool output expansion", () => {
-	it("expands children and forces a full repaint so every live block re-renders", () => {
-		const expandable = { setExpanded: vi.fn() };
-		const inert = { render: vi.fn(() => []) };
+	it("expands the transcript container and forces a full repaint", () => {
+		const setExpanded = vi.fn();
 		const requestRender = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
-			chatContainer: { children: [expandable, inert] },
+			chatContainer: { setExpanded },
 			ui: { requestRender },
 			showStatus,
 		} as unknown as InteractiveModeContext;
@@ -19,9 +18,7 @@ describe("InputController tool output expansion", () => {
 		new InputController(ctx).toggleToolOutputExpansion();
 
 		expect(ctx.toolOutputExpanded).toBe(true);
-		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
-		// Expansion mutates every live block; the forced repaint re-renders them
-		// at their new heights in the same frame.
+		expect(setExpanded).toHaveBeenCalledWith(true);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledWith(true);
 		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");

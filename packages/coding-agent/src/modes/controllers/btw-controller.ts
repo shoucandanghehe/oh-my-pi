@@ -3,6 +3,7 @@ import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import btwConversationPrompt from "../../prompts/system/btw-conversation.md" with { type: "text" };
 import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
 import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
+import type { ContinuePausedAgentsResult } from "../../session/agent-session-types";
 import { BtwManager } from "../../session/btw-manager";
 import { BTW_THREAD_CUSTOM_TYPE, type BtwPromotionLifecycle, type BtwPromotionRequest } from "../../session/btw-thread";
 import { sanitizeEphemeralAssistantForPromotion } from "../../session/messages";
@@ -38,6 +39,16 @@ export class BtwController {
 	#workspacePane: BtwConversationPane | undefined;
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
+
+	readonly label = "BTW";
+
+	prepareForPausedExit(): void {
+		this.#manager?.prepareForPausedExit();
+	}
+
+	continuePaused(): Promise<ContinuePausedAgentsResult> {
+		return this.#managerForCurrentSession().continuePaused();
+	}
 
 	hasActiveRequest(): boolean {
 		return this.#activeRequest !== undefined;

@@ -9,9 +9,7 @@ use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
 
 use napi::{JsString, Result};
 use napi_derive::napi;
-use syntect::parsing::{
-	ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxDefinition, SyntaxReference, SyntaxSet,
-};
+use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 
 use crate::{
 	js::{self, InlineStr},
@@ -34,32 +32,15 @@ thread_local! {
 	static SCOPE_COLOR_CACHE: RefCell<HashMap<Scope, usize>> = RefCell::new(HashMap::with_capacity(256));
 }
 
-/// Syntaxes bundled in addition to syntect's defaults: syntect ships none of
-/// these, so we vendor their `.sublime-syntax` sources and fold them into the
-/// set.
-const EXTRA_SYNTAXES: &[&str] = &[
-	include_str!("syntaxes/Julia.sublime-syntax"),
-	include_str!("syntaxes/Nix.sublime-syntax"),
-	include_str!("syntaxes/Mermaid.sublime-syntax"),
-	include_str!("syntaxes/TypeScript.sublime-syntax"),
-	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
-];
-
 fn get_syntax_set() -> &'static SyntaxSet {
 	SYNTAX_SET.get_or_init(build_syntax_set)
 }
 
-/// Load syntect's newline-aware defaults and add the vendored extra syntaxes.
-/// A vendored syntax that fails to parse is skipped rather than breaking all
-/// highlighting; the bundled-language tests guard against silent absence.
+/// Load the pre-linked syntax set without relinking syntect's defaults on the
+/// first code fence rendered by the TUI.
 fn build_syntax_set() -> SyntaxSet {
-	let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
-	for src in EXTRA_SYNTAXES {
-		if let Ok(def) = SyntaxDefinition::load_from_str(src, true, None) {
-			builder.add(def);
-		}
-	}
-	builder.build()
+	syntect::dumps::from_uncompressed_data(include_bytes!("syntaxes/syntax_set.packdump"))
+		.expect("embedded syntax set should be valid")
 }
 
 /// Pre-compiled scope patterns for fast matching.

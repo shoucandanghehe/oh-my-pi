@@ -139,6 +139,7 @@ function createContext(): {
 		ui: {
 			requestRender,
 			resetDisplay,
+			getFocused: () => editor,
 			addInputListener: vi.fn(listener => {
 				inputListeners.push(listener as (data: string) => { consume?: boolean; data?: string } | undefined);
 				return () => {};

@@ -190,6 +190,35 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 	});
 
+	it("keeps the goal tool disabled when restoring a paused goal", async () => {
+		vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
+		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
+		vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
+		if (typeof process.stdin.setRawMode === "function") {
+			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
+		}
+		const now = Date.now();
+		harness.session.sessionManager.appendModeChange("goal_paused", {
+			goal: {
+				id: "goal-1",
+				objective: "Ship the release",
+				status: "paused",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+
+		await harness.mode.init();
+
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(harness.mode.goalModePaused).toBe(true);
+		expect(harness.session.getGoalModeState()).toMatchObject({ enabled: false, goal: { status: "paused" } });
+		expect(await toolNamesFor(harness)).not.toContain("goal");
+	});
+
 	it("replaces the active goal via /goal set", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const originalGoal = harness.session.getGoalModeState()?.goal;
