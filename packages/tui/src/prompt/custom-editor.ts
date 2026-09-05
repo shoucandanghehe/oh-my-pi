@@ -445,6 +445,8 @@ export class CustomEditor extends Editor {
 	/** Draft images pasted into the composer, consumed on submit. Co-located with
 	 *  {@link imageLinks} so every piece of draft-image state lives on the editor. */
 	pendingImages: ImageContent[] = [];
+	/** Text-only composers must never accept an attachment they cannot submit. */
+	acceptsImagePaste = true;
 	/** Per-image source links (file:// targets) parallel to {@link pendingImages};
 	 *  `undefined` entries are images without a backing reference yet. */
 	pendingImageLinks: (string | undefined)[] = [];
@@ -523,13 +525,14 @@ export class CustomEditor extends Editor {
 	 *  every "message submitted" path; pass no argument for a plain discard. */
 	clearDraft(historyText?: string): void {
 		if (historyText !== undefined) this.addToHistory(historyText);
-		this.setText("");
+		// Clear attachments before notifying onChange so saved drafts cannot retain them.
 		this.clearPasteState();
 		this.imageLinks = undefined;
 		this.pendingImages = [];
 		this.pendingImageLinks = [];
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
+		this.setText("");
 	}
 
 	/** Preserve a canceled draft in local navigation, then clear the composer. */
@@ -1438,6 +1441,13 @@ export class CustomEditor extends Editor {
 		void promise.then(this.#onPasteSettled, this.#onPasteSettled);
 	}
 
+	/** Non-keyboard paste transports share the submit barrier with bracketed paste. */
+	pasteFromClipboard(): Promise<boolean> {
+		const pending = this.onPasteImage?.() ?? Promise.resolve(false);
+		this.#trackAsyncPaste(pending);
+		return pending;
+	}
+
 	override handleInput(data: string): void {
 		// Serialize behind any in-flight async paste so a trailing Enter / follow-up key can't
 		// submit before the clipboard image reaches `pendingImages` (Codex PR #3602 review).
@@ -1530,7 +1540,7 @@ export class CustomEditor extends Editor {
 			// Serialize configured clipboard paste just like bracketed image paste:
 			// explicit sends and subsequent keys must wait for its attachments.
 			if (this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
-				this.#trackAsyncPaste(Promise.resolve(this.onPasteImage()));
+				void this.pasteFromClipboard();
 				return;
 			}
 

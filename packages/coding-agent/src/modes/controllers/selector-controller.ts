@@ -1340,6 +1340,7 @@ export class SelectorController {
 
 					// Ask about summarization
 					done(); // Close selector first
+					this.ctx.ui.renderNow();
 
 					// Pure-rewind probe (before navigation mutates the leaf): when the
 					// target sits on the current leaf's path and no summary is added,

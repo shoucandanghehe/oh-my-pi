@@ -2,7 +2,7 @@ import { backgroundChrome, colorTone, sampleBackground, sampleForeground } from 
 import { sameItems } from "../native/memo";
 import { card, col } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
-import type { Component } from "../tui";
+import { type Component, measureComponentRows } from "../tui";
 import {
 	getPaddingX,
 	getPublishedLineWidths,
@@ -173,6 +173,15 @@ export class Box implements Component {
 		}
 		this.#native = { children, bg, border, borderColor, node: described };
 		return described;
+	}
+
+	measureRows(width: number): number {
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		const border = this.#border && width - 2 >= paddingX * 2 + 1;
+		const contentWidth = Math.max(1, (border ? width - 2 : width) - paddingX * 2);
+		let contentRows = 0;
+		for (const child of this.children) contentRows += measureComponentRows(child, contentWidth);
+		return contentRows === 0 ? 0 : contentRows + this.#paddingY * 2 + (border ? 2 : 0);
 	}
 
 	render(width: number): readonly string[] {
