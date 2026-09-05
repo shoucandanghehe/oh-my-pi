@@ -5,8 +5,8 @@ import {
 	TranscriptContainer,
 	type TranscriptStableRow,
 } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { highlightCode, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { type Component, Container } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
 	#rows: string[];
@@ -161,6 +161,34 @@ class CountingFinalizedBlock implements Component {
 	render(): readonly string[] {
 		this.renderCount++;
 		return this.rows;
+	}
+}
+
+class HighlightedFinalizedBlock implements Component {
+	coloredMeasureCount = 0;
+	measureCount = 0;
+	readonly #code: string;
+
+	constructor(index: number) {
+		this.#code = Array.from(
+			{ length: 40 },
+			(_value, line) => `def unique_${index}_${line}(value: int) -> int: return value * ${index + line}`,
+		).join("\n");
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	measureRows(width: number): number {
+		this.measureCount++;
+		const highlighted = highlightCode(`${this.#code}\n# width ${width}`, "python");
+		if (highlighted.some(line => line.includes("\x1b["))) this.coloredMeasureCount++;
+		return highlighted.length;
+	}
+
+	render(width: number): readonly string[] {
+		return highlightCode(`${this.#code}\n# width ${width}`, "python");
 	}
 }
 const frame = { tick: 0, now: 0 };
@@ -709,6 +737,49 @@ describe("TranscriptContainer virtual viewport", () => {
 		}
 
 		expect(performance.now() - startedAt).toBeLessThan(100);
+	});
+
+	it("keeps direct and nested targeted animations within the frame budget on large histories", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 100_000; index++) {
+			transcript.addChild(new CountingFinalizedBlock([`history-${index}`]));
+		}
+		const owner = new Container();
+		const active = new Block(["waiting"], false);
+		owner.addChild(active);
+		transcript.addChild(owner);
+		transcript.renderVirtualViewport(80, { rows: 40, offset: 0, followBottom: true });
+		expect(transcript.containsComponent(owner)).toBe(true);
+		expect(transcript.containsComponent(active)).toBe(true);
+
+		const targets = [owner, active];
+		const startedAt = performance.now();
+		for (let frame = 0; frame < 100; frame++) {
+			transcript.renderVirtualViewportTargeted(80, { rows: 40, offset: 0, followBottom: true }, targets);
+		}
+
+		expect(performance.now() - startedAt).toBeLessThan(10);
+	});
+
+	it("keeps syntax-highlighted history reflow within the interactive resize budget", async () => {
+		await initTheme(false);
+		const blocks = Array.from({ length: 100 }, (_value, index) => new HighlightedFinalizedBlock(index));
+		const transcript = new TranscriptContainer();
+		for (const block of blocks) transcript.addChild(block);
+		const initial = transcript.renderVirtualViewport(160, { rows: 40, offset: 0, followBottom: true });
+		for (const block of blocks) {
+			block.measureCount = 0;
+			block.coloredMeasureCount = 0;
+		}
+
+		const startedAt = performance.now();
+		const resized = transcript.renderVirtualViewport(140, { rows: 40, offset: 0, followBottom: true });
+		const resizeCost = performance.now() - startedAt;
+
+		expect(resized.estimatedTotalRows).toBe(initial.estimatedTotalRows);
+		expect(blocks.reduce((total, block) => total + block.measureCount, 0)).toBe(100);
+		expect(blocks.reduce((total, block) => total + block.coloredMeasureCount, 0)).toBe(0);
+		expect(resizeCost).toBeLessThan(50);
 	});
 
 	it("remeasures an offscreen targeted stream before the user scrolls back toward it", () => {

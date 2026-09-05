@@ -13,6 +13,21 @@ class BoldTypeErrorComponent implements Component {
 	}
 }
 
+class CountingMeasuredComponent implements Component {
+	measureCount = 0;
+	renderCount = 0;
+
+	measureRows(): number {
+		this.measureCount++;
+		return 1;
+	}
+
+	render(): readonly string[] {
+		this.renderCount++;
+		return ["measured"];
+	}
+}
+
 function visibleText(lines: readonly string[]): string {
 	let text = lines.join("\n");
 	text = text.replace(/\x1b\]8;[^\x1b\x07]*(?:\x07|\x1b\\)/g, "");
@@ -134,6 +149,41 @@ describe("ToolExecutionComponent custom renderer failures", () => {
 		const rendered = visibleText(component.render(80));
 		expect(rendered).toContain(resultText);
 		expect(rendered).not.toContain("no matches");
+	});
+
+	it("delegates layout-only measurement through custom renderer safety wrappers", () => {
+		const child = new CountingMeasuredComponent();
+		const tool: AgentTool = {
+			name: "measured_renderer",
+			label: "Measured Renderer",
+			description: "renders measurable output",
+			parameters: { type: "object", additionalProperties: true },
+			renderCall() {
+				return child;
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const ui: ToolExecutionUi = {
+			requestRender() {},
+			requestComponentRender(_component: Component) {},
+			resetDisplay() {},
+		};
+		const component = new ToolExecutionComponent(
+			"measured_renderer",
+			{},
+			{ showImages: false },
+			tool,
+			ui,
+			process.cwd(),
+		);
+		child.measureCount = 0;
+		child.renderCount = 0;
+
+		expect(component.measureRows(80)).toBeGreaterThan(0);
+		expect(child.measureCount).toBe(1);
+		expect(child.renderCount).toBe(0);
 	});
 });
 
