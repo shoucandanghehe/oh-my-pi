@@ -16,6 +16,11 @@ export interface BtwPromotionRequest {
 	turns: readonly EphemeralConversationTurn[];
 }
 
+export interface BtwPausedRequest {
+	input: string;
+	timestamp: number;
+}
+
 export interface BtwPromotionLifecycle {
 	prepare(): void;
 	rollback(): void;
@@ -40,7 +45,7 @@ export type BtwThreadEvent =
 	| (BtwThreadEventBase & { op: "turn"; turn: EphemeralConversationTurn })
 	| (BtwThreadEventBase & { op: "draft"; text: string })
 	| (BtwThreadEventBase & { op: "read"; through: number })
-	| (BtwThreadEventBase & { op: "request" })
+	| (BtwThreadEventBase & { op: "request"; input?: string; timestamp?: number })
 	| (BtwThreadEventBase & { op: "terminal"; error?: string })
 	| (BtwThreadEventBase & { op: "remove"; reason: "deleted" | "promoted" });
 
@@ -57,6 +62,7 @@ export interface RestoredBtwThread {
 	readThrough: number;
 	phase: "ready" | "error";
 	error?: string;
+	pausedRequest?: BtwPausedRequest;
 }
 
 interface MutableRestoredBtwThread {
@@ -72,6 +78,7 @@ interface MutableRestoredBtwThread {
 	readThrough: number;
 	phase: "ready" | "running" | "error";
 	error?: string;
+	pausedRequest?: BtwPausedRequest;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
@@ -126,7 +133,18 @@ function parseEvent(value: unknown): BtwThreadEvent | undefined {
 	if (data.op === "read" && typeof data.through === "number" && Number.isInteger(data.through) && data.through >= 0) {
 		return { ...base, op: "read", through: data.through };
 	}
-	if (data.op === "request") return { ...base, op: "request" };
+	if (data.op === "request") {
+		if (data.input === undefined && data.timestamp === undefined) return { ...base, op: "request" };
+		if (
+			typeof data.input !== "string" ||
+			!data.input ||
+			typeof data.timestamp !== "number" ||
+			!Number.isFinite(data.timestamp)
+		) {
+			return undefined;
+		}
+		return { ...base, op: "request", input: data.input, timestamp: data.timestamp };
+	}
 	if (data.op === "terminal" && (data.error === undefined || typeof data.error === "string")) {
 		return { ...base, op: "terminal", error: data.error };
 	}
@@ -166,6 +184,7 @@ export function restoreBtwThreads(entries: Iterable<SessionEntry>): RestoredBtwT
 			case "turn":
 				thread.turns.push(event.turn);
 				thread.phase = "ready";
+				thread.pausedRequest = undefined;
 				thread.error = undefined;
 				break;
 			case "draft":
@@ -177,10 +196,15 @@ export function restoreBtwThreads(entries: Iterable<SessionEntry>): RestoredBtwT
 			case "request":
 				thread.phase = "running";
 				thread.error = undefined;
+				thread.pausedRequest =
+					event.input !== undefined && event.timestamp !== undefined
+						? { input: event.input, timestamp: event.timestamp }
+						: undefined;
 				break;
 			case "terminal":
 				thread.phase = event.error ? "error" : "ready";
 				thread.error = event.error;
+				thread.pausedRequest = undefined;
 				break;
 			case "remove":
 				threads.delete(event.key);
@@ -188,8 +212,11 @@ export function restoreBtwThreads(entries: Iterable<SessionEntry>): RestoredBtwT
 		}
 	}
 	return [...threads.values()].map(thread => {
-		const phase = thread.phase === "running" ? "error" : thread.phase;
-		const error = thread.phase === "running" ? "Reply interrupted before completion" : thread.error;
-		return { ...thread, phase, error };
+		const interrupted = thread.phase === "running" && thread.pausedRequest === undefined;
+		return {
+			...thread,
+			phase: thread.phase === "running" ? (interrupted ? "error" : "ready") : thread.phase,
+			error: interrupted ? "Reply interrupted before completion" : thread.error,
+		};
 	});
 }

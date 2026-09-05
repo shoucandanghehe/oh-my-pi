@@ -140,7 +140,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	}
 
 	/** ctrl+o toggle: reveal/hide the full Markdown body. */
-	setExpanded(expanded: boolean): void {
+	setBodyExpanded(expanded: boolean): void {
 		if (this.#expanded === expanded) return;
 		this.#expanded = expanded;
 		this.#cache = undefined;

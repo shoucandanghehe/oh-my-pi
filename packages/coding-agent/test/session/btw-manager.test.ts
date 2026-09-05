@@ -2,7 +2,11 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { BtwManager } from "@oh-my-pi/pi-coding-agent/session/btw-manager";
-import type { BtwThreadEvent, BtwThreadModelRef } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
+import {
+	BTW_THREAD_CUSTOM_TYPE,
+	type BtwThreadEvent,
+	type BtwThreadModelRef,
+} from "@oh-my-pi/pi-coding-agent/session/btw-thread";
 import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
@@ -10,6 +14,7 @@ import {
 	type EphemeralConversationStatus,
 	type EphemeralTurnResult,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
+import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 
 const MODEL: BtwThreadModelRef = { provider: "anthropic", id: "claude-sonnet-4-5" };
 const usage: Usage = {
@@ -338,5 +343,58 @@ describe("BtwManager", () => {
 		await prompt;
 
 		expect(events.map(event => event.op)).toEqual(["create", "request"]);
+	});
+
+	it("persists and resumes a durable request interrupted by paused exit", async () => {
+		const entries: CustomEntry<BtwThreadEvent>[] = [];
+		const appendEvent = (event: BtwThreadEvent): void => {
+			const sequence = entries.length + 1;
+			entries.push({
+				type: "custom",
+				customType: BTW_THREAD_CUSTOM_TYPE,
+				data: event,
+				id: `event-${sequence}`,
+				parentId: sequence === 1 ? null : `event-${sequence - 1}`,
+				timestamp: new Date(sequence * 1_000).toISOString(),
+			});
+		};
+		const turnStarted = Promise.withResolvers<void>();
+		const interrupted = new BtwManager({
+			entries: [],
+			appendEvent,
+			createConversation: () =>
+				new EphemeralConversation({
+					snapshotBaseMessages: () => [],
+					sideSessionId: "side-paused",
+					runTurn: async (_messages, options) => {
+						turnStarted.resolve();
+						const result = Promise.withResolvers<EphemeralTurnResult>();
+						const abort = (): void => result.reject(options.signal?.reason);
+						if (options.signal?.aborted) abort();
+						else options.signal?.addEventListener("abort", abort, { once: true });
+						return result.promise;
+					},
+				}),
+			nextKey: () => "thread-paused",
+			now: () => 100,
+		});
+		const key = interrupted.createChild("Pause me", "anchor-1", MODEL);
+		const pending = interrupted.prompt(key, "Finish after resume");
+		await turnStarted.promise;
+
+		interrupted.prepareForPausedExit();
+		await pending.catch(() => undefined);
+
+		const restored = new BtwManager({
+			entries,
+			appendEvent,
+			createConversation: (_model, checkpoint) => immediateConversation(checkpoint),
+			nextKey: () => "unused",
+			now: () => 200,
+		});
+		const result = await restored.continuePaused();
+
+		expect(result).toEqual({ continued: 1, skipped: [], complete: true });
+		expect(restored.thread(key)?.turns.map(turn => turn.input)).toEqual(["Finish after resume"]);
 	});
 });

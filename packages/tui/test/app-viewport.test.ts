@@ -190,6 +190,45 @@ class CountingTranscript implements Component, AppViewportScrollRegion {
 }
 
 describe("TUI app viewport backend", () => {
+	it("uses a bounded app provider instead of native history or full-history resize frames", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 4);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const nativeFrame = vi.fn(() => ({ viewport: ["native"] }));
+			const nativeResize = vi.fn(() => ["native-resize"]);
+			const appViewports: Array<{ columns: number; rows: number }> = [];
+			tui.setFrameProvider({
+				renderFrame: nativeFrame,
+				acknowledgeHistory() {},
+				renderResizeFrame: nativeResize,
+			});
+			tui.setAppViewportFrameProvider({
+				renderAppViewportFrame(viewport) {
+					appViewports.push(viewport);
+					return {
+						viewport: ["app"],
+						estimatedTotalRows: 1,
+						offset: 0,
+						stickyRows: 0,
+						cursor: null,
+						rowMap: [0],
+					};
+				},
+			});
+
+			try {
+				tui.start();
+				await scheduler.drain(term);
+				expect(appViewports.at(-1)).toEqual({ columns: 19, rows: 4 });
+				expect(nativeFrame).not.toHaveBeenCalled();
+				expect(nativeResize).not.toHaveBeenCalled();
+				expect(viewportContent(term)).toContain("app");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
 	it("delegates normalized mouse events to a workspace input owner", async () => {
 		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
 			const term = new VirtualTerminal(40, 8);
@@ -1292,7 +1331,7 @@ describe("TUI app viewport backend", () => {
 			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 			const imageId = tui.imageBudget.acquireId("workspace-direct-clip");
 			tui.imageBudget.registerPlacementGeometry(imageId, 40, 60);
-			const placement = `\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=${imageId},p=${imageId},c=4,r=4\x1b\\\x1b8` + "\x1b[0m│";
+			const placement = `\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=${imageId},p=${imageId},c=4,r=4\x1b\\\x1b8\x1b[0m│`;
 			const model = WorkspaceModel.single("left");
 			expect(model.splitPane("left", "image", "right")).toBe(true);
 			const split = model.root;

@@ -176,6 +176,30 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		).rejects.toBe(failure);
 	});
 
+	it("returns an unterminated trailing record to incremental callers", async () => {
+		const trailing = JSON.stringify(msg("m2", "m1", "pending"));
+		const content = [JSON.stringify(HEADER), JSON.stringify(msg("m1", "s1", "complete")), trailing].join("\n");
+		const file = await writeTemp(content);
+		const visited: FileEntry[] = [];
+		let pending = "";
+
+		await sessionLoader.visitEntriesFromFileStream(
+			file,
+			entry => {
+				visited.push(entry);
+			},
+			{
+				maxBytes: Buffer.byteLength(content),
+				onTrailingPartial: bytes => {
+					pending = new TextDecoder().decode(bytes);
+				},
+			},
+		);
+
+		expect(entryIds(visited)).toEqual(["s1", "m1"]);
+		expect(JSON.parse(pending)).toMatchObject({ id: "m2" });
+	});
+
 	it("matches parseSessionContent on title slot + valid + malformed + blank lines", async () => {
 		const slotLine = serializeTitleSlot({ title: "Hello world", source: "user", updatedAt: ISO });
 		// title slot | header | valid | blank | malformed | valid | malformed-no-newline-at-EOF

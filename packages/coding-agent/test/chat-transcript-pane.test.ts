@@ -1,14 +1,33 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ChatTranscriptPane,
 	type ChatTranscriptPaneEditorOptions,
 } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-pane";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
 	await initTheme(false);
 });
+
+afterAll(() => {
+	resetSettingsForTest();
+});
+
+class CountingRows implements Component {
+	renders = 0;
+
+	constructor(private readonly text: string) {}
+
+	render(): readonly string[] {
+		this.renders++;
+		return [this.text];
+	}
+}
 
 function createPane(editor: ChatTranscriptPaneEditorOptions): ChatTranscriptPane {
 	const pane = new ChatTranscriptPane({
@@ -106,6 +125,52 @@ describe("ChatTranscriptPane", () => {
 					end: { row: 4, col: 19 },
 				}),
 			).toBe("row-1\nrow-2\nrow-3\nrow-4\nrow-5");
+		} finally {
+			pane.dispose();
+		}
+	});
+
+	it("reflows only visible transcript blocks when pane width changes", () => {
+		const blocks: CountingRows[] = [];
+		const pane = new ChatTranscriptPane({
+			builder: {
+				ui: new TUI(new ProcessTerminal()),
+				cwd: process.cwd(),
+				requestRender: () => {},
+				getMessageRenderer: () => message => {
+					const block = new CountingRows(String(message.content));
+					blocks.push(block);
+					return block;
+				},
+			},
+			expandKeys: ["ctrl+o"],
+			getPlaceholder: () => "No messages yet.",
+			onClose: () => {},
+		});
+		try {
+			pane.setViewportHeight(20);
+			pane.rebuild(
+				Array.from(
+					{ length: 1_000 },
+					(_value, index) =>
+						({
+							role: "custom",
+							customType: "counting",
+							content: `row-${index}`,
+							display: true,
+							timestamp: index,
+						}) as AgentMessage,
+				),
+			);
+
+			pane.render(100);
+			const firstWidthRenders = blocks.reduce((total, block) => total + block.renders, 0);
+			pane.render(70);
+			const secondWidthRenders = blocks.reduce((total, block) => total + block.renders, 0) - firstWidthRenders;
+
+			expect(firstWidthRenders).toBeLessThan(100);
+			expect(secondWidthRenders).toBeLessThan(100);
+			expect(Bun.stripANSI(pane.render(70).join("\n"))).toContain("row-999");
 		} finally {
 			pane.dispose();
 		}

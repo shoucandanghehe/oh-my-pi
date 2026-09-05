@@ -1,11 +1,22 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
 	await initTheme(false);
+});
+
+afterAll(() => {
+	resetSettingsForTest();
 });
 
 describe("AgentTranscriptViewer", () => {
@@ -103,5 +114,64 @@ describe("AgentTranscriptViewer", () => {
 			viewer.dispose();
 		}
 		expect(disposeStatusLine).toHaveBeenCalledTimes(1);
+	});
+
+	it("loads a local transcript asynchronously before publishing incremental rows", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-load-"));
+		const file = path.join(dir, "Worker.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		const entries: unknown[] = [
+			{ type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: dir },
+			{ type: "custom", id: "padding", timestamp, data: "x".repeat(2 * 1024 * 1024) },
+			...Array.from({ length: 300 }, (_value, index) => ({
+				type: "message",
+				id: `m${index}`,
+				parentId: index === 0 ? null : `m${index - 1}`,
+				timestamp,
+				message: { role: "user", content: `row-${index}`, timestamp: index },
+			})),
+		];
+		fs.writeFileSync(file, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+			sessionFile: file,
+		});
+		let viewer: AgentTranscriptViewer | undefined;
+		const loaded = Promise.withResolvers<void>();
+		viewer = new AgentTranscriptViewer({
+			agentId: "Worker",
+			registry,
+			ui: new TUI(new ProcessTerminal()),
+			cwd: dir,
+			expandKeys: ["ctrl+o"],
+			hubKeys: ["ctrl+a"],
+			createStatusLine: () => ({
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: () => {},
+			}),
+			requestRender: () => {
+				if (viewer && Bun.stripANSI(viewer.render(60).join("\n")).includes("row-299")) loaded.resolve();
+			},
+			onClose: () => {},
+			onHubToggle: () => {},
+		});
+		viewer.setViewportHeight(12);
+		try {
+			const immediate = Bun.stripANSI(viewer.render(60).join("\n"));
+			expect(immediate).toContain("Loading transcript");
+			expect(immediate).not.toContain("row-299");
+
+			await loaded.promise;
+			expect(Bun.stripANSI(viewer.render(60).join("\n"))).toContain("row-299");
+		} finally {
+			viewer.dispose();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

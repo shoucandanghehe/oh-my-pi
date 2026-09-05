@@ -1,4 +1,4 @@
-import type { TUI } from "../tui";
+import type { Component, TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
 
@@ -30,6 +30,7 @@ export class Loader extends Text {
 	#layoutFrames: readonly string[];
 	#layoutFrame: string;
 	#trailer?: () => string | undefined;
+	#additionalRepaintTarget?: Component;
 
 	constructor(
 		ui: TUI,
@@ -141,6 +142,13 @@ export class Loader extends Text {
 	setTrailer(trailer: (() => string | undefined) | undefined): void {
 		this.#trailer = trailer;
 	}
+	/**
+	 * Repaint one component that derives animation state from the loader clock
+	 * but lives outside the loader's targeted-render subtree.
+	 */
+	setAdditionalRepaintTarget(target: Component | undefined): void {
+		this.#additionalRepaintTarget = target;
+	}
 
 	setMessage(message: string) {
 		if (message === this.message) {
@@ -201,5 +209,8 @@ export class Loader extends Text {
 			return;
 		}
 		this.#ui.requestComponentRender(this);
+		if (this.#additionalRepaintTarget) {
+			this.#ui.requestComponentRender(this.#additionalRepaintTarget);
+		}
 	}
 }

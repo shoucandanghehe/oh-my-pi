@@ -17,13 +17,14 @@ import {
 const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
 const STREAM_YIELD_ENTRIES = 8_192;
+const STREAM_READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
 export interface VisitEntriesFromFileStreamOptions {
 	/** Stop after the visitor returns `false`. */
 	shouldContinue?: () => boolean;
 	/** Stop after this many valid or malformed JSONL records have been consumed. */
 	maxRecords?: number;
-	/** Read at most this many bytes from the file's current prefix. */
+	/** Read at most this many bytes from the file snapshot. */
 	maxBytes?: number;
 	/** Yield to the macrotask queue after this many bytes have been consumed. */
 	yieldEveryBytes?: number;
@@ -31,6 +32,8 @@ export interface VisitEntriesFromFileStreamOptions {
 	yieldEveryEntries?: number;
 	/** Called once for every malformed JSONL record skipped by the stream. */
 	onMalformedRecord?: () => void;
+	/** Receive an unterminated trailing record instead of parsing it as complete. */
+	onTrailingPartial?: (bytes: Uint8Array) => void;
 }
 
 /** Parsed session entries plus corruption metadata needed by writable loaders. */
@@ -109,6 +112,7 @@ export async function visitEntriesFromFileStream(
 	// chunk), so the ≥8MiB memory guard is preserved (the file is never fully
 	// loaded into memory).
 	let buffer: Uint8Array = new Uint8Array();
+	let trailingPartial: Uint8Array | undefined;
 	const decoder = new TextDecoder();
 
 	const yieldToMacrotask = async (): Promise<void> => {
@@ -194,9 +198,11 @@ export async function visitEntriesFromFileStream(
 
 	try {
 		const file = Bun.file(filePath);
-		const source = Number.isFinite(maxBytes) ? file.slice(0, maxBytes) : file;
-		for await (const chunk of source.stream()) {
-			if (stopped) break;
+		const size = Math.min(file.size, maxBytes);
+		for (let offset = 0; offset < size && !stopped; offset += STREAM_READ_CHUNK_BYTES) {
+			const end = Math.min(size, offset + STREAM_READ_CHUNK_BYTES);
+			const chunk = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+			if (chunk.byteLength === 0) break;
 			bytesSinceYield += chunk.byteLength;
 			buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
 			// The optional fixed-width title slot is a physical first line that is
@@ -218,12 +224,18 @@ export async function visitEntriesFromFileStream(
 					}
 				}
 			}
+			if (options.onTrailingPartial && end === size && buffer.length > 0 && buffer[buffer.length - 1] !== 0x0a) {
+				const newline = buffer.lastIndexOf(0x0a);
+				trailingPartial = newline === -1 ? buffer : buffer.subarray(newline + 1);
+				buffer = newline === -1 ? new Uint8Array() : buffer.subarray(0, newline + 1);
+			}
 			await drain();
 			await yieldToMacrotask();
 		}
 		// A trailing record without a final newline: terminate it so the parser
-		// can complete it (readline yielded it; parseChunk needs the delimiter).
-		if (!stopped && buffer.length > 0 && buffer[buffer.length - 1] !== 0x0a) {
+		if (!stopped && trailingPartial) {
+			options.onTrailingPartial?.(trailingPartial);
+		} else if (!stopped && buffer.length > 0 && buffer[buffer.length - 1] !== 0x0a) {
 			buffer = Buffer.concat([buffer, new Uint8Array([0x0a])]);
 			await drain();
 		}

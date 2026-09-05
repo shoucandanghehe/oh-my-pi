@@ -361,11 +361,13 @@ export class UiHelpers {
 			) {
 				continue;
 			}
+			this.ctx.chatContainer.prepareVirtualStructure();
 			renderChunk?.();
 			await waitForImmediate();
 			messagesSinceYield = 0;
 			chunkStartedAt = performance.now();
 		}
+		this.ctx.chatContainer.prepareVirtualStructure();
 	}
 
 	*#renderSessionContextSteps(
@@ -935,6 +937,7 @@ export class UiHelpers {
 				} else {
 					await this.ctx.renderSessionContextIncrementally(context, renderOptions);
 				}
+				stagedChatContainer.prepareVirtualStructure();
 				if (this.ctx.viewSession.sessionManager.getEntries().length === replayEntryCount) {
 					break;
 				}
@@ -970,17 +973,13 @@ export class UiHelpers {
 				this.ctx.pendingPythonComponents = [];
 			}
 
-			const replayedChatChildren = [...stagedChatContainer.children];
-			stagedChatContainer.clear();
 			this.ctx.chatContainer = visibleChatContainer;
 			if (preservedChatChildren) {
 				visibleChatContainer.clear();
 			} else {
 				visibleChatContainer.disposeChildren();
 			}
-			for (const child of replayedChatChildren) {
-				visibleChatContainer.addChild(child);
-			}
+			visibleChatContainer.adoptContentsFrom(stagedChatContainer);
 			if (preservedChatChildren) {
 				for (const child of preservedChatChildren) {
 					visibleChatContainer.addChild(child);

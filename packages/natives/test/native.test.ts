@@ -270,10 +270,9 @@ describe("pi-natives", () => {
 		});
 
 		it("highlights Julia via the vendored syntax", () => {
-			// Julia is not in syntect's defaults; its syntax is vendored and folded
-			// into the set. Assert it is actually present, not merely aliased — an
-			// alias alone would let supportsLanguage report true while highlightCode
-			// returns the source unchanged.
+			// Julia is not in syntect's defaults. Assert the packaged language
+			// set contains it, not merely the alias — otherwise supportsLanguage
+			// could report true while highlightCode returns the source unchanged.
 			expect(getSupportedLanguages()).toContain("Julia");
 			expect(supportsLanguage("julia")).toBe(true);
 			expect(supportsLanguage("jl")).toBe(true);
