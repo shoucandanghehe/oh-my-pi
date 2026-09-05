@@ -113,12 +113,14 @@ async function createContext() {
 		retry,
 	};
 	const updatePendingMessagesDisplay = vi.fn();
+	const handleBtwContinueKey = vi.fn(async () => true);
 	const handleBtwBranchKey = vi.fn(async () => true);
 	const handleBtwCopyKey = vi.fn(async () => true);
 	const canBranchBtw = vi.fn(() => false);
-	const canCopyBtw = vi.fn(() => false);
+	const handlesBtwContinueKey = vi.fn(() => false);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
+	const handlesBtwCopyKey = vi.fn(() => false);
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -214,6 +216,8 @@ async function createContext() {
 		hideToolActivity: false,
 		toolOutputExpanded: false,
 		settings: { set: vi.fn() },
+		workspaceEnabled: false,
+		isMainWorkspacePaneFocused: vi.fn(() => true),
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
@@ -227,11 +231,13 @@ async function createContext() {
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
+		handlesBtwContinueKey,
+		handleBtwContinueKey,
 		hasActiveBtw,
 		handlesBtwBranchKey,
 		handleBtwBranchKey,
 		canBranchBtw,
-		canCopyBtw,
+		handlesBtwCopyKey,
 		handleBtwCopyKey,
 		showError,
 		showStatus: vi.fn(),
@@ -263,13 +269,15 @@ async function createContext() {
 			clearInlineImages,
 			refreshAppearance,
 			resetDisplayAfterAppearanceRefresh,
+			handlesBtwContinueKey,
+			handleBtwContinueKey,
 			handleBtwBranchKey,
 			addInputListener,
 			canBranchBtw,
 			hasActiveBtw,
 			handlesBtwBranchKey,
 			handleBtwCopyKey,
-			canCopyBtw,
+			handlesBtwCopyKey,
 			showError,
 		},
 	};
@@ -417,15 +425,53 @@ describe("InputController keybinding setup", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("routes Enter to a visible continuable /btw panel", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		spies.handlesBtwContinueKey.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\r");
+
+		expect(result).toEqual({ consume: true });
+		expect(spies.handleBtwContinueKey).toHaveBeenCalledTimes(1);
+	});
+
+	it("lets Enter reach the composer when the inline /btw panel is not visible", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\r");
+
+		expect(result).toBeUndefined();
+		expect(spies.handleBtwContinueKey).not.toHaveBeenCalled();
+	});
+
+	it("leaves BTW shortcuts to an attachment-only composer", async () => {
+		for (const [data, gate, handler] of [
+			["\r", "handlesBtwContinueKey", "handleBtwContinueKey"],
+			["b", "handlesBtwBranchKey", "handleBtwBranchKey"],
+			["c", "handlesBtwCopyKey", "handleBtwCopyKey"],
+		] as const) {
+			const { InputController, ctx, spies } = await createContext();
+			spies[gate].mockReturnValue(true);
+			ctx.editor.pendingImages = [{ type: "image", mimeType: "image/png", data: "abc" }];
+			const controller = new InputController(ctx);
+
+			controller.setupKeyHandlers();
+			expect(dispatchInput(registeredInputListeners(spies.addInputListener), data)).toBeUndefined();
+			expect(spies[handler]).not.toHaveBeenCalled();
+		}
+	});
+
 	it("routes b to branch a branchable /btw panel", async () => {
 		const { InputController, ctx, spies } = await createContext();
 		spies.handlesBtwBranchKey.mockReturnValue(true);
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "b");
 
 		expect(result).toEqual({ consume: true });
 		expect(spies.handleBtwBranchKey).toHaveBeenCalledTimes(1);
@@ -438,9 +484,7 @@ describe("InputController keybinding setup", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "b");
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
@@ -450,11 +494,9 @@ describe("InputController keybinding setup", () => {
 		const { InputController, ctx, spies } = await createContext();
 		spies.handlesBtwBranchKey.mockReturnValue(true);
 		const controller = new InputController(ctx);
-
 		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
+
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "b");
 
 		expect(result).toEqual({ consume: true });
 		expect(spies.handleBtwBranchKey).toHaveBeenCalledTimes(1);
@@ -466,9 +508,7 @@ describe("InputController keybinding setup", () => {
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const listener = spies.addInputListener.mock.calls[1]?.[0];
-		expect(listener).toBeDefined();
-		const result = listener?.("b");
+		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "b");
 
 		expect(result).toBeUndefined();
 		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
@@ -532,7 +572,7 @@ describe("InputController keybinding setup", () => {
 
 	it("routes c to copy a copyable /btw panel when the editor is empty", async () => {
 		const { InputController, ctx, spies } = await createContext();
-		(ctx.canCopyBtw as unknown as { mockReturnValue(value: boolean): void }).mockReturnValue(true);
+		spies.handlesBtwCopyKey.mockReturnValue(true);
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
@@ -544,7 +584,7 @@ describe("InputController keybinding setup", () => {
 
 	it("lets c fall through while the editor has draft text", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
-		(ctx.canCopyBtw as unknown as { mockReturnValue(value: boolean): void }).mockReturnValue(true);
+		spies.handlesBtwCopyKey.mockReturnValue(true);
 		editor.setText("continue this draft");
 		const controller = new InputController(ctx);
 
@@ -568,7 +608,7 @@ describe("InputController keybinding setup", () => {
 
 	it("lets c fall through while another input is focused", async () => {
 		const { InputController, ctx, setFocused, spies } = await createContext();
-		(ctx.canCopyBtw as unknown as { mockReturnValue(value: boolean): void }).mockReturnValue(true);
+		spies.handlesBtwCopyKey.mockReturnValue(true);
 		setFocused({ pasteText: vi.fn() });
 		const controller = new InputController(ctx);
 
@@ -713,6 +753,15 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 		// The editor is the default focus target in the harness.
 		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+
+	it("defers to a focused non-Main app-viewport pane", async () => {
+		const { ctx, listeners } = await setup();
+		(ctx as unknown as { workspaceEnabled: boolean }).workspaceEnabled = true;
+		(ctx.isMainWorkspacePaneFocused as unknown as Mock<() => boolean>).mockReturnValue(false);
+
+		expect(dispatchInput(listeners, CTRL_O)).toBeUndefined();
+		expect(ctx.toolOutputExpanded).toBe(false);
 	});
 
 	it("defers while a fullscreen/anchored overlay owns the surface", async () => {

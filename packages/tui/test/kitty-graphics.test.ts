@@ -58,15 +58,13 @@ describe("kitty Unicode placeholder encoding", () => {
 		expect(visibleWidth(grid[0]!, 3)).toBe(6);
 	});
 
-	it("renderKittyPlaceholderLines prefixes line 0 with the virtual placement APC", () => {
+	it("renderKittyPlaceholderLines makes every sliced row self-contained", () => {
 		const opts = { imageId: 2, placementId: 2, columns: 2, rows: 3 } as const;
 		const placement = encodeKittyVirtualPlacement(opts);
 		const grid = encodeKittyPlaceholderGrid(opts);
 		const lines = renderKittyPlaceholderLines(opts);
 		expect(lines).toHaveLength(3);
-		// Line 0 is the placement APC + the first grid row; later rows are unchanged.
-		expect(lines[0]).toBe(placement + grid[0]);
-		expect(lines.slice(1)).toEqual(grid.slice(1));
+		expect(lines).toEqual(grid.map(row => placement + row));
 	});
 
 	it("kittyPlaceholdersFit guards the diacritic table capacity", () => {

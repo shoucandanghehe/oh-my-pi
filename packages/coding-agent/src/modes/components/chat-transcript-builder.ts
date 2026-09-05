@@ -19,6 +19,7 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
+import { displayArgsForToolCall } from "../controllers/tool-args-reveal";
 import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
@@ -422,7 +423,7 @@ export class ChatTranscriptBuilder {
 				hideThinkingBlock,
 				() => this.deps.requestRender(),
 				this.deps.getMessageRenderer ? undefined : [],
-				undefined,
+				this.deps.ui.imageBudget,
 				proseOnlyThinking,
 				this.deps.linkTargets,
 			);
@@ -462,7 +463,7 @@ export class ChatTranscriptBuilder {
 			this.#readGroup = null;
 			const component = new ToolExecutionComponent(
 				content.name,
-				content.arguments,
+				displayArgsForToolCall(content),
 				{
 					useBuiltInRenderer: this.deps.isBuiltInTool?.(content.name) ?? true,
 					// Stable ids and Kitty placeholder cells keep images anchored

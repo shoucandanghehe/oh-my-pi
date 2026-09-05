@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { TUI } from "@oh-my-pi/pi-tui";
+import { Container, TUI } from "@oh-my-pi/pi-tui";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import {
@@ -612,6 +612,67 @@ describe("TUI inline-image budget", () => {
 		);
 	}
 
+	it("falls back to an authoritative pass when a targeted mutation introduces an image", async () => {
+		const term = new VirtualTerminal(40, 12);
+		const writes: string[] = [];
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
+			realWrite(data);
+		});
+		const tui = new TUI(term);
+		const root = new Container();
+		root.addChild(new Text("text-only", 0, 0));
+		tui.addChild(root);
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(tui.imageBudget.quiescent).toBe(true);
+			writes.length = 0;
+
+			const image = makeImage(tui.imageBudget, "targeted-introduction");
+			root.addChild(image);
+			tui.requestComponentRender(image);
+			await settle(term);
+
+			expect(writes.join("")).toContain("a=t,f=100,q=2");
+			expect(tui.imageBudget.quiescent).toBe(false);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("preserves graphic height when a keyed image is rebuilt before demotion", () => {
+		const budget = new ImageBudget(1, () => {});
+		const create = (key: string) =>
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: text => text },
+				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: key },
+				{ widthPx: 40, heightPx: 40 },
+			);
+		const first = create("first-rebuilt");
+		const second = create("second-rebuilt");
+
+		budget.beginPass();
+		expect(first.render(20)).toHaveLength(4);
+		budget.endPass();
+
+		budget.beginPass();
+		first.render(20);
+		second.render(20);
+		budget.endPass();
+
+		const rebuiltFirst = create("first-rebuilt");
+		budget.beginPass();
+		const fallback = rebuiltFirst.render(20);
+		second.render(20);
+		expect(budget.endPass()).toBe(true);
+		expect(fallback).toHaveLength(4);
+	});
+
 	it("renders following text below a multi-row direct Kitty placement", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		const term = new VirtualTerminal(40, 12);
@@ -789,6 +850,13 @@ describe("TUI inline-image budget", () => {
 			expect(output).toContain(encodeKittyDeleteImage(secondId));
 			expect(tui.imageBudget.shouldTransmit(firstId)).toBe(true);
 			expect([...tui.imageBudget.takeAllTransmittedIds()]).toEqual([]);
+
+			writes.length = 0;
+			tui.requestRender();
+			await settle(term);
+			const replay = writes.join("");
+			expect(replay).toContain(`a=t,f=100,q=2,i=${firstId}`);
+			expect(replay).toContain(`a=t,f=100,q=2,i=${secondId}`);
 		} finally {
 			tui.stop();
 		}

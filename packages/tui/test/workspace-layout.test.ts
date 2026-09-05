@@ -461,6 +461,22 @@ describe("WorkspaceModel", () => {
 		expect(side.clears).toBe(0);
 	});
 
+	it("preserves leading-row semantics for generic component-owned tail providers", () => {
+		const pane = new TailPane();
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => 6,
+			requestRender: () => {},
+			panes: [{ paneId: "main", title: "Main", component: pane, scroll: "component" }],
+		});
+
+		const rendered = workspace.render(20);
+
+		expect(rendered.slice(1).map(line => line.trim())).toEqual(["0", "1", "2", "3", "4"]);
+		expect(pane.fullRenders).toBe(1);
+		expect(pane.tailRenders).toBe(0);
+	});
+
 	it("uses viewport-tail rendering during an active sash drag and settles with a full render", () => {
 		const model = WorkspaceModel.single("main");
 		expect(model.splitPane("main", "agent", "right")).toBe(true);

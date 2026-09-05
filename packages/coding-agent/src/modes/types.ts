@@ -164,6 +164,8 @@ export interface InteractiveModeContext {
 	closeBtwWorkspacePane(): boolean;
 	/** Restore keyboard focus and the active workspace marker to the main pane. */
 	focusMainWorkspacePane(): void;
+	/** Whether the Main pane currently owns app-viewport workspace focus. */
+	isMainWorkspacePaneFocused(): boolean;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
 	clearTransientSessionUi(): void;
 	settings: Settings;
@@ -334,7 +336,6 @@ export interface InteractiveModeContext {
 		display?: boolean;
 		streamingBehavior?: "steer" | "followUp";
 	}): SubmittedUserInput;
-	submitMainMessage(text: string, streamingBehavior: "steer" | "followUp"): boolean;
 	cancelPendingSubmission(): boolean;
 	markPendingSubmissionStarted(input: SubmittedUserInput): boolean;
 	finishPendingSubmission(input: SubmittedUserInput): void;
@@ -501,12 +502,12 @@ export interface InteractiveModeContext {
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
-	canContinueBtw(): boolean;
+	handlesBtwContinueKey(): boolean;
 	handleBtwContinueKey(): Promise<boolean>;
 	handleBtwBranchKey(): Promise<boolean>;
 	canBranchBtw(): boolean;
 	handlesBtwBranchKey(): boolean;
-	canCopyBtw(): boolean;
+	handlesBtwCopyKey(): boolean;
 	handleBtwCopyKey(): Promise<boolean>;
 	handleBtwBranch(request: BtwPromotionRequest, lifecycle?: BtwPromotionLifecycle): Promise<boolean>;
 	handleOmfgCommand(complaint: string): Promise<void>;

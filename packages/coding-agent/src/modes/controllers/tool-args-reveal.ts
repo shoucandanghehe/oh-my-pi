@@ -1,3 +1,5 @@
+import type { ToolCall } from "@oh-my-pi/pi-ai";
+import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { parseStreamingJson, parseStreamingJsonThrottled, STREAMING_JSON_PARSE_MIN_GROWTH } from "@oh-my-pi/pi-utils";
 import { nextStep, STREAMING_REVEAL_FRAME_MS } from "./streaming-reveal";
@@ -426,6 +428,21 @@ export function decodeStreamedToolArgs(partialJson: string, source: StreamedTool
 	if (extracted) Object.assign(args, extracted.values);
 	args.__partialJson = partialJson;
 	return args;
+}
+
+/** Resolve the args a transcript tool card displays from the same raw stream state as the live reveal. */
+export function displayArgsForToolCall(
+	toolCall: ToolCall,
+	renderToolName = toolCall.name,
+): Record<string, unknown> {
+	const partialJson = getStreamingPartialJson(toolCall);
+	if (!partialJson) return toolCall.arguments;
+	const rawInput = toolCall.customWireName !== undefined;
+	return decodeStreamedToolArgs(partialJson, {
+		rawInput,
+		fullArgs: toolCall.arguments,
+		streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
+	});
 }
 
 /**

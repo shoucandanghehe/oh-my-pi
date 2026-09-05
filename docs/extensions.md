@@ -558,7 +558,7 @@ before and performs no extra syscalls.
 
 Supported:
 
-- dialogs: `select`, `confirm`, `input`, `editor`
+- dialogs: `select`, `confirm`, `input`, `editor`, `askDialog`, `localAskDialog`
 - input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`
 - autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
 - terminal title and working message (`setTitle`, `setWorkingMessage`)
@@ -573,6 +573,11 @@ Current no-op methods in this controller:
 
 `setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines). `setEditorText` and `pasteToEditor` schedule a repaint after mutating the editor, so prompt changes don't leave stale content on screen.
 
+`askDialog` races the host TUI against a connected collaboration guest. Use
+`localAskDialog` for approvals or other decisions that must be answered on the
+host terminal: it has the same questions, result, timeout, and abort contract as
+`askDialog`, but never sends a guest UI request.
+
 ### RPC mode (`rpc-mode.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
@@ -585,6 +590,7 @@ Unsupported/no-op in RPC implementation:
 - `onTerminalInput`
 - `custom`
 - `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
+- `localAskDialog` (host-TUI-only)
 - `setWorkingMessage`
 - theme switching/loading (`setTheme` returns failure)
 - tool expansion controls are inert
@@ -592,10 +598,12 @@ Unsupported/no-op in RPC implementation:
 ### Print/headless/subagent paths
 
 When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning.
+`localAskDialog` is unavailable, so extensions that require a host-local answer must fail closed.
 
 ### ACP mode
 
 ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in `acp-agent.ts`). `ctx.hasUI` is `true` while `select`/`confirm`/`input`/`editor` round-trip (as ACP elicitations; defaults are returned when the client lacks the `elicitation.form` capability). The non-elicitation surface (widgets, theming, terminal input, autocomplete stacking) is stubbed no-op.
+`localAskDialog` remains unavailable because ACP elicitations are remote rather than host-local.
 
 ## Session and state patterns
 

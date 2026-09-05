@@ -23,9 +23,10 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, escapeXmlText, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
+import btwSummaryTemplate from "../prompts/system/btw-summary.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
 export {
@@ -41,6 +42,35 @@ import { formatOutputNotice } from "../tools/output-meta";
 import { titleTextFromSkillPrompt } from "./skill-title-input";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
+export const BTW_SUMMARY_MESSAGE_TYPE = "btw:summary";
+export interface BtwSummarySource {
+	threadKey: string;
+	threadTitle: string;
+}
+export interface BtwSummary extends BtwSummarySource {
+	summary: string;
+}
+export interface BtwSummaryMessageDetails {
+	summaries: BtwSummary[];
+}
+
+export function createBtwSummaryMessage(summaries: BtwSummary[]): CustomMessage<BtwSummaryMessageDetails> {
+	return {
+		role: "custom",
+		customType: BTW_SUMMARY_MESSAGE_TYPE,
+		content: prompt.render(btwSummaryTemplate, {
+			summaries: summaries.map(entry => ({
+				threadKey: escapeXmlAttribute(entry.threadKey),
+				threadTitle: escapeXmlAttribute(entry.threadTitle),
+				summary: escapeXmlText(entry.summary),
+			})),
+		}),
+		display: true,
+		details: { summaries },
+		attribution: "agent",
+		timestamp: Date.now(),
+	};
+}
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
 export const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";

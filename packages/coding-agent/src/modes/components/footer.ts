@@ -157,24 +157,15 @@ export class FooterComponent implements Component {
 	render(width: number): readonly string[] {
 		const state = this.session.state;
 
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-		let totalPremiumRequests = 0;
-
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-				totalPremiumRequests += entry.message.usage.premiumRequests ?? 0;
-			}
-		}
+		// The session index maintains these totals incrementally. Reading the snapshot
+		// keeps high-frequency footer renders independent of journal length.
+		const usage = this.session.sessionManager.getAssistantUsageStatistics();
+		const totalInput = usage.input;
+		const totalOutput = usage.output;
+		const totalCacheRead = usage.cacheRead;
+		const totalCacheWrite = usage.cacheWrite;
+		const totalCost = usage.cost;
+		const totalPremiumRequests = usage.premiumRequests;
 
 		// Calculate context usage from session (handles compaction correctly).
 		// After compaction, tokens are unknown until the next LLM response.

@@ -1,15 +1,19 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
+	type AutocompleteProvider,
 	type Component,
+	componentContains,
 	type EditorTopBorder,
 	extractComponentTextSelection,
 	type Focusable,
 	type MouseRoutable,
 	matchesKey,
 	normalizeTextSelection,
+	renderTargeted,
 	routeSgrMouseInput,
 	ScrollView,
 	type SgrMouseEvent,
+	type TargetedRender,
 	type TextSelectionRange,
 	type ViewportHeightAware,
 	visibleWidth,
@@ -28,12 +32,14 @@ export type ChatTranscriptPaneEditorOptions =
 			placeholder: string;
 			readOnly?: false;
 			onSubmit: (text: string) => boolean;
+			autocompleteProvider?: AutocompleteProvider;
 	  }
 	| {
 			label: string;
 			placeholder: string;
 			readOnly: true;
 			onSubmit?: never;
+			autocompleteProvider?: undefined;
 	  };
 
 export interface ChatTranscriptPaneOptions {
@@ -61,7 +67,7 @@ function sanitizeNotice(text: string, maxWidth: number): string {
 }
 
 /** Shared transcript, scrolling, selection, editor, and pane chrome. */
-export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, ViewportHeightAware {
+export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware {
 	readonly #builder: ChatTranscriptBuilder;
 	readonly #scrollView = new ScrollView([], { height: 10, scrollbar: "auto", scrollbarStyle: "braille" });
 	readonly #editor: CustomEditor | undefined;
@@ -74,6 +80,12 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 	#selectionContentLines: readonly string[] = [];
 	#selectionViewportHeight = 0;
 	#initialEntryId: string | undefined;
+	#cachedContentLines: readonly string[] = [];
+	#cachedEditorLines: readonly string[] = [];
+	#cachedNoticeLine: string | undefined;
+	#renderWidth = 0;
+	#renderHeight = 0;
+	#hasFullFrame = false;
 
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
 		this.#builder = new ChatTranscriptBuilder(options.builder);
@@ -93,6 +105,8 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 			editor.setMaxHeight(4);
 			editor.onExit = options.onClose;
 			editor.disableSubmit = options.editor.readOnly === true;
+			if (options.editor.autocompleteProvider) editor.setAutocompleteProvider(options.editor.autocompleteProvider);
+			editor.onAutocompleteUpdate = () => options.builder.requestRender();
 			if (!editor.disableSubmit) editor.onSubmit = text => this.#submit(text);
 			this.#editor = editor;
 		}
@@ -124,6 +138,13 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 
 	setViewportHeight(height: number): void {
 		this.#viewportHeight = Math.max(1, Math.trunc(height));
+	}
+
+	containsComponent(component: Component): boolean {
+		return (
+			(this.#editor !== undefined && componentContains(this.#editor, component)) ||
+			componentContains(this.#builder.container, component)
+		);
 	}
 
 	getEditorText(): string {
@@ -231,9 +252,15 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		}
 		const editorEmpty = !this.#editor || this.#editor.getText().trim() === "";
 		if (this.options.onInput?.(data, editorEmpty)) return;
+		if (matchesKey(data, "escape") && this.#editor?.hasAutocomplete()) {
+			this.#editor.handleInput(data);
+			this.options.builder.requestRender();
+			return;
+		}
 		if (matchesKey(data, "escape")) {
 			if (!editorEmpty) {
 				this.#editor?.setText("");
+				this.options.onEditorChange?.(this.#editor?.getText() ?? "");
 				this.options.builder.requestRender();
 				return;
 			}
@@ -261,13 +288,10 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 	}
 
 	render(width: number): readonly string[] {
-		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
 		const contentWidth = Math.max(1, width - 1);
 		const notice = this.#notice ?? this.options.getNotice?.();
 		const noticeLine = notice ? ` ${theme.fg("error", sanitizeNotice(notice, Math.max(10, width - 2)))}` : undefined;
 		const editorLines = this.#editor ? this.#editor.render(width) : [];
-		const chrome = editorLines.length + (noticeLine ? 1 : 0);
-		const viewportHeight = Math.max(this.#viewportHeight === undefined ? 3 : 0, termHeight - chrome);
 		const contentLines = this.#builder.isEmpty
 			? [
 					` ${theme.fg(
@@ -279,6 +303,57 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 					)}`,
 				]
 			: this.#builder.container.render(contentWidth);
+		return this.#renderFrame(width, contentLines, editorLines, noticeLine);
+	}
+
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
+		if (
+			!this.#hasFullFrame ||
+			width !== this.#renderWidth ||
+			termHeight !== this.#renderHeight ||
+			targets.length === 0
+		) {
+			return this.render(width);
+		}
+		const contentTargets: Component[] = [];
+		const editorTargets: Component[] = [];
+		for (const target of targets) {
+			if (this.#editor !== undefined && componentContains(this.#editor, target)) {
+				editorTargets.push(target);
+			} else if (componentContains(this.#builder.container, target)) {
+				contentTargets.push(target);
+			} else {
+				return this.render(width);
+			}
+		}
+		const contentWidth = Math.max(1, width - 1);
+		const contentLines =
+			contentTargets.length > 0
+				? renderTargeted(this.#builder.container, contentWidth, contentTargets)
+				: this.#cachedContentLines;
+		const editorLines =
+			editorTargets.length > 0 && this.#editor
+				? renderTargeted(this.#editor, width, editorTargets)
+				: this.#cachedEditorLines;
+		return this.#renderFrame(width, contentLines, editorLines, this.#cachedNoticeLine);
+	}
+
+	#renderFrame(
+		width: number,
+		contentLines: readonly string[],
+		editorLines: readonly string[],
+		noticeLine: string | undefined,
+	): readonly string[] {
+		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
+		const chrome = editorLines.length + (noticeLine ? 1 : 0);
+		const viewportHeight = Math.max(this.#viewportHeight === undefined ? 3 : 0, termHeight - chrome);
+		this.#cachedContentLines = contentLines;
+		this.#cachedEditorLines = editorLines;
+		this.#cachedNoticeLine = noticeLine;
+		this.#renderWidth = width;
+		this.#renderHeight = termHeight;
+		this.#hasFullFrame = true;
 		this.#scrollView.setLines(contentLines);
 		this.#selectionContentLines = contentLines;
 		this.#selectionViewportHeight = viewportHeight;
@@ -299,6 +374,13 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		if (noticeLine) lines.push(noticeLine);
 		lines.push(...editorLines);
 		return this.#viewportHeight === undefined ? lines : lines.slice(0, termHeight);
+	}
+
+	invalidate(): void {
+		this.#hasFullFrame = false;
+		this.#builder.container.invalidate();
+		this.#editor?.invalidate?.();
+		this.#scrollView.invalidate?.();
 	}
 
 	dispose(): void {

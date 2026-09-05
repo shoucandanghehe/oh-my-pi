@@ -1,6 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
-import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
@@ -40,7 +39,7 @@ import {
 import { TranscriptBlock, TranscriptContainer } from "../../modes/components/transcript-container";
 import { createUsageRowBlock, turnElapsedMs } from "../../modes/components/usage-row";
 import { UserMessageComponent } from "../../modes/components/user-message";
-import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
+import { displayArgsForToolCall } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
 import { videoPreviewSource } from "../../utils/video";
 import { theme } from "../../modes/theme/theme";
@@ -582,20 +581,7 @@ export class UiHelpers {
 
 					readGroup?.seal();
 					readGroup = null;
-					const partialJson = getStreamingPartialJson(content);
-					// Mid-stream rebuild (theme change, settings, focus replay): decode
-					// display args from the raw stream exactly like the live reveal path.
-					// The provider-parsed `arguments` lag the stream by up to a throttled
-					// parse window, so spreading them alone would freeze a long write/edit
-					// preview at its last full parse.
-					const rawInput = content.customWireName !== undefined;
-					const renderArgs = partialJson
-						? decodeStreamedToolArgs(partialJson, {
-								rawInput,
-								fullArgs: content.arguments,
-								streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
-							})
-						: content.arguments;
+					const renderArgs = displayArgsForToolCall(content, renderToolName);
 					const component = new ToolExecutionComponent(
 						renderToolName,
 						renderArgs,

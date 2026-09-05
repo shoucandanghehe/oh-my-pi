@@ -41,7 +41,11 @@ class TailRows implements Component, ViewportTailProvider {
 	fullRenders = 0;
 	tailRenders = 0;
 
-	constructor(private readonly rows: readonly string[]) {}
+	constructor(private rows: readonly string[]) {}
+
+	setRows(rows: readonly string[]): void {
+		this.rows = rows;
+	}
 
 	render(): readonly string[] {
 		this.fullRenders++;
@@ -51,6 +55,33 @@ class TailRows implements Component, ViewportTailProvider {
 	renderViewportTail(_width: number, maxRows: number): readonly string[] {
 		this.tailRenders++;
 		return this.rows.slice(-maxRows);
+	}
+}
+
+class CountingRows implements Component {
+	renders = 0;
+
+	constructor(private text: string) {}
+
+	setText(text: string): void {
+		this.text = text;
+	}
+
+	render(): readonly string[] {
+		this.renders++;
+		return [this.text];
+	}
+}
+
+class MutableRows implements Component {
+	constructor(private rows: readonly string[]) {}
+
+	setRows(rows: readonly string[]): void {
+		this.rows = rows;
+	}
+
+	render(): readonly string[] {
+		return this.rows;
 	}
 }
 
@@ -510,6 +541,57 @@ describe("MainSessionPane", () => {
 		expect(pane.render(40)).toEqual(["hello", "", "", "status", "editor"]);
 	});
 
+	it("virtualizes follow-bottom frames from the first workspace render", () => {
+		const history = new TailRows(Array.from({ length: 10_000 }, (_value, index) => `row-${index}`));
+		const main = new MainSessionPane({
+			scrollRoot: history,
+			stickyRoot: new StaticRows(["status", "editor"]),
+			requestRender: () => {},
+		});
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => 8,
+			requestRender: () => {},
+			panes: [{ paneId: "main", title: "Main", component: main, scroll: "component" }],
+		});
+
+		workspace.render(40);
+		expect(history.fullRenders).toBe(0);
+		expect(history.tailRenders).toBe(1);
+		history.tailRenders = 0;
+
+		const steady = workspace.render(40);
+
+		expect(history.fullRenders).toBe(0);
+		expect(history.tailRenders).toBe(1);
+		expect(steady.some(row => row.includes("row-9999"))).toBe(true);
+	});
+
+	it("materializes current geometry before scrolling up from a growing virtual tail", () => {
+		const history = new TailRows(Array.from({ length: 20 }, (_value, index) => `row-${index}`));
+		const main = new MainSessionPane({
+			scrollRoot: history,
+			stickyRoot: new StaticRows(["status", "editor"]),
+			requestRender: () => {},
+		});
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => 8,
+			requestRender: () => {},
+			panes: [{ paneId: "main", title: "Main", component: main, scroll: "component" }],
+		});
+		workspace.render(40);
+		history.setRows(Array.from({ length: 120 }, (_value, index) => `row-${index}`));
+		workspace.render(40);
+
+		main.handleInput("\x1b[5~");
+		const scrolled = workspace.render(40);
+
+		expect(history.fullRenders).toBe(2);
+		expect(scrolled.some(row => row.includes("row-110"))).toBe(true);
+		expect(scrolled.some(row => row.includes("row-8"))).toBe(false);
+	});
+
 	it("composes only the visible history tail while a workspace sash is moving", () => {
 		const history = new TailRows(Array.from({ length: 10_000 }, (_value, index) => `row-${index}`));
 		const scrollRoot = new Container();
@@ -543,5 +625,110 @@ describe("MainSessionPane", () => {
 
 		expect(history.fullRenders).toBe(0);
 		expect(history.tailRenders).toBeGreaterThan(0);
+	});
+	it("refetches the transcript tail when targeted sticky chrome changes height", () => {
+		const history = new TailRows(["zero", "one", "two", "three", "four", "five"]);
+		const sticky = new MutableRows(["status"]);
+		const pane = new MainSessionPane({ scrollRoot: history, stickyRoot: sticky, requestRender: () => {} });
+		pane.setViewportHeight(5);
+
+		expect(pane.renderViewportTail(40, 5).some(row => row.includes("two"))).toBe(true);
+		sticky.setRows(["status-a", "status-b", "status-c"]);
+		const taller = pane.renderViewportTailTargeted(40, 5, [sticky]);
+		expect(taller.some(row => row.includes("four"))).toBe(true);
+		expect(taller.some(row => row.includes("one"))).toBe(false);
+		expect(taller.some(row => row.includes("two"))).toBe(false);
+		sticky.setRows(["status"]);
+		const shorter = pane.renderViewportTailTargeted(40, 5, [sticky]);
+		expect(shorter.some(row => row.includes("two"))).toBe(true);
+	});
+
+	it("restores cached transcript rows after targeted sticky chrome shrinks", () => {
+		const sticky = new MutableRows(["status"]);
+		const pane = new MainSessionPane({
+			scrollRoot: new StaticRows(["history"]),
+			stickyRoot: sticky,
+			requestRender: () => {},
+		});
+		pane.setViewportHeight(4);
+		expect(pane.render(40).some(row => row.includes("history"))).toBe(true);
+
+		sticky.setRows(["one", "two", "three", "four"]);
+		expect(pane.renderTargeted(40, [sticky])).toEqual(["one", "two", "three", "four"]);
+		sticky.setRows(["status"]);
+
+		expect(pane.renderTargeted(40, [sticky]).some(row => row.includes("history"))).toBe(true);
+	});
+
+	it("keeps long workspace history out of component-scoped editor renders", async () => {
+		const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+		const term = new VirtualTerminal(60, 8);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const transcript = new TranscriptContainer();
+		const history = Array.from({ length: 1_000 }, (_value, index) => new CountingRows(`history-${index}`));
+		for (const row of history) transcript.addChild(row);
+		const scrollRoot = new Container();
+		scrollRoot.addChild(transcript);
+		const stickyRoot = new Container();
+		const editor = new CountingRows("editor-0");
+		stickyRoot.addChild(editor);
+		const main = new MainSessionPane({
+			scrollRoot,
+			stickyRoot,
+			requestRender: () => tui.requestRender(),
+			requestComponentRender: component => tui.requestComponentRender(component),
+		});
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => term.rows,
+			requestRender: () => tui.requestRender(),
+			requestComponentRender: component => tui.requestComponentRender(component),
+			panes: [{ paneId: "main", title: "Main", component: main, focusTarget: editor, scroll: "component" }],
+		});
+		tui.addChild(workspace);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const historyRenders = history.reduce((total, row) => total + row.renders, 0);
+
+			editor.setText("editor-1");
+			tui.requestComponentRender(editor);
+			await scheduler.drain(term);
+
+			expect(history.reduce((total, row) => total + row.renders, 0)).toBe(historyRenders);
+			expect(term.getViewport().some(row => Bun.stripANSI(row).includes("editor-1"))).toBe(true);
+
+			const virtualizedPrefix = history.slice(0, -term.rows);
+			const prefixRenders = virtualizedPrefix.reduce((total, row) => total + row.renders, 0);
+			const rendersBeforeLiveUpdate = history.reduce((total, row) => total + row.renders, 0);
+			const live = history[history.length - 1]!;
+			live.setText("history-live");
+			tui.requestComponentRender(live);
+			await scheduler.drain(term);
+
+			const rendersAfterLiveUpdate = history.reduce((total, row) => total + row.renders, 0);
+			expect(virtualizedPrefix.reduce((total, row) => total + row.renders, 0)).toBe(prefixRenders);
+			expect(rendersAfterLiveUpdate - rendersBeforeLiveUpdate).toBeLessThanOrEqual(term.rows);
+			expect(term.getViewport().some(row => Bun.stripANSI(row).includes("history-live"))).toBe(true);
+
+			const rendersBeforeScroll = history.reduce((total, row) => total + row.renders, 0);
+			workspace.handleAppViewportInput("\x1b[5~");
+			await scheduler.drain(term);
+
+			expect(history.reduce((total, row) => total + row.renders, 0) - rendersBeforeScroll).toBe(history.length);
+
+			const rendersBeforeFocus = history.reduce((total, row) => total + row.renders, 0);
+			workspace.focusPane("main");
+			await scheduler.drain(term);
+
+			expect(history.reduce((total, row) => total + row.renders, 0)).toBe(rendersBeforeFocus);
+		} finally {
+			tui.stop();
+			if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+			else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+		}
 	});
 });

@@ -13,12 +13,13 @@
  * model's context window). A stable conversation must not re-query on every
  * redraw — that per-event recompute is what previously froze large sessions.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ContextUsage } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme, setSymbolPreset, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { EphemeralConversationStatus } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { getSessionAccentAnsi } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { adjustHsv } from "@oh-my-pi/pi-utils";
 import { StatusLineTestComponents } from "./helpers/status-line";
@@ -28,6 +29,10 @@ beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
 	await initTheme();
+});
+
+afterEach(() => {
+	statusLines.dispose();
 });
 
 afterAll(() => {
@@ -56,9 +61,14 @@ function makeSession(opts: {
 	modelInput?: string[];
 }): Fake {
 	const contextWindow = opts.contextWindow ?? 200_000;
-	const model = opts.modelInput
-		? { id: "test-model", contextWindow, input: opts.modelInput }
-		: { id: "test-model", contextWindow };
+	const model = {
+		id: "main-model",
+		name: "Main Model",
+		provider: "anthropic",
+		contextWindow,
+		thinking: false,
+		...(opts.modelInput ? { input: opts.modelInput } : {}),
+	};
 	let usage: ContextUsage | undefined = "usage" in opts ? opts.usage : { tokens: 1234, contextWindow, percent: 0.6 };
 	let calls = 0;
 	let revision = 0;
@@ -72,6 +82,7 @@ function makeSession(opts: {
 		state: { messages: opts.messages, model },
 		settings: opts.settings,
 		sessionManager: {
+			getSessionId: () => "main-session",
 			getUsageStatistics: () => ({
 				input: 0,
 				output: 0,
@@ -618,5 +629,54 @@ describe("StatusLineComponent context breakdown", () => {
 		const chip = comp.getStandaloneTopBorder(80);
 		expect(chip.width).toBeGreaterThan(0);
 		expect(chip.content).toContain("test");
+	});
+
+	it("renders a selected BTW runtime instead of the attached Main session", () => {
+		const { session, usageCalls } = makeSession({
+			messages: [userMessage("main")],
+			usage: { tokens: 5000, contextWindow: 200_000, percent: 2.5 },
+		});
+		const comp = statusLines.track(new StatusLineComponent(session));
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["model", "context_pct"],
+			rightSegments: ["session", "session_name", "cost"],
+			separator: "powerline-thin",
+		});
+		const runtimeStatus: EphemeralConversationStatus = {
+			sessionId: "side-runtime-123",
+			model: {
+				id: "side-model",
+				name: "Side Model",
+				provider: "anthropic",
+				contextWindow: 100_000,
+				thinking: false,
+			} as unknown as EphemeralConversationStatus["model"],
+			thinkingLevel: undefined,
+			isStreaming: false,
+			latestAssistantMessage: undefined,
+			stats: {
+				tokens: { input: 40_000, output: 10_000, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 50_000 },
+				premiumRequests: 0,
+				cost: 1.25,
+				contextUsage: { tokens: 50_000, contextWindow: 100_000, percent: 50 },
+			},
+		};
+		comp.setRuntimeStatus(runtimeStatus, "Alpha");
+
+		const plain = comp.getTopBorder(120).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(plain).toContain("Side Model");
+		expect(plain).toContain("50.0%/100K");
+		expect(plain).toContain("side-run");
+		expect(plain).toContain("Alpha");
+		expect(plain).toContain("$1.25");
+		expect(plain).not.toContain("Main Model");
+		expect(plain).not.toContain("main-ses");
+
+		comp.setRuntimeStatus({ ...runtimeStatus, stats: { ...runtimeStatus.stats, contextUsage: undefined } }, "Alpha");
+		const emptyPlain = comp.getTopBorder(120).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(emptyPlain).toContain("0.0%/100K");
+		expect(emptyPlain).not.toContain("2.5%/200K");
+		expect(usageCalls()).toBe(0);
 	});
 });

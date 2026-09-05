@@ -20,7 +20,7 @@ describe("AgentTranscriptViewer", () => {
 			session: {} as never,
 		});
 		const peerStatusLine = {
-			getTopBorder: vi.fn(() => ({ content: " MAIN STATUS ", width: 13 })),
+			getTopBorder: vi.fn(() => ({ content: " MAIN STATUS ", width: 13, revision: 0 })),
 			dispose: vi.fn(),
 		};
 		const viewer = new AgentTranscriptViewer({
@@ -73,7 +73,7 @@ describe("AgentTranscriptViewer", () => {
 		});
 		const disposeStatusLine = vi.fn();
 		const createStatusLine = vi.fn(() => ({
-			getTopBorder: () => ({ content: " LIVE STATUS ", width: 13 }),
+			getTopBorder: () => ({ content: " LIVE STATUS ", width: 13, revision: 0 }),
 			dispose: disposeStatusLine,
 		}));
 		const viewer = new AgentTranscriptViewer({

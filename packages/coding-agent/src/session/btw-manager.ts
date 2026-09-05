@@ -1,9 +1,12 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type BtwThreadEvent, type BtwThreadModelRef, type RestoredBtwThread, restoreBtwThreads } from "./btw-thread";
 import type {
 	EphemeralConversation,
 	EphemeralConversationCheckpoint,
+	EphemeralConversationSideOptions,
 	EphemeralTurnResult,
 } from "./ephemeral-conversation";
+import type { BtwSummarySource } from "./messages";
 import type { SessionEntry } from "./session-entries";
 
 export type BtwThreadKind = "quick" | "child";
@@ -11,7 +14,8 @@ export type BtwThreadPhase = "ready" | "running" | "error";
 
 export interface BtwThreadRequest {
 	input: string;
-	text: string;
+	messages: AgentMessage[];
+	streamMessage: Extract<AgentMessage, { role: "assistant" }> | undefined;
 	timestamp: number;
 }
 
@@ -21,7 +25,10 @@ export interface BtwManagerOptions {
 	createConversation: (
 		model: BtwThreadModelRef,
 		checkpoint: EphemeralConversationCheckpoint | undefined,
+		sideOptions?: EphemeralConversationSideOptions,
 	) => EphemeralConversation;
+	/** Builds durable side capabilities bound to the source BTW thread. */
+	createSideOptions?: (source: BtwSummarySource) => EphemeralConversationSideOptions;
 	nextKey: () => string;
 	now: () => number;
 	onChange?: () => void;
@@ -85,6 +92,7 @@ export class BtwThread {
 export class BtwManager {
 	readonly #appendEvent: BtwManagerOptions["appendEvent"];
 	readonly #createConversation: BtwManagerOptions["createConversation"];
+	readonly #createSideOptions: BtwManagerOptions["createSideOptions"];
 	readonly #nextKey: BtwManagerOptions["nextKey"];
 	readonly #now: BtwManagerOptions["now"];
 	readonly #onChange: BtwManagerOptions["onChange"];
@@ -97,6 +105,7 @@ export class BtwManager {
 	constructor(options: BtwManagerOptions) {
 		this.#appendEvent = options.appendEvent;
 		this.#createConversation = options.createConversation;
+		this.#createSideOptions = options.createSideOptions;
 		this.#nextKey = options.nextKey;
 		this.#now = options.now;
 		this.#onChange = options.onChange;
@@ -153,6 +162,11 @@ export class BtwManager {
 	continueQuick(key: string): boolean {
 		const thread = this.#threads.get(key);
 		if (thread?.kind !== "quick" || thread.phase !== "ready" || thread.turns.length === 0) return false;
+		const sideOptions = this.#createSideOptions?.({ threadKey: thread.key, threadTitle: thread.title });
+		if (sideOptions) {
+			const checkpoint = thread.conversation.checkpoint();
+			thread.conversation = this.#createConversation(thread.model, checkpoint, sideOptions);
+		}
 		thread.kind = "child";
 		this.#quickKey = undefined;
 		this.#childKeys.push(key);
@@ -160,6 +174,39 @@ export class BtwManager {
 		this.#appendEvent(this.#createEvent(thread));
 		this.#onChange?.();
 		return true;
+	}
+
+	/**
+	 * Create a durable child thread directly, journaling it before any turn runs.
+	 * The first prompt is driven by the caller via {@link prompt}.
+	 */
+	createChild(input: string, anchorLeafId: string, model: BtwThreadModelRef): string {
+		const key = this.#nextKey();
+		const title =
+			input
+				.replace(/[\r\n\t ]+/g, " ")
+				.trim()
+				.slice(0, 60) || "BTW";
+		const thread = new BtwThread({
+			key,
+			kind: "child",
+			title,
+			createdAt: this.#now(),
+			anchorLeafId,
+			model,
+			conversation: this.#createConversation(
+				model,
+				undefined,
+				this.#createSideOptions?.({ threadKey: key, threadTitle: title }),
+			),
+		});
+		thread.conversation.freeze();
+		this.#threads.set(key, thread);
+		this.#childKeys.push(key);
+		this.#activeKey = key;
+		this.#appendEvent(this.#createEvent(thread));
+		this.#onChange?.();
+		return key;
 	}
 
 	select(key: string): boolean {
@@ -195,31 +242,6 @@ export class BtwManager {
 		return true;
 	}
 
-	refresh(key: string, anchorLeafId: string): boolean {
-		const thread = this.#threads.get(key);
-		if (thread?.kind !== "child" || thread.phase === "running" || !anchorLeafId) return false;
-		const previous = thread.conversation.checkpoint();
-		const conversation = this.#createConversation(thread.model, {
-			turns: previous.turns,
-			sideSessionId: `${previous.sideSessionId}:refresh:${this.#nextKey()}`,
-		});
-		const checkpoint = conversation.freeze();
-		thread.anchorLeafId = anchorLeafId;
-		thread.conversation = conversation;
-		thread.phase = "ready";
-		thread.error = undefined;
-		this.#appendEvent({
-			version: 1,
-			op: "refresh",
-			key,
-			anchorLeafId,
-			sideSessionId: checkpoint.sideSessionId,
-			baseMessages: checkpoint.baseMessages,
-		});
-		this.#onChange?.();
-		return true;
-	}
-
 	preparePromotion(key: string): boolean {
 		const thread = this.#threads.get(key);
 		if (thread?.kind !== "child" || thread.phase === "running" || this.#preparedPromotions.has(key)) {
@@ -245,7 +267,10 @@ export class BtwManager {
 	remove(key: string, reason: "deleted" | "promoted"): boolean {
 		const thread = this.#threads.get(key);
 		if (!thread) return false;
-		thread.abortController?.abort();
+		const abortController = thread.abortController;
+		thread.request = undefined;
+		thread.abortController = undefined;
+		abortController?.abort();
 		if (thread.kind === "child" && !this.#preparedPromotions.has(key)) {
 			this.#appendEvent({ version: 1, op: "remove", key, reason });
 		}
@@ -253,7 +278,12 @@ export class BtwManager {
 		return this.#forget(key);
 	}
 
-	async prompt(key: string, input: string, onTextDelta?: (delta: string) => void): Promise<EphemeralTurnResult> {
+	async prompt(
+		key: string,
+		input: string,
+		onTextDelta?: (delta: string) => void,
+		onThinkingDelta?: (delta: string) => void,
+	): Promise<EphemeralTurnResult> {
 		const thread = this.#threads.get(key);
 		if (!thread) throw new Error(`Unknown BTW thread: ${key}`);
 		if (thread.phase === "running") throw new Error("BTW thread already has a reply in progress");
@@ -263,7 +293,12 @@ export class BtwManager {
 			thread.draft = "";
 			this.persistDraft(key);
 		}
-		const request: BtwThreadRequest = { input: trimmed, text: "", timestamp: this.#now() };
+		const request: BtwThreadRequest = {
+			input: trimmed,
+			messages: [],
+			streamMessage: undefined,
+			timestamp: this.#now(),
+		};
 		const abortController = new AbortController();
 		thread.request = request;
 		thread.abortController = abortController;
@@ -277,8 +312,20 @@ export class BtwManager {
 				signal: abortController.signal,
 				onTextDelta: delta => {
 					if (thread.request !== request) return;
-					request.text += delta;
 					onTextDelta?.(delta);
+				},
+				onThinkingDelta: delta => {
+					if (thread.request !== request) return;
+					onThinkingDelta?.(delta);
+				},
+				onMessage: event => {
+					if (thread.request !== request) return;
+					if (event.type === "update") {
+						request.streamMessage = event.message;
+					} else {
+						request.streamMessage = undefined;
+						request.messages.push(event.message);
+					}
 					this.#onChange?.();
 				},
 			});
@@ -310,14 +357,21 @@ export class BtwManager {
 
 	dispose(): void {
 		for (const thread of this.#threads.values()) {
-			thread.abortController?.abort();
 			if (thread.kind === "child") this.persistDraft(thread.key);
+			const abortController = thread.abortController;
+			thread.request = undefined;
+			thread.abortController = undefined;
+			abortController?.abort();
 		}
 	}
 
 	/** Stop old-session work after a successful session transition without writing into the new session. */
 	abandon(): void {
-		for (const thread of this.#threads.values()) thread.abortController?.abort();
+		for (const thread of this.#threads.values()) {
+			thread.request = undefined;
+			thread.abortController?.abort();
+			thread.abortController = undefined;
+		}
 		this.#threads.clear();
 		this.#childKeys.length = 0;
 		this.#preparedPromotions.clear();
@@ -366,7 +420,11 @@ export class BtwManager {
 			createdAt: restored.createdAt,
 			anchorLeafId: restored.anchorLeafId,
 			model: restored.model,
-			conversation: this.#createConversation(restored.model, checkpoint),
+			conversation: this.#createConversation(
+				restored.model,
+				checkpoint,
+				this.#createSideOptions?.({ threadKey: restored.key, threadTitle: restored.title }),
+			),
 			phase: restored.phase,
 			error: restored.error,
 			draft: restored.draft,
