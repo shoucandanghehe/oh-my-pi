@@ -69,4 +69,63 @@ describe("WorkspacePaneController", () => {
 		expect(created[0]!.pane.disposed).toBe(true);
 		expect(workspace.model.hasPane("agent:Worker")).toBe(false);
 	});
+	it("opens background panes without stealing the current focus", () => {
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => 20,
+			requestRender: () => {},
+			panes: [{ paneId: "main", title: "Main", component: new MainPane(), minWidth: 20, minHeight: 6 }],
+		});
+		workspace.render(120);
+		const controller = new WorkspacePaneController(workspace);
+
+		expect(
+			controller.open({
+				key: "agent:Worker",
+				paneId: "agent:Worker",
+				title: "Worker",
+				minWidth: 24,
+				minHeight: 6,
+				focus: false,
+				createPane: () => new FakePane(),
+			}),
+		).toBe(true);
+
+		expect(workspace.focusedPaneId).toBe("main");
+		expect(workspace.model.hasPane("agent:Worker")).toBe(true);
+	});
+	it("reflows all panes when no existing pane can be split in place", () => {
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => 20,
+			requestRender: () => {},
+			panes: [{ paneId: "main", title: "Main", component: new MainPane(), minWidth: 40, minHeight: 8 }],
+		});
+		workspace.render(90);
+		const controller = new WorkspacePaneController(workspace);
+		const open = (id: string) =>
+			controller.open({
+				key: `agent:${id}`,
+				paneId: `agent:${id}`,
+				title: id,
+				minWidth: 24,
+				minHeight: 6,
+				focus: false,
+				createPane: () => new FakePane(),
+			});
+
+		for (const id of ["A", "B", "C"]) {
+			expect(open(id)).toBe(true);
+			workspace.render(90);
+		}
+		expect(open("D")).toBe(true);
+		workspace.render(90);
+
+		expect(workspace.frame?.constrained).toBe(false);
+		expect([...workspace.frame!.panes.keys()].sort()).toEqual(["agent:A", "agent:B", "agent:C", "agent:D", "main"]);
+		for (const [id, rect] of workspace.frame!.panes) {
+			expect(rect.width).toBeGreaterThanOrEqual(id === "main" ? 40 : 24);
+			expect(rect.height).toBeGreaterThanOrEqual(id === "main" ? 8 : 6);
+		}
+	});
 });

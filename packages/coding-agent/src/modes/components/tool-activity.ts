@@ -38,6 +38,10 @@ export class ToolActivityContainer extends Container implements ToolActivityComp
 		}
 	}
 
+	override measureRows(width: number): number {
+		return this.#visible ? super.measureRows(width) : 0;
+	}
+
 	override render(width: number): readonly string[] {
 		if (!this.#visible) return [];
 		return super.render(width);

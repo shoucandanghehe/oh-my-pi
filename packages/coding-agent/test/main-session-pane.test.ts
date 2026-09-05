@@ -65,11 +65,17 @@ class TailRows implements Component, ViewportTailProvider {
 
 class CountingRows implements Component {
 	renders = 0;
+	measures = 0;
 
 	constructor(private text: string) {}
 
 	setText(text: string): void {
 		this.text = text;
+	}
+
+	measureRows(): number {
+		this.measures++;
+		return 1;
 	}
 
 	render(): readonly string[] {
@@ -444,6 +450,52 @@ describe("MainSessionPane", () => {
 		}
 	});
 
+	it("keeps a held tail selection under the mouse while new output arrives", async () => {
+		const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+		const term = new VirtualTerminal(20, 6);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const history = new TailRows(["zero", "one", "two", "three", "four", "five", "six"]);
+		const main = new MainSessionPane({
+			scrollRoot: history,
+			stickyRoot: new StaticRows(["STATUS"]),
+			requestRender: () => tui.requestRender(),
+		});
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => term.rows,
+			requestRender: () => tui.requestRender(),
+			panes: [{ paneId: "main", title: "Main", component: main, scroll: "component" }],
+		});
+		tui.addChild(workspace);
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const rect = workspace.frame?.panes.get("main");
+			if (!rect) throw new Error("workspace frame unavailable");
+			const selectedRow = rect.y + 2;
+			expect(Bun.stripANSI(term.getViewport()[selectedRow] ?? "").trimEnd()).toStartWith("four");
+
+			term.sendInput(`\x1b[<0;${rect.x + 1};${selectedRow + 1}M`);
+			history.setRows(["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"]);
+			tui.requestRender(true);
+			await scheduler.drain(term);
+			expect(Bun.stripANSI(term.getViewport()[selectedRow] ?? "").trimEnd()).toStartWith("four");
+
+			term.sendInput(`\x1b[<32;${rect.x + 5};${selectedRow + 1}M`);
+			await scheduler.drain(term);
+			expect(Bun.stripANSI(term.getViewport()[selectedRow] ?? "").trimEnd()).toStartWith("four");
+			expect(term.getViewportRowBackgroundColumns(selectedRow)).toEqual([0, 1, 2, 3, 4]);
+			term.sendInput(`\x1b[<0;${rect.x + 5};${selectedRow + 1}m`);
+		} finally {
+			tui.stop();
+			if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+			else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+		}
+	});
+
 	it("keeps an active drag when its anchor scrolls above the pane without selecting sticky input", async () => {
 		const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
 		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
@@ -519,6 +571,23 @@ describe("MainSessionPane", () => {
 			expect(Bun.stripANSI(scrolledRows[index] ?? "")).toStartWith(expected);
 		}
 		expect(renders).toBe(1);
+	});
+
+	it("resumes following when a selection releases at the live tail", () => {
+		const history = new MutableRows(Array.from({ length: 10 }, (_value, index) => `row-${index}`));
+		const pane = new MainSessionPane({
+			scrollRoot: history,
+			stickyRoot: new StaticRows(["status", "editor"]),
+			requestRender: () => {},
+		});
+		pane.setViewportHeight(6);
+		pane.render(40);
+
+		pane.setTextSelectionActive(true);
+		pane.setTextSelectionActive(false);
+		history.setRows(Array.from({ length: 12 }, (_value, index) => `row-${index}`));
+
+		expect(pane.render(40).some(row => row.startsWith("row-11"))).toBe(true);
 	});
 
 	it("returns to the live tail from the app-viewport scrollback control", async () => {
@@ -699,7 +768,7 @@ describe("MainSessionPane", () => {
 		expect(steady.some(row => row.includes("row-9999"))).toBe(true);
 	});
 
-	it("pages through estimated transcript rows without materializing full history", () => {
+	it("pages through exact transcript rows without painting full history", () => {
 		const blocks = Array.from({ length: 10_000 }, (_value, index) => new CountingRows(`block-${index}`));
 		const transcript = new TranscriptContainer();
 		for (const block of blocks) transcript.addChild(block);
@@ -730,7 +799,7 @@ describe("MainSessionPane", () => {
 		expect(scrolled.some(row => row.includes("block-9999"))).toBe(false);
 	});
 
-	it("coalesces repeated virtual page-up input without materializing full history", () => {
+	it("coalesces repeated virtual page-up input without painting full history", () => {
 		const blocks = Array.from({ length: 10_000 }, (_value, index) => new CountingRows(`block-${index}`));
 		const transcript = new TranscriptContainer();
 		for (const block of blocks) transcript.addChild(block);
@@ -757,7 +826,7 @@ describe("MainSessionPane", () => {
 		expect(scrolled.some(row => row.includes("block-9999"))).toBe(false);
 	});
 
-	it("rebases the first page-up against completed transcript warmup geometry", async () => {
+	it("anchors the first page-up against exact transcript geometry", () => {
 		const transcript = new TranscriptContainer();
 		for (let index = 0; index < 90; index++) {
 			transcript.addChild(new StaticRows(Array.from({ length: 10 }, (_value, row) => `old-${index}-row-${row}`)));
@@ -778,7 +847,6 @@ describe("MainSessionPane", () => {
 		});
 
 		expect(workspace.render(40).some(row => row.includes("tail-99"))).toBe(true);
-		await transcript.warmVirtualViewport(39);
 
 		main.handleInput("\x1b[5~");
 		const scrolled = workspace.render(40);
@@ -787,7 +855,7 @@ describe("MainSessionPane", () => {
 		expect(scrolled.some(row => row.includes("old-"))).toBe(false);
 	});
 
-	it("drags an estimated transcript scrollbar without materializing full history", () => {
+	it("drags an exact transcript scrollbar without painting full history", () => {
 		const blocks = Array.from({ length: 1_000 }, (_value, index) => new CountingRows(`block-${index}`));
 		const transcript = new TranscriptContainer();
 		for (const block of blocks) transcript.addChild(block);

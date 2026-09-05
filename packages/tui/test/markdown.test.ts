@@ -1800,6 +1800,26 @@ describe("Inline color swatches", () => {
 	});
 });
 
+describe("Layout-only row measurement", () => {
+	it("keeps fenced-code height exact without invoking syntax highlighting", () => {
+		let highlightCallCount = 0;
+		const themeWithLayout = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string): string[] => {
+				highlightCallCount++;
+				return code.split("\n").map(line => chalk.cyan(line));
+			},
+			highlightCodeForLayout: (code: string): string[] => code.split("\n"),
+		};
+		const markdown = new Markdown("```ts\nconst x = 1;\nconst y = 2;\n```", 1, 0, themeWithLayout);
+
+		const measuredRows = markdown.measureRows(24);
+		expect(highlightCallCount).toBe(0);
+		expect(markdown.render(24)).toHaveLength(measuredRows);
+		expect(highlightCallCount).toBe(1);
+	});
+});
+
 describe("Module-level LRU render cache", () => {
 	it("invokes highlightCode only once for two distinct instances with identical (text, width, theme)", () => {
 		// Build a theme with a spy on highlightCode. The theme object reference

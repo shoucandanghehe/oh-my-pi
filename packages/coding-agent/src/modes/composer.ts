@@ -321,6 +321,7 @@ export class Composer implements TerminalFrameProvider, AppViewportFrameProvider
 			const scrollHeight = Math.max(0, rows - stickyRows);
 			const offset = Math.max(0, scroll.length - scrollHeight);
 			const visibleScroll = scroll.slice(offset, offset + scrollHeight);
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 			const padding = new Array<string>(Math.max(0, scrollHeight - visibleScroll.length)).fill("");
 			const visibleSticky = sticky.slice(sticky.length - stickyRows);
 			const frame = [...visibleScroll, ...padding, ...visibleSticky];

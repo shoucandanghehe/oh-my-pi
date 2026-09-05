@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { Container, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
+import type { CollabUiRequestDraft } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../../src/config/keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "../../../src/modes/components/ask-dialog";
@@ -17,6 +18,11 @@ beforeAll(async () => {
 	if (!dark) throw new Error("Failed to load dark theme");
 	setThemeInstance(dark);
 });
+
+function guestOptionLabels(request: CollabUiRequestDraft): string[] {
+	if (request.kind !== "select") throw new Error(`Expected select request, got ${request.kind}`);
+	return request.options.map(option => (typeof option === "string" ? option : option.label));
+}
 
 function makeHarness() {
 	const editor = new CustomEditor(getEditorTheme());
@@ -315,6 +321,90 @@ describe("ExtensionUiController editor UI", () => {
 
 		expect(await pending).toBeUndefined();
 		expect(requestGuestUi).not.toHaveBeenCalled();
+	});
+
+	it("offers collaboration guests custom input by default", async () => {
+		const harness = makeHarness();
+		const requestGuestUi = vi.fn((request: CollabUiRequestDraft) => {
+			if (request.kind === "select") {
+				expect(guestOptionLabels(request)).toContain("Other (type your own)");
+				return Promise.resolve({ kind: "answered" as const, value: "Other (type your own)" });
+			}
+			expect(request.kind).toBe("editor");
+			return Promise.resolve({ kind: "answered" as const, value: "guest custom answer" });
+		});
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+
+		const result = await ui.askDialog?.([
+			{
+				id: "choice",
+				question: "Choose?",
+				options: [{ label: "Option A" }],
+			},
+		]);
+
+		expect(requestGuestUi).toHaveBeenCalledTimes(2);
+		expect(result).toEqual({
+			kind: "submit",
+			results: [
+				expect.objectContaining({
+					id: "choice",
+					selectedOptions: [],
+					customInput: "guest custom answer",
+				}),
+			],
+		});
+	});
+
+	it("advertises and honors disabled custom input for collaboration guest questions", async () => {
+		const harness = makeHarness();
+		let requestIndex = 0;
+		const requestGuestUi = vi.fn((request: CollabUiRequestDraft) => {
+			expect(request.kind).toBe("select");
+			const labels = guestOptionLabels(request);
+			switch (requestIndex++) {
+				case 0:
+					expect(labels).toEqual(["Option A", "Option B", "Chat about this"]);
+					return Promise.resolve({ kind: "answered" as const, value: "Option B" });
+				case 1:
+					expect(labels).toEqual(["Option A", "Option B", "Next →", "Chat about this"]);
+					return Promise.resolve({ kind: "answered" as const, value: "Next →" });
+				case 2:
+					expect(labels).toEqual(["Option C", "Chat about this"]);
+					return Promise.resolve({ kind: "answered" as const, value: "Option C" });
+				default:
+					throw new Error(`Unexpected guest request ${requestIndex}`);
+			}
+		});
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+		expect(ui.askDialogCapabilities).toEqual({ allowCustomInput: true });
+
+		const result = await ui.askDialog?.([
+			{
+				id: "multi",
+				question: "Choose many?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+				multi: true,
+				allowCustomInput: false,
+			},
+			{
+				id: "single",
+				question: "Choose one?",
+				options: [{ label: "Option C" }],
+				allowCustomInput: false,
+			},
+		]);
+
+		expect(requestGuestUi).toHaveBeenCalledTimes(3);
+		expect(result).toEqual({
+			kind: "submit",
+			results: [
+				expect.objectContaining({ id: "multi", selectedOptions: ["Option B"], customInput: undefined }),
+				expect.objectContaining({ id: "single", selectedOptions: ["Option C"], customInput: undefined }),
+			],
+		});
 	});
 
 	it("bridges addAutocompleteProvider factories to the interactive mode context (#4919)", async () => {

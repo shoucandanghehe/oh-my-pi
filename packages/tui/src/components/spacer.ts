@@ -24,6 +24,10 @@ export class Spacer implements Component {
 		// No cached state to invalidate currently
 	}
 
+	measureRows(_width: number): number {
+		return this.#lines;
+	}
+
 	render(_width: number): readonly string[] {
 		let cached = this.#cached;
 		if (cached === undefined) {

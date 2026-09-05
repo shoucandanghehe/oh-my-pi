@@ -37,6 +37,7 @@ export function layoutBrailleScrollbar(
 ): BrailleScrollbarLayout {
 	const height = Math.max(0, Math.trunc(viewportRows));
 	const total = Math.max(0, Math.trunc(totalRows));
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const glyphs: string[] = new Array(height).fill(BRAILLE_SCROLLBAR_BLANK);
 	if (height === 0 || total <= height) return { glyphs, metrics: null };
 	const slotsPerRow = BRAILLE_SCROLLBAR_DOTS.length;

@@ -158,6 +158,8 @@ export interface InteractiveModeContext {
 	readonly workspaceEnabled: boolean;
 	/** Create or focus a persistent transcript pane for an agent. */
 	openAgentWorkspacePane(id: string): Promise<void>;
+	/** Open a local fake pane and play the real subagent petrification/close path. */
+	previewSubagentExitAnimation(): void;
 	/** Create or focus the session-scoped ephemeral /btw pane. */
 	openBtwWorkspacePane(component: Component): boolean;
 	/** Close only the /btw view; its side conversation remains in memory. */

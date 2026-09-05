@@ -19,6 +19,39 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
+function createRunningViewer(ui: TUI = new TUI(new ProcessTerminal()), statusContent?: string): AgentTranscriptViewer {
+	const registry = new AgentRegistry();
+	registry.register({
+		id: "Worker",
+		displayName: "Worker",
+		kind: "sub",
+		parentId: "Main",
+		status: "running",
+		session: statusContent ? ({} as never) : null,
+	});
+	const viewer = new AgentTranscriptViewer({
+		agentId: "Worker",
+		registry,
+		ui,
+		cwd: process.cwd(),
+		expandKeys: ["ctrl+o"],
+		hubKeys: ["ctrl+a"],
+		createStatusLine: () => ({
+			getTopBorder: () => ({
+				content: statusContent ?? " STATUS ",
+				width: Bun.stringWidth(Bun.stripANSI(statusContent ?? " STATUS ")),
+				revision: 0,
+			}),
+			dispose: () => {},
+		}),
+		requestRender: () => {},
+		onClose: () => {},
+		onHubToggle: () => {},
+	});
+	viewer.setViewportHeight(8);
+	return viewer;
+}
+
 describe("AgentTranscriptViewer", () => {
 	it("keeps an advisor on the unified shell with a read-only composer", () => {
 		const registry = new AgentRegistry();
@@ -116,6 +149,111 @@ describe("AgentTranscriptViewer", () => {
 		expect(disposeStatusLine).toHaveBeenCalledTimes(1);
 	});
 
+	it("plays the completed-agent petrification before closing", () => {
+		vi.useFakeTimers();
+		const viewer = createRunningViewer();
+		const close = vi.fn();
+		try {
+			const normal = viewer.render(40);
+			const normalHeader = viewer.renderWorkspaceHeader(40, false);
+			viewer.startAutoClose(close);
+			vi.advanceTimersByTime(64);
+			const petrifyingHeader = viewer.renderWorkspaceHeader(40, false);
+			expect(petrifyingHeader).not.toBe(normalHeader);
+			viewer.cancelAutoClose();
+			expect(viewer.render(40)).toEqual(normal);
+			expect(viewer.renderWorkspaceHeader(40, false)).toBe(normalHeader);
+
+			viewer.startAutoClose(close);
+			vi.advanceTimersByTime(2_999);
+			expect(close).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(16);
+			expect(close).toHaveBeenCalledTimes(1);
+		} finally {
+			viewer.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("petrifies diagonally from the top-left without moving glyphs", () => {
+		vi.useFakeTimers();
+		const viewer = createRunningViewer();
+		try {
+			const normal = viewer.render(40);
+			viewer.startAutoClose(() => {});
+			vi.advanceTimersByTime(1_200);
+			const petrifying = viewer.render(40);
+
+			expect(petrifying[0]).not.toBe(normal[0]);
+			expect(Bun.stripANSI(petrifying[0] ?? "").trimEnd()).toBe(Bun.stripANSI(normal[0] ?? "").trimEnd());
+			expect(petrifying.at(-1)).toBe(normal.at(-1));
+			const graySteps = new Set((petrifying[0] ?? "").match(/\x1b\[38;2;\d+;\d+;\d+m/g) ?? []);
+			expect(graySteps.size).toBeGreaterThanOrEqual(4);
+		} finally {
+			viewer.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("preserves styled backgrounds while petrifying foreground glyphs", () => {
+		vi.useFakeTimers();
+		const background = theme.bg("statusLineBg", " STONE STATUS ");
+		const viewer = createRunningViewer(new TUI(new ProcessTerminal()), background);
+		try {
+			const normal = viewer.render(40);
+			const normalStatus = normal.find(line => Bun.stripANSI(line).includes("STONE STATUS"));
+			expect(normalStatus).toContain(theme.getBgAnsi("statusLineBg"));
+
+			viewer.startAutoClose(() => {});
+			vi.advanceTimersByTime(2_600);
+			const petrifiedStatus = viewer.render(40).find(line => Bun.stripANSI(line).includes("STONE STATUS"));
+
+			expect(Bun.stripANSI(petrifiedStatus ?? "")).toBe(Bun.stripANSI(normalStatus ?? ""));
+			expect(petrifiedStatus).toContain(theme.getBgAnsi("statusLineBg"));
+		} finally {
+			viewer.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("restores the pane and permanently abandons auto-close after interaction", () => {
+		vi.useFakeTimers();
+		const viewer = createRunningViewer();
+		const close = vi.fn();
+		try {
+			const normal = viewer.render(40);
+			viewer.startAutoClose(close);
+			vi.advanceTimersByTime(2_999);
+			viewer.handleInput("\x1b[5~");
+			expect(viewer.render(40)).toEqual(normal);
+
+			viewer.startAutoClose(close);
+			vi.advanceTimersByTime(3_100);
+			expect(close).not.toHaveBeenCalled();
+		} finally {
+			viewer.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("repaints the dissolve at display-frame cadence", () => {
+		vi.useFakeTimers();
+		const requestComponentRender = vi.fn();
+		const ui = { requestComponentRender } as unknown as TUI;
+		const viewer = createRunningViewer(ui);
+		try {
+			viewer.startAutoClose(() => {});
+			requestComponentRender.mockClear();
+
+			vi.advanceTimersByTime(1_000);
+			const viewerPaints = requestComponentRender.mock.calls.filter(([component]) => component === viewer);
+			expect(viewerPaints.length).toBeGreaterThanOrEqual(60);
+		} finally {
+			viewer.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	it("loads a local transcript asynchronously before publishing incremental rows", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-load-"));
 		const file = path.join(dir, "Worker.jsonl");
@@ -142,6 +280,7 @@ describe("AgentTranscriptViewer", () => {
 			session: null,
 			sessionFile: file,
 		});
+		// oxlint-disable-next-line prefer-const -- requestRender may run during construction before assignment
 		let viewer: AgentTranscriptViewer | undefined;
 		const loaded = Promise.withResolvers<void>();
 		viewer = new AgentTranscriptViewer({
@@ -169,6 +308,58 @@ describe("AgentTranscriptViewer", () => {
 
 			await loaded.promise;
 			expect(Bun.stripANSI(viewer.render(60).join("\n"))).toContain("row-299");
+		} finally {
+			viewer.dispose();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("opens a persisted activity entry inside the virtualized transcript", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-deep-link-"));
+		const file = path.join(dir, "Worker.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		const entries = [
+			{ type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: dir },
+			...Array.from({ length: 30 }, (_value, index) => ({
+				type: "message",
+				id: `m${index}`,
+				parentId: index === 0 ? null : `m${index - 1}`,
+				timestamp,
+				message: { role: "user", content: `activity-row-${index}`, timestamp: index },
+			})),
+		];
+		fs.writeFileSync(file, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+			sessionFile: file,
+		});
+		const viewer = new AgentTranscriptViewer({
+			agentId: "Worker",
+			initialEntryId: "m20",
+			registry,
+			ui: new TUI(new ProcessTerminal()),
+			cwd: dir,
+			expandKeys: ["ctrl+o"],
+			hubKeys: ["ctrl+a"],
+			createStatusLine: () => ({
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: () => {},
+			}),
+			requestRender: () => {},
+			onClose: () => {},
+			onHubToggle: () => {},
+		});
+		viewer.setViewportHeight(8);
+		try {
+			const rendered = Bun.stripANSI(viewer.render(60).join("\n"));
+			expect(rendered).toContain("activity-row-20");
+			expect(rendered).not.toContain("activity-row-0");
 		} finally {
 			viewer.dispose();
 			fs.rmSync(dir, { recursive: true, force: true });

@@ -101,11 +101,9 @@ import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
-import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
-	type: "text",
-};
+import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../registry/agent-registry";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -292,6 +290,8 @@ const AGENT_WORKSPACE_MIN_WIDTH = 24;
 const AGENT_WORKSPACE_MIN_HEIGHT = 6;
 const BTW_WORKSPACE_MIN_WIDTH = 28;
 const BTW_WORKSPACE_MIN_HEIGHT = 8;
+const DEBUG_PETRIFICATION_PANE_KEY = "debug:petrification-preview";
+const DEBUG_PETRIFICATION_AGENT_ID = "Petrification Preview";
 const EDITOR_FALLBACK_ROWS = 24;
 const EDITOR_MIN_CHROME_ROWS = 4; // rows reserved for transcript + status on small terms
 const EDITOR_MIN_RENDERED_ROWS = 3; // bordered editor floor: top+bottom border + 1 content row
@@ -607,6 +607,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mainScrollRoot: Container | undefined;
 	#mainStickyRoot: Container | undefined;
 	#workspacePanes: WorkspacePaneController | undefined;
+	readonly #autoAgentViewers = new Map<string, AgentTranscriptViewer>();
 	#workspaceWelcome: WelcomeComponent | undefined;
 
 	isInitialized = false;
@@ -1115,13 +1116,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#createAgentWorkspaceViewer(agentId: string, close: () => void): AgentTranscriptViewer {
-		const remote = this.collabGuest?.hubRemote;
+	#createAgentWorkspaceViewer(
+		agentId: string,
+		close: () => void,
+		registryOverride?: AgentRegistry,
+	): AgentTranscriptViewer {
+		const remote = registryOverride ? undefined : this.collabGuest?.hubRemote;
+		const lifecycle = registryOverride || remote ? undefined : () => AgentLifecycleManager.global();
 		return new AgentTranscriptViewer({
 			agentId,
-			registry: this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+			registry: registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
 			remote,
-			lifecycle: remote ? undefined : () => AgentLifecycleManager.global(),
+			lifecycle,
 			ui: this.ui,
 			getTool: name => this.session.getToolByName(name),
 			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
@@ -1135,6 +1141,53 @@ export class InteractiveMode implements InteractiveModeContext {
 			onClose: close,
 			onHubToggle: () => this.showAgentHub(),
 		});
+	}
+
+	#openAutoAgentWorkspacePane(id: string): void {
+		const workspacePanes = this.#workspacePanes;
+		if (!workspacePanes || workspacePanes.has(`agent:${id}`)) return;
+		let viewer: AgentTranscriptViewer | undefined;
+		const key = `agent:${id}`;
+		const opened = workspacePanes.open({
+			key,
+			paneId: key,
+			title: id,
+			minWidth: AGENT_WORKSPACE_MIN_WIDTH,
+			minHeight: AGENT_WORKSPACE_MIN_HEIGHT,
+			focus: false,
+			createPane: close => {
+				viewer = this.#createAgentWorkspaceViewer(id, () => {
+					this.#autoAgentViewers.delete(id);
+					close();
+				});
+				return viewer;
+			},
+		});
+		if (opened && viewer) this.#autoAgentViewers.set(id, viewer);
+	}
+
+	#handleAgentRegistryEvent(event: RegistryEvent): void {
+		const { ref } = event;
+		if (ref.kind !== "sub") return;
+		if (event.type === "registered") {
+			if (ref.status === "running") this.#openAutoAgentWorkspacePane(ref.id);
+			return;
+		}
+		if (event.type === "status_changed" && ref.status === "running") {
+			const viewer = this.#autoAgentViewers.get(ref.id);
+			if (viewer) viewer.cancelAutoClose();
+			else this.#openAutoAgentWorkspacePane(ref.id);
+			return;
+		}
+		const viewer = this.#autoAgentViewers.get(ref.id);
+		if (!viewer) return;
+		if (event.type === "status_changed" || event.type === "removed") {
+			viewer.startAutoClose(() => {
+				if (this.#autoAgentViewers.get(ref.id) !== viewer) return;
+				this.#autoAgentViewers.delete(ref.id);
+				this.#workspacePanes?.close(`agent:${ref.id}`);
+			});
+		}
 	}
 
 	async openAgentWorkspacePane(id: string): Promise<void> {
@@ -1153,6 +1206,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			throw new Error("The terminal is too small to open another agent pane");
 		}
+	}
+
+	previewSubagentExitAnimation(): void {
+		const workspacePanes = this.#workspacePanes;
+		if (!workspacePanes) {
+			this.showWarning("Petrification preview requires the app-viewport render backend");
+			return;
+		}
+		workspacePanes.close(DEBUG_PETRIFICATION_PANE_KEY);
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: DEBUG_PETRIFICATION_AGENT_ID,
+			displayName: DEBUG_PETRIFICATION_AGENT_ID,
+			kind: "advisor",
+			parentId: MAIN_AGENT_ID,
+			status: "idle",
+			session: null,
+			sessionFile: this.sessionManager.getSessionFile(),
+		});
+		let viewer: AgentTranscriptViewer | undefined;
+		const opened = workspacePanes.open({
+			key: DEBUG_PETRIFICATION_PANE_KEY,
+			paneId: DEBUG_PETRIFICATION_PANE_KEY,
+			title: DEBUG_PETRIFICATION_AGENT_ID,
+			minWidth: AGENT_WORKSPACE_MIN_WIDTH,
+			minHeight: AGENT_WORKSPACE_MIN_HEIGHT,
+			focus: false,
+			createPane: close => {
+				viewer = this.#createAgentWorkspaceViewer(DEBUG_PETRIFICATION_AGENT_ID, close, registry);
+				return viewer;
+			},
+		});
+		if (!opened || !viewer) {
+			this.showWarning("The terminal is too small to open the petrification preview");
+			return;
+		}
+		viewer.startAutoClose(() => workspacePanes.close(DEBUG_PETRIFICATION_PANE_KEY));
 	}
 
 	openBtwWorkspacePane(component: Component): boolean {
@@ -2433,9 +2524,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
+			for (const id of this.#autoAgentViewers.keys()) this.#workspacePanes?.close(`agent:${id}`);
+			this.#autoAgentViewers.clear();
 			this.#agentRegistrySubscriptionTarget = registry;
-			this.#agentRegistryUnsubscribe = registry.onChange(() => {
+			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				this.syncRunningSubagentBadge();
+				this.#handleAgentRegistryEvent(event);
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
@@ -4962,6 +5056,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#eventBusUnsubscribers = [];
 		this.#workspacePanes?.dispose();
+		this.#autoAgentViewers.clear();
 		this.#observerRegistry.dispose();
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;

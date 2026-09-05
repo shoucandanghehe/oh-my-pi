@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
+	type AppViewportHoverProvider,
 	type AutocompleteProvider,
 	type Component,
 	componentContains,
@@ -68,7 +69,9 @@ function sanitizeNotice(text: string, maxWidth: number): string {
 }
 
 /** Shared transcript, scrolling, selection, editor, and pane chrome. */
-export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware {
+export class ChatTranscriptPane
+	implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware, AppViewportHoverProvider
+{
 	readonly #builder: ChatTranscriptBuilder;
 	readonly #scrollView = new ScrollView([], { height: 10, scrollbar: "auto", scrollbarStyle: "braille" });
 	readonly #editor: CustomEditor | undefined;
@@ -89,6 +92,10 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 	#hasFullFrame = false;
 	#virtualContent = false;
 	#estimatedTotalRows = 0;
+	#returnToBottomVisible = false;
+	#returnToBottomRow = -1;
+	#returnToBottomCol = -1;
+	#returnToBottomHovered = false;
 
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
 		this.#builder = new ChatTranscriptBuilder(options.builder);
@@ -141,6 +148,20 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 
 	setViewportHeight(height: number): void {
 		this.#viewportHeight = Math.max(1, Math.trunc(height));
+	}
+
+	setTextSelectionActive(active: boolean): void {
+		this.#followBottom = !active && this.#scrollView.getScrollOffset() >= this.#scrollView.getMaxScrollOffset();
+	}
+
+	wantsAppViewportHover(): boolean {
+		return this.#returnToBottomVisible;
+	}
+
+	clearAppViewportHover(): void {
+		if (!this.#returnToBottomHovered) return;
+		this.#returnToBottomHovered = false;
+		this.options.builder.requestRender();
 	}
 
 	containsComponent(component: Component): boolean {
@@ -280,6 +301,19 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		if (event.motion) {
+			const hovered = this.#returnToBottomContains(line, col);
+			if (hovered !== this.#returnToBottomHovered) {
+				this.#returnToBottomHovered = hovered;
+				this.options.builder.requestRender();
+				return true;
+			}
+			if (hovered) return true;
+		}
+		if (event.leftClick && this.#returnToBottomContains(line, col)) {
+			this.#jumpToBottom();
+			return true;
+		}
 		const handled = this.#scrollView.routeMouse(event, line - this.#scrollViewStartLine, col);
 		if (!handled) return false;
 		this.#syncFollow();
@@ -337,11 +371,12 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		const noticeLine = notice ? ` ${theme.fg("error", sanitizeNotice(notice, Math.max(10, width - 2)))}` : undefined;
 		const editorLines = this.#editor ? this.#editor.render(width) : [];
 		const viewportHeight = this.#contentViewportHeight(editorLines, noticeLine);
+		let scrollOffset = this.#scrollView.getScrollOffset();
 		if (this.#initialEntryId) {
 			const targetRow = this.#builder.rowForEntry(this.#initialEntryId, contentWidth);
 			if (targetRow !== undefined) {
 				this.#followBottom = false;
-				this.#scrollView.setScrollOffset(Math.max(0, targetRow - 1));
+				scrollOffset = Math.max(0, targetRow - 1);
 				this.#initialEntryId = undefined;
 			}
 		}
@@ -349,7 +384,7 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 			? undefined
 			: this.#builder.container.renderVirtualViewport(contentWidth, {
 					rows: viewportHeight,
-					offset: this.#scrollView.getScrollOffset(),
+					offset: scrollOffset,
 					followBottom: this.#followBottom,
 				});
 		const contentLines = virtualFrame?.lines ?? [
@@ -420,7 +455,8 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 
 	#contentViewportHeight(editorLines: readonly string[], noticeLine: string | undefined): number {
 		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
-		const chrome = editorLines.length + (noticeLine ? 1 : 0);
+		const returnControlRows = this.#editor ? 1 : 0;
+		const chrome = returnControlRows + editorLines.length + (noticeLine ? 1 : 0);
 		return Math.max(this.#viewportHeight === undefined ? 3 : 0, termHeight - chrome);
 	}
 
@@ -451,11 +487,48 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 
 		this.#scrollViewStartLine = 0;
 		const lines = [...this.#scrollView.render(width)];
+		if (this.#editor) lines.push(this.#renderReturnToBottomControl(width, lines.length));
+		else this.#clearReturnToBottomControl();
 		if (noticeLine) lines.push(noticeLine);
 		lines.push(...editorLines);
 		return this.#viewportHeight === undefined ? lines : lines.slice(0, termHeight);
 	}
 
+	#renderReturnToBottomControl(width: number, row: number): string {
+		this.#returnToBottomRow = row;
+		this.#returnToBottomCol = Math.max(0, Math.trunc(width) - 1);
+		this.#returnToBottomVisible =
+			!this.#followBottom && this.#scrollView.getScrollOffset() < this.#scrollView.getMaxScrollOffset();
+		if (!this.#returnToBottomVisible) {
+			this.#returnToBottomHovered = false;
+			return "";
+		}
+		const glyph = theme.fg(this.#returnToBottomHovered ? "text" : "muted", "▽");
+		return `${" ".repeat(this.#returnToBottomCol)}${glyph}`;
+	}
+
+	#clearReturnToBottomControl(): void {
+		this.#returnToBottomVisible = false;
+		this.#returnToBottomHovered = false;
+		this.#returnToBottomRow = -1;
+		this.#returnToBottomCol = -1;
+	}
+
+	#returnToBottomContains(row: number, col: number): boolean {
+		return (
+			this.#returnToBottomVisible &&
+			row === this.#returnToBottomRow &&
+			col >= Math.max(0, this.#returnToBottomCol - 2) &&
+			col <= this.#returnToBottomCol
+		);
+	}
+
+	#jumpToBottom(): void {
+		this.#scrollView.scrollToBottom();
+		this.#followBottom = true;
+		this.#returnToBottomHovered = false;
+		this.options.builder.requestRender();
+	}
 	invalidate(): void {
 		this.#hasFullFrame = false;
 		this.#builder.container.invalidate();

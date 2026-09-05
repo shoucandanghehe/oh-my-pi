@@ -50,6 +50,11 @@ const DEBUG_MENU_ITEMS: SelectItem[] = [
 		label: "Test: terminal protocols",
 		description: "Styling, links, text sizing, graphics, notify",
 	},
+	{
+		value: "petrify",
+		label: "Test: subagent pane petrification",
+		description: "Local preview; no model or subagent",
+	},
 	{ value: "raw-sse", label: "View: raw SSE stream", description: "Show live provider SSE frames" },
 	{
 		value: "remote-debugger",
@@ -136,6 +141,9 @@ export class DebugSelectorComponent extends OverlayPanel {
 				break;
 			case "protocols":
 				await this.#handleViewProtocols();
+				break;
+			case "petrify":
+				this.ctx.previewSubagentExitAnimation();
 				break;
 			case "transcript":
 				await this.#handleTranscriptExport();

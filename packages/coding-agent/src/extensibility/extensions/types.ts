@@ -148,6 +148,8 @@ export interface ExtensionAskDialogQuestion {
 	question: string;
 	header?: string;
 	options: ExtensionAskDialogOption[];
+	/** Show an "Other (type your own)" answer. Defaults to true. */
+	allowCustomInput?: boolean;
 	multi?: boolean;
 	recommended?: number;
 }
@@ -270,6 +272,15 @@ export interface ExtensionUIContext {
 
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
+
+	/**
+	 * Features this UI context guarantees for rich ask dialogs.
+	 * Treat an absent capability as unsupported.
+	 */
+	readonly askDialogCapabilities?: {
+		/** `allowCustomInput: false` hides custom answers in every dialog presentation path. */
+		readonly allowCustomInput: true;
+	};
 
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(

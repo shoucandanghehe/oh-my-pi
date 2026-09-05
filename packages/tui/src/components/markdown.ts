@@ -1400,6 +1400,11 @@ export interface MarkdownTheme {
 	underline: (text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
 	/**
+	 * Exact visible-text equivalent of `highlightCode` for layout-only row
+	 * measurement. Omit when highlighting can change visible cells or row count.
+	 */
+	highlightCodeForLayout?: (code: string, lang?: string) => string[];
+	/**
 	 * Create a stateful incremental highlighter for one streaming code fence.
 	 * `push` receives newline-terminated complete lines (only the final push
 	 * may omit the trailing newline) and must return highlighted ANSI text for
@@ -1785,6 +1790,7 @@ export class Markdown implements Component {
 	#activeTextSelectionRows: RenderedTextSelectionRow[] | undefined;
 	#activeTextSelectionLogicalLine = 0;
 	#transientRenderCache = false;
+	#sharedRenderCache = true;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
 	// block tokens are frozen, plus those tokens. marked has no resumable lexer,
@@ -2086,6 +2092,28 @@ export class Markdown implements Component {
 		}
 	}
 
+	measureRows(width: number): number {
+		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
+			return this.#cachedLines.length;
+		}
+		const highlightCodeForLayout = this.#theme.highlightCodeForLayout;
+		if (!highlightCodeForLayout) return this.render(width).length;
+		const layoutTheme = { ...this.#theme, highlightCode: highlightCodeForLayout };
+		delete layoutTheme.createHighlightStream;
+		const probe = new Markdown(
+			this.#text,
+			this.#paddingX,
+			this.#paddingY,
+			layoutTheme,
+			this.#defaultTextStyle,
+			this.#codeBlockIndent,
+		);
+		probe.#ignoreTight = this.#ignoreTight;
+		probe.#sharedRenderCache = false;
+		probe.transientRenderCache = this.transientRenderCache;
+		return probe.render(width).length;
+	}
+
 	render(width: number): readonly string[] {
 		// L1: per-instance cache — fastest path for repeated renders of the same
 		// instance at the same width (e.g. resize debounce, repeated redraws).
@@ -2261,7 +2289,7 @@ export class Markdown implements Component {
 		// theme.heading is used as the representative theme probe — it's required
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
-		if (!this.transientRenderCache) {
+		if (!this.transientRenderCache && this.#sharedRenderCache) {
 			cacheKey = this.#renderCacheKey(normalizedText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
