@@ -7,6 +7,7 @@ import {
 	Image,
 	ImageProtocol,
 	imageFallback,
+	measureComponentRows,
 	Spacer,
 	TERMINAL,
 	Text,
@@ -114,15 +115,28 @@ class SafeToolRendererComponent implements Component {
 		}
 	}
 
+	#fallbackAfterError(err: unknown): Component | undefined {
+		if (!this.#warned) {
+			this.#warned = true;
+			logger.warn("Tool renderer failed", { tool: this.#toolName, stage: this.#stage, error: String(err) });
+		}
+		return this.#fallback();
+	}
+
+	measureRows(width: number): number {
+		try {
+			return measureComponentRows(this.#component, width);
+		} catch (err) {
+			const fallback = this.#fallbackAfterError(err);
+			return fallback ? measureComponentRows(fallback, width) : 0;
+		}
+	}
+
 	render(width: number): readonly string[] {
 		try {
 			return this.#component.render(width);
 		} catch (err) {
-			if (!this.#warned) {
-				this.#warned = true;
-				logger.warn("Tool renderer failed", { tool: this.#toolName, stage: this.#stage, error: String(err) });
-			}
-			return this.#fallback()?.render(width) ?? [];
+			return this.#fallbackAfterError(err)?.render(width) ?? [];
 		}
 	}
 
