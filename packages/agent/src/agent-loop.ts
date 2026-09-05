@@ -48,7 +48,7 @@ import {
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
-import { agentPauseGate } from "./pause";
+import { agentPauseGate, PAUSE_SHUTDOWN_ABORT_REASON } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -581,10 +581,11 @@ export function unpairedToolCallTail(messages: readonly AgentMessage[]): Assista
  * Used for retries - context already has user message or tool results.
  *
  * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm` — except for an assistant tail with unpaired runnable
- * tool calls (see {@link unpairedToolCallTail}), which resumes by executing
- * those calls first. Any other assistant tail is rejected here; other invalid
- * tails cannot be validated since `convertToLlm` is only called once per turn.
+ * via `convertToLlm` — except for an assistant tail that either carries unpaired runnable
+ * tool calls (see {@link unpairedToolCallTail}) or has `pause_turn` stop details. Unpaired
+ * calls resume by executing those calls first; `pause_turn` requests another model sample.
+ * Any other assistant tail is rejected here; other invalid tails cannot be validated since
+ * `convertToLlm` is only called once per turn.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -596,7 +597,12 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant" && !unpairedToolCallTail(context.messages)) {
+	const lastMessage = context.messages[context.messages.length - 1];
+	if (
+		lastMessage.role === "assistant" &&
+		lastMessage.stopDetails?.type !== "pause_turn" &&
+		!unpairedToolCallTail(context.messages)
+	) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -1038,6 +1044,39 @@ async function runLoopBody(
 	initialMessages: AgentMessage[],
 	streamFn?: StreamFn,
 ): Promise<void> {
+	const loopId = agentPauseGate.registerLoop();
+	try {
+		await runLoopBodyInner(
+			currentContext,
+			newMessages,
+			config,
+			signal,
+			stream,
+			telemetry,
+			invokeAgentSpan,
+			stepCounter,
+			initialMessages,
+			streamFn,
+			loopId,
+		);
+	} finally {
+		agentPauseGate.unregisterLoop(loopId);
+	}
+}
+
+async function runLoopBodyInner(
+	currentContext: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	telemetry: AgentTelemetry | undefined,
+	invokeAgentSpan: Span | undefined,
+	stepCounter: StepCounter,
+	initialMessages: AgentMessage[],
+	streamFn: StreamFn | undefined,
+	loopId: symbol,
+): Promise<void> {
 	let deadlineTimer: Timer | undefined;
 	if (config.deadline !== undefined) {
 		const deadlineAbortController = new AbortController();
@@ -1140,10 +1179,17 @@ async function runLoopBody(
 				// Yield at the top of each iteration to prevent busy-wait when
 				// the agent loop is executing tool calls back-to-back.
 				await yieldIfDue();
-				// Park at the turn boundary while the process-wide pause gate is
-				// engaged (host /pause). An external abort releases the park so a
+				// Park at the model-call boundary while the process-wide pause gate is
+				// engaged (host /pause). Tools already in flight finish first; only the
+				// next provider request waits. An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal, loopId);
+				// Dispose while paused: end without synthesizing an aborted assistant
+				// turn so a later `/continue` can resume from the last durable tail.
+				if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
+				}
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1258,6 +1304,7 @@ async function runLoopBody(
 						currentContext,
 						config,
 						signal,
+						loopId,
 						stream,
 						telemetry,
 						invokeAgentSpan,
@@ -1271,6 +1318,10 @@ async function runLoopBody(
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 				} catch (err) {
+					if (err === PAUSE_SHUTDOWN_ABORT_REASON) {
+						endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+						return;
+					}
 					if (!(err instanceof HarmonyLeakInterruption)) throw err;
 					if (err.recovered) {
 						if (harmonyTruncateResumeCount >= 2) {
@@ -1647,6 +1698,7 @@ async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
+	loopId: symbol,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
@@ -1706,6 +1758,14 @@ async function streamAssistantResponse(
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
+
+	// Context shaping and credential resolution above may yield after the loop's
+	// initial gate check. Re-check immediately before the provider call; there is
+	// no async gap after this point where a newly engaged pause could slip through.
+	if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal, loopId);
+	if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
+		throw PAUSE_SHUTDOWN_ABORT_REASON;
+	}
 
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
@@ -2578,11 +2638,9 @@ async function executeToolCalls(
 			record.skipped = true;
 			return;
 		}
-		// Park before starting this tool while the process-wide pause gate is
-		// engaged. Tools already executing are unaffected (pausing never aborts);
-		// a batch interrupted mid-pause unwinds via the signal checks below.
-		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(record.signal);
-
+		// Tools always start once the assistant turn is committed. Process-wide
+		// pause only parks before the next model call so a barrier exit leaves a
+		// durable transcript (no dangling toolCalls without results).
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a
 		// failure recorded there surfaces here at the record's scheduled slot so

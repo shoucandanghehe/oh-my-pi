@@ -12,7 +12,6 @@
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
-import { setTerminalTitleState } from "../../utils/title-generator";
 import type { InteractiveModeContext } from "../types";
 
 export class SessionFocusController {
@@ -92,6 +91,7 @@ export class SessionFocusController {
 		this.ctx.unsubscribe?.();
 		this.ctx.clearTransientSessionUi();
 		this.ctx.eventController.resetTranscriptAnchors();
+		this.ctx.eventController.resetTerminalActivity();
 		// Orphan-delta guard: when attaching mid-turn the message_start for the
 		// in-flight assistant message predates the attach. message_update carries
 		// the full accumulating message, so synthesize the missing start before
@@ -133,12 +133,10 @@ export class SessionFocusController {
 		// own todos rather than overwriting them with the main session's list.
 		await this.ctx.reloadTodos(target);
 		if (generation !== this.#attachGeneration) return false;
-		// Sync the run-state title to the attached target: a streaming target has no
-		// agent_start incoming, so arm the loader/working title manually; an idle
-		// target would otherwise inherit the previous session's stuck spinner, so
-		// reset it to idle (agent_end teardown already ran via clearTransientSessionUi).
+		// Sync the run state to the attached target. A streaming target has no
+		// agent_start incoming, so arm its activity manually; resetTerminalActivity
+		// already returned an idle target to the aggregate's remaining state.
 		if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
-		else setTerminalTitleState("idle");
 		if (generation !== this.#attachGeneration) return false;
 		this.ctx.updateEditorBorderColor();
 		this.ctx.ui.requestRender();

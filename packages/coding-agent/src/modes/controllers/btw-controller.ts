@@ -157,8 +157,6 @@ export class BtwController {
 			return;
 		}
 
-		this.#closeActiveRequest({ abort: true });
-
 		const request: BtwRequest = {
 			component: new BtwPanelComponent({
 				question: trimmedQuestion,
@@ -170,6 +168,8 @@ export class BtwController {
 			leafId: this.ctx.sessionManager.getLeafId(),
 			sessionId: this.ctx.sessionManager.getSessionId(),
 		};
+		this.ctx.terminalActivity.set(request, "working");
+		this.#closeActiveRequest({ abort: true });
 		this.ctx.btwContainer.clear();
 		this.ctx.btwContainer.addChild(request.component);
 		this.ctx.ui.requestRender();
@@ -215,6 +215,8 @@ export class BtwController {
 				return;
 			}
 			request.component.markError(error instanceof Error ? error.message : String(error));
+		} finally {
+			this.ctx.terminalActivity.release(request);
 		}
 	}
 
@@ -222,6 +224,7 @@ export class BtwController {
 		const request = this.#activeRequest;
 		if (!request) return;
 		this.#activeRequest = undefined;
+		this.ctx.terminalActivity.release(request);
 		this.#clearCompletedState();
 		if (options.abort) {
 			request.abortController.abort();

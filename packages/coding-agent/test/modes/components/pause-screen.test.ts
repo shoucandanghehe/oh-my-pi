@@ -18,23 +18,23 @@ interface FakeHost {
 	shown: Component[];
 	statuses: string[];
 	hiddenCount(): number;
+	pausedExitCount(): number;
 }
 
 function makeHost(rows = 24): FakeHost {
 	const shown: Component[] = [];
 	const statuses: string[] = [];
+	let pausedExits = 0;
 	let hidden = 0;
 	const host: PauseScreenHost = {
 		ui: {
 			showOverlay(component) {
 				shown.push(component);
 				return {
-					hide: () => {
+					hide() {
 						hidden++;
 					},
-					setHidden() {},
-					isHidden: () => false,
-				};
+				} as never;
 			},
 			setFocus() {},
 			requestRender() {},
@@ -43,8 +43,13 @@ function makeHost(rows = 24): FakeHost {
 		showStatus(message) {
 			statuses.push(message);
 		},
+		session: {
+			async disposeForPausedExit() {
+				pausedExits++;
+			},
+		},
 	};
-	return { host, shown, statuses, hiddenCount: () => hidden };
+	return { host, shown, statuses, hiddenCount: () => hidden, pausedExitCount: () => pausedExits };
 }
 
 describe("pause screen", () => {
@@ -61,41 +66,73 @@ describe("pause screen", () => {
 	});
 
 	describe("renderPauseScreen", () => {
-		it("paints exactly the requested rows with title, explainer, clock, and hint", () => {
-			const lines = renderPauseScreen(80, 24, 65_000);
+		it("shows PAUSED when ready with exit hint", () => {
+			const lines = renderPauseScreen(80, 24, {
+				elapsedMs: 65_000,
+				activeLoops: 2,
+				parkedLoops: 2,
+				ready: true,
+			});
 			expect(lines.length).toBe(24);
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("P A U S E D");
 			expect(text).toContain("Main agent, subagents, and advisor");
 			expect(text).toContain("paused for 1:05");
+			expect(text).toContain("paused · all 2 loops at model boundary");
 			expect(text).toContain("esc · enter · space — resume");
+			expect(text).toContain("q — exit paused");
 			expect(text).toContain("█".repeat(5));
 		});
 
-		it("drops to the compact card on small terminals", () => {
-			const lines = renderPauseScreen(40, 10, 3_000);
+		it("shows PAUSING while waiting for the barrier", () => {
+			const lines = renderPauseScreen(40, 10, {
+				elapsedMs: 3_000,
+				activeLoops: 1,
+				parkedLoops: 0,
+				ready: false,
+			});
 			expect(lines.length).toBe(10);
 			const text = lines.map(stripAnsi).join("\n");
-			expect(text).toContain("▌▌ P A U S E D");
+			expect(text).toContain("▌▌ P A U S I N G");
 			expect(text).toContain("paused for 0:03");
+			expect(text).toContain("pausing · 0/1 at model boundary");
 			expect(text).toContain("esc to resume");
-			expect(text).not.toContain("█".repeat(5)); // no room for the big glyph
+			expect(text).not.toContain("█".repeat(5));
 		});
 
 		it("rolls the clock into hours past 60 minutes", () => {
-			const text = renderPauseScreen(80, 24, 3_725_000).map(stripAnsi).join("\n");
+			const text = renderPauseScreen(80, 24, {
+				elapsedMs: 3_725_000,
+				activeLoops: 0,
+				parkedLoops: 0,
+				ready: true,
+			})
+				.map(stripAnsi)
+				.join("\n");
 			expect(text).toContain("paused for 1:02:05");
 		});
 
 		it("displays the session name when provided in full mode", () => {
-			const lines = renderPauseScreen(80, 24, 65_000, "My Awesome Session");
+			const lines = renderPauseScreen(80, 24, {
+				elapsedMs: 65_000,
+				sessionName: "My Awesome Session",
+				activeLoops: 0,
+				parkedLoops: 0,
+				ready: true,
+			});
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("My Awesome Session");
 			expect(text).toContain("P A U S E D");
 		});
 
 		it("displays the session name when provided in compact mode", () => {
-			const lines = renderPauseScreen(40, 10, 3_000, "Compact Session Title");
+			const lines = renderPauseScreen(40, 10, {
+				elapsedMs: 3_000,
+				sessionName: "Compact Session Title",
+				activeLoops: 0,
+				parkedLoops: 0,
+				ready: true,
+			});
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("Compact Session Title");
 			expect(text).toContain("▌▌ P A U S E D");
@@ -143,6 +180,25 @@ describe("pause screen", () => {
 			await runPauseScreen(host); // must resolve immediately, not park
 			expect(shown.length).toBe(0);
 			expect(agentPauseGate.paused).toBe(true); // foreign pause not stolen
+		});
+
+		it("exits paused only when the barrier is ready", async () => {
+			const { host, shown, pausedExitCount, statuses } = makeHost();
+			const run = runPauseScreen(host);
+			await Bun.sleep(1);
+
+			const component = shown[0];
+			expect(component).toBeInstanceOf(PauseScreenComponent);
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected PauseScreenComponent");
+
+			// No active loops → ready immediately; q should exit paused.
+			expect(agentPauseGate.ready).toBe(true);
+			component.handleInput("q");
+			const outcome = await run;
+			expect(outcome).toBe("exited");
+			expect(pausedExitCount()).toBe(1);
+			expect(agentPauseGate.paused).toBe(false);
+			expect(statuses.some(message => message.includes("Resumed after"))).toBe(false);
 		});
 	});
 });

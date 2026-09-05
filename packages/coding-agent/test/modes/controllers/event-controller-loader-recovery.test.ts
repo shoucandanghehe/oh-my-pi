@@ -1,8 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -20,16 +22,35 @@ import { createInteractiveModeContext } from "../../helpers/interactive-mode-con
  * kept streaming. The fix tears the working loader down (stop + dereference) so
  * the next `agent_start` recreates and re-attaches it.
  */
-function createContext(options: { terminalProgress?: boolean } = {}) {
+interface LoaderRecoveryContextOptions {
+	terminalProgress?: boolean;
+	runEphemeralTurn?: AgentSession["runEphemeralTurn"];
+}
+
+function createContext(options: LoaderRecoveryContextOptions = {}) {
 	const streamState = { isStreaming: false };
 	if (options.terminalProgress) settings.set("terminal.showProgress", true);
 	const setProgress = vi.fn((_active: boolean) => {});
+	const setTitleState = vi.fn();
+	const terminalActivity = new TerminalActivityController({
+		isProgressEnabled: () => options.terminalProgress === true,
+		setProgress,
+		setTitleState,
+	});
 	const ctx = createInteractiveModeContext({
 		ui: { terminal: { setProgress } },
+		terminalActivity,
+		btwContainer: {
+			clear: vi.fn(),
+			addChild: vi.fn(),
+		},
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
 			},
+			getToolByName: () => undefined,
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			runEphemeralTurn: options.runEphemeralTurn ?? vi.fn(async () => Promise.withResolvers<never>().promise),
 		},
 	});
 	const { statusContainer } = ctx;
@@ -48,11 +69,15 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 		ctx.loadingAnimation = working;
 		statusContainer.addChild(working);
 	});
-	return { ctx, streamState, statusContainer, workingLoaders, setProgress };
+	return { ctx, streamState, statusContainer, workingLoaders, setProgress, setTitleState };
 }
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
 const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
+const AGENT_END_WILL_CONTINUE = {
+	...AGENT_END,
+	isTerminal: false,
+} as unknown as AgentSessionEvent;
 const COMPACTION_START = {
 	type: "auto_compaction_start",
 	reason: "overflow",
@@ -238,5 +263,58 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		await controller.handleEvent(AGENT_START);
 		await controller.handleEvent(AGENT_END);
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false, true, false]);
+	});
+	it("keeps terminal progress and title active when the main turn ends while /btw is still running", async () => {
+		const sideRequest = Promise.withResolvers<never>();
+		const { ctx, streamState, setProgress, setTitleState } = createContext({
+			terminalProgress: true,
+			runEphemeralTurn: () => sideRequest.promise,
+		});
+		const eventController = new EventController(ctx);
+		const btwController = new BtwController(ctx);
+
+		streamState.isStreaming = true;
+		await eventController.handleEvent(AGENT_START);
+		await btwController.start("Is the main turn still working?");
+
+		streamState.isStreaming = false;
+		await eventController.handleEvent(AGENT_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working"]);
+
+		expect(btwController.handleEscape()).toBe(true);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working", "idle"]);
+	});
+	it("keeps terminal activity when /btw finishes during a scheduled main continuation", async () => {
+		const sideRequest = Promise.withResolvers<unknown>();
+		const { ctx, streamState, setProgress, setTitleState } = createContext({
+			terminalProgress: true,
+			runEphemeralTurn: () => sideRequest.promise,
+		});
+		const eventController = new EventController(ctx);
+		const btwController = new BtwController(ctx);
+
+		streamState.isStreaming = true;
+		await eventController.handleEvent(AGENT_START);
+		await btwController.start("Will the main turn keep working?");
+
+		streamState.isStreaming = false;
+		await eventController.handleEvent(AGENT_END_WILL_CONTINUE);
+		sideRequest.resolve({
+			replyText: "Yes",
+			assistantMessage: { content: [{ type: "text", text: "Yes" }] },
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working"]);
+
+		streamState.isStreaming = true;
+		await eventController.handleEvent(AGENT_START);
+		streamState.isStreaming = false;
+		await eventController.handleEvent(AGENT_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working", "idle"]);
 	});
 });
