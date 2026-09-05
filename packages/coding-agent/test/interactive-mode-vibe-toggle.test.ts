@@ -774,12 +774,19 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const leafId = session.sessionManager.getLeafId();
 		if (!leafId) throw new Error("Expected session leaf");
 
-		const result = await session.branchFromBtw(
-			"why did that happen?",
-			createAssistantMessage("because reasons"),
-			leafId,
-			originalSessionId,
-		);
+		const assistantMessage = createAssistantMessage("because reasons");
+		const result = await session.branchFromBtw({
+			anchorLeafId: leafId,
+			sessionId: originalSessionId,
+			turns: [
+				{
+					input: "why did that happen?",
+					assistantMessage,
+					replyText: "because reasons",
+					timestamp: assistantMessage.timestamp,
+				},
+			],
+		});
 		expect(result.cancelled).toBe(false);
 		expect(session.sessionManager.getSessionId()).not.toBe(originalSessionId);
 		expect(mode.vibeModeEnabled).toBe(true);

@@ -15,6 +15,19 @@ describe("Text component", () => {
 		expect(text.render(40).join("\n")).toContain("<c>hello</c>");
 	});
 
+	it("measures wrapped rows without running foreground style callbacks", () => {
+		let styleCallCount = 0;
+		const text = new Text("alpha beta gamma delta", 1, 1).setStyleFn(value => {
+			styleCallCount++;
+			return `\x1b[31m${value}\x1b[39m`;
+		});
+
+		const measuredRows = text.measureRows(10);
+		expect(styleCallCount).toBe(0);
+		expect(text.render(10)).toHaveLength(measuredRows);
+		expect(styleCallCount).toBe(1);
+	});
+
 	it("re-resolves the style fn after invalidate so a theme change re-shapes", () => {
 		// The styler reads a mutable `color`, standing in for the active theme.
 		// The coding-agent invalidates status components on `onThemeChange`, so a

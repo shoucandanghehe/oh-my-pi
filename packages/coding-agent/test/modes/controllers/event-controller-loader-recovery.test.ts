@@ -5,7 +5,9 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { Loader } from "@oh-my-pi/pi-tui";
+import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 /**
@@ -288,7 +290,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working", "idle"]);
 	});
 	it("keeps terminal activity when /btw finishes during a scheduled main continuation", async () => {
-		const sideRequest = Promise.withResolvers<unknown>();
+		const sideRequest = Promise.withResolvers<EphemeralTurnResult>();
 		const { ctx, streamState, setProgress, setTitleState } = createContext({
 			terminalProgress: true,
 			runEphemeralTurn: () => sideRequest.promise,
@@ -304,7 +306,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		await eventController.handleEvent(AGENT_END_WILL_CONTINUE);
 		sideRequest.resolve({
 			replyText: "Yes",
-			assistantMessage: { content: [{ type: "text", text: "Yes" }] },
+			assistantMessage: createAssistantMessage("Yes"),
 		});
 		await Promise.resolve();
 		await Promise.resolve();

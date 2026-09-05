@@ -14,6 +14,7 @@ import {
 	normalizeTextSelection,
 } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { withCodeHighlightingDisabledForLayout } from "../theme/tui-adapters";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -200,6 +201,10 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
 	#childStartRows = new Map<Component, number>();
+	// Canonical O(1) owner lookup for component-scoped animation frames. Without
+	// this, every spinner tick walks the complete transcript once per ancestor.
+	#directChildIndices = new Map<Component, number>();
+	#targetOwnerIndices = new WeakMap<Component, number>();
 	// Watchdog for the wedge where an unfinalized frontier block pins pressure
 	// retirement: everything behind it stays live and degrades to one-line
 	// allocations. Logs once per pinned episode after a grace period.
@@ -220,6 +225,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		const canExtendVirtualLedger =
 			!this.#virtualStructureDirty && this.#virtualEntries.length === this.children.length;
 		super.addChild(component);
+		this.#directChildIndices.set(component, this.children.length - 1);
 		this.#applyPresentationState(component);
 		this.#entries.push({
 			component,
@@ -261,6 +267,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
 		super.removeChild(component);
 		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
+		this.#directChildIndices = new Map(this.children.map((child, index) => [child, index]));
+		this.#targetOwnerIndices = new WeakMap();
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
 		this.#virtualStructureDirty = true;
@@ -270,6 +278,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	override clear(): void {
 		super.clear();
 		this.#entries = [];
+		this.#directChildIndices = new Map();
+		this.#targetOwnerIndices = new WeakMap();
 		this.#frontier = 0;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
@@ -304,6 +314,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			throw new Error("TranscriptContainer.adoptContentsFrom requires an empty destination");
 		}
 		const children = source.children;
+		const directChildIndices = source.#directChildIndices;
+		const targetOwnerIndices = source.#targetOwnerIndices;
 		const entries = source.#entries;
 		const frontier = source.#frontier;
 		const nextBatchId = source.#nextBatchId;
@@ -325,6 +337,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		super.clear();
 		this.children = children;
 		this.#entries = entries;
+		this.#directChildIndices = directChildIndices;
+		this.#targetOwnerIndices = targetOwnerIndices;
 		this.#frontier = frontier;
 		this.#nextBatchId = nextBatchId;
 		this.#offered = offered;
@@ -340,6 +354,24 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#virtualWidth = virtualWidth;
 		this.#virtualGeneration = virtualGeneration;
 		this.#generation = generation;
+	}
+
+	override containsComponent(component: Component): boolean {
+		return component === this || this.#ownerIndex(component) >= 0;
+	}
+
+	#ownerIndex(component: Component): number {
+		const directIndex = this.#directChildIndices.get(component);
+		if (directIndex !== undefined) return directIndex;
+		const cachedIndex = this.#targetOwnerIndices.get(component);
+		if (cachedIndex !== undefined) {
+			const cachedOwner = this.children[cachedIndex];
+			if (cachedOwner !== undefined && componentContains(cachedOwner, component)) return cachedIndex;
+		}
+		const ownerIndex = this.children.findIndex(child => componentContains(child, component));
+		if (ownerIndex >= 0) this.#targetOwnerIndices.set(component, ownerIndex);
+		else this.#targetOwnerIndices.delete(component);
+		return ownerIndex;
 	}
 
 	override invalidate(): void {
@@ -875,11 +907,9 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		let changedFrom = this.#virtualEntries.length;
 		const measured = new Set<Component>();
 		for (const target of targets) {
-			const owner = this.children.find(child => componentContains(child, target));
-			if (!owner || measured.has(owner)) continue;
-			measured.add(owner);
-			const index = this.children.indexOf(owner);
-			if (index < 0) return this.render(width);
+			const index = this.#ownerIndex(target);
+			if (index < 0 || measured.has(this.children[index]!)) continue;
+			measured.add(this.children[index]!);
 			if (this.#measureVirtualEntry(index, width)) changedFrom = Math.min(changedFrom, index);
 		}
 		if (measured.size === 0) return this.render(width);
@@ -908,7 +938,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		const targeted = new Set<number>();
 		for (const target of targets) {
 			if (target === this) return this.#renderVirtualViewport(width, request);
-			const ownerIndex = this.children.findIndex(child => componentContains(child, target));
+			const ownerIndex = this.#ownerIndex(target);
 			if (ownerIndex < 0) return this.#renderVirtualViewport(width, request);
 			targeted.add(ownerIndex);
 		}
@@ -1116,9 +1146,11 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			this.#virtualLayoutDirtyFrom = 0;
 		}
 		let changedFrom = this.#virtualEntries.length;
-		for (let index = this.#virtualLayoutDirtyFrom; index < this.#virtualEntries.length; index++) {
-			if (this.#measureVirtualLayout(index, width)) changedFrom = Math.min(changedFrom, index);
-		}
+		withCodeHighlightingDisabledForLayout(() => {
+			for (let index = this.#virtualLayoutDirtyFrom; index < this.#virtualEntries.length; index++) {
+				if (this.#measureVirtualLayout(index, width)) changedFrom = Math.min(changedFrom, index);
+			}
+		});
 		this.#virtualLayoutDirtyFrom = this.#virtualEntries.length;
 		if (
 			changedFrom < this.#virtualEntries.length ||
@@ -1156,6 +1188,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			};
 		});
 		this.#virtualEntries = next;
+		this.#directChildIndices = new Map(children.map((component, index) => [component, index]));
+		this.#targetOwnerIndices = new WeakMap();
 		this.#virtualLayoutDirtyFrom = 0;
 		this.#virtualStructureDirty = false;
 		if (this.#measuredVirtualEntries.size > 0) {
