@@ -23,7 +23,7 @@ import type { KeyId } from "../../config/keybindings";
 import type { BtwThreadPhase } from "../../session/btw-manager";
 import type { BtwThreadModelRef } from "../../session/btw-thread";
 import type { EphemeralConversationStatus, EphemeralConversationTurn } from "../../session/ephemeral-conversation";
-import { sanitizeEphemeralAssistantForPromotion } from "../../session/messages";
+import { sanitizeAssistantForReparentedHistory } from "../../session/messages";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
 import { renderWorkspacePaneHeader } from "../shared";
 import { theme } from "../theme/theme";
@@ -188,10 +188,11 @@ export class BtwConversationPane
 	}
 
 	wantsAppViewportHover(): boolean {
-		return this.#threads.length > 0;
+		return this.#threads.length > 0 || this.#pane.wantsAppViewportHover();
 	}
 
 	clearAppViewportHover(): void {
+		this.#pane.clearAppViewportHover();
 		if ((!this.#previewKey && !this.#railPeek && !this.#newThreadHovered) || this.#hoverClearTimer) return;
 		this.#hoverClearTimer = setTimeout(() => this.#clearAppViewportHoverNow(), RAIL_PEEK_LEAVE_GRACE_MS);
 		this.#hoverClearTimer.unref();
@@ -204,6 +205,10 @@ export class BtwConversationPane
 	setViewportHeight(height: number): void {
 		this.#height = Math.max(1, Math.trunc(height));
 		this.#pane.setViewportHeight(this.#height);
+	}
+
+	setTextSelectionActive(active: boolean): void {
+		this.#pane.setTextSelectionActive(active);
 	}
 
 	update(threads: readonly BtwThreadView[], selectedKey: string | undefined): void {
@@ -606,7 +611,7 @@ export class BtwConversationPane
 				completedTurn.timestamp === this.#renderedRequestTimestamp
 			) {
 				updatedStream = this.#pane.finalizeStreamingAssistant(
-					sanitizeEphemeralAssistantForPromotion(completedTurn.assistantMessage, completedTurn.replyText),
+					sanitizeAssistantForReparentedHistory(completedTurn.assistantMessage),
 				);
 			}
 		}
@@ -632,7 +637,7 @@ export class BtwConversationPane
 				timestamp: turn.timestamp,
 			});
 			if (turn.intermediateMessages) messages.push(...turn.intermediateMessages);
-			messages.push(sanitizeEphemeralAssistantForPromotion(turn.assistantMessage, turn.replyText));
+			messages.push(sanitizeAssistantForReparentedHistory(turn.assistantMessage));
 		}
 		if (thread.request) {
 			messages.push({
@@ -661,6 +666,7 @@ export class BtwConversationPane
 		this.#options.onPersistDraft(this.#selectedKey);
 	}
 	#clearAppViewportHoverNow(): void {
+		this.#pane.clearAppViewportHover();
 		if (this.#hoverClearTimer) {
 			clearTimeout(this.#hoverClearTimer);
 			this.#hoverClearTimer = undefined;

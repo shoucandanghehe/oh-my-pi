@@ -578,6 +578,15 @@ Current no-op methods in this controller:
 host terminal: it has the same questions, result, timeout, and abort contract as
 `askDialog`, but never sends a guest UI request.
 
+`ExtensionAskDialogQuestion.allowCustomInput` defaults to `true`. Set it to
+`false` to remove `Other (type your own)` from both the host dialog and
+collaboration guest prompts.
+
+Check `ctx.ui.askDialogCapabilities?.allowCustomInput === true` before relying
+on that field. An absent capability means the runtime may ignore
+`allowCustomInput`, including older hosts that already expose `askDialog` or
+`localAskDialog`.
+
 ### RPC mode (`rpc-mode.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:

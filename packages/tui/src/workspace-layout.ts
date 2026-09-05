@@ -316,6 +316,12 @@ export class WorkspaceModel {
 		return true;
 	}
 
+	/** Replace the complete split tree after a caller has validated new geometry. */
+	replaceLayout(root: WorkspaceLayoutNode): void {
+		validateLayoutNode(root, new Set(), new Set());
+		this.#root = normalizeNode(root);
+	}
+
 	movePane(paneId: string, targetPaneId: string, edge: WorkspaceEdge): boolean {
 		if (paneId === targetPaneId || !this.hasPane(paneId) || !this.hasPane(targetPaneId)) return false;
 		const removal = removePane(this.#root, paneId);
@@ -406,6 +412,7 @@ function allocateSizes(
 		const basis = minimums.some(minimum => minimum > 0) ? minimums : weights;
 		return { sizes: apportion(total, basis), constrained: true };
 	}
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const sizes = new Array<number>(weights.length).fill(0);
 	const active = new Set(weights.map((_weight, index) => index));
 	let remaining = total;
@@ -506,6 +513,101 @@ export function layoutWorkspace(
 
 	place(root, normalizedRect);
 	return { panes, splits, sashes, constrained };
+}
+
+function buildBalancedGridLayout(
+	paneIds: readonly string[],
+	groupCount: number,
+	outerAxis: WorkspaceAxis,
+	extraAtStart: boolean,
+): WorkspaceLayoutNode {
+	const baseGroupSize = Math.floor(paneIds.length / groupCount);
+	const remainder = paneIds.length % groupCount;
+	const innerAxis: WorkspaceAxis = outerAxis === "x" ? "y" : "x";
+	const prefix = `workspace-reflow-${outerAxis}-${groupCount}-${extraAtStart ? "start" : "end"}`;
+	let splitSequence = 0;
+	let offset = 0;
+	const groups: WorkspaceLayoutNode[] = [];
+	for (let index = 0; index < groupCount; index++) {
+		const getsExtra = extraAtStart ? index < remainder : index >= groupCount - remainder;
+		const groupSize = baseGroupSize + (getsExtra ? 1 : 0);
+		const paneNodes: WorkspaceLayoutNode[] = paneIds
+			.slice(offset, offset + groupSize)
+			.map(paneId => ({ kind: "pane", paneId }));
+		offset += groupSize;
+		groups.push(
+			paneNodes.length === 1
+				? paneNodes[0]!
+				: {
+						kind: "split",
+						splitId: `${prefix}-${++splitSequence}`,
+						axis: innerAxis,
+						children: paneNodes.map(node => ({ node, weight: 1 })),
+					},
+		);
+	}
+	if (groups.length === 1) return groups[0]!;
+	return {
+		kind: "split",
+		splitId: `${prefix}-${++splitSequence}`,
+		axis: outerAxis,
+		children: groups.map(node => ({ node, weight: 1 })),
+	};
+}
+
+function findWorkspaceReflowLayout(
+	panes: readonly WorkspacePane[],
+	width: number,
+	height: number,
+): WorkspaceLayoutNode | undefined {
+	if (panes.length === 0) return undefined;
+	const paneById = new Map(panes.map(pane => [pane.paneId, pane]));
+	const paneIds = panes.map(pane => pane.paneId);
+	const constraints = (paneId: string): WorkspacePaneConstraints => {
+		const pane = paneById.get(paneId);
+		return { minWidth: pane?.minWidth ?? 10, minHeight: pane?.minHeight ?? 3 };
+	};
+	let best:
+		| {
+				root: WorkspaceLayoutNode;
+				minimumScale: number;
+				anchorArea: number;
+		  }
+		| undefined;
+	for (const outerAxis of ["x", "y"] as const) {
+		for (let groupCount = 1; groupCount <= paneIds.length; groupCount++) {
+			const remainder = paneIds.length % groupCount;
+			for (const extraAtStart of remainder === 0 ? [true] : [true, false]) {
+				const root = buildBalancedGridLayout(paneIds, groupCount, outerAxis, extraAtStart);
+				const frame = layoutWorkspace(root, { x: 0, y: 0, width, height }, constraints);
+				if (frame.constrained) continue;
+				let minimumScale = Number.POSITIVE_INFINITY;
+				for (const pane of panes) {
+					const paneRect = frame.panes.get(pane.paneId);
+					if (!paneRect) {
+						minimumScale = 0;
+						break;
+					}
+					const minimum = constraints(pane.paneId);
+					minimumScale = Math.min(
+						minimumScale,
+						paneRect.width / minimum.minWidth,
+						paneRect.height / minimum.minHeight,
+					);
+				}
+				const anchorRect = frame.panes.get(paneIds[0]!);
+				const anchorArea = anchorRect ? anchorRect.width * anchorRect.height : 0;
+				if (
+					!best ||
+					minimumScale > best.minimumScale ||
+					(minimumScale === best.minimumScale && anchorArea > best.anchorArea)
+				) {
+					best = { root, minimumScale, anchorArea };
+				}
+			}
+		}
+	}
+	return best?.root;
 }
 
 interface WorkspaceResizeDrag {
@@ -688,6 +790,27 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		if (!this.#model.splitPane(targetPaneId, pane.paneId, edge)) return false;
 		this.#panes.set(pane.paneId, pane);
 		this.#targetPaneCache = new WeakMap();
+		this.focusPane(pane.paneId);
+		return true;
+	}
+
+	/**
+	 * Rebuild the whole split tree to insert a pane when no current rectangle
+	 * can be split in place. Existing components, focus targets, and scroll
+	 * state survive; only geometry and equalized split weights change.
+	 */
+	reflowPane(pane: WorkspacePane): boolean {
+		if (this.#panes.has(pane.paneId) || !this.#frame || this.#renderWidth <= 0 || this.#renderHeight <= 0) {
+			return false;
+		}
+		const root = findWorkspaceReflowLayout([...this.#panes.values(), pane], this.#renderWidth, this.#renderHeight);
+		if (!root) return false;
+		this.#model.replaceLayout(root);
+		this.#panes.set(pane.paneId, pane);
+		this.#targetPaneCache = new WeakMap();
+		this.#drag = undefined;
+		this.#dropTarget = undefined;
+		this.#dragSnapshot = undefined;
 		this.focusPane(pane.paneId);
 		return true;
 	}

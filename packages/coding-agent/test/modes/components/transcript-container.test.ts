@@ -146,11 +146,16 @@ class ReplacementBlock extends Block {
 
 class CountingFinalizedBlock implements Component {
 	renderCount = 0;
+	measureCount = 0;
 
 	constructor(readonly rows: readonly string[]) {}
 
 	isTranscriptBlockFinalized(): boolean {
 		return true;
+	}
+	measureRows(): number {
+		this.measureCount++;
+		return this.rows.length;
 	}
 
 	render(): readonly string[] {
@@ -598,32 +603,38 @@ describe("TranscriptContainer virtual viewport", () => {
 		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(80);
 	});
 
-	it("warms exact virtual heights in the background before later scrolling", async () => {
+	it("publishes an exact stable scrollbar range before heterogeneous history is visited", () => {
 		const blocks = Array.from(
-			{ length: 2_000 },
+			{ length: 100 },
 			(_value, index) =>
 				new CountingFinalizedBlock(
-					Array.from({ length: (index % 9) + 1 }, (_rowValue, row) => `history-${index}-${row}`),
+					Array.from({ length: index < 90 ? 8 : 1 }, (_rowValue, row) => `history-${index}-${row}`),
 				),
 		);
 		const transcript = new TranscriptContainer();
 		for (const block of blocks) transcript.addChild(block);
+		transcript.prepareVirtualStructure();
 
-		transcript.renderVirtualViewport(80, { rows: 40, offset: 0, followBottom: true });
-		await transcript.warmVirtualViewport(80);
-		const exactTotalRows = blocks.reduce((total, block) => total + block.rows.length, blocks.length - 1);
-		const rendersBeforeScroll = blocks.reduce((total, block) => total + block.renderCount, 0);
+		const tail = transcript.renderVirtualViewport(80, {
+			rows: 10,
+			offset: 0,
+			followBottom: true,
+		});
+		const requestedOffset = Math.floor((tail.estimatedTotalRows - 10) / 2);
 		const middle = transcript.renderVirtualViewport(80, {
-			rows: 40,
-			offset: Math.floor(exactTotalRows / 2),
+			rows: 10,
+			offset: requestedOffset,
 			followBottom: false,
 		});
 
-		expect(middle.estimatedTotalRows).toBe(exactTotalRows);
-		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBe(rendersBeforeScroll);
+		expect(tail.estimatedTotalRows).toBe(829);
+		expect(middle.estimatedTotalRows).toBe(tail.estimatedTotalRows);
+		expect(middle.offset).toBe(requestedOffset);
+		expect(blocks.reduce((total, block) => total + block.measureCount, 0)).toBe(100);
+		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(40);
 	});
 
-	it("pauses background height warmup while the user scrolls away from the bottom", async () => {
+	it("keeps background work viewport-bound while following a large transcript tail", async () => {
 		const blocks = Array.from(
 			{ length: 2_000 },
 			(_value, index) =>
@@ -635,13 +646,12 @@ describe("TranscriptContainer virtual viewport", () => {
 		for (const block of blocks) transcript.addChild(block);
 
 		transcript.renderVirtualViewport(80, { rows: 40, offset: 0, followBottom: true });
-		transcript.renderVirtualViewport(80, { rows: 40, offset: 10_000, followBottom: false });
-		const rendersAfterScroll = blocks.reduce((total, block) => total + block.renderCount, 0);
+		const rendersAfterFrame = blocks.reduce((total, block) => total + block.renderCount, 0);
 		const { promise, resolve } = Promise.withResolvers<void>();
 		setImmediate(resolve);
 		await promise;
 
-		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBe(rendersAfterScroll);
+		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBe(rendersAfterFrame);
 	});
 
 	it("adopts a prepared large transcript without a cold first-frame rebuild", () => {
@@ -669,7 +679,7 @@ describe("TranscriptContainer virtual viewport", () => {
 		expect(frameCost).toBeLessThan(10);
 	});
 
-	it("does not add a phantom separator after warmed empty history", () => {
+	it("does not add a phantom separator after measuring empty history", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new CountingFinalizedBlock([]));
 		transcript.renderVirtualViewport(40, { rows: 5, offset: 0, followBottom: true });

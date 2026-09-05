@@ -431,10 +431,7 @@ export function decodeStreamedToolArgs(partialJson: string, source: StreamedTool
 }
 
 /** Resolve the args a transcript tool card displays from the same raw stream state as the live reveal. */
-export function displayArgsForToolCall(
-	toolCall: ToolCall,
-	renderToolName = toolCall.name,
-): Record<string, unknown> {
+export function displayArgsForToolCall(toolCall: ToolCall, renderToolName = toolCall.name): Record<string, unknown> {
 	const partialJson = getStreamingPartialJson(toolCall);
 	if (!partialJson) return toolCall.arguments;
 	const rawInput = toolCall.customWireName !== undefined;
