@@ -168,7 +168,10 @@ function makeViewer(file: string, remote?: AgentHubRemote, ui?: TUI, options?: V
 		remote,
 		expandKeys: ["ctrl+o"],
 		hubKeys: options?.hubKeys ?? ["ctrl+s"],
-		createStatusLine: () => ({ getTopBorder: () => ({ content: " π model ", width: 9 }), dispose: () => {} }),
+		createStatusLine: () => ({
+			getTopBorder: () => ({ content: " π model ", width: 9, revision: 0 }),
+			dispose: () => {},
+		}),
 		lifecycle: options?.sendable
 			? () => {
 					throw new Error("Lifecycle is not exercised by composer rendering");

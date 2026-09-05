@@ -44,10 +44,17 @@ export class BtwController {
 	}
 
 	canContinue(): boolean {
+		if (this.#branchInFlight || this.#managerSessionId !== this.ctx.sessionManager.getSessionId()) return false;
 		const request = this.#activeRequest;
 		if (!request?.threadKey || request.component.isBranchable() !== true) return false;
 		const thread = this.#manager?.thread(request.threadKey);
 		return thread?.kind === "quick" && thread.phase === "ready" && thread.turns.length > 0;
+	}
+
+	/** Whether plain `Enter` is currently reserved by the visible inline QuickAsk panel. */
+	handlesContinueKey(): boolean {
+		const request = this.#activeRequest;
+		return request !== undefined && this.ctx.btwContainer.children.includes(request.component) && this.canContinue();
 	}
 
 	canBranch(): boolean {
@@ -60,10 +67,12 @@ export class BtwController {
 		return this.#canPromoteThread(this.#manager?.activeKey);
 	}
 
-	/** Whether plain `b` is currently reserved for a completed or pending branch action. */
+	/** Whether plain `b` is currently reserved by the visible inline QuickAsk panel. */
 	handlesBranchKey(): boolean {
+		const request = this.#activeRequest;
+		if (!request || !this.ctx.btwContainer.children.includes(request.component)) return false;
 		if (this.#branchInFlight) return true;
-		return this.#activeRequest?.component.isBranchable() === true;
+		return request.component.isBranchable() && (request.threadKey ? this.canBranch() : true);
 	}
 
 	#branchUnavailableReason(): string | undefined {
@@ -99,14 +108,25 @@ export class BtwController {
 		return this.#threadCopyText(this.#manager?.activeKey) !== undefined;
 	}
 
-	async handleCopy(): Promise<boolean> {
-		if (!this.canCopy()) return false;
+	/** Whether plain `c` is currently reserved by the visible inline QuickAsk panel. */
+	handlesCopyKey(): boolean {
 		const request = this.#activeRequest;
-		const copyText = request?.threadKey
-			? this.#threadCopyText(request.threadKey)
-			: request
-				? this.#lastCopyText
-				: this.#threadCopyText(this.#manager?.activeKey);
+		return (
+			request !== undefined &&
+			this.ctx.btwContainer.children.includes(request.component) &&
+			request.component.isCopyable()
+		);
+	}
+
+	async handleCopy(threadKey?: string): Promise<boolean> {
+		if (this.#copyInFlight) return false;
+		const copyText = threadKey
+			? this.#threadCopyText(threadKey)
+			: this.#activeRequest?.threadKey
+				? this.#threadCopyText(this.#activeRequest.threadKey)
+				: this.#activeRequest
+					? this.#lastCopyText
+					: this.#threadCopyText(this.#manager?.activeKey);
 		if (copyText === undefined) return false;
 		this.#copyInFlight = true;
 		this.ctx.ui.requestRender();
@@ -159,7 +179,7 @@ export class BtwController {
 				return false;
 			}
 			if (this.#lastSessionId === undefined) return false;
-			return this.#promote({
+			const promoted = await this.#promote({
 				anchorLeafId: this.#lastLeafId,
 				sessionId: this.#lastSessionId,
 				turns: [
@@ -171,6 +191,10 @@ export class BtwController {
 					},
 				],
 			});
+			if (promoted && this.#activeRequest === request) {
+				this.#closeActiveRequest({ abort: false, removeQuick: false });
+			}
+			return promoted;
 		}
 		const activeKey = this.#manager?.activeKey;
 		return activeKey ? this.#promoteThread(activeKey) : false;
@@ -204,6 +228,10 @@ export class BtwController {
 	}
 
 	async start(question: string): Promise<void> {
+		if (this.#branchInFlight) {
+			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
+			return;
+		}
 		if (!this.ctx.workspaceEnabled) {
 			await this.#startLegacy(question);
 			return;
@@ -214,10 +242,6 @@ export class BtwController {
 	#startWorkspace(input: string): void {
 		const manager = this.#managerForCurrentSession();
 		if (!input) {
-			if (manager.children.length === 0) {
-				this.ctx.showStatus("Usage: /btw <question>");
-				return;
-			}
 			this.#openWorkspacePane(manager);
 			return;
 		}
@@ -283,22 +307,30 @@ export class BtwController {
 	#managerForCurrentSession(): BtwManager {
 		const sessionId = this.ctx.sessionManager.getSessionId();
 		if (this.#manager && this.#managerSessionId === sessionId) return this.#manager;
+		this.#closeActiveRequest({ abort: true, removeQuick: true });
 		this.#workspacePane?.abandon();
 		this.#closeWorkspacePane();
 		this.#manager?.abandon();
 		this.#managerSessionId = sessionId;
 		this.#manager = new BtwManager({
 			entries: this.ctx.sessionManager.getEntries(),
-			appendEvent: event => this.ctx.sessionManager.appendCustomEntry(BTW_THREAD_CUSTOM_TYPE, event),
-			createConversation: (modelRef, checkpoint) => {
+			appendEvent: event => {
+				if (this.ctx.sessionManager.getSessionId() !== sessionId) return;
+				this.ctx.sessionManager.appendCustomEntry(BTW_THREAD_CUSTOM_TYPE, event);
+			},
+			createConversation: (modelRef, checkpoint, sideOptions) => {
 				const active = this.ctx.session.model;
 				const model =
 					active?.provider === modelRef.provider && active.id === modelRef.id
 						? active
 						: this.ctx.session.findModel(modelRef.provider, modelRef.id);
 				if (!model) throw new Error(`BTW model is unavailable: ${modelRef.provider}/${modelRef.id}`);
-				return this.ctx.session.createEphemeralConversation(btwConversationPrompt, checkpoint, model);
+				return this.ctx.session.createEphemeralConversation(btwConversationPrompt, checkpoint, model, sideOptions);
 			},
+			createSideOptions: source => ({
+				readOnlyTools: true,
+				shareSummaryWithMain: summary => this.ctx.session.publishBtwSummary({ ...source, summary }),
+			}),
 			nextKey: () => `btw-${Snowflake.next()}`,
 			now: Date.now,
 			onChange: () => this.#updateWorkspacePane(),
@@ -307,7 +339,6 @@ export class BtwController {
 	}
 
 	#openWorkspacePane(manager: BtwManager): boolean {
-		if (!manager.activeKey || !manager.thread(manager.activeKey)) return false;
 		if (!this.#workspacePane) {
 			this.#workspacePane = new BtwConversationPane({
 				ui: this.ctx.ui,
@@ -317,12 +348,10 @@ export class BtwController {
 				proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 				requestRender: () => this.ctx.ui.requestRender(),
 				statusLine: this.ctx.statusLine.createPeer(this.ctx.session),
-				onSubmit: input => {
-					const key = manager.activeKey;
-					return key ? this.#sendThreadInput(key, input) : false;
-				},
-				canCopy: () => this.#threadCopyText(manager.activeKey) !== undefined,
-				onCopy: () => this.handleCopy(),
+				onSubmit: input => this.#submitPaneInput(manager, input),
+				onNewThread: () => this.#createChild(manager, "") !== undefined,
+				canCopy: key => this.#threadCopyText(key) !== undefined,
+				onCopy: key => this.handleCopy(key),
 				onClose: () => this.#closeWorkspacePane(),
 				onDraftChange: (key, text) => {
 					manager.setDraft(key, text);
@@ -333,6 +362,8 @@ export class BtwController {
 				},
 				onCloseThread: key => this.#closeThread(manager, key),
 				onPromoteThread: key => this.#promoteThread(key),
+				onRejectedSubmit: () =>
+					this.ctx.showStatus("A BTW reply is still streaming — wait for it to finish", { dim: true }),
 				onPersistDraft: key => {
 					manager.persistDraft(key);
 				},
@@ -349,7 +380,70 @@ export class BtwController {
 	#closeWorkspacePane(): void {
 		if (!this.#workspacePane) return;
 		this.#workspacePane = undefined;
+		const manager = this.#manager;
+		if (manager && this.#managerSessionId === this.ctx.sessionManager.getSessionId()) {
+			for (const thread of manager.children) {
+				if (
+					thread.phase === "ready" &&
+					thread.request === undefined &&
+					thread.turns.length === 0 &&
+					!thread.draft.trim()
+				) {
+					manager.remove(thread.key, "deleted");
+				}
+			}
+		}
 		this.ctx.closeBtwWorkspacePane();
+	}
+
+	#submitPaneInput(manager: BtwManager, input: string): boolean {
+		if (this.#branchInFlight) {
+			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
+			return false;
+		}
+		const trimmed = input.trim();
+		if (!trimmed) return false;
+		const commandEnd = trimmed.indexOf(" ");
+		const command = commandEnd < 0 ? trimmed : trimmed.slice(0, commandEnd);
+		if (command === "/new") {
+			const question = commandEnd < 0 ? "" : trimmed.slice(commandEnd + 1).trim();
+			return question ? this.#createChildAndSend(manager, question) : this.#createChild(manager, "") !== undefined;
+		}
+		const key = manager.activeKey;
+		return key ? this.#sendThreadInput(key, trimmed) : this.#createChildAndSend(manager, trimmed);
+	}
+
+	#createChild(manager: BtwManager, input: string): string | undefined {
+		if (this.#branchInFlight || manager !== this.#manager) {
+			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
+			return undefined;
+		}
+		const activeKey = manager.activeKey;
+		const active = activeKey ? manager.thread(activeKey) : undefined;
+		if (
+			!input.trim() &&
+			active?.kind === "child" &&
+			active.phase === "ready" &&
+			active.request === undefined &&
+			active.turns.length === 0
+		) {
+			return active.key;
+		}
+		const model = this.ctx.session.model;
+		const leafId = this.ctx.sessionManager.getLeafId();
+		if (!model || !leafId) {
+			this.ctx.showError(!model ? "No active model available for BTW." : "Cannot start BTW before Main has a leaf");
+			return undefined;
+		}
+		return manager.createChild(input, leafId, { provider: model.provider, id: model.id });
+	}
+
+	/** Create a durable child from the pane (no QuickAsk hop) and send its first question. */
+	#createChildAndSend(manager: BtwManager, input: string): boolean {
+		const key = this.#createChild(manager, input);
+		if (!key) return false;
+		this.#sendThreadInput(key, input);
+		return true;
 	}
 
 	#sendThreadInput(key: string, input: string): boolean {
@@ -361,38 +455,14 @@ export class BtwController {
 		const command = commandEnd < 0 ? trimmed : trimmed.slice(0, commandEnd);
 		const argument = commandEnd < 0 ? "" : trimmed.slice(commandEnd + 1).trim();
 		if (command === "/help") {
-			this.ctx.showStatus("BTW actions: /refresh · /steer <message> · /handoff [direction] · /promote");
+			this.ctx.showStatus("BTW actions: /new [question] · /handoff [direction] · /promote · /delete");
 			return false;
 		}
 		if (command === "/clear") {
-			this.ctx.showStatus("Use /refresh to re-freeze Main context, or start a new /btw thread", { dim: true });
+			this.ctx.showStatus("Start a new durable BTW thread with /new", { dim: true });
 			return false;
 		}
-		if (command === "/refresh") {
-			const leafId = this.ctx.sessionManager.getLeafId();
-			if (!leafId || !manager.refresh(key, leafId)) {
-				this.ctx.showError("Cannot refresh a BTW thread while its reply is running");
-				return false;
-			}
-			manager.setDraft(key, "");
-			manager.persistDraft(key);
-			this.ctx.showStatus("Refreshed BTW from the current Main context", { dim: true });
-			return true;
-		}
-		if (command === "/steer") {
-			if (!argument) {
-				this.ctx.showStatus("Usage: /steer <message>");
-				return false;
-			}
-			if (!this.ctx.submitMainMessage(argument, "steer")) {
-				this.ctx.showError("Cannot steer Main before its input loop is ready");
-				return false;
-			}
-			manager.setDraft(key, "");
-			manager.persistDraft(key);
-			this.ctx.showStatus("Steered Main from BTW", { dim: true });
-			return true;
-		}
+		if (command === "/delete") return this.#closeThread(manager, key);
 		if (command === "/handoff") {
 			if (thread.phase === "running" || thread.turns.length === 0) {
 				this.ctx.showError("Wait for a completed BTW reply before handing off to Main");
@@ -402,18 +472,25 @@ export class BtwController {
 				turns: thread.turns.map(turn => ({ input: turn.input, replyText: turn.replyText })),
 				instruction: argument || undefined,
 			});
-			if (!this.ctx.submitMainMessage(handoff, "followUp")) {
-				this.ctx.showError("Cannot hand off before Main's input loop is ready");
-				return false;
-			}
+			void this.ctx.session
+				.sendUserMessage(handoff, { deliverAs: "followUp" })
+				.then(() => this.ctx.showStatus("Handed BTW context to Main", { dim: true }))
+				.catch(error =>
+					this.ctx.showError(
+						`Failed to hand off BTW context: ${error instanceof Error ? error.message : String(error)}`,
+					),
+				);
 			manager.setDraft(key, "");
 			manager.persistDraft(key);
-			this.ctx.showStatus("Handed BTW context to Main", { dim: true });
 			return true;
 		}
 		if (command === "/promote") {
 			void this.#promoteThread(key);
 			return true;
+		}
+		if (thread.phase === "running") {
+			this.ctx.showStatus("A BTW reply is still streaming — wait for it to finish", { dim: true });
+			return false;
 		}
 		manager.setDraft(key, "");
 		this.ctx.terminalActivity.set(thread, "working");
@@ -438,15 +515,26 @@ export class BtwController {
 			error: thread.error,
 			draft: thread.draft,
 			turns: thread.turns,
+			getTool: name => thread.conversation.getTool(name),
 			unread: thread.unread,
+			status: thread.conversation.status,
 			request: thread.request
-				? { input: thread.request.input, text: thread.request.text, timestamp: thread.request.timestamp }
+				? {
+						input: thread.request.input,
+						messages: thread.request.messages,
+						streamMessage: thread.request.streamMessage,
+						timestamp: thread.request.timestamp,
+					}
 				: undefined,
 		}));
 		pane.update(threads, manager.activeKey);
 	}
 
 	#closeThread(manager: BtwManager, key: string): boolean {
+		if (this.#branchInFlight || manager !== this.#manager) {
+			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
+			return false;
+		}
 		if (!manager.remove(key, "deleted")) return false;
 		if (manager.children.length === 0) this.#closeWorkspacePane();
 		return true;
@@ -478,6 +566,12 @@ export class BtwController {
 		const thread = manager?.thread(key);
 		const sessionId = this.#managerSessionId;
 		if (!manager || !thread || !sessionId) return false;
+		// Promotion switches the session, after which `abandon()` must not write
+		// into the new session's journal — so persist every unflushed draft now,
+		// before the branch is attempted. No-op when a draft is already stored.
+		for (const candidate of manager.children) {
+			if (candidate.kind === "child") manager.persistDraft(candidate.key);
+		}
 		const lifecycle: BtwPromotionLifecycle | undefined =
 			thread.kind === "child"
 				? {
@@ -490,9 +584,13 @@ export class BtwController {
 					}
 				: undefined;
 		const promoted = await this.#promote(
-			{ anchorLeafId: thread.anchorLeafId, sessionId, turns: thread.turns },
+			{ anchorLeafId: thread.anchorLeafId, sessionId, turns: [...thread.turns] },
 			lifecycle,
 		);
+		if (this.#manager !== manager) {
+			manager.abandon();
+			return promoted;
+		}
 		if (!promoted) return false;
 		if (thread.kind === "child") manager.completePromotion(key);
 		else manager.remove(key, "promoted");

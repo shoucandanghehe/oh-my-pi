@@ -3,6 +3,7 @@ import {
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
@@ -103,6 +104,11 @@ export class ImageBudget {
 	#applyingReset = false;
 	#lastTotal = 0;
 	#purgeIds: number[] = [];
+	/** Ids present in the previous authoritative frame but absent from the latest. */
+	#authoritativeIds = new Set<number>();
+	#retiredIds: number[] = [];
+	/** Tallest rendered graphic block per immutable image occurrence. */
+	#renderedRows = new Map<number, number>();
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
 	/** Transmit sequences (full base64) to write once, before this frame's placements. */
@@ -205,6 +211,7 @@ export class ImageBudget {
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
+			this.#passIds.push(imageId);
 			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
 			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
@@ -225,6 +232,10 @@ export class ImageBudget {
 	endPass(): boolean {
 		const total = this.#passIds.length;
 		this.#lastTotal = total;
+		const currentIds = new Set(this.#passIds);
+		this.#retiredIds = [...this.#authoritativeIds].filter(id => !currentIds.has(id));
+		this.#authoritativeIds = currentIds;
+		let reset = false;
 		if (this.#applyingReset) {
 			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
 				const id = this.#passIds[i];
@@ -257,8 +268,7 @@ export class ImageBudget {
 
 	/** All image ids believed to be loaded in the terminal store; clears tracking. */
 	takeAllTransmittedIds(): readonly number[] {
-		if (this.#transmitted.size === 0) return EMPTY_IDS;
-		const ids = [...this.#transmitted];
+		const ids = this.#transmitted.size === 0 ? EMPTY_IDS : [...this.#transmitted];
 		this.#transmitted.clear();
 		this.#purgeIds = [];
 		this.#pendingTransmits.clear();
@@ -266,6 +276,36 @@ export class ImageBudget {
 		this.#idToKey.clear();
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
+		this.#authoritativeIds.clear();
+		this.#renderedRows.clear();
+		this.#retiredIds = [];
+		return ids;
+	}
+
+	rememberRenderedRows(imageId: number, rows: number): number {
+		const remembered = Math.max(this.#renderedRows.get(imageId) ?? 0, Math.max(0, Math.trunc(rows)));
+		this.#renderedRows.set(imageId, remembered);
+		return remembered;
+	}
+
+	getRememberedRenderedRows(imageId: number): number {
+		return this.#renderedRows.get(imageId) ?? 0;
+	}
+	/**
+	 * Retire graphics absent from the latest authoritative frame. App-viewport
+	 * callers may safely delete these ids because it has no native scrollback;
+	 * native-scrollback callers deliberately leave them archived.
+	 */
+	takeRetiredIds(): readonly number[] {
+		if (this.#retiredIds.length === 0) return EMPTY_IDS;
+		const ids = this.#retiredIds;
+		this.#retiredIds = [];
+		for (const id of ids) {
+			this.#transmitted.delete(id);
+			this.#deletePlacementState(id);
+			this.#forgetKeyForId(id);
+			this.#renderedRows.delete(id);
+		}
 		return ids;
 	}
 
@@ -406,6 +446,11 @@ export class ImageBudget {
 		return this.#pendingTransmits.size > 0;
 	}
 
+	/** Whether a stable partial pass encountered graphics and needs a full audit. */
+	get stablePassObservedImages(): boolean {
+		return this.#stablePass && this.#passIds.length > 0;
+	}
+
 	/**
 	 * True when the budget has nothing in flight: no live images observed on
 	 * the last pass, no queued transmits, no pending purges, and no stricter
@@ -511,6 +556,9 @@ export class Image implements Component {
 		this.#dimensions = dimensions || getImageDimensions(base64Data, mimeType) || { widthPx: 800, heightPx: 600 };
 		this.#budget = options.budget;
 		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey) : undefined;
+		if (this.#imageId != null && this.#budget !== undefined) {
+			this.#renderedGraphicRows = this.#budget.getRememberedRenderedRows(this.#imageId);
+		}
 	}
 	/** Return source metadata without exposing the encoded image buffer. */
 	debugState(): Record<string, unknown> {
@@ -539,6 +587,10 @@ export class Image implements Component {
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		const needsKittyTransmit =
+			imageProtocol === ImageProtocol.Kitty &&
+			this.#imageId != null &&
+			(this.#budget?.shouldTransmit(this.#imageId) ?? false);
 
 		if (
 			this.#cachedLines &&
@@ -548,7 +600,7 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
+			!needsKittyTransmit
 		) {
 			return this.#cachedLines;
 		}
@@ -561,7 +613,7 @@ export class Image implements Component {
 		if (hasProtocol && !suppressed) {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
-			const needsTransmit = this.#imageId != null && (this.#budget?.shouldTransmit(this.#imageId) ?? false);
+			const needsTransmit = needsKittyTransmit;
 			const result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,
@@ -574,8 +626,8 @@ export class Image implements Component {
 			}
 
 			if (result?.lines) {
-				// Unicode placeholders: the image is already a block of real text-cell
-				// lines (line 0 carries the virtual-placement APC). No cursor moves.
+				// Unicode placeholders are real text-cell lines. Every row carries
+				// the virtual-placement APC so viewport slicing stays self-contained.
 				lines = result.lines;
 			} else if (result) {
 				// Direct placement: return `rows` lines so TUI accounts for image
@@ -604,6 +656,9 @@ export class Image implements Component {
 				lines = this.#fallbackLines();
 			}
 			this.#renderedGraphicRows = Math.max(this.#renderedGraphicRows, lines.length);
+			if (this.#imageId != null && this.#budget !== undefined) {
+				this.#renderedGraphicRows = this.#budget.rememberRenderedRows(this.#imageId, this.#renderedGraphicRows);
+			}
 		} else {
 			lines = this.#fallbackLines();
 		}

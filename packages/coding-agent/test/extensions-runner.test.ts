@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
 	Extension,
+	ExtensionAskDialogResult,
 	ExtensionError,
 	ExtensionServiceTier,
 	ExtensionUIContext,
@@ -1894,6 +1895,99 @@ describe("ExtensionRunner", () => {
 			}
 		});
 
+		it("pauses a tool_call timeout during localAskDialog and forwards the handler signal", async () => {
+			const extensionPath = path.join(tempDir.path(), "local-ask-tool-call.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", async (_event, ctx) => {
+							if (!ctx.ui.localAskDialog) throw new Error("localAskDialog is unavailable");
+							await ctx.ui.localAskDialog([
+								{
+									id: "approval",
+									question: "Approve this exact message?",
+									options: [{ label: "Approve" }, { label: "Reject" }],
+								},
+							]);
+							ctx.ui.notify("Local dialog settled");
+							await Promise.withResolvers().promise;
+						});
+					}
+				`,
+			);
+
+			const result = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const dialog = Promise.withResolvers<ExtensionAskDialogResult | undefined>();
+			const dialogStarted = Promise.withResolvers<void>();
+			const dialogCompleted = Promise.withResolvers<void>();
+			let dialogSignal: AbortSignal | undefined;
+			const localAskDialog: NonNullable<ExtensionUIContext["localAskDialog"]> = async (
+				_questions,
+				dialogOptions,
+			) => {
+				dialogSignal = dialogOptions?.signal;
+				dialogStarted.resolve();
+				return await dialog.promise;
+			};
+			const notify: ExtensionUIContext["notify"] = message => {
+				if (message === "Local dialog settled") dialogCompleted.resolve();
+			};
+			const uiPrototype = Object.create(runner.getUIContext(), {
+				localAskDialog: { value: localAskDialog },
+				notify: { value: notify },
+			});
+			const uiContext: ExtensionUIContext = Object.create(uiPrototype);
+			initializeRunner(runner, uiContext);
+			vi.useFakeTimers();
+			let now = 0;
+			const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => now);
+			try {
+				testSetExtensionHandlerTimeoutMs(25);
+				const tool: AgentTool = {
+					name: "guarded",
+					label: "Guarded",
+					description: "must not execute after the extension gate times out",
+					parameters: Type.Object({}),
+					strict: true,
+					execute: async () => ({ content: [{ type: "text", text: "ran" }] }),
+				};
+				const wrapped = new ExtensionToolWrapper(tool, runner);
+				let settled = false;
+				const execution = wrapped.execute("local-ask-tool-call", {}).finally(() => {
+					settled = true;
+				});
+
+				await dialogStarted.promise;
+				expect(dialogSignal).toBeDefined();
+				now = 100;
+				vi.advanceTimersByTime(100);
+				expect(dialogSignal?.aborted).toBe(false);
+				expect(settled).toBe(false);
+
+				dialog.resolve({ kind: "submit", results: [] });
+				await dialogCompleted.promise;
+				now = 125;
+				vi.advanceTimersByTime(25);
+				await Promise.resolve();
+				await Promise.resolve();
+				vi.advanceTimersByTime(0);
+
+				await expect(execution).rejects.toThrow(`Extension ${extensionPath} timed out after 25ms`);
+				expect(dialogSignal?.aborted).toBe(true);
+			} finally {
+				performanceNow.mockRestore();
+				vi.useRealTimers();
+			}
+		});
+
 		it("charges async custom factory setup to the handler timeout until the dialog is presented", async () => {
 			const extensionPath = path.join(tempDir.path(), "pending-custom-factory.ts");
 			fs.writeFileSync(
@@ -2275,10 +2369,7 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("tool approval lifecycle", () => {
-		const initializeRunner = (
-			runner: ExtensionRunner,
-			select: (title: string, options: string[]) => Promise<string | undefined>,
-		) => {
+		const initializeRunner = (runner: ExtensionRunner, select: ExtensionUIContext["select"]) => {
 			runner.initialize(
 				{
 					sendMessage: () => {},
@@ -2457,6 +2548,40 @@ describe("ExtensionRunner", () => {
 				await execution;
 				expect(order).toEqual([`preview_wait:${toolCallId}`, "preview_ready", "ui_select"]);
 			}
+		});
+
+		it("passes the tool abort signal to the approval dialog", async () => {
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const controller = new AbortController();
+			const executed = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ok" }] }));
+			const select = vi.fn(async (_title, _options, dialogOptions) => {
+				expect(dialogOptions?.signal).toBe(controller.signal);
+				controller.abort(new Error("thread deleted"));
+				return "Approve";
+			});
+			initializeRunner(runner, select);
+
+			const wrapper = new ExtensionToolWrapper({ ...approvalTool, execute: executed }, runner);
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-abort", {}, controller.signal, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				}),
+			).rejects.toThrow("thread deleted");
+
+			expect(executed).not.toHaveBeenCalled();
 		});
 
 		it("emits resolved false when approval is denied", async () => {

@@ -91,7 +91,9 @@ describe("EventController message_update coalescing", () => {
 		vi.advanceTimersByTime(1);
 		await flushMicrotasks();
 
-		expect(ui.requestRender).toHaveBeenCalledTimes(1);
+		expect(ui.requestRender).not.toHaveBeenCalled();
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+		expect(ui.requestComponentRender).toHaveBeenLastCalledWith(ctx.streamingComponent);
 		expect((ctx.streamingMessage as AssistantMessage | undefined)?.content).toEqual([
 			{ type: "text", text: "tok1 tok2 tok3 tok4 tok5" },
 		]);
@@ -101,7 +103,8 @@ describe("EventController message_update coalescing", () => {
 		vi.advanceTimersByTime(33);
 		await flushMicrotasks();
 
-		expect(ui.requestRender).toHaveBeenCalledTimes(2);
+		expect(ui.requestRender).not.toHaveBeenCalled();
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
 		expect((ctx.streamingMessage as AssistantMessage | undefined)?.content).toEqual([
 			{ type: "text", text: "tok1 tok2 tok3 tok4 tok5 tok6 tok7" },
 		]);
