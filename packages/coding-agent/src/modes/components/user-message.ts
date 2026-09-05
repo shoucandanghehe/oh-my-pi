@@ -116,15 +116,11 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 /**
  * Collapsed placeholder for a synthetic (agent-attributed) user input in the
  * file/remote-backed transcript viewer — chiefly the advisor's `Session update`
- * replay dumps, which can each be hundreds of KiB of Markdown and, on cold open,
- * blocked the TUI for tens of seconds while every historical body was laid out
- * before the viewport clip (issue #6308).
+ * replay dumps, which can each be hundreds of KiB. Cold open renders one compact
+ * summary; ctrl+o reveals one viewport-anchored body with full Markdown styling
+ * instead of synchronously laying out every historical replay dump.
  *
- * Collapsed by default: renders one dim summary row (label · size · line count ·
- * expand hint) and builds NO Markdown. The heavy {@link UserMessageComponent} is
- * constructed lazily only when expanded via `ctrl+o`, so blocks above the
- * viewport never pay layout cost until the reader asks to see them. The raw
- * observability data stays intact in `__advisor.jsonl`.
+ * The raw observability data stays intact in `__advisor.jsonl`.
  */
 export class CollapsedSyntheticMessageComponent implements Component {
 	#expanded = false;
@@ -137,6 +133,10 @@ export class CollapsedSyntheticMessageComponent implements Component {
 		private readonly imageLinks?: readonly (string | undefined)[],
 	) {
 		this.#summary = summarizeSyntheticInput(text);
+	}
+
+	get expanded(): boolean {
+		return this.#expanded;
 	}
 
 	/** ctrl+o toggle: reveal/hide the full Markdown body. */

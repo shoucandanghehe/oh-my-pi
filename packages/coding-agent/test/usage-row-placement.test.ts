@@ -170,7 +170,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 			},
 			timestamp: USAGE_TS,
 		} as unknown as AgentMessage;
-		builder.rebuild([{ type: "message", id: "m1", parentId: null, timestamp: new Date(0).toISOString(), message }]);
+		builder.rebuild([message]);
 		const children = builder.container.children;
 		const last = children[children.length - 1]!;
 		const rendered = last.render(120).join("\n");
@@ -216,16 +216,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 			cwd: process.cwd(),
 			requestRender: () => {},
 		});
-		const messages = [...readTurn(), ...readTurn("r2", "src/bar.ts", 2121, SECOND_USAGE_TS)];
-		builder.rebuild(
-			messages.map((message, index) => ({
-				type: "message",
-				id: `m${index}`,
-				parentId: index === 0 ? null : `m${index - 1}`,
-				timestamp: new Date(0).toISOString(),
-				message,
-			})),
-		);
+		builder.rebuild([...readTurn(), ...readTurn("r2", "src/bar.ts", 2121, SECOND_USAGE_TS)]);
 
 		const groups = builder.container.children.filter(
 			(component): component is ReadToolGroupComponent => component instanceof ReadToolGroupComponent,

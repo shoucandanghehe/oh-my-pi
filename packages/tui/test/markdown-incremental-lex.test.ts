@@ -153,6 +153,24 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		assertIdenticalGrowthTransient(TABLE, 60, 7);
 	});
 
+	it("transient render-prefix cache preserves logical text selection across visual wraps", () => {
+		const streaming = new Markdown("", 1, 0, THEME);
+		streaming.transientRenderCache = true;
+		streaming.setText("alpha beta gamma\n\none");
+		streaming.render(9);
+
+		streaming.setText("alpha beta gamma\n\none two three");
+		const lines = streaming.render(9);
+		const separatorRow = lines.findIndex(line => Bun.stripANSI(line).trim() === "");
+		expect(separatorRow).toBeGreaterThan(0);
+		expect(
+			streaming.getTextSelection({
+				start: { row: 0, col: 1 },
+				end: { row: separatorRow - 1, col: 7 },
+			}),
+		).toBe("alpha beta gamma");
+	});
+
 	it("a width change mid-stream still matches a cold render at the new width", () => {
 		const streaming = new Markdown("", 0, 0, THEME);
 		// Warm the stream cache at width 80 across the whole message.

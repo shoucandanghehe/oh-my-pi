@@ -2655,44 +2655,35 @@ describe("AuthStorage codex oauth ranking", () => {
 				addSparkUsage(
 					createCodexUsageReport({
 						accountId: "acct-legacy-meter",
-						primary: { usedFraction: chatPrimary, resetInMs: FIVE_HOUR_MS },
-						secondary: { usedFraction: chatSecondary, resetInMs: WEEK_MS },
-						metadata: {
-							allowed: chatAllowed,
-							limitReached: chatLimitReached,
-							planType: "pro",
-							email: "legacy-meter@example.com",
-							accountId: "acct-legacy-meter",
-						},
-					}),
-					sparkPrimary,
-					sparkSecondary,
-					{ allowed: sparkAllowed, limitReached: sparkLimitReached },
-				),
-			);
-
-			const health = await authStorage.getModelUsageHealth("openai-codex", {
-				modelId,
-				reserveFraction: 0.1,
-			});
-
-			expect(health).toMatchObject({
-				state: "healthy",
-				accounts: [
-					{
-						credentialId: row.id,
-						credentialType: "oauth",
-						state: "healthy",
 					},
-				],
-			});
-			expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.91, 10);
-			expect(store.listCredentialBlocks([row.id]).map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
-				[remainingBlockScope, blockedUntilMs],
-			]);
-			expect(readLegacyCodexSharedBlock(dbPath, row.id)).toBe(blockedUntilMs);
-		},
-	);
+				}),
+				sparkPrimary,
+				sparkSecondary,
+				{ allowed: sparkAllowed, limitReached: sparkLimitReached },
+			),
+		);
+
+		const health = await authStorage.getModelUsageHealth("openai-codex", {
+			modelId,
+			reserveFraction: 0.1,
+		});
+
+		expect(health).toMatchObject({
+			state: "healthy",
+			accounts: [
+				{
+					credentialId: row.id,
+					credentialType: "oauth",
+					state: "healthy",
+				},
+			],
+		});
+		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.91, 10);
+		expect(store.listCredentialBlocks([row.id]).map(block => [block.blockScope, block.blockedUntilMs])).toEqual([
+			[remainingBlockScope, blockedUntilMs],
+		]);
+		expect(readLegacyCodexSharedBlock(dbPath, row.id)).toBe(blockedUntilMs);
+	});
 
 	test("deletes only the recovered persisted Codex meter block", async () => {
 		if (!authStorage || !store?.upsertCredentialBlock || !store.getCredentialBlock) {

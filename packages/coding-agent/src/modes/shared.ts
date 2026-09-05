@@ -1,5 +1,6 @@
 import type { TabBarTheme } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { truncateToWidth } from "../tools/render-utils";
 import { theme } from "./theme/theme";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -13,6 +14,13 @@ export function sanitizeStatusText(text: string): string {
 		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
 		.replace(/ +/g, " ")
 		.trim();
+}
+
+/** Shared focus marker and title treatment for app-viewport workspace panes. */
+export function renderWorkspacePaneHeader(title: string, width: number, focused: boolean, suffix = ""): string {
+	const indicator = focused ? theme.fg("accent", "●") : theme.fg("muted", "○");
+	const styledTitle = focused ? theme.fg("accent", theme.bold(title)) : theme.fg("muted", title);
+	return truncateToWidth(`${indicator} ${styledTitle}${suffix}`, Math.max(1, width));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -1,5 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { type AppViewportScrollRegion, type Component, CURSOR_MARKER, type Focusable, TUI } from "@oh-my-pi/pi-tui";
+import {
+	type AppViewportInputOwner,
+	type AppViewportScrollRegion,
+	type Component,
+	CURSOR_MARKER,
+	type Focusable,
+	type SgrMouseEvent,
+	Text,
+	TUI,
+	WorkspaceLayout,
+	WorkspaceModel,
+} from "@oh-my-pi/pi-tui";
 import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -76,6 +87,23 @@ class CursorLine implements Component, Focusable {
 	}
 }
 
+class WorkspaceInputOwner implements Component, AppViewportInputOwner {
+	readonly mouseEvents: SgrMouseEvent[] = [];
+	hover = false;
+
+	handleAppViewportMouse(event: SgrMouseEvent): boolean {
+		this.mouseEvents.push(event);
+		return true;
+	}
+
+	wantsAppViewportHover(): boolean {
+		return this.hover;
+	}
+
+	render(): readonly string[] {
+		return ["workspace"];
+	}
+}
 function captureWrites(term: VirtualTerminal): string[] {
 	const writes: string[] = [];
 	const realWrite = term.write.bind(term);
@@ -153,6 +181,285 @@ class CountingTranscript implements Component, AppViewportScrollRegion {
 }
 
 describe("TUI app viewport backend", () => {
+	it("delegates normalized mouse events to a workspace input owner", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const term = new VirtualTerminal(40, 8);
+			const owner = new WorkspaceInputOwner();
+			const tui = new TUI(term);
+			tui.addChild(owner);
+			try {
+				tui.start();
+				await flushRender(term);
+				term.sendInput("\x1b[<0;5;3M");
+				expect(owner.mouseEvents).toEqual([
+					{
+						button: 0,
+						col: 4,
+						row: 2,
+						release: false,
+						wheel: null,
+						motion: false,
+						leftClick: true,
+						rightClick: false,
+					},
+				]);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("enables any-motion tracking only while the app viewport owner needs hover", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const term = new VirtualTerminal(40, 8);
+			const writes = captureWrites(term);
+			const owner = new WorkspaceInputOwner();
+			const tui = new TUI(term);
+			tui.addChild(owner);
+			try {
+				tui.start();
+				await flushRender(term);
+				expect(writes.join("")).toContain("\x1b[?1002h\x1b[?1006h");
+				expect(writes.join("")).not.toContain("\x1b[?1003h");
+
+				let writeIndex = writes.length;
+				owner.hover = true;
+				tui.requestRender(true);
+				await flushRender(term);
+				expect(writes.slice(writeIndex).join("")).toContain("\x1b[?1002l\x1b[?1003h");
+
+				writeIndex = writes.length;
+				owner.hover = false;
+				tui.requestRender(true);
+				await flushRender(term);
+				expect(writes.slice(writeIndex).join("")).toContain("\x1b[?1003l\x1b[?1002h");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("routes sash drags through app viewport into a workspace layout", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const term = new VirtualTerminal(20, 6);
+			const model = WorkspaceModel.single("main");
+			model.splitPane("main", "agent", "right");
+			const tui = new TUI(term);
+			const workspace = new WorkspaceLayout({
+				model,
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(true),
+				panes: [
+					{ paneId: "main", title: "Main", component: new WidthFill(), minWidth: 3 },
+					{ paneId: "agent", title: "Agent", component: new WidthFill(), minWidth: 3 },
+				],
+			});
+			tui.addChild(workspace);
+			try {
+				tui.start();
+				await flushRender(term);
+				expect(workspace.frame?.panes.get("main")?.width).toBe(9);
+				expect(workspace.frame?.sashes[0]?.rect).toEqual({ x: 9, y: 0, width: 1, height: 6 });
+
+				term.sendInput("\x1b[<0;10;3M");
+				term.sendInput("\x1b[<32;13;3M");
+				term.sendInput("\x1b[<0;13;3m");
+				await flushRender(term);
+				expect(workspace.frame?.panes.get("main")?.width).toBe(12);
+				expect(workspace.frame?.panes.get("agent")?.width).toBe(6);
+				expect(term.getViewport().some(line => line.includes("│"))).toBe(true);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+	it("preserves a recursive workspace across constrained Windows resizes", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			const term = new VirtualTerminal(40, 8);
+			const model = WorkspaceModel.single("main");
+			model.splitPane("main", "agent", "right");
+			model.splitPane("agent", "worker", "bottom");
+			const tui = new TUI(term);
+			const workspace = new WorkspaceLayout({
+				model,
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(true),
+				panes: [
+					{ paneId: "main", title: "Main", component: new WidthFill(), minWidth: 5, minHeight: 3 },
+					{ paneId: "agent", title: "Agent", component: new WidthFill(), minWidth: 5, minHeight: 3 },
+					{ paneId: "worker", title: "Worker", component: new WidthFill(), minWidth: 5, minHeight: 3 },
+				],
+			});
+			tui.addChild(workspace);
+			try {
+				tui.start();
+				await flushRender(term);
+				expect(workspace.frame?.constrained).toBe(false);
+
+				term.resize(12, 5);
+				await flushRender(term);
+				expect(workspace.frame?.constrained).toBe(true);
+				expect([...workspace.frame!.panes.keys()]).toEqual(["main", "agent", "worker"]);
+
+				term.resize(40, 8);
+				await flushRender(term);
+				expect(workspace.frame?.constrained).toBe(false);
+				expect([...workspace.frame!.panes.keys()]).toEqual(["main", "agent", "worker"]);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("moves keyboard focus to the pane clicked inside a workspace", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const term = new VirtualTerminal(20, 6);
+			const model = WorkspaceModel.single("main");
+			model.splitPane("main", "agent", "right");
+			const main = new CursorLine();
+			const agent = new CursorLine();
+			const tui = new TUI(term);
+			const workspace = new WorkspaceLayout({
+				model,
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(true),
+				focus: component => tui.setFocus(component),
+				panes: [
+					{ paneId: "main", title: "Main", component: main, minWidth: 3 },
+					{ paneId: "agent", title: "Agent", component: agent, minWidth: 3 },
+				],
+			});
+			tui.addChild(workspace);
+			tui.setFocus(main);
+			try {
+				tui.start();
+				await flushRender(term);
+				term.sendInput("\x1b[<0;13;3M");
+				await flushRender(term);
+				expect(tui.getFocused()).toBe(agent);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("keeps drag selection within its starting workspace pane", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const term = new VirtualTerminal(30, 6);
+			const model = WorkspaceModel.single("main");
+			model.splitPane("main", "agent", "right");
+			const tui = new TUI(term);
+			let copiedText = "";
+			tui.onAppViewportSelectionCopy = text => {
+				copiedText = text;
+			};
+			const workspace = new WorkspaceLayout({
+				model,
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(true),
+				panes: [
+					{
+						paneId: "main",
+						title: "Main",
+						component: new StaticLines(["LEFT-ONE", "LEFT-TWO", "LEFT-THREE"]),
+						minWidth: 3,
+					},
+					{
+						paneId: "agent",
+						title: "Agent",
+						component: new StaticLines(["RIGHT-ONE", "RIGHT-TWO", "RIGHT-THREE"]),
+						minWidth: 3,
+					},
+				],
+			});
+			tui.addChild(workspace);
+
+			try {
+				tui.start();
+				await flushRender(term);
+				const mainRect = workspace.frame?.panes.get("main");
+				const agentRect = workspace.frame?.panes.get("agent");
+				if (!mainRect || !agentRect) throw new Error("workspace frame unavailable");
+				const startRow = mainRect.y + 1;
+				const endRow = startRow + 2;
+
+				term.sendInput(`\x1b[<0;${mainRect.x + 1};${startRow + 1}M`);
+				term.sendInput(`\x1b[<32;${agentRect.x + agentRect.width};${endRow + 1}M`);
+				term.sendInput(`\x1b[<0;${agentRect.x + agentRect.width};${endRow + 1}m`);
+				await flushRender(term);
+
+				for (let row = startRow; row <= endRow; row++) {
+					const selectedColumns = term.getViewportRowBackgroundColumns(row);
+					expect(selectedColumns.length).toBeGreaterThan(0);
+					expect(selectedColumns.every(column => column < agentRect.x)).toBe(true);
+				}
+				term.sendInput("\x03");
+				expect(copiedText).toBe("LEFT-ONE\nLEFT-TWO\nLEFT-THREE");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("copies wrapped pane text without visual line breaks or its left gutter", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const term = new VirtualTerminal(20, 6);
+			const model = WorkspaceModel.single("main");
+			model.splitPane("main", "agent", "right");
+			const tui = new TUI(term);
+			let copiedText = "";
+			tui.onAppViewportSelectionCopy = text => {
+				copiedText = text;
+			};
+			const workspace = new WorkspaceLayout({
+				model,
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(true),
+				panes: [
+					{
+						paneId: "main",
+						title: "Main",
+						component: new Text("alpha beta gamma", 1, 0),
+						minWidth: 3,
+					},
+					{
+						paneId: "agent",
+						title: "Agent",
+						component: new StaticLines(["RIGHT-ONE", "RIGHT-TWO", "RIGHT-THREE"]),
+						minWidth: 3,
+					},
+				],
+			});
+			tui.addChild(workspace);
+
+			try {
+				tui.start();
+				await flushRender(term);
+				const mainRect = workspace.frame?.panes.get("main");
+				const agentRect = workspace.frame?.panes.get("agent");
+				if (!mainRect || !agentRect) throw new Error("workspace frame unavailable");
+				const startRow = mainRect.y + 1;
+				const endRow = startRow + 2;
+
+				term.sendInput(`\x1b[<0;${mainRect.x + 1};${startRow + 1}M`);
+				term.sendInput(`\x1b[<32;${agentRect.x + agentRect.width};${endRow + 1}M`);
+				term.sendInput(`\x1b[<0;${agentRect.x + agentRect.width};${endRow + 1}m`);
+				await flushRender(term);
+				term.sendInput("\x03");
+				expect(copiedText).toBe("alpha beta gamma");
+
+				for (let row = startRow; row <= endRow; row++) {
+					const selectedColumns = term.getViewportRowBackgroundColumns(row);
+					expect(selectedColumns.length).toBeGreaterThan(0);
+					expect(selectedColumns.every(column => column > mainRect.x && column < agentRect.x)).toBe(true);
+				}
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
 	it("scrolls without re-rendering transcript components", async () => {
 		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
 			const term = new VirtualTerminal(40, 5);

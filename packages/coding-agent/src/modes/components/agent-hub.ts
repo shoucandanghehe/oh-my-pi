@@ -74,7 +74,7 @@ import {
 	treeContinuation,
 	treeMetadataIndent,
 } from "./agent-hub-renderer";
-import { AgentTranscriptViewer } from "./agent-transcript-viewer";
+import { AgentTranscriptViewer, type AgentTranscriptViewerDeps } from "./agent-transcript-viewer";
 import {
 	bottomBorder,
 	divider,
@@ -174,8 +174,12 @@ export interface AgentHubDeps {
 	proseOnlyThinking?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
+	/** Creates the same StatusLineComponent used by Main for transcript chat panes. Required by openChat. */
+	createStatusLine?: AgentTranscriptViewerDeps["createStatusLine"];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
 	focusAgent?: (id: string) => Promise<void>;
+	/** Open this agent in an app-viewport workspace pane instead of replacing the main session view. */
+	openAgent?: (id: string) => Promise<void>;
 	/** Current main session file; used to seed parked historical subagents after restart. */
 	sessionFile?: string | null;
 	/** Initial top-level projection; slash commands deep-link into this surface. */
@@ -276,7 +280,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
+	#createStatusLine: AgentTranscriptViewerDeps["createStatusLine"] | undefined;
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
+	#openAgent: ((id: string) => Promise<void>) | undefined;
 
 	// Fullscreen transcript overlay opened by openChat(), if any.
 	#transcriptOverlay: OverlayHandle | undefined;
@@ -312,7 +318,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
+		this.#createStatusLine = deps.createStatusLine;
 		this.#focusAgent = deps.focusAgent;
+		this.#openAgent = deps.openAgent;
 
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#scheduleDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#scheduleDataChange()));
@@ -441,6 +449,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	openChat(id: string, entryId?: string): void {
 		if (this.#disposed || !this.#registry.get(id)) return;
 		if (typeof this.#ui.showOverlay !== "function") return;
+		if (!this.#createStatusLine) throw new Error("Agent Hub chat requires a status line factory");
 		this.#closeTranscriptOverlay();
 		this.#notice = undefined;
 		const viewer = new AgentTranscriptViewer({
@@ -448,7 +457,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			initialEntryId: entryId,
 			registry: this.#registry,
 			remote: this.#remote,
-			observers: this.#observers,
 			lifecycle: this.#remote ? undefined : this.#lifecycle,
 			ui: this.#ui,
 			getTool: this.#getTool,
@@ -458,10 +466,11 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,
 			expandKeys: this.#expandKeys,
+			createStatusLine: this.#createStatusLine,
 			hubKeys: this.#hubKeys,
 			requestRender: this.#requestRender,
 			onClose: () => this.#closeTranscriptOverlay(viewer),
-			onHubClose: () => {
+			onHubToggle: () => {
 				if (this.#disposed) return;
 				this.#closeTranscriptOverlay(viewer);
 				if (!this.#disposed) this.#onDone();
@@ -1463,23 +1472,35 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	}
 
 	/**
-	 * Enter on a row: focus the main view on the agent's live session and close
-	 * the hub. The transcript then renders through the regular session pipeline —
-	 * exact parity by construction. Collab guests (no local sessions) keep the
-	 * in-hub chat view.
+	 * Enter on a row: prefer an external workspace-pane adapter when present.
+	 * Otherwise focus a local live session in the main view; advisors and remote
+	 * agents retain the fullscreen transcript viewer fallback.
 	 */
 	#activateAgent(ref: AgentRef): void {
 		this.#notice = undefined;
+		if (this.#openAgent) {
+			this.#activateAndClose(this.#openAgent, ref.id);
+			return;
+		}
 		const focusAgent = this.#focusAgent;
 		// Aborted agents and advisor refs are read-only transcripts with no
 		// revivable session; open the in-hub viewer instead of failing ensureLive.
 		if (ref.kind === "advisor" || ref.status === "aborted" || this.#remote || !focusAgent) {
-			this.openChat(ref.id);
+			try {
+				this.openChat(ref.id);
+			} catch (error) {
+				this.#notice = error instanceof Error ? error.message : String(error);
+				this.#requestRender();
+			}
 			return;
 		}
+		this.#activateAndClose(focusAgent, ref.id);
+	}
+
+	#activateAndClose(action: (id: string) => Promise<void>, id: string): void {
 		void (async () => {
 			try {
-				await focusAgent(ref.id); // ensureLive inside revives parked agents; no parking, no session files
+				await action(id);
 				this.#onDone();
 			} catch (error) {
 				this.#notice = error instanceof Error ? error.message : String(error);
