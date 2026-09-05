@@ -108,6 +108,8 @@ export interface RuntimeChildrenOptions {
 	 * to the roots below the transcript in render order.
 	 */
 	readonly nativeDock?: readonly Component[];
+	/** Preserve bootstrap/classic root chrome, or let a full-height runtime own the terminal. */
+	readonly chrome?: "preserve" | "omit";
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -276,6 +278,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// rediscovered from whatever chrome is expanded when the height changes.
 	#transientChrome: ReadonlySet<Component> = new Set();
 	#transientChromeFloor: number | undefined;
+	#runtimeChrome: "preserve" | "omit" = "preserve";
 	#lastInterruptAt = 0;
 	/** Last described surface; its arrays are reused while their children are unchanged. */
 	#nativeSurface: NativeSurface = { main: [], dock: [] };
@@ -896,13 +899,15 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#startupStatus = undefined;
 	}
 
-	/** Mount or replace session-aware root children while preserving the header and status hosts. */
+	/** Mount or replace session-aware root children. */
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;
 		this.#transientChrome = new Set(options.transient);
 		this.#transientChromeFloor = undefined;
 		this.#nativeDock = options.nativeDock;
+		const chrome = options.chrome ?? "preserve";
 		this.ui.removeChild(this.#statusHost);
+		if (chrome === "omit") this.ui.removeChild(this.#header);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);
 		} else {
@@ -911,8 +916,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#runtimeMounted = true;
 		}
 		this.#runtimeChildren = children;
+		if (chrome === "preserve" && this.#runtimeChrome === "omit") this.ui.addChild(this.#header);
 		for (const child of children) this.ui.addChild(child);
-		this.ui.addChild(this.#statusHost);
+		if (chrome === "preserve") this.ui.addChild(this.#statusHost);
+		this.#runtimeChrome = chrome;
 		this.ui.requestRender();
 	}
 

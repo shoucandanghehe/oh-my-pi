@@ -17,12 +17,14 @@ interface BtwPanelComponentOptions {
 	tui: TUI;
 	canBranch?: () => boolean;
 	canFollowUp?: () => boolean;
+	continueToThread?: boolean;
 }
 
 export class BtwPanelComponent extends OverlayPanel {
 	#tui: TUI;
 	#canBranch: (() => boolean) | undefined;
 	#canFollowUp: (() => boolean) | undefined;
+	#continueToThread: boolean;
 	#state: BtwPanelState = "running";
 	#answer = "";
 	#errorMessage: string | undefined;
@@ -47,6 +49,7 @@ export class BtwPanelComponent extends OverlayPanel {
 			footer: () => this.#footerLine(),
 		}));
 		this.addChild(this.#content);
+		this.#continueToThread = options.continueToThread === true;
 		this.#rebuild();
 	}
 
@@ -203,12 +206,16 @@ export class BtwPanelComponent extends OverlayPanel {
 			case "running":
 				return theme.fg("muted", `${esc} to cancel`);
 			case "complete": {
+				if (!this.isCopyable()) return theme.fg("muted", `${esc} dismiss`);
 				const actions: string[] = [];
+				if (this.#continueToThread) actions.push(`${formatKeyHint("enter")} continue`);
 				const copyKey = formatKeyHint("c");
-				if (this.isCopyable()) actions.push(this.#copied ? `${copyKey} to copy again` : `${copyKey} to copy`);
+				if (this.isCopyable()) actions.push(this.#copied ? `${copyKey} to copy again` : `${copyKey} copy`);
 				if (this.#canFollowUp?.()) actions.push(`${formatKeyHint("f")} to follow up`);
-				if (this.#canBranch?.() ?? this.isBranchable()) actions.push(`${formatKeyHint("b")} to branch`);
-				actions.push(`${esc} to close`);
+				if (this.#canBranch?.() ?? this.isBranchable()) {
+					actions.push(`${formatKeyHint("b")} ${this.#continueToThread ? "promote to chat" : "branch to chat"}`);
+				}
+				actions.push(`${esc} dismiss`);
 				if (this.#copied) {
 					return `${theme.fg("success", "✓ Copied to clipboard")}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
 				}
