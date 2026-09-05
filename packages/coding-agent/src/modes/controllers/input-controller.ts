@@ -82,14 +82,6 @@ export function shouldSkipHistory(slashText: string): boolean {
 	return false;
 }
 
-interface Expandable {
-	setExpanded(expanded: boolean): void;
-}
-
-function isExpandable(obj: unknown): obj is Expandable {
-	return typeof obj === "object" && obj !== null && "setExpanded" in obj && typeof obj.setExpanded === "function";
-}
-
 /** Minimal contract for any component that can receive a paste payload directly. */
 interface PasteTarget {
 	pasteText(text: string): void;
@@ -2158,13 +2150,7 @@ export class InputController {
 
 	setToolsExpanded(expanded: boolean): void {
 		this.ctx.toolOutputExpanded = expanded;
-		for (const child of this.ctx.chatContainer.children) {
-			if (isExpandable(child)) {
-				child.setExpanded(expanded);
-			}
-		}
-		// Toggling expansion mutates every live block; blocks already committed to
-		// terminal history stay at their committed presentation.
+		this.ctx.chatContainer.setExpanded(expanded);
 		this.ctx.ui.requestRender(true);
 	}
 

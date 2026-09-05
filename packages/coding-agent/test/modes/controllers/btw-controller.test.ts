@@ -258,6 +258,169 @@ describe("BtwConversationPane", () => {
 		pane.dispose();
 	});
 
+	it("updates the current stream block without rebuilding the displayed thread", () => {
+		const requestRender = vi.fn();
+		const requestComponentRender = vi.fn();
+		const ui = { requestRender, requestComponentRender } as unknown as TUI;
+		const pane = new BtwConversationPane({
+			ui,
+			cwd: process.cwd(),
+			expandKeys: [],
+			hideThinkingBlock: () => false,
+			proseOnlyThinking: () => false,
+			requestRender,
+			statusLine: {
+				setRuntimeStatus: vi.fn(),
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: vi.fn(),
+			},
+			onSubmit: () => true,
+			onNewThread: () => true,
+			canCopy: () => false,
+			onCopy: async () => false,
+			onClose: vi.fn(),
+			onDraftChange: vi.fn(),
+			onPersistDraft: vi.fn(),
+			onSelectThread: () => true,
+			onMarkRead: vi.fn(),
+			onCloseThread: () => true,
+			onPromoteThread: async () => true,
+		});
+		const thread: BtwThreadView = {
+			key: "stream",
+			title: "Streaming",
+			phase: "running",
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			error: undefined,
+			draft: "",
+			unread: 0,
+			turns: [],
+			request: {
+				input: "Explain",
+				messages: [],
+				streamMessage: createAssistantMessage("partial one"),
+				timestamp: 1,
+			},
+		};
+		try {
+			pane.setViewportHeight(12);
+			pane.update([thread], thread.key);
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("partial one");
+			requestRender.mockClear();
+			requestComponentRender.mockClear();
+
+			pane.update(
+				[
+					{
+						...thread,
+						request: {
+							...thread.request!,
+							streamMessage: createAssistantMessage("partial two"),
+						},
+					},
+				],
+				thread.key,
+			);
+
+			expect(requestComponentRender).toHaveBeenCalled();
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("partial two");
+		} finally {
+			pane.dispose();
+		}
+	});
+
+	it("keeps the scrolled viewport anchored when a stream completes", () => {
+		const requestRender = vi.fn();
+		const ui = { requestRender, requestComponentRender: vi.fn() } as unknown as TUI;
+		const pane = new BtwConversationPane({
+			ui,
+			cwd: process.cwd(),
+			expandKeys: [],
+			hideThinkingBlock: () => false,
+			proseOnlyThinking: () => false,
+			requestRender,
+			statusLine: {
+				setRuntimeStatus: vi.fn(),
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: vi.fn(),
+			},
+			onSubmit: () => true,
+			onNewThread: () => true,
+			canCopy: () => false,
+			onCopy: async () => false,
+			onClose: vi.fn(),
+			onDraftChange: vi.fn(),
+			onPersistDraft: vi.fn(),
+			onSelectThread: () => true,
+			onMarkRead: vi.fn(),
+			onCloseThread: () => true,
+			onPromoteThread: async () => true,
+		});
+		const answer = Array.from({ length: 200 }, (_value, index) => String(index + 1)).join("\n");
+		const streamMessage = createAssistantMessage(answer);
+		const turns: Array<BtwThreadView["turns"][number]> = [];
+		const thread: BtwThreadView = {
+			key: "stream",
+			title: "Streaming",
+			phase: "running",
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			error: undefined,
+			draft: "",
+			unread: 0,
+			turns,
+			request: {
+				input: "Count",
+				messages: [],
+				streamMessage,
+				timestamp: 1,
+			},
+		};
+		const visibleNumbers = (): string[] =>
+			pane
+				.render(80)
+				.map(line => Bun.stripANSI(line).match(/^│ (\d+)/)?.[1])
+				.filter((line): line is string => line !== undefined);
+		try {
+			pane.setViewportHeight(12);
+			pane.update([thread], thread.key);
+			pane.render(80);
+			pane.handleInput("\x1b[5~");
+			const scrolledRows = visibleNumbers();
+			expect(Number(scrolledRows[0])).toBeGreaterThan(1);
+
+			const endedThread: BtwThreadView = {
+				...thread,
+				request: {
+					...thread.request!,
+					messages: [streamMessage],
+					streamMessage: undefined,
+				},
+			};
+			pane.update([endedThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+
+			turns.push({
+				input: "Count",
+				assistantMessage: streamMessage,
+				replyText: answer,
+				timestamp: 1,
+			});
+			const completedThread: BtwThreadView = {
+				...endedThread,
+				phase: "ready",
+				turns,
+				request: undefined,
+			};
+			pane.update([completedThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+
+			pane.update([completedThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+		} finally {
+			pane.dispose();
+		}
+	});
+
 	it("defaults the rail closed and selects a hover-previewed thread without pinning it open", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();

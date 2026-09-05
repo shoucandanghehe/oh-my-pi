@@ -557,6 +557,18 @@ interface WorkspacePaneViewport {
 	followBottom: boolean;
 }
 
+interface TextSelectionAware {
+	setTextSelectionActive(active: boolean): void;
+}
+
+function textSelectionAware(component: Component | undefined): TextSelectionAware | undefined {
+	if (!component) return undefined;
+	const candidate = component as Component & Partial<TextSelectionAware>;
+	if (typeof candidate.setTextSelectionActive !== "function") return undefined;
+	// The runtime method check above establishes the optional capability.
+	return candidate as Component & TextSelectionAware;
+}
+
 /**
  * App-viewport workspace compositor with recursively nested panes. The layout
  * tree owns geometry; pane components retain their own content and scroll state.
@@ -579,6 +591,7 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	#dropTarget: WorkspaceDropTarget | undefined;
 	#dragSnapshot: readonly string[] | undefined;
 	#hoveredPaneId: string | undefined;
+	#textSelectionPaneId: string | undefined;
 	#paneRenderCache = new Map<string, { component: Component; width: number; height: number; lines: string[] }>();
 	#targetedPaneTargets: Map<string, Component[]> | undefined;
 	readonly #chromeRenderTarget: Component = { render: () => [] };
@@ -793,6 +806,23 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		if (!paneId || !pane || !rect || row < rect.y + 1) return undefined;
 		if (pane.scroll !== "component") return this.#viewports.get(paneId)?.offset ?? 0;
 		return pane.component.getTextSelectionScrollOffset?.(Math.floor(row) - rect.y - 1);
+	}
+
+	setAppViewportTextSelectionActive(active: boolean, row?: number, col?: number): void {
+		if (!active) {
+			const previous = this.#textSelectionPaneId;
+			this.#textSelectionPaneId = undefined;
+			if (previous) textSelectionAware(this.#panes.get(previous)?.component)?.setTextSelectionActive(false);
+			return;
+		}
+		if (row === undefined || col === undefined) return;
+		const paneId = this.#paneAt(row, col);
+		if (!paneId) return;
+		if (this.#textSelectionPaneId && this.#textSelectionPaneId !== paneId) {
+			textSelectionAware(this.#panes.get(this.#textSelectionPaneId)?.component)?.setTextSelectionActive(false);
+		}
+		this.#textSelectionPaneId = paneId;
+		textSelectionAware(this.#panes.get(paneId)?.component)?.setTextSelectionActive(true);
 	}
 
 	getAppViewportTextSelection(selection: TextSelectionRange): string | undefined {

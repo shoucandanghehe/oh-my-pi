@@ -1969,7 +1969,10 @@ export class StatusLineComponent implements Component {
 			subagentCount: runtimeStatus ? 0 : this.#subagentCount,
 			activeMs: runtimeStatus ? 0 : this.getActiveMs(),
 			turnElapsedMs: runtimeStatus ? null : turnElapsedMs,
-			brandFgAnsi: this.#brandFgAnsi(runtimeStatus ? runtimeStatus.isStreaming : turnElapsedMs !== null, sessionAccentEnabled),
+			brandFgAnsi: this.#brandFgAnsi(
+				runtimeStatus ? runtimeStatus.isStreaming : turnElapsedMs !== null,
+				sessionAccentEnabled,
+			),
 			git: {
 				branch: gitBranch,
 				status: gitStatus,
@@ -2138,7 +2141,8 @@ export class StatusLineComponent implements Component {
 				: (this.session
 						.getAsyncJobSnapshot()
 						?.running.filter(
-							job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
+							job =>
+								job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
 						).length ?? 0);
 			if (runningBackgroundJobs > 0) {
 				const count = placeholders ? "…" : `${runningBackgroundJobs}`;

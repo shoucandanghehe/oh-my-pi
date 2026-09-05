@@ -16,8 +16,8 @@
 import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
-	componentContains,
 	type Component,
+	componentContains,
 	type EditorTopBorder,
 	type Focusable,
 	type MouseRoutable,
@@ -37,7 +37,7 @@ import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
-import { parseSessionEntries } from "../../session/session-loader";
+import { parseSessionEntries, visitEntriesFromFileStream } from "../../session/session-loader";
 import { replaceTabs } from "../../tools/render-utils";
 import { renderWorkspacePaneHeader } from "../shared";
 import { theme } from "../theme/theme";
@@ -79,6 +79,7 @@ export interface AgentTranscriptViewerDeps {
 const POLL_MS = 250;
 
 const SENTINEL_BYTES = 4096;
+const ASYNC_LOCAL_LOAD_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
 interface LocalTranscriptSentinel {
 	offset: number;
@@ -147,6 +148,8 @@ export class AgentTranscriptViewer
 	readonly #pane: ChatTranscriptPane;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
+	#localLoadToken = 0;
+	#localLoading: { path: string; dev: number; ino: number } | undefined;
 	// Remote transcript state (incremental; the host caps each read).
 	#remoteBytes = 0;
 	#remoteFetchInFlight = false;
@@ -252,6 +255,8 @@ export class AgentTranscriptViewer
 	dispose(): void {
 		this.#disposed = true;
 		this.#stopPolling();
+		this.#localLoadToken++;
+		this.#localLoading = undefined;
 		this.#remoteToken++;
 		this.#statusLine?.dispose();
 		this.#pane.dispose();
@@ -286,6 +291,8 @@ export class AgentTranscriptViewer
 			this.#clearLocal("missing");
 			return;
 		}
+		const loading = this.#localLoading;
+		if (loading && loading.path === sessionFile && loading.dev === stat.dev && loading.ino === stat.ino) return;
 		const state = this.#localState;
 		if (state && this.#canAppendLocal(sessionFile, stat, state)) {
 			if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) return;
@@ -298,7 +305,9 @@ export class AgentTranscriptViewer
 	}
 
 	#clearLocal(reason: string): void {
-		if (!this.#localState && this.#localUnavailable === reason) return;
+		if (!this.#localState && !this.#localLoading && this.#localUnavailable === reason) return;
+		this.#localLoadToken++;
+		this.#localLoading = undefined;
 		this.#localState = undefined;
 		this.#localUnavailable = reason;
 		this.#rebuild([]);
@@ -323,28 +332,34 @@ export class AgentTranscriptViewer
 	}
 
 	#loadLocalFull(sessionFile: string, stat: fs.Stats): void {
+		if (stat.size < ASYNC_LOCAL_LOAD_THRESHOLD_BYTES) {
+			this.#localLoadToken++;
+			this.#localLoading = undefined;
+			this.#loadLocalFullSync(sessionFile, stat);
+			return;
+		}
+		const token = ++this.#localLoadToken;
+		this.#localLoading = { path: sessionFile, dev: stat.dev, ino: stat.ino };
+		this.#localState = undefined;
+		this.#localUnavailable = "";
+		this.#rebuild([]);
+		void this.#loadLocalFullAsync(sessionFile, stat, token);
+	}
+
+	#loadLocalFullSync(sessionFile: string, stat: fs.Stats): void {
 		let data: Buffer;
 		try {
 			data = fs.readFileSync(sessionFile);
 		} catch (err) {
-			// Leave #localState unchanged so a transient read error retries next poll.
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
-		// The file may have grown between the earlier `statSync` and this read.
-		// Anchor the tail cursor to what we actually consumed so the next poll's
-		// `#appendLocal` never re-renders bytes already in the rebuilt transcript;
-		// re-stat for mtime/identity so the post-read clock matches what's on disk.
 		let post: fs.Stats;
 		try {
 			post = fs.statSync(sessionFile);
 		} catch {
 			post = stat;
 		}
-		// A reader that opens the file mid-append sees a trailing partial line
-		// (no terminating newline). Carry those bytes as `pending` so the next
-		// poll's `#appendLocal` joins them with the completion bytes instead of
-		// parsing a headless line fragment and dropping the entry.
 		const text = data.toString("utf-8");
 		const lastNewline = text.lastIndexOf("\n");
 		const complete = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
@@ -361,6 +376,59 @@ export class AgentTranscriptViewer
 			sentinels: sentinelsFromBuffer(data),
 		};
 		this.#rebuild(this.#extractMessages(parseSessionEntries(complete)));
+	}
+
+	async #loadLocalFullAsync(sessionFile: string, stat: fs.Stats, token: number): Promise<void> {
+		const batch: SessionMessageEntry[] = [];
+		const decoder = new TextDecoder();
+		let pending = "";
+		try {
+			await visitEntriesFromFileStream(
+				sessionFile,
+				entry => {
+					if (entry.type !== "message") return;
+					batch.push(entry);
+					if (batch.length < 128) return;
+					this.#append(batch.splice(0));
+				},
+				{
+					maxBytes: stat.size,
+					yieldEveryEntries: 128,
+					shouldContinue: () => token === this.#localLoadToken && !this.#disposed,
+					onTrailingPartial: bytes => {
+						pending = decoder.decode(bytes);
+					},
+				},
+			);
+		} catch (err) {
+			if (token === this.#localLoadToken) {
+				this.#localLoading = undefined;
+				logger.debug("transcript viewer: incremental load failed", { err: String(err) });
+			}
+			return;
+		}
+		if (token !== this.#localLoadToken || this.#disposed) return;
+		if (batch.length > 0) this.#append(batch);
+		let sentinels: LocalTranscriptSentinel[];
+		try {
+			sentinels = sentinelsFromFile(sessionFile, stat.size);
+		} catch (err) {
+			this.#localLoading = undefined;
+			logger.debug("transcript viewer: sentinel load failed", { err: String(err) });
+			return;
+		}
+		this.#localState = {
+			path: sessionFile,
+			dev: stat.dev,
+			ino: stat.ino,
+			size: stat.size,
+			mtimeMs: stat.mtimeMs,
+			offset: stat.size,
+			pending,
+			sentinels,
+		};
+		this.#localLoading = undefined;
+		this.deps.requestRender();
 	}
 
 	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState): void {
@@ -558,6 +626,7 @@ export class AgentTranscriptViewer
 			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
+		if (this.#localLoading) return "Loading transcript…";
 		if (!this.deps.registry.get(this.deps.agentId)?.sessionFile) return "No session file available yet.";
 		return "No messages yet.";
 	}

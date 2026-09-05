@@ -40,6 +40,7 @@ function createContext(options: LoaderRecoveryContextOptions = {}) {
 	const ctx = createInteractiveModeContext({
 		ui: { terminal: { setProgress } },
 		terminalActivity,
+
 		btwContainer: {
 			clear: vi.fn(),
 			addChild: vi.fn(),

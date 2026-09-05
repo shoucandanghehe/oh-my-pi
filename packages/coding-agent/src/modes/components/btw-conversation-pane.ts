@@ -125,6 +125,13 @@ export class BtwConversationPane
 	#selectedKey: string | undefined;
 	#previewKey: string | undefined;
 	#displayedKey: string | undefined;
+	#renderedTurns: readonly EphemeralConversationTurn[] | undefined;
+	#renderedTurnsLength = 0;
+	#renderedRequestInput: string | undefined;
+	#renderedRequestTimestamp: number | undefined;
+	#renderedRequestMessages: readonly AgentMessage[] | undefined;
+	#renderedRequestMessagesLength = 0;
+	#renderedStreamMessage: AssistantMessage | undefined;
 	#railOffset = 0;
 	#railCollapsed = true;
 	#railPeek = false;
@@ -550,7 +557,67 @@ export class BtwConversationPane
 			this.#scrollOffsets.set(previousKey, this.#pane.getScrollOffset());
 		this.#displayedKey = displayed?.key;
 		this.#options.statusLine.setRuntimeStatus(displayed?.status, displayed?.title);
-		this.#pane.rebuild(displayed ? this.#messages(displayed) : []);
+		const sameRenderedRequest =
+			displayed !== undefined &&
+			displayed.key === previousKey &&
+			displayed.request !== undefined &&
+			this.#renderedTurns === displayed.turns &&
+			this.#renderedTurnsLength === displayed.turns.length &&
+			this.#renderedRequestInput === displayed.request.input &&
+			this.#renderedRequestTimestamp === displayed.request.timestamp;
+		const transcriptUnchanged =
+			displayed !== undefined &&
+			displayed.key === previousKey &&
+			this.#renderedTurns === displayed.turns &&
+			this.#renderedTurnsLength === displayed.turns.length &&
+			this.#renderedRequestInput === displayed.request?.input &&
+			this.#renderedRequestTimestamp === displayed.request?.timestamp &&
+			this.#renderedRequestMessages === displayed.request?.messages &&
+			this.#renderedRequestMessagesLength === (displayed.request?.messages.length ?? 0) &&
+			this.#renderedStreamMessage === displayed.request?.streamMessage;
+		const streamMessage = displayed?.request?.streamMessage;
+		let updatedStream =
+			sameRenderedRequest &&
+			this.#renderedRequestMessages === displayed.request?.messages &&
+			this.#renderedRequestMessagesLength === (displayed.request?.messages.length ?? 0) &&
+			this.#renderedStreamMessage !== undefined &&
+			streamMessage !== undefined &&
+			this.#pane.updateStreamingAssistant(streamMessage);
+		if (
+			!updatedStream &&
+			sameRenderedRequest &&
+			this.#renderedStreamMessage !== undefined &&
+			streamMessage === undefined
+		) {
+			const finalMessage = displayed.request?.messages.at(-1);
+			updatedStream = finalMessage?.role === "assistant" && this.#pane.finalizeStreamingAssistant(finalMessage);
+		}
+		if (
+			!updatedStream &&
+			displayed !== undefined &&
+			displayed.key === previousKey &&
+			displayed.request === undefined &&
+			this.#renderedRequestInput !== undefined &&
+			this.#renderedTurnsLength + 1 === displayed.turns.length
+		) {
+			const completedTurn = displayed.turns.at(-1);
+			if (
+				completedTurn?.input === this.#renderedRequestInput &&
+				completedTurn.timestamp === this.#renderedRequestTimestamp
+			) {
+				updatedStream = this.#pane.finalizeStreamingAssistant(
+					sanitizeEphemeralAssistantForPromotion(completedTurn.assistantMessage, completedTurn.replyText),
+				);
+			}
+		}
+		if (!updatedStream && !transcriptUnchanged) this.#pane.rebuild(displayed ? this.#messages(displayed) : []);
+		this.#renderedTurns = displayed?.turns;
+		this.#renderedTurnsLength = displayed?.turns.length ?? 0;
+		this.#renderedRequestInput = displayed?.request?.input;
+		this.#renderedRequestTimestamp = displayed?.request?.timestamp;
+		this.#renderedRequestMessages = displayed?.request?.messages;
+		this.#renderedRequestMessagesLength = displayed?.request?.messages.length ?? 0;
+		this.#renderedStreamMessage = displayed?.request?.streamMessage;
 		if (displayed && displayed.key !== previousKey) {
 			this.#pane.setScrollOffset(this.#scrollOffsets.get(displayed.key) ?? "bottom");
 		}

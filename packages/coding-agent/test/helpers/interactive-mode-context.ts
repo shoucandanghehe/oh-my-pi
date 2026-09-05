@@ -35,6 +35,7 @@ import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-a
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -197,6 +198,11 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		terminal: { setProgress: vi.fn() },
 		imageBudget: undefined,
 	};
+	const terminalActivity = new TerminalActivityController({
+		isProgressEnabled: () => false,
+		setProgress: active => ui.terminal.setProgress(active),
+		setTitleState: vi.fn(),
+	});
 	const mount = (content: Component | readonly Component[]): void => {
 		for (const item of Array.isArray(content) ? content : [content as Component]) chatContainer.addChild(item);
 		ui.requestRender();
@@ -215,6 +221,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 			markActivityEnd: vi.fn(),
 			setSession: vi.fn(),
 		},
+		terminalActivity,
 		session,
 		get viewSession() {
 			return viewSession ?? this.session;

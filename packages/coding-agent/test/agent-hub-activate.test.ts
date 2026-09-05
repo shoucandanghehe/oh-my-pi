@@ -197,6 +197,10 @@ describe("Agent hub Enter activation", () => {
 			registry: agents,
 			irc: new IrcBus(agents),
 			focusAgent,
+			createStatusLine: () => ({
+				getTopBorder: () => ({ content: "", width: 0, revision: 0 }),
+				dispose: () => {},
+			}),
 			ui: {
 				requestRender: () => {},
 				requestComponentRender: () => {},
@@ -668,7 +672,13 @@ describe("Agent hub Enter activation", () => {
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
 
 		controller.showAgentHub(new SessionObserverRegistry());
-		expect(overlayOptions).toEqual({ anchor: "bottom-center", width: "100%", maxHeight: "100%", margin: 0, fullscreen: true });
+		expect(overlayOptions).toEqual({
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
 
 		hub!.handleInput("\r");
 		await done.promise;

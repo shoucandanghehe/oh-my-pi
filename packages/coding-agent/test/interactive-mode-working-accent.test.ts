@@ -7,6 +7,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import * as sessionColor from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import { type Component, SPINNER_ADVANCE_MS } from "@oh-my-pi/pi-tui";
 import { adjustHsv, TempDir } from "@oh-my-pi/pi-utils";
 
 type Harness = {
@@ -48,6 +49,8 @@ async function createHarness(sessionName: string): Promise<Harness> {
 	await sessionManager.setSessionName(sessionName, "user");
 	const session = {
 		sessionManager,
+		getAgentId: () => undefined,
+		getAsyncJobSnapshot: () => ({ running: [] }),
 		settings,
 		agent: {
 			state: { tools: [] },
@@ -58,7 +61,7 @@ async function createHarness(sessionName: string): Promise<Harness> {
 		autoCompactionEnabled: true,
 		messages: [],
 		systemPrompt: [],
-		state: { model: undefined },
+		state: { messages: [], model: undefined },
 		isStreaming: true,
 		model: undefined,
 		thinkingLevel: undefined,
@@ -200,6 +203,48 @@ describe("InteractiveMode working activity", () => {
 			expect(stripVTControlCharacters(renderLoader(mode))).toContain("Working");
 		} finally {
 			loader.stop();
+		}
+	});
+});
+
+describe("InteractiveMode working status spinner", () => {
+	it("repaints the editor status border on every working-loader spinner advance", async () => {
+		const { mode } = await createHarness("Animated status");
+		let monotonicNow = 1_000;
+		let wallNow = 1_000;
+		vi.spyOn(performance, "now").mockImplementation(() => monotonicNow);
+		vi.spyOn(Date, "now").mockImplementation(() => wallNow);
+		vi.useFakeTimers();
+		const requestComponentRender = vi.spyOn(mode.ui, "requestComponentRender");
+
+		try {
+			mode.statusLine.markActivityStart();
+			mode.ensureLoadingAnimation();
+			requestComponentRender.mockClear();
+			monotonicNow += SPINNER_ADVANCE_MS;
+			vi.advanceTimersByTime(SPINNER_ADVANCE_MS);
+			const repaintTarget = requestComponentRender.mock.calls
+				.map(([target]) => target)
+				.find(target => target !== mode.loadingAnimation) as Component | undefined;
+			expect(repaintTarget).toBeDefined();
+			expect(repaintTarget).not.toBe(mode.statusLine);
+			const renderStatus = (): string => Bun.stripANSI(mode.statusLine.getTopBorder(118).content);
+			expect(renderStatus()).toContain(" 0s ");
+			requestComponentRender.mockClear();
+
+			wallNow += 2_000;
+			monotonicNow += SPINNER_ADVANCE_MS;
+			vi.advanceTimersByTime(SPINNER_ADVANCE_MS);
+
+			expect(requestComponentRender).toHaveBeenCalledWith(mode.loadingAnimation);
+			expect(requestComponentRender).toHaveBeenCalledWith(repaintTarget);
+			expect(renderStatus()).toContain(" 2s ");
+		} finally {
+			mode.statusLine.resetActiveTime();
+			mode.loadingAnimation?.stop();
+			mode.loadingAnimation = undefined;
+			mode.statusContainer.disposeChildren();
+			vi.useRealTimers();
 		}
 	});
 });

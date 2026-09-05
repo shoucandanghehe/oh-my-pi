@@ -16,8 +16,8 @@ import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import { $flag, getDebugLogPath, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
-import { TuiDebugServer } from "./debug-server";
 import { appendBrailleScrollbar, BRAILLE_SCROLLBAR_BLANK, layoutBrailleScrollbar } from "./components/scroll-view";
+import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
 import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
@@ -217,6 +217,21 @@ export interface TerminalFrameProvider {
 	beginHistoryFlush?(): void;
 }
 
+/** Visible app-owned viewport plus semantic geometry for selection and scroll UI. */
+export interface AppViewportFramePlan {
+	readonly viewport: readonly string[];
+	readonly estimatedTotalRows: number;
+	readonly offset: number;
+	readonly stickyRows: number;
+	readonly cursor: { readonly row: number; readonly col: number } | null;
+	readonly rowMap: readonly number[];
+}
+
+/** Product adapter for app-owned viewport composition; never retires rows into native history. */
+export interface AppViewportFrameProvider {
+	renderAppViewportFrame(viewport: ViewportSize, targets: readonly Component[]): AppViewportFramePlan;
+}
+
 export interface TUIStartOptions {
 	/** Clear saved native scrollback before the first paint. */
 	clearScrollback?: boolean;
@@ -365,12 +380,60 @@ export interface AppViewportInputOwner {
 	getAppViewportTextSelectionRect?(row: number, col: number): AppViewportTextSelectionRect | undefined;
 	getAppViewportTextSelectionScrollOffset?(row: number, col: number): number | undefined;
 	getAppViewportTextSelection?(selection: TextSelectionRange): string | undefined;
+	/** Freeze or release a scrolling text-selection surface. */
+	setAppViewportTextSelectionActive?(active: boolean, row?: number, col?: number): void;
 }
 function isOverlayFocusTarget(owner: Component, component: Component | null): boolean {
 	if (component === owner) return true;
 	if (!component) return false;
 	const candidate = owner as Component & Partial<OverlayFocusOwner>;
 	return candidate.ownsOverlayFocusTarget?.(component) === true;
+}
+
+export interface VirtualViewportRequest {
+	readonly rows: number;
+	readonly offset: number;
+	readonly followBottom: boolean;
+}
+
+export interface VirtualViewportFrame {
+	readonly lines: readonly string[];
+	readonly estimatedTotalRows: number;
+	readonly offset: number;
+}
+
+/** Estimated-height viewport for tall components. */
+export interface VirtualViewportProvider {
+	hasVirtualViewport(): boolean;
+	getEstimatedVirtualRows(width: number): number;
+	renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportFrame;
+	renderVirtualViewportTargeted?(
+		width: number,
+		request: VirtualViewportRequest,
+		targets: readonly Component[],
+	): VirtualViewportFrame;
+	getVirtualTextSelectionInset?(width: number, row: number): number;
+	getVirtualTextSelectionRightInset?(width: number, row: number): number;
+	getVirtualTextSelection?(width: number, selection: TextSelectionRange): string | undefined;
+}
+
+function asVirtualViewportProvider(component: Component): VirtualViewportProvider | undefined {
+	const candidate = component as Component & Partial<VirtualViewportProvider>;
+	return typeof candidate.hasVirtualViewport === "function" &&
+		candidate.hasVirtualViewport() &&
+		typeof candidate.renderVirtualViewport === "function" &&
+		typeof candidate.getEstimatedVirtualRows === "function"
+		? (candidate as VirtualViewportProvider)
+		: undefined;
+}
+
+export interface ViewportTailProvider {
+	renderViewportTail(width: number, maxRows: number): readonly string[];
+}
+
+function asViewportTailProvider(component: Component): ViewportTailProvider | undefined {
+	const candidate = component as Component & Partial<ViewportTailProvider>;
+	return typeof candidate.renderViewportTail === "function" ? (candidate as ViewportTailProvider) : undefined;
 }
 
 /** Optional component-scoped compose seam for wrappers with stable row ledgers. */
@@ -547,7 +610,7 @@ export interface OverlayHandle {
 /**
  * Container - a component that contains other components
  */
-export class Container implements Component, TargetedRender {
+export class Container implements Component, TargetedRender, ViewportTailProvider, VirtualViewportProvider {
 	children: Component[] = [];
 
 	// Memoized concatenation of the children's latest renders. Children are
@@ -685,6 +748,253 @@ export class Container implements Component, TargetedRender {
 		return lines;
 	}
 
+	renderViewportTail(width: number, maxRows: number): readonly string[] {
+		width = Math.max(1, width);
+		let remaining = Math.max(0, Math.trunc(maxRows));
+		if (remaining === 0) return [];
+		const chunks: (readonly string[])[] = [];
+		for (let index = this.children.length - 1; index >= 0 && remaining > 0; index--) {
+			const child = this.children[index]!;
+			const provider = asViewportTailProvider(child);
+			const rendered = provider
+				? provider.renderViewportTail(width, remaining)
+				: child.render(width).slice(-remaining);
+			const visible = rendered.length > remaining ? rendered.slice(-remaining) : rendered;
+			chunks.push(visible);
+			remaining -= visible.length;
+		}
+		const lines: string[] = [];
+		for (let index = chunks.length - 1; index >= 0; index--) lines.push(...chunks[index]!);
+		return lines;
+	}
+
+	hasVirtualViewport(): boolean {
+		return this.children.some(child => asVirtualViewportProvider(child) !== undefined);
+	}
+
+	getEstimatedVirtualRows(width: number): number {
+		width = Math.max(1, width);
+		let rows = 0;
+		for (const child of this.children) {
+			const provider = asVirtualViewportProvider(child);
+			rows += provider ? provider.getEstimatedVirtualRows(width) : child.render(width).length;
+		}
+		return rows;
+	}
+
+	renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportFrame {
+		return this.#renderVirtualViewport(width, request);
+	}
+
+	renderVirtualViewportTargeted(
+		width: number,
+		request: VirtualViewportRequest,
+		targets: readonly Component[],
+	): VirtualViewportFrame {
+		const grouped = new Map<Component, Component[]>();
+		for (const target of targets) {
+			if (target === this) return this.#renderVirtualViewport(width, request);
+			const owner = this.children.find(child => componentContains(child, target));
+			if (!owner) return this.#renderVirtualViewport(width, request);
+			const childTargets = grouped.get(owner);
+			if (childTargets) childTargets.push(target);
+			else grouped.set(owner, [target]);
+		}
+		return this.#renderVirtualViewport(width, request, grouped);
+	}
+
+	getVirtualTextSelectionInset(width: number, row: number): number {
+		return this.#getVirtualTextSelectionInset(width, row, false);
+	}
+
+	getVirtualTextSelectionRightInset(width: number, row: number): number {
+		return this.#getVirtualTextSelectionInset(width, row, true);
+	}
+
+	getVirtualTextSelection(width: number, selection: TextSelectionRange): string | undefined {
+		const layouts = this.#virtualSelectionLayouts(width);
+		const normalized = normalizeTextSelection(selection);
+		const totalRows = layouts.reduce((total, layout) => total + layout.rows, 0);
+		if (normalized.start.row < 0 || normalized.end.row >= totalRows) return undefined;
+		let text = "";
+		let selected = false;
+		for (const layout of layouts) {
+			const endRow = layout.startRow + layout.rows - 1;
+			if (endRow < normalized.start.row || layout.startRow > normalized.end.row) continue;
+			const overlapStart = Math.max(normalized.start.row, layout.startRow);
+			const overlapEnd = Math.min(normalized.end.row, endRow);
+			const localSelection = {
+				start: {
+					row: overlapStart - layout.startRow,
+					col: overlapStart === normalized.start.row ? normalized.start.col : 0,
+				},
+				end: {
+					row: overlapEnd - layout.startRow,
+					col: overlapEnd === normalized.end.row ? normalized.end.col : Number.MAX_SAFE_INTEGER,
+				},
+			};
+			const part = layout.provider
+				? layout.provider.getVirtualTextSelection?.(width, localSelection)
+				: extractComponentTextSelection(layout.component, layout.lines ?? [], localSelection);
+			if (part === undefined) return undefined;
+			if (selected) text += "\n";
+			text += part;
+			selected = true;
+		}
+		return selected ? text : undefined;
+	}
+
+	#getVirtualTextSelectionInset(width: number, row: number, right: boolean): number {
+		const targetRow = Math.trunc(row);
+		if (targetRow < 0) return 0;
+		for (const layout of this.#virtualSelectionLayouts(width)) {
+			if (targetRow < layout.startRow || targetRow >= layout.startRow + layout.rows) continue;
+			const localRow = targetRow - layout.startRow;
+			if (layout.provider) {
+				return right
+					? (layout.provider.getVirtualTextSelectionRightInset?.(width, localRow) ?? 0)
+					: (layout.provider.getVirtualTextSelectionInset?.(width, localRow) ?? 0);
+			}
+			return right
+				? (layout.component.getTextSelectionRightInset?.(localRow) ?? 0)
+				: (layout.component.getTextSelectionInset?.(localRow) ?? 0);
+		}
+		return 0;
+	}
+
+	#virtualSelectionLayouts(width: number): Array<{
+		component: Component;
+		provider: VirtualViewportProvider | undefined;
+		lines: readonly string[] | undefined;
+		startRow: number;
+		rows: number;
+	}> {
+		width = Math.max(1, width);
+		let startRow = 0;
+		return this.children.map(component => {
+			const provider = asVirtualViewportProvider(component);
+			const lines = provider ? undefined : component.render(width);
+			const rows = provider ? provider.getEstimatedVirtualRows(width) : (lines?.length ?? 0);
+			const layout = { component, provider, lines, startRow, rows };
+			startRow += rows;
+			return layout;
+		});
+	}
+
+	#renderVirtualViewport(
+		width: number,
+		request: VirtualViewportRequest,
+		targeted?: ReadonlyMap<Component, readonly Component[]>,
+	): VirtualViewportFrame {
+		width = Math.max(1, width);
+		const viewportRows = Math.max(0, Math.trunc(request.rows));
+		const layouts: Array<{
+			component: Component;
+			provider: VirtualViewportProvider | undefined;
+			lines: readonly string[] | undefined;
+			frame: VirtualViewportFrame | undefined;
+			startRow: number;
+			rows: number;
+		}> = this.children.map(component => {
+			const provider = asVirtualViewportProvider(component);
+			const lines = provider ? undefined : component.render(width);
+			return {
+				component,
+				provider,
+				lines,
+				frame: undefined,
+				startRow: 0,
+				rows: provider ? provider.getEstimatedVirtualRows(width) : (lines?.length ?? 0),
+			};
+		});
+		const renderProvider = (
+			provider: VirtualViewportProvider,
+			component: Component,
+			providerRequest: VirtualViewportRequest,
+		): VirtualViewportFrame =>
+			targeted && provider.renderVirtualViewportTargeted
+				? provider.renderVirtualViewportTargeted(width, providerRequest, targeted.get(component) ?? [])
+				: provider.renderVirtualViewport(width, providerRequest);
+		const rebuild = (): number => {
+			let total = 0;
+			for (const layout of layouts) {
+				layout.startRow = total;
+				total += layout.rows;
+			}
+			return total;
+		};
+		let totalRows = rebuild();
+		let offset = request.followBottom
+			? Math.max(0, totalRows - viewportRows)
+			: Math.max(0, Math.min(Math.trunc(request.offset), Math.max(0, totalRows - viewportRows)));
+
+		for (let pass = 0; pass < 3 && viewportRows > 0; pass++) {
+			let geometryChanged = false;
+			let anchorAdjusted = false;
+			const viewportEnd = offset + viewportRows;
+			for (const layout of layouts) {
+				const provider = layout.provider;
+				if (!provider) continue;
+				const layoutEnd = layout.startRow + layout.rows;
+				if (layoutEnd <= offset || layout.startRow >= viewportEnd) continue;
+				const startsInside = offset >= layout.startRow && offset < layoutEnd;
+				const localOffset = Math.max(0, offset - layout.startRow);
+				const providerRows = Math.max(0, Math.min(viewportEnd, layoutEnd) - Math.max(offset, layout.startRow));
+				const frame = renderProvider(provider, layout.component, {
+					rows: providerRows,
+					offset: localOffset,
+					followBottom: request.followBottom && viewportEnd >= layoutEnd,
+				});
+				layout.frame = frame;
+				if (layout.rows !== frame.estimatedTotalRows) {
+					layout.rows = frame.estimatedTotalRows;
+					geometryChanged = true;
+				}
+				if (!request.followBottom && startsInside) {
+					const adjusted = layout.startRow + frame.offset;
+					if (adjusted !== offset) {
+						offset = adjusted;
+						anchorAdjusted = true;
+					}
+				}
+			}
+			if (!geometryChanged && !anchorAdjusted) break;
+			totalRows = rebuild();
+			offset = request.followBottom
+				? Math.max(0, totalRows - viewportRows)
+				: Math.max(0, Math.min(offset, Math.max(0, totalRows - viewportRows)));
+		}
+
+		totalRows = rebuild();
+		offset = request.followBottom
+			? Math.max(0, totalRows - viewportRows)
+			: Math.max(0, Math.min(offset, Math.max(0, totalRows - viewportRows)));
+		const end = Math.min(totalRows, offset + viewportRows);
+		const lines: string[] = [];
+		for (const layout of layouts) {
+			const layoutEnd = layout.startRow + layout.rows;
+			if (layoutEnd <= offset || layout.startRow >= end) continue;
+			const from = Math.max(offset, layout.startRow) - layout.startRow;
+			const to = Math.min(end, layoutEnd) - layout.startRow;
+			if (!layout.provider) {
+				lines.push(...(layout.lines?.slice(from, to) ?? []));
+				continue;
+			}
+			let frame = layout.frame;
+			if (!frame || frame.offset > from || frame.offset + frame.lines.length < to) {
+				frame = renderProvider(layout.provider, layout.component, {
+					rows: to - from,
+					offset: from,
+					followBottom: request.followBottom && end >= layoutEnd,
+				});
+				layout.frame = frame;
+			}
+			const frameFrom = Math.max(0, from - frame.offset);
+			const frameTo = Math.max(frameFrom, to - frame.offset);
+			lines.push(...frame.lines.slice(frameFrom, frameTo));
+		}
+		return { lines, estimatedTotalRows: totalRows, offset };
+	}
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		const children = this.children;
@@ -959,6 +1269,7 @@ export function coalesceAdjacentSgr(line: string): string {
 export class TUI extends Container {
 	terminal: Terminal;
 	#frameProvider: TerminalFrameProvider | undefined;
+	#appViewportFrameProvider: AppViewportFrameProvider | undefined;
 	#acceptedHistoryBatchId = 0;
 	// Screen row where the provider's mutable viewport begins (0-based); rows
 	// above it hold history still visible on the physical screen.
@@ -1031,6 +1342,7 @@ export class TUI extends Container {
 		  }
 		| undefined;
 	#debugNextWindowTop = 0;
+	#scopedInputRenderComponents = new WeakSet<Component>();
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
 
@@ -1119,6 +1431,11 @@ export class TUI extends Container {
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
 	#appViewportBackend = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
+	#appViewportComponentTargets = new Set<Component>();
+	/** A pending full compose dominates later component-scoped requests until that frame starts. */
+	#appViewportFullComposePending = true;
+	#appViewportRootLines = new Map<Component, readonly string[]>();
+	#appViewportRootWidth = -1;
 	#appViewportActive = false;
 	#appViewportPixelMouseSupported = false;
 	#appViewportCellSizeKnown = false;
@@ -1177,7 +1494,6 @@ export class TUI extends Container {
 	// atomically. It must survive a deferred Ghostty image frame.
 	#pendingAltExit = "";
 
-
 	// Overlay stack for modal components rendered on top of base content
 	overlayStack: {
 		component: Component;
@@ -1204,6 +1520,72 @@ export class TUI extends Container {
 		this.#providerWindow = [];
 		this.#resizeReplaySize = undefined;
 		this.requestRender(true);
+	}
+
+	setAppViewportFrameProvider(provider: AppViewportFrameProvider | undefined): void {
+		this.#appViewportFrameProvider = provider;
+		this.#appViewportComponentTargets.clear();
+		this.#appViewportComposeStale = true;
+		this.requestRender(true);
+	}
+
+	override render(width: number): readonly string[] {
+		return this.#renderRootChildren(width);
+	}
+
+	override renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		return this.#renderRootChildren(width, targets);
+	}
+
+	#renderRootChildren(width: number, targets?: readonly Component[]): readonly string[] {
+		width = Math.max(1, width);
+		let grouped: Map<Component, Component[]> | undefined;
+		if (targets && targets.length > 0) {
+			grouped = new Map();
+			for (const target of targets) {
+				const owner = this.children.find(child => componentContains(child, target));
+				if (!owner) {
+					grouped = undefined;
+					break;
+				}
+				const childTargets = grouped.get(owner);
+				if (childTargets) childTargets.push(target);
+				else grouped.set(owner, [target]);
+			}
+		}
+		const targeted =
+			grouped !== undefined &&
+			targets !== undefined &&
+			targets.length > 0 &&
+			this.#appViewportRootWidth === width &&
+			this.#appViewportRootLines.size === this.children.length &&
+			this.children.every(child => this.#appViewportRootLines.has(child));
+		if (!targeted) this.#appViewportRootLines.clear();
+		this.#appViewportScrollRegionEnd = undefined;
+		const lines: string[] = [];
+		for (const child of this.children) {
+			const childTargets = targeted ? grouped?.get(child) : undefined;
+			const rendered = childTargets
+				? renderTargeted(child, width, childTargets)
+				: targeted
+					? this.#appViewportRootLines.get(child)!
+					: child.render(width);
+			this.#appViewportRootLines.set(child, rendered);
+			const region = child as Component & Partial<AppViewportScrollRegion>;
+			const start = region.getAppViewportScrollRegionStart?.();
+			if (start !== undefined) {
+				const boundedStart = Number.isFinite(start) ? Math.max(0, Math.min(rendered.length, Math.trunc(start))) : 0;
+				const end = region.getAppViewportScrollRegionEnd?.();
+				const boundedEnd =
+					end !== undefined && Number.isFinite(end)
+						? Math.max(boundedStart, Math.min(rendered.length, Math.trunc(end)))
+						: rendered.length;
+				this.#appViewportScrollRegionEnd = lines.length + boundedEnd;
+			}
+			lines.push(...rendered);
+		}
+		this.#appViewportRootWidth = width;
+		return lines;
 	}
 
 	#syncTerminalCursorMode(component: Component | null): void {
@@ -1338,6 +1720,15 @@ export class TUI extends Container {
 	/** Feed debug and test input through the same pipeline as terminal stdin. */
 	injectDebugInput(data: string): void {
 		this.#handleInput(data);
+	}
+
+	/**
+	 * Mark a focused component whose input handler mutates only its own subtree.
+	 * Other components retain full-frame rendering because input callbacks may
+	 * change siblings or focus.
+	 */
+	enableScopedInputRender(component: Component): void {
+		this.#scopedInputRenderComponents.add(component);
 	}
 
 	/**
@@ -1520,6 +1911,12 @@ export class TUI extends Container {
 	 * to keep the good stash.
 	 */
 	#beginResizeAltPaint(restartingProbe = false): void {
+		if (this.#appViewportBackend) {
+			this.#appViewportComposeStale = true;
+			this.#forceViewportRepaintOnNextRender = true;
+			this.requestRender(true);
+			return;
+		}
 		if (this.#altActive) {
 			this.requestRender(true);
 			return;
@@ -2042,7 +2439,7 @@ export class TUI extends Container {
 			this.#appViewportComposeStale = true;
 			this.#appViewportFrameCursorPos = null;
 			this.#appViewportPreviousScrollRegionEnd = undefined;
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			this.#appViewportSelectionDrag = false;
 			this.#stopAppViewportSelectionAutoScroll();
 			this.#appViewportLastClick = null;
@@ -2128,6 +2525,7 @@ export class TUI extends Container {
 		if (this.#stopped) return;
 		this.invalidate();
 		this.#appViewportComposeStale = true;
+		this.#appViewportFullComposePending = true;
 		this.#prepareForcedRender(true);
 		this.#renderRequested = false;
 		this.#executeRender();
@@ -2151,7 +2549,11 @@ export class TUI extends Container {
 	requestRender(force = false, options?: RenderRequestOptions): void {
 		// Content changes invalidate the cached app-viewport frame; scrolling and
 		// selection only change viewport-owned state applied during emission.
-		if (!options?.viewportOnly) this.#appViewportComposeStale = true;
+		if (!options?.viewportOnly) {
+			this.#appViewportComposeStale = true;
+			this.#appViewportComponentTargets.clear();
+			this.#appViewportFullComposePending = true;
+		}
 		if (force) {
 			this.#prepareForcedRender(
 				options?.clearScrollback === true,
@@ -2177,6 +2579,9 @@ export class TUI extends Container {
 	 */
 	renderNow(options?: RenderRequestOptions): void {
 		if (this.#stopped) return;
+		this.#appViewportComponentTargets.clear();
+		this.#appViewportFullComposePending = true;
+		this.#appViewportComposeStale = true;
 		this.#prepareForcedRender(options?.clearScrollback === true);
 		this.#renderRequested = false;
 		const start = this.#renderScheduler.now();
@@ -2191,9 +2596,10 @@ export class TUI extends Container {
 	 * scratch — retired blocks no longer render — so a scoped request is simply
 	 * an ordinary render.
 	 */
-	requestComponentRender(_component: Component): void {
+	requestComponentRender(component: Component): void {
 		if (this.#stopped) return;
 		this.#appViewportComposeStale = true;
+		if (!this.#appViewportFullComposePending) this.#appViewportComponentTargets.add(component);
 		this.#requestOrdinaryRender();
 	}
 
@@ -2203,8 +2609,6 @@ export class TUI extends Container {
 		this.#renderRequested = true;
 		this.#renderScheduler.scheduleImmediate(() => this.#scheduleRender());
 	}
-
-
 
 	#maybeDeferGhosttyInitialImagePaint(): boolean {
 		if (this.#ghosttyInitialImageDelayDone) return false;
@@ -2528,7 +2932,7 @@ export class TUI extends Container {
 		let point = this.#appViewportContentPoint(row, col);
 		const previousSelectionActive = this.#appViewportSelection?.active === true;
 		if (!point) {
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			if (previousSelectionActive) this.requestRender(true, { viewportOnly: true });
 			return;
 		}
@@ -2589,6 +2993,7 @@ export class TUI extends Container {
 		} else if (!selection.anchorScroll) {
 			selection.focusScroll = tracking;
 		}
+		this.#syncAppViewportTextSelectionOwner(inputOwner);
 	}
 
 	#syncAppViewportSelectionScrollPoint(
@@ -2743,13 +3148,13 @@ export class TUI extends Container {
 		const rangeStart = Math.min(bounds?.startCol ?? 0, lineWidth);
 		const rangeEnd = Math.min((bounds?.endCol ?? lineWidth - 1) + 1, lineWidth);
 		if (rangeEnd <= rangeStart) {
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			return false;
 		}
 		const targetCol = Math.max(rangeStart, Math.min(point.col, rangeEnd - 1));
 		const targetKind = this.#appViewportSelectionCellKind(line, targetCol);
 		if (targetKind === "whitespace") {
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			return false;
 		}
 		let start = targetCol;
@@ -2772,7 +3177,7 @@ export class TUI extends Container {
 		const startCol = Math.min(bounds?.startCol ?? 0, lineWidth);
 		const endCol = Math.min(bounds?.endCol ?? lineWidth - 1, lineWidth - 1);
 		if (endCol < startCol) {
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			return false;
 		}
 		this.#appViewportSelection = {
@@ -2914,11 +3319,18 @@ export class TUI extends Container {
 		};
 	}
 
+	#syncAppViewportTextSelectionOwner(inputOwner: AppViewportInputOwner | undefined): void {
+		const selection = this.#appViewportSelection;
+		const tracking = selection?.active ? (selection.anchorScroll ?? selection.focusScroll) : undefined;
+		inputOwner?.setAppViewportTextSelectionActive?.(tracking !== undefined, tracking?.row, tracking?.col);
+	}
+
 	#clearAppViewportSelection(): void {
 		this.#appViewportSelection = null;
 		this.#appViewportSelectionDrag = false;
 		this.#appViewportLastClick = null;
 		this.#stopAppViewportSelectionAutoScroll();
+		this.#syncAppViewportTextSelectionOwner(this.#findAppViewportInputOwner());
 	}
 
 	#appViewportSelectionText(): string {
@@ -3100,7 +3512,11 @@ export class TUI extends Container {
 				return;
 			}
 			focused.handleInput(data);
-			this.requestRender();
+			if (focused === this.#focusedComponent && this.#scopedInputRenderComponents.has(focused)) {
+				this.requestComponentRender(focused);
+			} else {
+				this.requestRender();
+			}
 		}
 	}
 
@@ -4092,7 +4508,6 @@ export class TUI extends Container {
 
 	#forgetHardwareCursorState(): void {
 		this.#hardwareCursorState = null;
-
 	}
 
 	/**
@@ -4115,33 +4530,53 @@ export class TUI extends Container {
 		return this.terminal.kittyEnableSequence ? "\x1b[<u" : "";
 	}
 
-
 	#renderAppViewportFrame(width: number, height: number): void {
 		const inputOwner = this.#findAppViewportInputOwner();
 		const hoverMouse = inputOwner?.wantsAppViewportHover?.() ?? false;
 		this.#enterAppViewport(hoverMouse);
 		this.#syncAppViewportHoverMouse(hoverMouse);
 		const contentWidth = Math.max(1, width - 1);
-		this.#imageBudget.beginPass();
-		const viewport = { columns: contentWidth, rows: Number.MAX_SAFE_INTEGER };
-		const provided =
-			this.#frameProvider?.renderResizeFrame?.(viewport) ?? this.#frameProvider?.renderFrame(viewport).viewport;
-		const rawFrame = Array.from(provided ?? this.render(contentWidth));
-		if (this.#imageBudget.endPass()) {
-			this.#clearScrollbackOnNextRender = true;
+		const viewport = { columns: contentWidth, rows: Math.max(0, height) };
+		const fullCompose = this.#appViewportFullComposePending;
+		this.#appViewportFullComposePending = false;
+		const targets = fullCompose ? [] : [...this.#appViewportComponentTargets];
+		this.#appViewportComponentTargets.clear();
+		const provider = this.#appViewportFrameProvider;
+		let plan: AppViewportFramePlan | undefined;
+		let fallbackFrame: readonly string[] | undefined;
+		let imageBudgetChanged = false;
+		if (provider && targets.length > 0) {
+			this.#imageBudget.beginPass(true);
+			plan = provider.renderAppViewportFrame(viewport, targets);
+			if (this.#imageBudget.stablePassObservedImages) {
+				this.#imageBudget.beginPass();
+				plan = provider.renderAppViewportFrame(viewport, []);
+				imageBudgetChanged = this.#imageBudget.endPass();
+			}
+		} else {
+			this.#imageBudget.beginPass();
+			if (provider) plan = provider.renderAppViewportFrame(viewport, []);
+			else
+				fallbackFrame = targets.length > 0 ? this.renderTargeted(contentWidth, targets) : this.render(contentWidth);
+			imageBudgetChanged = this.#imageBudget.endPass();
+		}
+		const rawFrame = Array.from(plan?.viewport ?? fallbackFrame ?? []);
+		if (plan) {
+			// Provider rows are already the complete visible app frame; pane-local
+			// scrollbars and sticky chrome were composed before this shared paint.
+			this.#appViewportScrollRegionEnd = Math.max(0, rawFrame.length - plan.stickyRows);
+			this.#appViewportScrollTop = 0;
+			this.#appViewportFollow = true;
+		}
+		if (imageBudgetChanged) {
+			this.#forceViewportRepaintOnNextRender = true;
 			this.#appViewportPreviousLines = [];
 		}
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 
 		const cursorMarkers = this.#extractCursorMarkers(rawFrame);
-		const cursorPos = cursorMarkers[0] ?? null;
+		const cursorPos = cursorMarkers[0] ?? plan?.cursor ?? null;
 		const frame = this.#prepareLinesArray(rawFrame, contentWidth);
-		const imageTransmits = this.#imageBudget.takeTransmits();
-		if (imageTransmits.length > 0) {
-			let transmitBuffer = "";
-			for (const seq of imageTransmits) transmitBuffer += seq;
-			this.terminal.write(transmitBuffer);
-		}
 		this.#emitAppViewportFrame(frame, width, height, cursorPos);
 		this.#appViewportFrameCursorPos = cursorPos;
 		this.#appViewportComposeStale = false;
@@ -4207,8 +4642,16 @@ export class TUI extends Container {
 				? fitted.map(line => TERMINAL.isImageLine(line))
 				: new Array<boolean>(height).fill(false);
 		let kittyCleanup = "";
-		for (const id of this.#imageBudget.takePurgeIds()) kittyCleanup += encodeKittyDeleteImage(id);
-		for (const id of this.#imageBudget.takeRetiredIds()) kittyCleanup += encodeKittyDeleteImage(id);
+		if (this.#clearScrollbackOnNextRender && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			kittyCleanup += encodeKittyDeleteAllImages();
+			this.#imageBudget.resetPlacementEpochs();
+			this.#imageBudget.takePurgeIds();
+			this.#imageBudget.takeRetiredIds();
+		} else {
+			for (const id of this.#imageBudget.takePurgeIds()) kittyCleanup += encodeKittyDeleteImage(id);
+			for (const id of this.#imageBudget.takeRetiredIds()) kittyCleanup += encodeKittyDeleteImage(id);
+		}
+		for (const sequence of this.#imageBudget.takeTransmits()) kittyCleanup += sequence;
 		if (
 			!geometryForcesFullRepaint &&
 			this.#appViewportPreviousWidth === width &&

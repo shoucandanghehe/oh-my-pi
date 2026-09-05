@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -10,7 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Text, TUI } from "@oh-my-pi/pi-tui";
+import { Text } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -53,9 +54,9 @@ describe("issue #4806 command output during streaming", () => {
 		});
 		streaming = true;
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
-		mode = new InteractiveMode(session, "test");
 		terminal = new VirtualTerminal(100, 80);
-		mode.ui = new TUI(terminal);
+		const composer = new Composer({ terminal });
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, undefined, composer);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 		await mode.init({ suppressWelcomeIntro: true });
 	});
@@ -73,6 +74,7 @@ describe("issue #4806 command output during streaming", () => {
 	});
 
 	async function submitCommand(command: string): Promise<void> {
+		void mode.getUserInput();
 		const submit = mode.editor.onSubmit;
 		if (!submit) throw new Error("Expected editor submit handler");
 		const settled = Promise.withResolvers<void>();

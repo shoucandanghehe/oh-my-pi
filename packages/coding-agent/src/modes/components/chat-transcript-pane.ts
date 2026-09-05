@@ -16,6 +16,7 @@ import {
 	type TargetedRender,
 	type TextSelectionRange,
 	type ViewportHeightAware,
+	type VirtualViewportFrame,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { KeyId } from "../../config/keybindings";
@@ -86,6 +87,8 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 	#renderWidth = 0;
 	#renderHeight = 0;
 	#hasFullFrame = false;
+	#virtualContent = false;
+	#estimatedTotalRows = 0;
 
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
 		this.#builder = new ChatTranscriptBuilder(options.builder);
@@ -194,14 +197,44 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		this.options.builder.requestRender();
 	}
 
+	updateStreamingAssistant(message: Extract<AgentMessage, { role: "assistant" }>): boolean {
+		const component = this.#builder.updateStreamingAssistant(message);
+		if (!component) return false;
+		this.options.builder.ui.requestComponentRender(component);
+		return true;
+	}
+
+	finalizeStreamingAssistant(message: Extract<AgentMessage, { role: "assistant" }>): boolean {
+		const component = this.#builder.finalizeStreamingAssistant(message);
+		if (!component) return false;
+		this.options.builder.ui.requestComponentRender(component);
+		return true;
+	}
+
 	getTextSelection(selection: TextSelectionRange): string | undefined {
 		const normalized = normalizeTextSelection(selection);
 		const contentStart = this.#scrollViewStartLine;
 		const viewportEnd = contentStart + this.#selectionViewportHeight;
 		if (normalized.start.row >= viewportEnd || normalized.end.row < contentStart) return undefined;
+		const visibleStart = normalized.start.row - contentStart;
+		const visibleEnd = normalized.end.row - contentStart;
+		if (this.#virtualContent) {
+			if (visibleEnd >= this.#selectionContentLines.length) {
+				this.#builder.container.renderVirtualViewport(Math.max(1, this.#renderWidth - 1), {
+					rows: visibleEnd + 1,
+					offset: this.#scrollView.getScrollOffset(),
+					followBottom: false,
+				});
+			}
+			const scrollOffset = this.#scrollView.getScrollOffset();
+			return this.#builder.container.getVirtualTextSelection(Math.max(1, this.#renderWidth - 1), {
+				start: { row: scrollOffset + visibleStart, col: normalized.start.col },
+				end: { row: scrollOffset + visibleEnd, col: normalized.end.col },
+			});
+		}
 		const scrollOffset = this.#scrollView.getScrollOffset();
-		const startRow = scrollOffset + normalized.start.row - contentStart;
-		const endRow = scrollOffset + normalized.end.row - contentStart;
+		const startRow = scrollOffset + visibleStart;
+		const endRow = scrollOffset + visibleEnd;
 		if (startRow < 0 || endRow >= this.#selectionContentLines.length) return undefined;
 		return extractComponentTextSelection(this.#builder.container, this.#selectionContentLines, {
 			start: { row: startRow, col: normalized.start.col },
@@ -215,6 +248,9 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		if (localRow < contentStart || localRow >= contentStart + this.#selectionViewportHeight) return 1;
 		if (this.#builder.isEmpty) return 1;
 		const contentRow = this.#scrollView.getScrollOffset() + localRow - contentStart;
+		if (this.#virtualContent) {
+			return this.#builder.container.getVirtualTextSelectionInset(Math.max(1, this.#renderWidth - 1), contentRow);
+		}
 		if (contentRow < 0 || contentRow >= this.#selectionContentLines.length) return 0;
 		return this.#builder.container.getTextSelectionInset?.(contentRow) ?? 0;
 	}
@@ -225,6 +261,12 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		if (localRow < contentStart || localRow >= contentStart + this.#selectionViewportHeight) return 0;
 		if (this.#builder.isEmpty) return 1;
 		const contentRow = this.#scrollView.getScrollOffset() + localRow - contentStart;
+		if (this.#virtualContent) {
+			return this.#builder.container.getVirtualTextSelectionRightInset(
+				Math.max(1, this.#renderWidth - 1),
+				contentRow,
+			);
+		}
 		if (contentRow < 0 || contentRow >= this.#selectionContentLines.length) return 1;
 		return 1 + (this.#builder.container.getTextSelectionRightInset?.(contentRow) ?? 0);
 	}
@@ -270,11 +312,13 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		for (const key of this.options.expandKeys) {
 			if (matchesKey(data, key)) {
 				const startRow = this.#scrollView.getScrollOffset();
-				this.#builder.toggleExpanded(
+				const endRow = startRow + Math.max(1, this.#selectionViewportHeight) - 1;
+				const visibleBlocks = this.#builder.container.getVirtualBlocksInRowRange(
+					Math.max(1, this.#renderWidth - 1),
 					startRow,
-					startRow + Math.max(1, this.#selectionViewportHeight) - 1,
-					this.#followBottom,
+					endRow,
 				);
+				this.#builder.toggleExpanded(visibleBlocks, this.#followBottom);
 				this.options.builder.requestRender();
 				return;
 			}
@@ -292,18 +336,29 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		const notice = this.#notice ?? this.options.getNotice?.();
 		const noticeLine = notice ? ` ${theme.fg("error", sanitizeNotice(notice, Math.max(10, width - 2)))}` : undefined;
 		const editorLines = this.#editor ? this.#editor.render(width) : [];
-		const contentLines = this.#builder.isEmpty
-			? [
-					` ${theme.fg(
-						"dim",
-						sanitizeNotice(
-							this.options.getPlaceholder(Math.max(10, contentWidth - 1)),
-							Math.max(10, contentWidth - 1),
-						),
-					)}`,
-				]
-			: this.#builder.container.render(contentWidth);
-		return this.#renderFrame(width, contentLines, editorLines, noticeLine);
+		const viewportHeight = this.#contentViewportHeight(editorLines, noticeLine);
+		if (this.#initialEntryId) {
+			const targetRow = this.#builder.rowForEntry(this.#initialEntryId, contentWidth);
+			if (targetRow !== undefined) {
+				this.#followBottom = false;
+				this.#scrollView.setScrollOffset(Math.max(0, targetRow - 1));
+				this.#initialEntryId = undefined;
+			}
+		}
+		const virtualFrame = this.#builder.isEmpty
+			? undefined
+			: this.#builder.container.renderVirtualViewport(contentWidth, {
+					rows: viewportHeight,
+					offset: this.#scrollView.getScrollOffset(),
+					followBottom: this.#followBottom,
+				});
+		const contentLines = virtualFrame?.lines ?? [
+			` ${theme.fg(
+				"dim",
+				sanitizeNotice(this.options.getPlaceholder(Math.max(10, contentWidth - 1)), Math.max(10, contentWidth - 1)),
+			)}`,
+		];
+		return this.#renderFrame(width, contentLines, editorLines, noticeLine, virtualFrame);
 	}
 
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
@@ -328,15 +383,45 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 			}
 		}
 		const contentWidth = Math.max(1, width - 1);
-		const contentLines =
-			contentTargets.length > 0
-				? renderTargeted(this.#builder.container, contentWidth, contentTargets)
-				: this.#cachedContentLines;
 		const editorLines =
 			editorTargets.length > 0 && this.#editor
 				? renderTargeted(this.#editor, width, editorTargets)
 				: this.#cachedEditorLines;
-		return this.#renderFrame(width, contentLines, editorLines, this.#cachedNoticeLine);
+		const viewportHeight = this.#contentViewportHeight(editorLines, this.#cachedNoticeLine);
+		let virtualFrame: VirtualViewportFrame | undefined;
+		if (!this.#builder.isEmpty) {
+			if (contentTargets.length > 0) {
+				virtualFrame = this.#builder.container.renderVirtualViewportTargeted(
+					contentWidth,
+					{
+						rows: viewportHeight,
+						offset: this.#scrollView.getScrollOffset(),
+						followBottom: this.#followBottom,
+					},
+					contentTargets,
+				);
+			} else if (this.#virtualContent && viewportHeight === this.#selectionViewportHeight) {
+				virtualFrame = {
+					lines: this.#cachedContentLines,
+					estimatedTotalRows: this.#estimatedTotalRows,
+					offset: this.#scrollView.getScrollOffset(),
+				};
+			} else {
+				virtualFrame = this.#builder.container.renderVirtualViewport(contentWidth, {
+					rows: viewportHeight,
+					offset: this.#scrollView.getScrollOffset(),
+					followBottom: this.#followBottom,
+				});
+			}
+		}
+		const contentLines = virtualFrame?.lines ?? this.#cachedContentLines;
+		return this.#renderFrame(width, contentLines, editorLines, this.#cachedNoticeLine, virtualFrame);
+	}
+
+	#contentViewportHeight(editorLines: readonly string[], noticeLine: string | undefined): number {
+		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
+		const chrome = editorLines.length + (noticeLine ? 1 : 0);
+		return Math.max(this.#viewportHeight === undefined ? 3 : 0, termHeight - chrome);
 	}
 
 	#renderFrame(
@@ -344,30 +429,25 @@ export class ChatTranscriptPane implements Component, Focusable, MouseRoutable, 
 		contentLines: readonly string[],
 		editorLines: readonly string[],
 		noticeLine: string | undefined,
+		virtualFrame: VirtualViewportFrame | undefined,
 	): readonly string[] {
 		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
-		const chrome = editorLines.length + (noticeLine ? 1 : 0);
-		const viewportHeight = Math.max(this.#viewportHeight === undefined ? 3 : 0, termHeight - chrome);
+		const viewportHeight = this.#contentViewportHeight(editorLines, noticeLine);
 		this.#cachedContentLines = contentLines;
 		this.#cachedEditorLines = editorLines;
 		this.#cachedNoticeLine = noticeLine;
 		this.#renderWidth = width;
 		this.#renderHeight = termHeight;
 		this.#hasFullFrame = true;
-		this.#scrollView.setLines(contentLines);
+		this.#virtualContent = virtualFrame !== undefined;
+		this.#estimatedTotalRows = virtualFrame?.estimatedTotalRows ?? contentLines.length;
 		this.#selectionContentLines = contentLines;
 		this.#selectionViewportHeight = viewportHeight;
 		this.#scrollView.setHeight(viewportHeight);
-		if (this.#initialEntryId) {
-			const targetRow = this.#builder.rowForEntry(this.#initialEntryId);
-			if (targetRow !== undefined) {
-				this.#followBottom = false;
-				this.#scrollView.setScrollOffset(Math.max(0, targetRow - 1));
-				this.#initialEntryId = undefined;
-			}
-		} else if (this.#followBottom) {
-			this.#scrollView.scrollToBottom();
-		}
+		this.#scrollView.setTotalRows(virtualFrame?.estimatedTotalRows);
+		this.#scrollView.setLines(contentLines);
+		if (virtualFrame) this.#scrollView.setScrollOffset(virtualFrame.offset);
+		else if (this.#followBottom) this.#scrollView.scrollToBottom();
 
 		this.#scrollViewStartLine = 0;
 		const lines = [...this.#scrollView.render(width)];

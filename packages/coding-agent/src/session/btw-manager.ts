@@ -1,5 +1,12 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type BtwThreadEvent, type BtwThreadModelRef, type RestoredBtwThread, restoreBtwThreads } from "./btw-thread";
+import { type AgentMessage, PAUSE_SHUTDOWN_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import type { ContinuePausedAgentsResult } from "./agent-session-types";
+import {
+	type BtwPausedRequest,
+	type BtwThreadEvent,
+	type BtwThreadModelRef,
+	type RestoredBtwThread,
+	restoreBtwThreads,
+} from "./btw-thread";
 import type {
 	EphemeralConversation,
 	EphemeralConversationCheckpoint,
@@ -46,6 +53,7 @@ interface BtwThreadOptions {
 	error?: string;
 	draft?: string;
 	readThrough?: number;
+	pausedRequest?: BtwPausedRequest;
 }
 
 export class BtwThread {
@@ -63,6 +71,7 @@ export class BtwThread {
 	readThrough: number;
 	request: BtwThreadRequest | undefined;
 	abortController: AbortController | undefined;
+	pausedRequest: BtwPausedRequest | undefined;
 
 	constructor(options: BtwThreadOptions) {
 		this.key = options.key;
@@ -77,6 +86,7 @@ export class BtwThread {
 		this.draft = options.draft ?? "";
 		this.persistedDraft = this.draft;
 		this.readThrough = Math.min(options.readThrough ?? 0, options.conversation.turns.length);
+		this.pausedRequest = options.pausedRequest;
 	}
 
 	get turns() {
@@ -286,6 +296,7 @@ export class BtwManager {
 	): Promise<EphemeralTurnResult> {
 		const thread = this.#threads.get(key);
 		if (!thread) throw new Error(`Unknown BTW thread: ${key}`);
+		if (thread.pausedRequest) throw new Error("BTW thread is paused; run /continue before sending another message");
 		if (thread.phase === "running") throw new Error("BTW thread already has a reply in progress");
 		const trimmed = input.trim();
 		if (!trimmed) throw new Error("BTW input must not be empty");
@@ -304,7 +315,15 @@ export class BtwManager {
 		thread.abortController = abortController;
 		thread.phase = "running";
 		thread.error = undefined;
-		if (thread.kind === "child") this.#appendEvent({ version: 1, op: "request", key });
+		if (thread.kind === "child") {
+			this.#appendEvent({
+				version: 1,
+				op: "request",
+				key,
+				input: request.input,
+				timestamp: request.timestamp,
+			});
+		}
 		this.#onChange?.();
 		try {
 			const result = await thread.conversation.prompt(trimmed, {
@@ -353,6 +372,55 @@ export class BtwManager {
 				this.#onChange?.();
 			}
 		}
+	}
+
+	prepareForPausedExit(): void {
+		let changed = false;
+		for (const thread of this.#threads.values()) {
+			if (thread.kind !== "child" || !thread.request) continue;
+			thread.pausedRequest = {
+				input: thread.request.input,
+				timestamp: thread.request.timestamp,
+			};
+			const abortController = thread.abortController;
+			thread.request = undefined;
+			thread.abortController = undefined;
+			thread.phase = "ready";
+			abortController?.abort(PAUSE_SHUTDOWN_ABORT_REASON);
+			changed = true;
+		}
+		if (changed) this.#onChange?.();
+	}
+
+	async continuePaused(): Promise<ContinuePausedAgentsResult> {
+		const paused = this.children.filter(thread => thread.pausedRequest !== undefined);
+		const skipped: string[] = [];
+		let continued = 0;
+		await Promise.all(
+			paused.map(async thread => {
+				const request = thread.pausedRequest;
+				if (!request) return;
+				thread.pausedRequest = undefined;
+				try {
+					await this.prompt(thread.key, request.input);
+					continued++;
+				} catch (error) {
+					thread.pausedRequest = request;
+					thread.phase = "ready";
+					thread.error = error instanceof Error ? error.message : String(error);
+					this.#appendEvent({
+						version: 1,
+						op: "request",
+						key: thread.key,
+						input: request.input,
+						timestamp: request.timestamp,
+					});
+					skipped.push(`${thread.title}: ${thread.error}`);
+					this.#onChange?.();
+				}
+			}),
+		);
+		return { continued, skipped, complete: skipped.length === 0 };
 	}
 
 	dispose(): void {
@@ -428,6 +496,7 @@ export class BtwManager {
 			phase: restored.phase,
 			error: restored.error,
 			draft: restored.draft,
+			pausedRequest: restored.pausedRequest,
 			readThrough: restored.readThrough,
 		});
 		this.#threads.set(thread.key, thread);

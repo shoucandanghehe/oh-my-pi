@@ -33,6 +33,7 @@ describe.skipIf(!supportsReftable)("git reftable support", () => {
 		if (initResult.exitCode !== 0) throw new Error(`reftable git init failed (exit ${initResult.exitCode})`);
 		await $`git config user.name "Test User"`.cwd(sharedRepoDir).quiet();
 		await $`git config user.email "test@example.com"`.cwd(sharedRepoDir).quiet();
+		await $`git config commit.gpgsign false`.cwd(sharedRepoDir).quiet();
 		await fs.writeFile(path.join(sharedRepoDir, "file.txt"), "hello world");
 		await $`git add file.txt`.cwd(sharedRepoDir).quiet();
 		await $`git commit -m "initial commit"`.cwd(sharedRepoDir).quiet();
