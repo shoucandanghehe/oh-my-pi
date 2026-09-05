@@ -384,4 +384,34 @@ describe("CopySelectorComponent", () => {
 		expect(boxed).toContain("const answer = 42;");
 		expect(boxed).not.toContain("bun test");
 	});
+
+	it("expands synthetic replay bodies with Ctrl+O", () => {
+		const body = "### Session update\n\nSYNTHETIC-EXPANDED-MARKER";
+		const selector = new CopySelectorComponent(
+			[
+				entry("synthetic", null, {
+					role: "user",
+					content: body,
+					attribution: "agent",
+					synthetic: true,
+					timestamp: 1,
+				} as AgentMessage),
+			],
+			{
+				ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+				cwd: "/tmp",
+				requestRender: () => {},
+				onPick: () => {},
+				onCancel: () => {},
+			},
+		);
+		const collapsed = Bun.stripANSI(selector.render(100).join("\n"));
+		expect(collapsed).not.toContain("SYNTHETIC-EXPANDED-MARKER");
+
+		selector.handleInput("\x0f");
+		const expanded = Bun.stripANSI(selector.render(100).join("\n"));
+		selector.dispose();
+
+		expect(expanded).toContain("SYNTHETIC-EXPANDED-MARKER");
+	});
 });

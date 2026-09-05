@@ -4,11 +4,12 @@ description: >
    exposes the backend through step outputs before any action condition
    uses it.
 
-   omp-kata jobs use the cluster remote cache. GitHub-hosted jobs use an
-   actions/cache-backed disk cache seeded by the bazel-cache-warm workflow
-   on the same runner image — cross-host action keys never hit, so the disk
-   cache is hosted-only and its key carries a schema version (v1 was
-   poisoned by a kata-produced export that silently missed every action).
+   omp-kata jobs use the cluster remote cache. GitHub-hosted jobs may first
+   restore exact final outputs; misses fall back to an actions/cache-backed
+   disk cache seeded by the bazel-cache-warm workflow on the same runner
+   image. Cross-host action keys never hit, so the disk cache is hosted-only
+   and its key carries a schema version (v1 was poisoned by a kata-produced
+   export that silently missed every action).
 
    The v3 key is <config hash>-<source hash>: config covers toolchain and
    build settings, source covers crates/** + BUILD.bazel. Restores fall
@@ -28,6 +29,14 @@ inputs:
    scope:
       description: Disk-cache key discriminator shared by compatible consumers
       required: true
+   output-path:
+      description: Optional exact build outputs to restore before the Bazel disk cache
+      required: false
+      default: ""
+   output-key-suffix:
+      description: Additional fingerprint for output assembly logic
+      required: false
+      default: ""
 
 outputs:
    rc:
@@ -42,6 +51,12 @@ outputs:
    remote:
       description: Whether the shell probe selected the cluster remote cache
       value: ${{ steps.backend.outputs.remote }}
+   output-cache-hit:
+      description: Whether the optional exact build output cache matched
+      value: ${{ steps.output-cache.outputs.cache-hit }}
+   output-cache-key:
+      description: Exact final-output cache key for a later explicit save
+      value: bazel-output-v1-${{ steps.backend.outputs.build-key }}-${{ inputs.output-key-suffix }}
 
 runs:
    using: composite
@@ -62,19 +77,29 @@ runs:
              fi
              remote=true
            fi
-           key="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-$SOURCE_HASH"
+           build_key="${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-$SOURCE_HASH"
+           key="bazel-disk-v3-$build_key"
            prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-$CONFIG_HASH-"
            bare_prefix="bazel-disk-v3-${{ inputs.scope }}-${{ runner.os }}-${{ runner.arch }}-"
            {
+             echo "build-key=$build_key"
              echo "remote=$remote"
              echo "cache-key=$key"
              echo "cache-prefix=$prefix"
              echo "cache-bare-prefix=$bare_prefix"
            } >> "$GITHUB_OUTPUT"
 
+      - name: Restore exact build outputs
+        id: output-cache
+        if: inputs.output-path != ''
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+           path: ${{ inputs.output-path }}
+           key: bazel-output-v1-${{ steps.backend.outputs.build-key }}-${{ inputs.output-key-suffix }}
+
       - name: Restore bazel disk cache
         id: restore
-        if: steps.backend.outputs.remote != 'true'
+        if: steps.backend.outputs.remote != 'true' && steps.output-cache.outputs.cache-hit != 'true'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
            # Both caches ride one archive: the action cache AND the repository

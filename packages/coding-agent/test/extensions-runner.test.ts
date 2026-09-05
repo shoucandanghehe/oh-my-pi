@@ -1435,6 +1435,44 @@ describe("ExtensionRunner", () => {
 			);
 		};
 
+		it("forwards ask dialog capabilities to tool-call handlers", async () => {
+			const extensionPath = path.join(tempDir.path(), "ask-dialog-capabilities.ts");
+			fs.writeFileSync(
+				extensionPath,
+				`
+					export default function(pi) {
+						pi.on("tool_call", (_event, ctx) => {
+							if (ctx.ui.askDialogCapabilities?.allowCustomInput !== true) return;
+							return { block: true, reason: "ask dialog capability forwarded" };
+						});
+					}
+				`,
+			);
+
+			const loaded = await loadTestExtensions([extensionPath]);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const uiContext = {
+				...runner.getUIContext(),
+				askDialogCapabilities: { allowCustomInput: true as const },
+			};
+			initializeRunner(runner, uiContext);
+
+			await expect(
+				runner.emitToolCall({
+					type: "tool_call",
+					toolName: "guarded",
+					toolCallId: "ask-dialog-capabilities",
+					input: {},
+				}),
+			).resolves.toEqual({ block: true, reason: "ask dialog capability forwarded" });
+		});
+
 		it("times out session_start handlers, emits an error, and continues to sibling extensions", async () => {
 			const hangExtensionPath = path.join(tempDir.path(), "hang-session-start.ts");
 			const fastExtensionPath = path.join(tempDir.path(), "fast-session-start.ts");

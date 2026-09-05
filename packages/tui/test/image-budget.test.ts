@@ -663,13 +663,13 @@ describe("TUI inline-image budget", () => {
 		budget.beginPass();
 		first.render(20);
 		second.render(20);
-		budget.endPass();
+		expect(budget.endPass()).toBe(true);
 
 		const rebuiltFirst = create("first-rebuilt");
 		budget.beginPass();
 		const fallback = rebuiltFirst.render(20);
 		second.render(20);
-		expect(budget.endPass()).toBe(true);
+		expect(budget.endPass()).toBe(false);
 		expect(fallback).toHaveLength(4);
 	});
 

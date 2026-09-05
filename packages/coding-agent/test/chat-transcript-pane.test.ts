@@ -6,7 +6,7 @@ import {
 	type ChatTranscriptPaneEditorOptions,
 } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-pane";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { type Component, ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, ProcessTerminal, type SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -27,6 +27,20 @@ class CountingRows implements Component {
 		this.renders++;
 		return [this.text];
 	}
+}
+
+function mouse(overrides: Partial<SgrMouseEvent>): SgrMouseEvent {
+	return {
+		button: 0,
+		col: 0,
+		row: 0,
+		release: false,
+		wheel: null,
+		motion: false,
+		leftClick: false,
+		rightClick: false,
+		...overrides,
+	};
 }
 
 function createPane(editor: ChatTranscriptPaneEditorOptions): ChatTranscriptPane {
@@ -91,6 +105,58 @@ describe("ChatTranscriptPane", () => {
 
 			pane.focused = false;
 			expect(renderedText(pane)).toContain("read-only · advisor");
+		} finally {
+			pane.dispose();
+		}
+	});
+
+	it("returns to the live tail from the control below the scrollbar", () => {
+		const pane = createPane({ label: "Message Agent", placeholder: "Message Agent…", onSubmit: () => true });
+		try {
+			pane.rebuild([
+				{
+					role: "user",
+					content: Array.from({ length: 12 }, (_value, index) => `row-${index}`).join("\n"),
+					timestamp: 0,
+				},
+			]);
+			pane.render(40);
+			pane.setScrollOffset(0);
+			const detached = pane.render(40).map(line => Bun.stripANSI(line));
+			const controlRow = detached.findIndex(line => line.includes("▽"));
+			const controlCol = detached[controlRow]?.indexOf("▽") ?? -1;
+
+			expect(controlRow).toBeGreaterThan(0);
+			expect(controlCol).toBe(39);
+			expect(pane.wantsAppViewportHover()).toBe(true);
+			expect(
+				pane.routeMouse(mouse({ row: controlRow, col: controlCol, leftClick: true }), controlRow, controlCol),
+			).toBe(true);
+
+			const returned = pane.render(40).map(line => Bun.stripANSI(line));
+			expect(returned.some(line => line.includes("▽"))).toBe(false);
+			expect(returned.some(line => line.includes("row-11"))).toBe(true);
+		} finally {
+			pane.dispose();
+		}
+	});
+
+	it("resumes following when a selection releases at the live tail", () => {
+		const pane = createPane({ label: "Message Agent", placeholder: "Message Agent…", onSubmit: () => true });
+		try {
+			pane.rebuild([
+				{
+					role: "user",
+					content: Array.from({ length: 12 }, (_value, index) => `row-${index}`).join("\n"),
+					timestamp: 0,
+				},
+			]);
+			pane.render(40);
+			pane.setTextSelectionActive(true);
+			pane.setTextSelectionActive(false);
+			pane.append([{ role: "user", content: "new-tail-marker", timestamp: 1 }]);
+
+			expect(Bun.stripANSI(pane.render(40).join("\n"))).toContain("new-tail-marker");
 		} finally {
 			pane.dispose();
 		}

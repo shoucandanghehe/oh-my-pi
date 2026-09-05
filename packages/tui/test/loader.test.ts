@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, setSystemTime, spyOn, vi } from "bun:test";
-import { Container, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, Container, TUI } from "@oh-my-pi/pi-tui";
 import { Loader, type LoaderMessageColorFn } from "@oh-my-pi/pi-tui/components/loader";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { VirtualTerminal } from "./virtual-terminal";
@@ -207,6 +207,33 @@ describe("Loader component", () => {
 		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
 		vi.advanceTimersByTime(1);
 		expect(ui.requestComponentRender).toHaveBeenCalledTimes(3);
+
+		loader.stop();
+	});
+
+	it("keeps an additional animation target responsive while loader paints back off", () => {
+		vi.useFakeTimers();
+		const ui = {
+			synchronizedOutput: true,
+			lastFrameCostMs: 5_000,
+			requestComponentRender: vi.fn(),
+		};
+		const target: Component = { render: () => [] };
+		const loader = new Loader(
+			ui as unknown as TUI,
+			text => text,
+			text => text,
+			"Checking",
+			["0", "1"],
+		);
+		loader.setAdditionalRepaintTarget(target);
+		ui.requestComponentRender.mockClear();
+
+		vi.advanceTimersByTime(240);
+		const targetPaints = ui.requestComponentRender.mock.calls.filter(([component]) => component === target);
+		const loaderPaints = ui.requestComponentRender.mock.calls.filter(([component]) => component === loader);
+		expect(targetPaints.length).toBeGreaterThanOrEqual(3);
+		expect(loaderPaints).toHaveLength(1);
 
 		loader.stop();
 	});

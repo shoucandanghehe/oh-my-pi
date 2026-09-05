@@ -291,6 +291,12 @@ export interface Component {
 	render(width: number): readonly string[];
 
 	/**
+	 * Return the exact physical row count at `width` without producing painted
+	 * rows when the component has a cheaper layout-only path.
+	 */
+	measureRows?(width: number): number;
+
+	/**
 	 * Optional ownership seam for composed components whose descendants are not
 	 * exposed through a public `children` array. Used to route component-scoped
 	 * renders through viewport/workspace wrappers.
@@ -337,6 +343,11 @@ export interface Component {
 	 * their children; leaf components without resources may omit it.
 	 */
 	dispose?(): void;
+}
+
+/** Exact row count, using a component's layout-only path when available. */
+export function measureComponentRows(component: Component, width: number): number {
+	return component.measureRows?.(width) ?? component.render(width).length;
 }
 
 /** Lets an overlay root delegate keyboard focus to components it owns. */
@@ -995,6 +1006,13 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		}
 		return { lines, estimatedTotalRows: totalRows, offset };
 	}
+	measureRows(width: number): number {
+		width = Math.max(1, width);
+		let rows = 0;
+		for (const child of this.children) rows += measureComponentRows(child, width);
+		return rows;
+	}
+
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		const children = this.children;
@@ -2795,6 +2813,7 @@ export class TUI extends Container {
 			this.#appViewportScrollbarDrag = null;
 			this.#appViewportSelectionDrag = false;
 			this.#stopAppViewportSelectionAutoScroll();
+			this.#syncAppViewportTextSelectionOwner(inputOwner);
 			return true;
 		}
 		if (event.leftClick) {
@@ -2958,8 +2977,8 @@ export class TUI extends Container {
 			return;
 		}
 		this.#appViewportSelection = { anchor: point, focus: point, active: false, bounds };
-		this.#captureAppViewportSelectionScroll(inputOwner, row, col, "both");
 		this.#appViewportSelectionDrag = true;
+		this.#captureAppViewportSelectionScroll(inputOwner, row, col, "both");
 		if (previousSelectionActive) this.requestRender(true, { viewportOnly: true });
 	}
 
@@ -3321,7 +3340,10 @@ export class TUI extends Container {
 
 	#syncAppViewportTextSelectionOwner(inputOwner: AppViewportInputOwner | undefined): void {
 		const selection = this.#appViewportSelection;
-		const tracking = selection?.active ? (selection.anchorScroll ?? selection.focusScroll) : undefined;
+		const tracking =
+			selection && (selection.active || this.#appViewportSelectionDrag)
+				? (selection.anchorScroll ?? selection.focusScroll)
+				: undefined;
 		inputOwner?.setAppViewportTextSelectionActive?.(tracking !== undefined, tracking?.row, tracking?.col);
 	}
 
@@ -4545,20 +4567,20 @@ export class TUI extends Container {
 		let plan: AppViewportFramePlan | undefined;
 		let fallbackFrame: readonly string[] | undefined;
 		let imageBudgetChanged = false;
-		if (provider && targets.length > 0) {
+		if (targets.length > 0) {
 			this.#imageBudget.beginPass(true);
-			plan = provider.renderAppViewportFrame(viewport, targets);
-			if (this.#imageBudget.stablePassObservedImages) {
+			if (provider) plan = provider.renderAppViewportFrame(viewport, targets);
+			else fallbackFrame = this.renderTargeted(contentWidth, targets);
+		}
+		if (targets.length === 0 || this.#imageBudget.stablePassObservedImages || !this.#imageBudget.quiescent) {
+			let retry: boolean;
+			do {
 				this.#imageBudget.beginPass();
-				plan = provider.renderAppViewportFrame(viewport, []);
-				imageBudgetChanged = this.#imageBudget.endPass();
-			}
-		} else {
-			this.#imageBudget.beginPass();
-			if (provider) plan = provider.renderAppViewportFrame(viewport, []);
-			else
-				fallbackFrame = targets.length > 0 ? this.renderTargeted(contentWidth, targets) : this.render(contentWidth);
-			imageBudgetChanged = this.#imageBudget.endPass();
+				if (provider) plan = provider.renderAppViewportFrame(viewport, []);
+				else fallbackFrame = this.render(contentWidth);
+				retry = this.#imageBudget.endPass();
+				imageBudgetChanged ||= retry;
+			} while (retry);
 		}
 		const rawFrame = Array.from(plan?.viewport ?? fallbackFrame ?? []);
 		if (plan) {
@@ -4640,7 +4662,8 @@ export class TUI extends Container {
 		const currentSixelRows =
 			TERMINAL.imageProtocol === ImageProtocol.Sixel
 				? fitted.map(line => TERMINAL.isImageLine(line))
-				: new Array<boolean>(height).fill(false);
+				: // oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+					new Array<boolean>(height).fill(false);
 		let kittyCleanup = "";
 		if (this.#clearScrollbackOnNextRender && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			kittyCleanup += encodeKittyDeleteAllImages();
@@ -4918,7 +4941,9 @@ export class TUI extends Container {
 	}
 
 	#buildAppViewportLines(lines: string[], height: number): string[] {
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const fitted: string[] = new Array(Math.max(0, height)).fill("");
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const rowMap: number[] = new Array(Math.max(0, height)).fill(-1);
 		const scrollEnd = this.#appViewportScrollRegionEnd ?? lines.length;
 		const boundedScrollEnd = Math.max(0, Math.min(scrollEnd, lines.length));
@@ -4951,6 +4976,7 @@ export class TUI extends Container {
 
 	#buildAppViewportScrollbarGlyphs(height: number, scrollHeight: number, totalRows: number): string[] {
 		const layout = layoutBrailleScrollbar(scrollHeight, totalRows, this.#appViewportScrollTop);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const glyphs: string[] = new Array(Math.max(0, height)).fill(APP_VIEWPORT_SCROLLBAR_BLANK);
 		for (let row = 0; row < layout.glyphs.length; row++) glyphs[row] = layout.glyphs[row]!;
 		const metrics = layout.metrics;

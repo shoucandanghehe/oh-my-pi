@@ -26,6 +26,8 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
+- Extension ask dialogs can now disable custom answers with `allowCustomInput: false`, consistently hiding the `Other (type your own)` option on host and collaboration guest UIs.
+- Interactive extensions can now detect `allowCustomInput` support through `ctx.ui.askDialogCapabilities` before relying on custom-answer suppression.
 
 ### Fixed
 
@@ -330,6 +332,20 @@
 - Prevented browser `app.path` from terminating existing same-executable applications when no reusable CDP endpoint is available.
 - Fixed top-level errors overwriting the active composer before terminal restoration.
 - Fixed Enter being ignored during the first turn when omp starts with an initial prompt.
+- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Double-Escape now opens a fullscreen transcript rewind selector that outlines the target item with a dotted border — ↑/↓ step through rendered items, ←/→ jump between user turns, Enter rewinds (branching on user prompts, in-place leaf moves elsewhere); it replaces both the previous user-message list and the tree route (`doubleEscapeAction` is now `rewind` or `none`)
+- The rewind selector shows alternate session-tree branches at a fork as side-by-side half-width transcript columns; ←/→ slide between them with an animated camera, a dot rail with edge ellipses tracks position when branches overflow the window, and Enter rewinds into the chosen branch
+- `/copy` now uses the same fullscreen transcript selector as esc-esc: step the dotted outline over rendered items and Enter copies the turn's text, or press → to descend into its inner blocks (fenced code, quotes, bash/eval commands, tool output) and copy one verbatim
+- Workspace panes now reorganize into a balanced grid when a new subagent pane cannot fit the current split tree.
+
+### Fixed
+
+- Fixed an issue where custom model overrides were lost during configuration updates
+- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
+- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+- Revived historical subagents now reopen their background transcript panes.
+- BTW workspace panes now preserve the current scrolled position when tool-using replies finish.
+- Large resumed sessions now compute transcript height once without repeatedly syntax-highlighting offscreen history, keeping scrollbar geometry stable and subsequent frames responsive.
 
 ## [18.0.11] - 2026-08-29
 
@@ -363,8 +379,14 @@
 - Fixed `lsp diagnostics` incorrectly reporting success for project-aware pull-diagnostic servers when diagnostics time out or fail.
 - Corrected labels under `Settings > Context > Compaction Token Limit`.
 - Fixed orphaned pages, iframes, and workers accumulating in the shared headless browser after abnormal OMP session termination.
+- Added automatic background panes for running subagents; completed panes petrify through a multi-tone gray gradient before closing unless the user interacts with them.
+- Added `/debug petrify` and a matching Debug Tools entry to preview subagent pane petrification without starting a model or subagent.
+
 ### Fixed
 
+- Fixed dark stripes appearing across styled pane rows during the subagent petrification animation.
+- Fixed app-viewport Main, BTW, and subagent panes preserving live-tail following across text selection and exposing a working return-to-bottom control.
+- Fixed app-viewport text selections moving away from the pointer when output refreshes during a held drag.
 - Fixed app-viewport scroll jumps after session restore and while reading a streaming BTW reply.
 - Fixed the working-status spinner and elapsed time freezing during model output.
 

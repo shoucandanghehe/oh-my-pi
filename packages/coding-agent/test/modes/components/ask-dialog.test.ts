@@ -595,7 +595,49 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
 	});
 
-	it("shows selected multi-select options together with custom input on Submit", async () => {
+	it("disables custom input without letting the cursor leave real options", () => {
+		const onPrompt = vi.fn();
+		const onSubmit = vi.fn();
+		const questions = [
+			{
+				id: "q1",
+				question: "Choose multiple?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+				multi: true,
+				recommended: 1,
+				allowCustomInput: false,
+			},
+			{
+				id: "q2",
+				question: "Second question?",
+				options: [{ label: "Option C" }, { label: "Option D" }],
+				allowCustomInput: false,
+			},
+		] as ExtensionAskDialogQuestion[];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt,
+		});
+
+		expect(render(component)).not.toContain("Other (type your own)");
+		component.handleInput(DOWN);
+		component.handleInput(SPACE);
+		expect(onPrompt).not.toHaveBeenCalled();
+
+		component.handleInput(TAB);
+		component.handleInput(TAB);
+		expect(render(component)).toContain("1 unanswered question");
+		component.handleInput(ENTER);
+
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results).toEqual([
+			expect.objectContaining({ selectedOptions: ["Option B"], customInput: undefined }),
+			expect.objectContaining({ selectedOptions: [], customInput: undefined }),
+		]);
+	});
+
+	it("shows custom input by default and includes it with selected multi-select options", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom detail"));
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
@@ -617,6 +659,7 @@ describe("AskDialogComponent", () => {
 			onCancel: vi.fn(),
 			onPrompt,
 		});
+		expect(render(component)).toContain("Other (type your own)");
 
 		component.handleInput(SPACE);
 		component.handleInput(DOWN);

@@ -383,6 +383,7 @@ function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): Exte
 			question: typeof q.question === "string" ? q.question : "",
 			...(typeof q.header === "string" ? { header: q.header } : {}),
 			options,
+			...(typeof q.allowCustomInput === "boolean" ? { allowCustomInput: q.allowCustomInput } : {}),
 			...(typeof q.multi === "boolean" ? { multi: q.multi } : {}),
 			...(Number.isInteger(q.recommended) ? { recommended: q.recommended } : {}),
 		});
@@ -676,7 +677,9 @@ export class AskDialogComponent implements Component {
 			label: this.#optionLabel(question, option.label, index),
 			optionIndex: index,
 		}));
-		rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
+		if (question.allowCustomInput !== false) {
+			rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
+		}
 		return rows;
 	}
 

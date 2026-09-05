@@ -225,6 +225,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 			if (highlighted !== null) return highlighted.split("\n");
 			return code.split("\n").map(line => theme.fg("mdCodeBlock", line));
 		},
+		highlightCodeForLayout: code => code.split("\n"),
 		createHighlightStream: lang => createHighlightStream(lang, theme),
 	};
 	cachedMarkdownTheme = markdownTheme;

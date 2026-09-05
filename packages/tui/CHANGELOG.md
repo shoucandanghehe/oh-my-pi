@@ -40,6 +40,9 @@
 - Fixed the TUI crashing on reference-style Markdown links whose labels match JavaScript built-in names; these links now render safely as plain text.
 - Fixed fatal cleanup leaving the cursor inside a focused input before error output is displayed.
 - Fixed resumed sessions showing stale background bands until the next keypress in WSL and Windows Terminal.
+### Fixed
+
+- Virtualized hosts can now measure exact component and Markdown row counts without painting syntax-highlighted offscreen content.
 
 ## [18.0.11] - 2026-08-29
 
@@ -50,6 +53,10 @@
 ### Fixed
 
 - Fixed inline color swatches appearing for words with hex-like prefixes, such as `#each`; swatches now appear only when the entire word is a valid color.
+### Fixed
+
+- Fixed Loader-synchronized component animations stalling when expensive frames trigger spinner backpressure.
+- Fixed app-viewport selections drifting when content repaints between mouse press and drag.
 
 ## [18.0.10] - 2026-08-28
 
