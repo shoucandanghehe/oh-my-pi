@@ -1,9 +1,8 @@
 /**
- * The agent's run status, published to every terminal surface that shows it:
- * the title's run-state separator, and the root record of the OSC 7501 Program
- * Status Protocol (https://mitchellh.com/writing/program-status-osc7501),
- * which tabs, multiplexers, and agent inboxes read from the PTY instead of
- * scraping the title.
+ * The main agent's run status, published as the root record of the OSC 7501
+ * Program Status Protocol (https://mitchellh.com/writing/program-status-osc7501).
+ * Tabs, multiplexers, and agent inboxes read it from the PTY instead of scraping
+ * the title. Concurrent title and progress activity is aggregated separately.
  *
  * A report replaces the terminal's record whole, so each one carries `app` and
  * the full status. omp only writes the root record; teardown and opting out
@@ -60,6 +59,7 @@ const runtime: {
 	reported: string | undefined;
 	/** The `working` status a command-line prompt holds from startup until its run reports. */
 	startup: RunFlowStatus | undefined;
+	setTitleState(state: TerminalTitleState): void;
 } = {
 	status: { state: "idle" },
 	dialogs: [],
@@ -68,6 +68,7 @@ const runtime: {
 	disposed: false,
 	reported: undefined,
 	startup: undefined,
+	setTitleState: setTerminalTitleState,
 };
 
 /** What every surface shows: the newest open dialog, else the event flow's status. */
@@ -112,7 +113,7 @@ function report(): void {
 }
 
 function publish(): void {
-	setTerminalTitleState(titleState(shownStatus()));
+	runtime.setTitleState(titleState(shownStatus()));
 	report();
 	syncPromptZones();
 }
@@ -204,16 +205,20 @@ export function resendProgramStatus(): void {
  * this terminal would take as "finished" before the prompt even starts.
  * {@link settleStartupRun} ends that hold.
  */
-export function initProgramStatus(options?: { startupRun?: boolean }): void {
+export function initProgramStatus(options?: {
+	startupRun?: boolean;
+	setTitleState?(state: TerminalTitleState): void;
+}): void {
 	runtime.disposed = false;
 	runtime.dialogs.length = 0;
 	runtime.startup = undefined;
 	runtime.supported = false;
+	runtime.setTitleState = options?.setTitleState ?? setTerminalTitleState;
 	if (options?.startupRun) {
 		runtime.startup = { state: "working" };
 		runtime.status = runtime.startup;
 		// Not `setRunStatus`: the record waits for `setProgramStatusEnabled`, but the title follows now.
-		setTerminalTitleState(titleState(shownStatus()));
+		runtime.setTitleState(titleState(shownStatus()));
 	}
 	syncPromptZones();
 }
@@ -238,5 +243,7 @@ export function disposeProgramStatus(): void {
 	clear();
 	runtime.disposed = true;
 	runtime.supported = false;
+	runtime.setTitleState("idle");
+	runtime.setTitleState = setTerminalTitleState;
 	syncPromptZones();
 }

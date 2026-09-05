@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { type WorkingSpec, workingMessage } from "../../../src/ui/dock/working";
+import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -15,19 +19,33 @@ import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/setting
  * The regression: the overlay handlers took the row down but the resumed turn
  * never put "Working…" back while the agent kept streaming.
  */
-function createContext(options: { terminalProgress?: boolean } = {}) {
+interface LoaderRecoveryContextOptions {
+	terminalProgress?: boolean;
+	runEphemeralTurn?: AgentSession["runEphemeralTurn"];
+}
+
+function createContext(options: LoaderRecoveryContextOptions = {}) {
 	const streamState = { isStreaming: false };
 	if (options.terminalProgress) cfgTerminalShowProgress.set(settings, true);
 	const setProgress = vi.fn((_active: boolean) => {});
+	const setTitleState = vi.fn();
+	const terminalActivity = new TerminalActivityController({
+		isProgressEnabled: () => options.terminalProgress === true,
+		setProgress,
+		setTitleState,
+	});
 	const ctx = createInteractiveModeContext({
-		setTerminalProgress: setProgress,
+		terminalActivity,
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
 			},
+			getToolByName: () => undefined,
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			runEphemeralTurn: options.runEphemeralTurn ?? vi.fn(async () => Promise.withResolvers<never>().promise),
 		},
 	});
-	return { ctx, streamState, setProgress };
+	return { ctx, streamState, setProgress, setTitleState };
 }
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
@@ -260,5 +278,59 @@ describe("EventController loader recovery after overflow maintenance", () => {
 			if (program === undefined) delete Bun.env.TERM_PROGRAM;
 			else Bun.env.TERM_PROGRAM = program;
 		}
+	});
+
+	it("keeps terminal progress and title active when the main turn ends while /btw is still running", async () => {
+		const sideRequest = Promise.withResolvers<never>();
+		const { ctx, streamState, setProgress, setTitleState } = createContext({
+			terminalProgress: true,
+			runEphemeralTurn: () => sideRequest.promise,
+		});
+		const eventController = new EventController(ctx);
+		const btwController = new BtwController(ctx);
+
+		streamState.isStreaming = true;
+		await eventController.handleEvent(AGENT_START);
+		await btwController.start("Is the main turn still working?");
+
+		streamState.isStreaming = false;
+		await eventController.handleEvent(AGENT_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working"]);
+
+		expect(btwController.handleEscape()).toBe(true);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working", "idle"]);
+	});
+	it("keeps terminal activity when /btw finishes during a scheduled main continuation", async () => {
+		const sideRequest = Promise.withResolvers<EphemeralTurnResult>();
+		const { ctx, streamState, setProgress, setTitleState } = createContext({
+			terminalProgress: true,
+			runEphemeralTurn: () => sideRequest.promise,
+		});
+		const eventController = new EventController(ctx);
+		const btwController = new BtwController(ctx);
+
+		streamState.isStreaming = true;
+		await eventController.handleEvent(AGENT_START);
+		await btwController.start("Will the main turn keep working?");
+
+		streamState.isStreaming = false;
+		await eventController.handleEvent(AGENT_PAUSE);
+		sideRequest.resolve({
+			replyText: "Yes",
+			assistantMessage: createAssistantMessage("Yes"),
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working"]);
+
+		streamState.isStreaming = true;
+		await eventController.handleEvent(AGENT_START);
+		streamState.isStreaming = false;
+		await eventController.handleEvent(AGENT_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
+		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working", "idle"]);
 	});
 });

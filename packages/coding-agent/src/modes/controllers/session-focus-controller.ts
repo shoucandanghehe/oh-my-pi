@@ -213,6 +213,7 @@ export class SessionFocusController {
 			this.ctx.unsubscribe?.();
 			this.ctx.clearTransientSessionUi({ viewOnly: true });
 			this.ctx.eventController.resetTranscriptAnchors();
+			this.ctx.eventController.resetTerminalActivity();
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {
 				if (generation !== this.#attachGeneration) return;

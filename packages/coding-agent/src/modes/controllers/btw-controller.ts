@@ -479,6 +479,7 @@ export class BtwController {
 		if (!request || getBtwLatestTurn(request.record).status !== "running") return false;
 		this.#updateRequest(request, { status: "cancelled", updatedAt: Date.now() });
 		request.abortController.abort();
+		this.ctx.terminalActivity.release(request);
 		request.panel.markAborted();
 		this.#updateNote(request.record);
 		this.#persist(request);
@@ -741,6 +742,7 @@ export class BtwController {
 			}
 			this.#refreshHistory();
 			if (native) this.#showNote(request.record, { append: !previous });
+			this.ctx.terminalActivity.set(request, "working");
 			void this.#runRequest(request);
 			return true;
 		} catch (error) {
@@ -979,6 +981,8 @@ export class BtwController {
 				if (cancelled) request.panel.markAborted();
 				else request.panel.markError(message);
 			}
+		} finally {
+			this.ctx.terminalActivity.release(request);
 		}
 		this.#persist(request);
 		if (this.#isActiveRequest(request)) {

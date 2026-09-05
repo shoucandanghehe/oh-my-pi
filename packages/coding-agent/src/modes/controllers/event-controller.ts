@@ -64,7 +64,6 @@ import {
 	cfgDisplaySmoothStreaming,
 	cfgErrorNotify,
 	cfgTerminalShowImages,
-	cfgTerminalShowProgress,
 } from "../settings";
 import type { AssistantView, InteractiveModeContext, PendingTool } from "../types";
 import { displaceableBy } from "../utils/displaceable";
@@ -387,14 +386,6 @@ export class EventController {
 	#toolArgsReveal: ToolArgsRevealController;
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
-	#terminalProgressActive = false;
-	/**
-	 * Whether the running auto-compaction turned terminal progress on itself.
-	 * Only then does its end turn progress off: a compaction inside a live turn
-	 * leaves the turn's progress for that turn's `agent_end`, so Tern (which
-	 * reads progress as busy state) never sees the agent stop mid-run.
-	 */
-	#compactionOwnsProgress = false;
 	/**
 	 * The working row names what a paused run awaits instead of the last intent,
 	 * until the next loop starts or the run ends.
@@ -430,6 +421,8 @@ export class EventController {
 	// once instead of twice.
 	#vocalizedMessageUpdates = new WeakSet<object>();
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
+	readonly #agentTerminalActivityOwner = {};
+	readonly #maintenanceTerminalActivityOwner = {};
 
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
@@ -576,7 +569,7 @@ export class EventController {
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
 		this.composerPrediction.cancel();
-		this.#setTerminalProgress(false);
+		this.resetTerminalActivity();
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}
@@ -1305,22 +1298,9 @@ export class EventController {
 		await run(event);
 	}
 
-	#setTerminalProgress(active: boolean): void {
-		if (active) {
-			// Tern reads the progress as the pane's busy state (its tab's live
-			// dot), so it gets it whatever the setting says. Tern's panes carry
-			// `KITTY_WINDOW_ID`, so the terminal identity says kitty there.
-			const wanted =
-				Bun.env.TERM_PROGRAM?.toLowerCase() === "tern" ||
-				(this.ctx.settings ? cfgTerminalShowProgress.get(this.ctx.settings) : undefined) === true;
-			if (this.#terminalProgressActive || !wanted) return;
-			this.ctx.setTerminalProgress(true);
-			this.#terminalProgressActive = true;
-			return;
-		}
-		if (!this.#terminalProgressActive) return;
-		this.ctx.setTerminalProgress(false);
-		this.#terminalProgressActive = false;
+	resetTerminalActivity(): void {
+		this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
+		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
 	}
 
 	#trackRetrySupersededAssistantComponent(component: AssistantView | undefined): void {
@@ -1416,9 +1396,7 @@ export class EventController {
 		this.ctx.clearWorking("retry");
 		this.composerPrediction.cancel();
 		this.ctx.statusLine.markActivityStart();
-		// The turn owns progress from here; a compaction that started it hands it over.
-		this.#compactionOwnsProgress = false;
-		this.#setTerminalProgress(true);
+		this.ctx.terminalActivity.set(this.#agentTerminalActivityOwner, "working");
 		this.ctx.ensureWorkingRow();
 		setRunStatus({ state: "working" });
 		reportProgramResume();
@@ -2200,6 +2178,7 @@ export class EventController {
 		);
 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
 		const renderToolName = toolRenderName(event.toolName, tool);
+
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId) && !this.#toolTimelineComponents.has(event.toolCallId)) {
 			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
@@ -2392,6 +2371,7 @@ export class EventController {
 		// which only fire `tool_execution_end`, never `_update` — do not leave
 		// the UI looking idle while the session keeps streaming (#3857).
 		this.#ensureWorkingLoaderWhileStreaming();
+
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
 				const component = this.ctx.pendingTools.get(event.toolCallId);
@@ -2626,7 +2606,7 @@ export class EventController {
 		options?: { interrupted?: boolean },
 	): Promise<void> {
 		this.#showingAsyncWait = false;
-		this.#setTerminalProgress(false);
+		this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();
 		this.#streamingReveal.stop();
@@ -2688,10 +2668,7 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
 		this.composerPrediction.cancel();
-		if (!this.#terminalProgressActive) {
-			this.#setTerminalProgress(true);
-			this.#compactionOwnsProgress = this.#terminalProgressActive;
-		}
+		this.ctx.terminalActivity.set(this.#maintenanceTerminalActivityOwner, "working");
 		const reasonText =
 			event.reason === "overflow"
 				? "Context overflow detected, "
@@ -2721,10 +2698,7 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
-		if (this.#compactionOwnsProgress) {
-			this.#compactionOwnsProgress = false;
-			this.#setTerminalProgress(false);
-		}
+		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
 		this.ctx.clearWorking("compaction");
 		const isHandoffAction = event.action === "handoff";
 		const isRemoteAction = event.action === "remote";

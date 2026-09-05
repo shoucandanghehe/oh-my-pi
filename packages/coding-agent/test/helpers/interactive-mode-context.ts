@@ -46,6 +46,7 @@ import { vi } from "bun:test";
 import type { FigureCell } from "../../src/ui/transcript/figures/svg";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
+import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPDroppedServer } from "@oh-my-pi/pi-coding-agent/mcp/transforms";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -296,7 +297,11 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		addGlobalKeyHandler: vi.fn((handler: (key: KeyEvent) => boolean) => register(input.globalKeys, handler)),
 		suspend: <R>(run: () => Promise<R>) => run(),
 		dialogVim: vi.fn(() => undefined),
-		setTerminalProgress: vi.fn(),
+		terminalActivity: new TerminalActivityController({
+			isProgressEnabled: () => false,
+			setProgress: vi.fn(),
+			setTitleState: vi.fn(),
+		}),
 		showEditorAreaDialog: vi.fn((factory: () => JSXNode, options?: OverlayOptions) =>
 			shell.overlays.show(factory, options),
 		),

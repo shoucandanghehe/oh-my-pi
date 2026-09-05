@@ -83,6 +83,7 @@ function makeCtx(
 	return {
 		...btwShellMembers(new Shell()),
 		keybindings: KeybindingsManager.inMemory(),
+		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		session,
 		settings: Settings.isolated(settings),
 		sessionManager: {

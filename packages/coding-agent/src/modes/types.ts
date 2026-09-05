@@ -87,6 +87,7 @@ import type { BlockedKind } from "../utils/run-status";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { TranscriptReplica } from "./interactive/transcript-replica";
 import type { EventController } from "./controllers/event-controller";
+import type { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { ConversationPosition } from "./utils/conversation-position";
 import type { StatusNoticeAction } from "./view-model/chrome/status-notice";
@@ -481,8 +482,7 @@ export interface InteractiveModeContext {
 	 * settles; the display is redrawn after. Replaces `ui.stop()` / `ui.start()` pairs.
 	 */
 	suspend<R>(run: () => Promise<R>): Promise<R>;
-	/** The terminal's busy indicator (OSC 9;4 progress) on or off. */
-	setTerminalProgress(busy: boolean): void;
+	readonly terminalActivity: TerminalActivityController;
 	/**
 	 * Mount `factory` in the composer's place (an extension select/input/editor/custom view, an
 	 * approval or login prompt); focus moves into it unless `options.focus` is false. Closing the

@@ -199,6 +199,7 @@ import {
 	setTerminalTitleSpinnerInterval,
 	setTerminalTitleHandoff,
 	setTerminalTitleSpinnerStyle,
+	setTerminalTitleState,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -230,6 +231,7 @@ import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
+import { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
 import {
@@ -325,6 +327,7 @@ import {
 	cfgStatusLineTransparent,
 	cfgSymbolPreset,
 	cfgTerminalProgramStatus,
+	cfgTerminalShowProgress,
 	cfgTerminalShowImages,
 	cfgTuiHyperlinks,
 	cfgTuiMaxFps,
@@ -697,6 +700,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#frame.statusPreviewRow(columns);
 	}
 	readonly statusLine: SessionStatusLine;
+	readonly terminalActivity: TerminalActivityController;
 	/** Live transcript blocks: assistant replies, tool calls, `!`/`$` runs. */
 	readonly #presenter: TranscriptPresenter;
 	/** What the transcript's message faces read (the live ones, and a replica's). */
@@ -1679,6 +1683,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Store pending commands for init() where file commands are loaded async
 		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 
+		this.terminalActivity = new TerminalActivityController({
+			isProgressEnabled: () => cfgTerminalShowProgress.get(this.settings),
+			setProgress: active => this.shell.host?.driver.setProgress(active),
+			setTitleState: setTerminalTitleState,
+		});
+
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
 		this.#tanCommandController = new TanCommandController(this);
@@ -2198,7 +2208,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).titleSpinnerInterval);
-		initProgramStatus({ startupRun: options.startupRun });
+		initProgramStatus({
+			startupRun: options.startupRun,
+			setTitleState: state => {
+				if (state === "idle") this.terminalActivity.release(initProgramStatus);
+				else this.terminalActivity.set(initProgramStatus, state);
+			},
+		});
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		this.#probeProgramStatus();
 		initProgramResume({
@@ -6918,7 +6934,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#recorder?.stop();
 		this.#recorder = undefined;
 		this.#working.clear();
-		this.setTerminalProgress(false);
+		this.terminalActivity.clear();
 		this.#editorAreaDialog?.close();
 		this.#micCursor?.dispose();
 		this.#micCursor = undefined;
@@ -7392,11 +7408,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			setTerminalTitleHandoff(false);
 			this.#inputController.enableEnhancedPaste();
 		}
-	}
-
-	/** The terminal's busy indicator (OSC 9;4; the driver keeps it alive where terminals drop it). */
-	setTerminalProgress(busy: boolean): void {
-		this.shell.host?.driver.setProgress(busy);
 	}
 
 	/**
