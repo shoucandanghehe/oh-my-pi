@@ -1818,6 +1818,28 @@ describe("Layout-only row measurement", () => {
 		expect(markdown.render(24)).toHaveLength(measuredRows);
 		expect(highlightCallCount).toBe(1);
 	});
+
+	it("skips ANSI style callbacks during layout-only measurement", () => {
+		let styleCallCount = 0;
+		const style = (text: string): string => {
+			styleCallCount++;
+			return chalk.cyan(text);
+		};
+		const themeWithLayout = {
+			...defaultMarkdownTheme,
+			heading: style,
+			code: style,
+			bold: style,
+			quote: style,
+			highlightCodeForLayout: (code: string): string[] => code.split("\n"),
+		};
+		const markdown = new Markdown("# Heading with **bold** and `code`\n\n> quoted text", 1, 0, themeWithLayout);
+
+		const measuredRows = markdown.measureRows(24);
+		expect(styleCallCount).toBe(0);
+		expect(markdown.render(24)).toHaveLength(measuredRows);
+		expect(styleCallCount).toBeGreaterThan(0);
+	});
 });
 
 describe("Module-level LRU render cache", () => {

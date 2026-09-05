@@ -2,24 +2,13 @@
  * Shared utility for truncating text to visual lines (accounting for line wrapping).
  * Used by both tool-execution.ts and bash-execution.ts for consistent behavior.
  */
-import { Text } from "@oh-my-pi/pi-tui";
+import { getPaddingX, padding, replaceTabs, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 
 export interface VisualTruncateResult {
-	/** The visual lines to display */
+	/** The visual lines to display. */
 	visualLines: readonly string[];
-	/** Number of visual lines that were skipped (hidden) */
+	/** Number of visual lines hidden before the returned tail. */
 	skippedCount: number;
-}
-
-const textCache = new Map<number, Text>();
-
-function getCachedText(paddingX: number): Text {
-	let text = textCache.get(paddingX);
-	if (!text) {
-		text = new Text("", paddingX, 0);
-		textCache.set(paddingX, text);
-	}
-	return text;
 }
 
 /**
@@ -40,16 +29,19 @@ export function truncateToVisualLines(
 	width: number,
 	paddingX: number = 0,
 ): VisualTruncateResult {
-	if (!text) {
+	if (!text || !text.trim()) {
 		return { visualLines: [], skippedCount: 0 };
 	}
 
-	// Create a temporary Text component to render and get visual lines
-	const tempText = getCachedText(paddingX);
-	if (tempText.getText() !== text) {
-		tempText.setText(text);
-	}
-	const allVisualLines = tempText.render(width);
+	const normalizedText = replaceTabs(text);
+	const inset = getPaddingX(paddingX);
+	const contentWidth = Math.max(1, width - inset * 2);
+	const leftMargin = padding(inset);
+	const rightMargin = padding(inset);
+	const allVisualLines = wrapTextWithAnsi(normalizedText, contentWidth).map(line => {
+		const withMargins = leftMargin + line + rightMargin;
+		return withMargins + padding(Math.max(0, width - visibleWidth(withMargins)));
+	});
 
 	if (allVisualLines.length <= maxVisualLines) {
 		return { visualLines: allVisualLines, skippedCount: 0 };

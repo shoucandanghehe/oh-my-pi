@@ -27,6 +27,10 @@ class CountingRows implements Component {
 		this.renders++;
 		return [this.text];
 	}
+
+	measureRows(): number {
+		return 1;
+	}
 }
 
 function mouse(overrides: Partial<SgrMouseEvent>): SgrMouseEvent {

@@ -1381,6 +1381,7 @@ export function getMarkdownLinkUrls(text: string): string[] {
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
  */
+
 export interface MarkdownTheme {
 	heading: (text: string) => string;
 	link: (text: string) => string;
@@ -1419,6 +1420,8 @@ export interface MarkdownTheme {
 	resolveMermaidAscii?: (source: string, maxWidth?: number) => string | null;
 	symbols: SymbolTheme;
 }
+
+const identityMarkdownStyle = (text: string): string => text;
 
 interface InlineStyleContext {
 	applyText: (text: string) => string;
@@ -1791,6 +1794,7 @@ export class Markdown implements Component {
 	#activeTextSelectionLogicalLine = 0;
 	#transientRenderCache = false;
 	#sharedRenderCache = true;
+	#layoutOnly = false;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
 	// block tokens are frozen, plus those tokens. marked has no resumable lexer,
@@ -2098,18 +2102,36 @@ export class Markdown implements Component {
 		}
 		const highlightCodeForLayout = this.#theme.highlightCodeForLayout;
 		if (!highlightCodeForLayout) return this.render(width).length;
-		const layoutTheme = { ...this.#theme, highlightCode: highlightCodeForLayout };
+		const layoutTheme: MarkdownTheme = {
+			...this.#theme,
+			heading: identityMarkdownStyle,
+			link: identityMarkdownStyle,
+			linkUrl: identityMarkdownStyle,
+			code: identityMarkdownStyle,
+			codeBlock: identityMarkdownStyle,
+			codeBlockBorder: identityMarkdownStyle,
+			quote: identityMarkdownStyle,
+			quoteBorder: identityMarkdownStyle,
+			hr: identityMarkdownStyle,
+			listBullet: identityMarkdownStyle,
+			bold: identityMarkdownStyle,
+			italic: identityMarkdownStyle,
+			strikethrough: identityMarkdownStyle,
+			underline: identityMarkdownStyle,
+			highlightCode: highlightCodeForLayout,
+		};
 		delete layoutTheme.createHighlightStream;
 		const probe = new Markdown(
 			this.#text,
 			this.#paddingX,
 			this.#paddingY,
 			layoutTheme,
-			this.#defaultTextStyle,
+			undefined,
 			this.#codeBlockIndent,
 		);
 		probe.#ignoreTight = this.#ignoreTight;
 		probe.#sharedRenderCache = false;
+		probe.#layoutOnly = true;
 		probe.transientRenderCache = this.transientRenderCache;
 		return probe.render(width).length;
 	}
@@ -2307,7 +2329,7 @@ export class Markdown implements Component {
 		const tokens = this.#lexTokens(normalizedText);
 		let contentLines: string[];
 		const contentSelectionRows: RenderedTextSelectionRow[] = [];
-		this.#activeTextSelectionRows = contentSelectionRows;
+		this.#activeTextSelectionRows = this.#layoutOnly ? undefined : contentSelectionRows;
 		this.#activeTextSelectionLogicalLine = 0;
 		this.#activeRenderSignature = signature;
 		try {
@@ -2318,6 +2340,11 @@ export class Markdown implements Component {
 			this.#activeRenderSignature = undefined;
 			this.#activeTextSelectionRows = undefined;
 			this.#activeTextSelectionLogicalLine = 0;
+		}
+		if (this.#layoutOnly) {
+			contentLines.length = Math.max(1, contentLines.length + this.#paddingY * 2);
+			contentLines.fill("");
+			return contentLines;
 		}
 		const emptyLines = this.#renderEmptyPaddingLines(signature);
 

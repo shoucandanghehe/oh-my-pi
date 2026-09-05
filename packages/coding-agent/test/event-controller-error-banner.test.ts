@@ -357,6 +357,7 @@ describe("EventController error banner", () => {
 		const errorMessage = Array.from({ length: 30 }, (_, i) => `provider error detail line ${i}`).join("\n");
 		const { controller, ctx } = createFixture();
 		ctx.toolOutputExpanded = true;
+		ctx.chatContainer.setExpanded(true);
 
 		await controller.handleEvent({
 			type: "message_start",

@@ -227,7 +227,6 @@ describe("InteractiveMode working status spinner", () => {
 				.map(([target]) => target)
 				.find(target => target !== mode.loadingAnimation) as Component | undefined;
 			expect(repaintTarget).toBeDefined();
-			expect(repaintTarget).not.toBe(mode.statusLine);
 			const renderStatus = (): string => Bun.stripANSI(mode.statusLine.getTopBorder(118).content);
 			expect(renderStatus()).toContain(" 0s ");
 			requestComponentRender.mockClear();

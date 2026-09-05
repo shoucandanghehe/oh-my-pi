@@ -30,6 +30,9 @@
 ### Fixed
 
 - Fixed the TUI tearing in Herdr panes so the live viewport updates as one frame instead of leaving the top frozen while only the bottom refreshed. Pane identity vars (`HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`) also count as inside Herdr, not only `HERDR_ENV=1`. A DECRPM “unrecognized” report keeps synchronized output on; a “permanently reset” report, or a custom terminal that omits the DECRPM status, still turns it off.
+### Fixed
+
+- Text and Markdown components now measure offscreen row counts without building styled or selection-mapped render output.
 
 ## [18.1.0] - 2026-09-01
 
