@@ -252,6 +252,7 @@ export class InputController {
 	#draftText: string | undefined;
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
+	#btwContinueListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
 	#globalEditorActionsListenerInstalled = false;
@@ -336,9 +337,22 @@ export class InputController {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
 				if (!this.ctx.focusedAgentId) return undefined;
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (!matchesKey(data, "left")) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				this.#handleFocusedLeftTap();
+				return { consume: true };
+			});
+		}
+		if (!this.#btwContinueListenerInstalled) {
+			this.#btwContinueListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => {
+				if (!matchesKey(data, "enter")) return undefined;
+				if (!this.ctx.handlesBtwContinueKey()) return undefined;
+				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
+				if (this.ctx.editor.getText().trim()) return undefined;
+				if (this.ctx.editor.pendingImages.length > 0) return undefined;
+				void this.ctx.handleBtwContinueKey().catch(() => {});
 				return { consume: true };
 			});
 		}
@@ -349,21 +363,20 @@ export class InputController {
 				if (!this.ctx.handlesBtwBranchKey()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
-				void this.ctx.handleBtwBranchKey();
+				if (this.ctx.editor.pendingImages.length > 0) return undefined;
+				void this.ctx.handleBtwBranchKey().catch(() => {});
 				return { consume: true };
 			});
 		}
 		if (!this.#btwCopyListenerInstalled) {
 			this.#btwCopyListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
+				if (!matchesKey(data, "c")) return undefined;
+				if (!this.ctx.handlesBtwCopyKey()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
-				if (matchesKey(data, "f") && this.ctx.canFollowUpBtw()) {
-					this.ctx.handleBtwFollowUpKey();
-					return { consume: true };
-				}
-				if (!matchesKey(data, "c") || !this.ctx.canCopyBtw()) return undefined;
-				void this.ctx.handleBtwCopyKey();
+				if (this.ctx.editor.pendingImages.length > 0) return undefined;
+				void this.ctx.handleBtwCopyKey().catch(() => {});
 				return { consume: true };
 			});
 		}
@@ -443,6 +456,7 @@ export class InputController {
 			// rebinds Ctrl+O for its own use (the tree selector's filter cycle).
 			this.ctx.ui.addInputListener(data => {
 				if (!this.ctx.keybindings.matches(data, "app.tools.expand")) return undefined;
+				if (this.ctx.workspaceEnabled && !this.ctx.isMainWorkspacePaneFocused()) return undefined;
 				if (this.ctx.ui.hasOverlay()) return undefined;
 				if (this.ctx.ui.getFocused() instanceof TreeSelectorComponent && matchesKey(data, "ctrl+o"))
 					return undefined;

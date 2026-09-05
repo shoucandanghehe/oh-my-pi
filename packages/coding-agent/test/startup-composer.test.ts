@@ -24,6 +24,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { type Component, WorkspaceLayout, WorkspaceModel } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createTestSession } from "./utilities";
@@ -265,6 +266,21 @@ describe("outer startup collaboration gate", () => {
 		}
 	});
 });
+class MutableRows implements Component {
+	#rows: readonly string[];
+
+	constructor(rows: readonly string[]) {
+		this.#rows = rows;
+	}
+
+	setRows(rows: readonly string[]): void {
+		this.#rows = rows;
+	}
+
+	render(): readonly string[] {
+		return this.#rows;
+	}
+}
 
 describe("Composer prepaint", () => {
 	let settings: Settings;
@@ -616,6 +632,72 @@ describe("Composer prepaint", () => {
 		expect(terminal.stops).toBe(1);
 	});
 
+	it("first frame mirrors the canonical settings-schema defaults", () => {
+		expect(COMPOSER_DEFAULTS).toEqual({
+			quiet: getDefault("startup.quiet"),
+			composerShape: getDefault("composer.shape") ?? "box",
+			showHardwareCursor: getDefault("showHardwareCursor"),
+			maxInlineImages: getDefault("tui.maxInlineImages"),
+			resizeScrollback: getDefault("tui.resizeScrollback"),
+			imeSafeCursor: getDefault("tui.imeSafeCursor"),
+			autocompleteMaxVisible: getDefault("autocompleteMaxVisible"),
+			spellingTypoDetection: getDefault("spelling.typoDetection"),
+			spellingAutocomplete: getDefault("spelling.autocomplete"),
+			spellingAutocorrect: getDefault("spelling.autocorrect"),
+		});
+	});
+
+	it("isolates a full-height workspace from late root chrome updates", async () => {
+		const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+		const terminal = new CountingTerminal(80, 10);
+		const composer = new Composer({ preferences: config, terminal });
+		const rootStatus = new MutableRows([]);
+		const main = new MutableRows(["MAIN-CONTENT"]);
+		const agent = new MutableRows(["AGENT-CONTENT"]);
+		const model = WorkspaceModel.single("main");
+		expect(model.splitPane("main", "agent", "right")).toBe(true);
+		const workspace = new WorkspaceLayout({
+			model,
+			height: () => terminal.rows,
+			requestRender: () => composer.ui.requestRender(),
+			panes: [
+				{ paneId: "main", title: "Main", component: main },
+				{ paneId: "agent", title: "Agent", component: agent },
+			],
+		});
+
+		try {
+			composer.start({ playWelcomeIntro: false });
+			await terminal.waitForRender();
+			composer.setPreferences({ quiet: true });
+			composer.setStatusComponent(rootStatus);
+			composer.setHeaderExtras([], []);
+			composer.setRuntimeChildren([workspace], { chrome: "omit" });
+			await terminal.waitForRender();
+
+			const mainRect = workspace.frame?.panes.get("main");
+			if (!mainRect) throw new Error("Main pane missing");
+			const readMain = () => terminal.getViewport().map(row => row.slice(mainRect.x, mainRect.x + mainRect.width));
+			const before = readMain();
+			expect(Bun.stripANSI(terminal.getViewport()[0] ?? "").trimEnd()).toStartWith(">Main");
+
+			rootStatus.setRows(["LATE-ROOT-STATUS"]);
+			agent.setRows([
+				`Validation failed for tool "hub": ${"received arguments ".repeat(20)}`,
+				...Array.from({ length: 20 }, (_value, index) => `agent-error-${index}`),
+			]);
+			composer.ui.requestRender();
+			await terminal.waitForRender(() => terminal.getViewport().some(row => row.includes("Validation failed")));
+
+			expect(readMain()).toEqual(before);
+			expect(Bun.stripANSI(terminal.getViewport()[0] ?? "").trimEnd()).toStartWith(">Main");
+		} finally {
+			composer.stop();
+			if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+			else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+		}
+	});
 	it("renders the complete interactive welcome scene on the first frame", async () => {
 		const terminal = new CountingTerminal(80, 32);
 		const composer = new Composer({

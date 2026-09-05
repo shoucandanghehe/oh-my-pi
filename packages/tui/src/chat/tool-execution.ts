@@ -150,6 +150,8 @@ export interface ToolExecutionUi {
 	requestRender(): void;
 	requestComponentRender(component: Component): void;
 	resetDisplay(): void;
+	/** Backend-aware replacement for a native-scrollback display reset. */
+	reconcileRenderTopology?(): void;
 	imageBudget?: TUI["imageBudget"];
 }
 
@@ -841,7 +843,8 @@ export class ToolExecutionComponent extends Container {
 		const provisionalResultSettled =
 			partialResultPaintedBeforeSettle && !isPartial && this.#rendererFlag("forceResultViewportRepaintOnSettle");
 		if (firstResultAfterRepaintShapePaint || provisionalResultSettled) {
-			this.#ui.requestRender();
+			if (this.#ui.reconcileRenderTopology) this.#ui.reconcileRenderTopology();
+			else this.#ui.requestRender();
 		}
 	}
 
@@ -1241,7 +1244,11 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
+						{
+							...resolveImageOptions(),
+							budget: this.#ui.imageBudget,
+							imageKey: `te${this.#instanceId}:${i}:${imageMimeType}:${String(Bun.hash(imageData))}`,
+						},
 					);
 					this.#imageComponents.push(imageComponent);
 					this.addChild(imageComponent);

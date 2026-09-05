@@ -3,6 +3,7 @@ import {
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
+	ImageProtocol,
 	imageFallback,
 	renderImage,
 	TERMINAL,
@@ -175,6 +176,12 @@ export class ImageBudget {
 	#transmitted: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
 	/** Transmit sequences (full base64) to write once per surface, before that frame's placements. */
 	#pendingTransmits: Record<Surface, Map<number, string>> = { screen: new Map(), alt: new Map() };
+	/** Image ids observed by the latest authoritative pass on each surface. */
+	#authoritativeIds: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
+	/** Images absent from each surface's latest completed authoritative frame. */
+	#retiredIds: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
+	/** Tallest rendered graphic block per immutable image occurrence. */
+	#renderedRows = new Map<number, number>();
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
@@ -264,6 +271,8 @@ export class ImageBudget {
 	beginAltScreenLifecycle(): void {
 		resetSurfaceSplit(this.#altSplit);
 		this.#liveIds.alt.clear();
+		this.#authoritativeIds.alt.clear();
+		this.#retiredIds.alt.clear();
 		// `?1049h` hands over an empty graphics store as well as a cleared grid.
 		this.#transmitted.alt.clear();
 	}
@@ -312,6 +321,7 @@ export class ImageBudget {
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
+			this.#passIds.push(imageId);
 			const suppressed = this.#cap > 0 && this.#split.suppressedIds.has(imageId);
 			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
@@ -344,6 +354,17 @@ export class ImageBudget {
 			this.#applyingReset = false;
 		}
 		const retry = this.#reconcile(total);
+		if (!retry) {
+			// Discovery retries are not authoritative frames. Advancing the
+			// baseline there would lose removals before the final pass drains them.
+			const currentIds = new Set(this.#passIds);
+			const retiredIds = this.#retiredIds[this.#surface];
+			retiredIds.clear();
+			for (const id of this.#authoritativeIds[this.#surface]) {
+				if (!currentIds.has(id)) retiredIds.add(id);
+			}
+			this.#authoritativeIds[this.#surface] = currentIds;
+		}
 		// Snapshot the committed display-order suppression by id: the prefix
 		// [0, onTerminal) is what this surface currently shows as text. Partial
 		// passes replay this per id (see #stablePass) instead of re-deriving it
@@ -405,14 +426,14 @@ export class ImageBudget {
 	 * the frame on any surface this pass is not repainting does. Returns whether
 	 * it was retired.
 	 */
-	#retire(imageId: number): boolean {
+	#retire(imageId: number, purgeIds = this.#purgeIds): boolean {
 		if (this.#passShowsLive(imageId)) return false;
 		for (const surface of SURFACES) {
 			if (surface !== this.#surface && this.#liveIds[surface].has(imageId)) return false;
 		}
 		// A transmit queued by a discarded discovery pass never reached the
 		// terminal, so cancel it instead of transmitting then purging.
-		if (!this.#pendingTransmits[this.#surface].delete(imageId)) this.#purgeIds.push(imageId);
+		if (!this.#pendingTransmits[this.#surface].delete(imageId)) purgeIds.push(imageId);
 		this.#transmitted[this.#surface].delete(imageId);
 		if (!this.#isTransmitted(imageId)) this.#deletePlacementState(imageId);
 		this.#forgetKeyForId(imageId);
@@ -452,7 +473,6 @@ export class ImageBudget {
 			this.#transmitted[surface].clear();
 			this.#pendingTransmits[surface].clear();
 		}
-		if (ids.size === 0) return EMPTY_IDS;
 		this.#purgeIds = [];
 		this.#resetPurgeIds = [];
 		this.#keyToId.clear();
@@ -460,7 +480,39 @@ export class ImageBudget {
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
 		for (const surface of SURFACES) this.#liveIds[surface].clear();
-		return [...ids];
+		for (const surface of SURFACES) {
+			this.#authoritativeIds[surface].clear();
+			this.#retiredIds[surface].clear();
+		}
+		this.#renderedRows.clear();
+		return ids.size === 0 ? EMPTY_IDS : [...ids];
+	}
+
+	rememberRenderedRows(imageId: number, rows: number): number {
+		const remembered = Math.max(this.#renderedRows.get(imageId) ?? 0, Math.max(0, Math.trunc(rows)));
+		this.#renderedRows.set(imageId, remembered);
+		return remembered;
+	}
+
+	getRememberedRenderedRows(imageId: number): number {
+		return this.#renderedRows.get(imageId) ?? 0;
+	}
+	/**
+	 * Retire graphics absent from the latest authoritative frame on this surface.
+	 * App-viewport callers drain these because they have no native scrollback;
+	 * native-scrollback callers deliberately leave them archived. The shared
+	 * retirement gate still protects graphics shown by another surface.
+	 */
+	takeRetiredIds(): readonly number[] {
+		const retiredIds = this.#retiredIds[this.#surface];
+		if (retiredIds.size === 0) return EMPTY_IDS;
+		const ids: number[] = [];
+		for (const id of retiredIds) {
+			if (!this.#retire(id, ids)) continue;
+			retiredIds.delete(id);
+			if (!this.#isTransmitted(id)) this.#renderedRows.delete(id);
+		}
+		return ids.length === 0 ? EMPTY_IDS : ids;
 	}
 
 	/** Whether `imageId`'s data still needs to be transmitted to the surface the in-flight pass paints. */
@@ -602,6 +654,11 @@ export class ImageBudget {
 		return this.#pendingTransmits[this.#surface].size > 0;
 	}
 
+	/** Whether a stable partial pass encountered graphics and needs a full audit. */
+	get stablePassObservedImages(): boolean {
+		return this.#stablePass && this.#passIds.length > 0;
+	}
+
 	/**
 	 * True when the budget has nothing in flight on either surface: no live images
 	 * observed on the last pass, no queued transmits, no pending purges, and no
@@ -737,6 +794,9 @@ export class Image implements Component {
 		this.#dimensions = dimensions || getImageDimensions(base64Data, mimeType) || { widthPx: 800, heightPx: 600 };
 		this.#budget = options.budget;
 		this.#imageId = options.budget ? options.budget.acquireId(options.imageKey) : undefined;
+		if (this.#imageId != null && this.#budget !== undefined) {
+			this.#renderedGraphicRows = this.#budget.getRememberedRenderedRows(this.#imageId);
+		}
 	}
 	/** Return source metadata without exposing the encoded image buffer. */
 	debugState(): Record<string, unknown> {
@@ -765,6 +825,10 @@ export class Image implements Component {
 		// toward (and are demoted by) the budget; without a protocol every image is
 		// already text.
 		const suppressed = hasProtocol && this.#budget !== undefined ? this.#budget.observe(this.#imageId ?? 0) : false;
+		const needsKittyTransmit =
+			imageProtocol === ImageProtocol.Kitty &&
+			this.#imageId != null &&
+			(this.#budget?.shouldTransmit(this.#imageId) ?? false);
 
 		if (
 			this.#cachedLines &&
@@ -774,7 +838,7 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
+			!needsKittyTransmit
 		) {
 			return this.#cachedLines;
 		}
@@ -787,7 +851,7 @@ export class Image implements Component {
 		if (hasProtocol && !suppressed) {
 			// Transmit the data once (keyed by id); thereafter renderImage returns
 			// just the placement, so repaints never re-send the base64.
-			const needsTransmit = this.#imageId != null && (this.#budget?.shouldTransmit(this.#imageId) ?? false);
+			const needsTransmit = needsKittyTransmit;
 			const result = renderImage(this.#base64Data, this.#dimensions, {
 				maxWidthCells: maxWidth,
 				maxHeightCells: this.#options.maxHeightCells,
@@ -800,8 +864,8 @@ export class Image implements Component {
 			}
 
 			if (result?.lines) {
-				// Unicode placeholders: the image is already a block of real text-cell
-				// lines (line 0 carries the virtual-placement APC). No cursor moves.
+				// Unicode placeholders are real text-cell lines. Every row carries
+				// the virtual-placement APC so viewport slicing stays self-contained.
 				lines = result.lines;
 			} else if (result) {
 				// Direct placement: return `rows` lines so TUI accounts for image
@@ -830,6 +894,9 @@ export class Image implements Component {
 				lines = this.#fallbackLines();
 			}
 			this.#renderedGraphicRows = Math.max(this.#renderedGraphicRows, lines.length);
+			if (this.#imageId != null && this.#budget !== undefined) {
+				this.#renderedGraphicRows = this.#budget.rememberRenderedRows(this.#imageId, this.#renderedGraphicRows);
+			}
 		} else {
 			lines = this.#fallbackLines();
 		}

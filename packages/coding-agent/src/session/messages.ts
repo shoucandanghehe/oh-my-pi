@@ -49,12 +49,25 @@ import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
-import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import {
+	type BranchSummaryMessage,
+	type CompactionSummaryMessage,
+	convertMessageToLlm,
+} from "@oh-my-pi/pi-agent-core/compaction/messages";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	MessageAttribution,
+	TextContent,
+	UserMessage,
+} from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { escapeXmlAttribute, escapeXmlText, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
+import btwSummaryTemplate from "../prompts/system/btw-summary.md" with { type: "text" };
 import { formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
 export {
@@ -65,8 +78,38 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
-import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
+
+export const BTW_SUMMARY_MESSAGE_TYPE = "btw:summary";
+export interface BtwSummarySource {
+	threadKey: string;
+	threadTitle: string;
+}
+export interface BtwSummary extends BtwSummarySource {
+	summary: string;
+}
+export interface BtwSummaryMessageDetails {
+	summaries: BtwSummary[];
+}
+
+export function createBtwSummaryMessage(summaries: BtwSummary[]): CustomMessage<BtwSummaryMessageDetails> {
+	return {
+		role: "custom",
+		customType: BTW_SUMMARY_MESSAGE_TYPE,
+		content: prompt.render(btwSummaryTemplate, {
+			summaries: summaries.map(entry => ({
+				threadKey: escapeXmlAttribute(entry.threadKey),
+				threadTitle: escapeXmlAttribute(entry.threadTitle),
+				summary: escapeXmlText(entry.summary),
+			})),
+		}),
+		display: true,
+		details: { summaries },
+		attribution: "agent",
+		timestamp: Date.now(),
+	};
+}
 
 /**
  * Logs provider-error turns so their actual cause is available outside the
@@ -101,6 +144,23 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 		content.push(block);
 	}
 	return { ...message, content, providerPayload: undefined };
+}
+/** Promote the visible ephemeral reply without replay-bound provider metadata. */
+export function sanitizeEphemeralAssistantForPromotion(message: AssistantMessage, replyText: string): AssistantMessage {
+	const sanitized = sanitizeAssistantForReparentedHistory(message);
+	const content: AssistantMessage["content"] = [];
+	let replacedText = false;
+	for (const block of sanitized.content) {
+		if (block.type !== "text") {
+			content.push(block);
+			continue;
+		}
+		if (replacedText) continue;
+		content.push({ type: "text", text: replyText });
+		replacedText = true;
+	}
+	if (!replacedText) content.push({ type: "text", text: replyText });
+	return { ...sanitized, content };
 }
 
 /**

@@ -101,6 +101,8 @@ export interface RuntimeChildrenOptions {
 	 * settled rows it displaces retire to native scrollback.
 	 */
 	readonly transient?: readonly Component[];
+	/** Preserve bootstrap/classic root chrome, or let a full-height runtime own the terminal. */
+	readonly chrome?: "preserve" | "omit";
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -277,6 +279,7 @@ export class Composer implements TerminalFrameProvider {
 	// rediscovered from whatever chrome is expanded when the height changes.
 	#transientChrome: ReadonlySet<Component> = new Set();
 	#transientChromeFloor: number | undefined;
+	#runtimeChrome: "preserve" | "omit" = "preserve";
 	#lastInterruptAt = 0;
 	#started = false;
 	#stopped = false;
@@ -871,12 +874,14 @@ export class Composer implements TerminalFrameProvider {
 		this.#statusHost.setLines(snapshot.bottomLines);
 	}
 
-	/** Mount or replace session-aware root children while preserving the header and status hosts. */
+	/** Mount or replace session-aware root children. */
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;
 		this.#transientChrome = new Set(options.transient);
 		this.#transientChromeFloor = undefined;
+		const chrome = options.chrome ?? "preserve";
 		this.ui.removeChild(this.#statusHost);
+		if (chrome === "omit") this.ui.removeChild(this.#header);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);
 		} else {
@@ -885,8 +890,10 @@ export class Composer implements TerminalFrameProvider {
 			this.#runtimeMounted = true;
 		}
 		this.#runtimeChildren = children;
+		if (chrome === "preserve" && this.#runtimeChrome === "omit") this.ui.addChild(this.#header);
 		for (const child of children) this.ui.addChild(child);
-		this.ui.addChild(this.#statusHost);
+		if (chrome === "preserve") this.ui.addChild(this.#statusHost);
+		this.#runtimeChrome = chrome;
 		this.ui.requestRender();
 	}
 

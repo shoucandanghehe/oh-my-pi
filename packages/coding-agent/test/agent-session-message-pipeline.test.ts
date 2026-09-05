@@ -41,10 +41,19 @@ import { createAgentSession, type ExtensionContext, type ExtensionFactory } from
 import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { BtwManager } from "@oh-my-pi/pi-coding-agent/session/btw-manager";
+import {
+	BTW_SUMMARY_MESSAGE_TYPE,
+	type BtwSummaryMessageDetails,
+	convertToLlm,
+	wrapSteeringForModel,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import sideChannelNoToolsReminder from "../src/prompts/system/side-channel-no-tools.md" with { type: "text" };
+import sideChannelReadonlyReminder from "../src/prompts/system/side-channel-readonly.md" with { type: "text" };
+import { ToolContextStore } from "../src/tools/context";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 function createAgent(): Agent {
@@ -1068,7 +1077,7 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.providerSessionState).toBe(session.providerSessionState);
 	});
 
-	it("preserves the provider prefix when ephemeral followups append structured history", async () => {
+	it("snapshots each side conversation on its first prompt and keeps one provider lineage", async () => {
 		const model = buildModel({
 			id: "side-stream-model",
 			name: "Side Stream Model",
@@ -1081,15 +1090,16 @@ describe("AgentSession message pipeline", () => {
 			contextWindow: 4096,
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
-		const contexts: Context[] = [];
-		const options: SimpleStreamOptions[] = [];
-		const sideStreamFn: StreamFn = (_model, context, streamOptions) => {
-			contexts.push({ ...context, messages: structuredClone(context.messages) });
-			options.push(streamOptions ?? {});
+		const capturedOptions: SimpleStreamOptions[] = [];
+		const capturedContexts: Context[] = [];
+		const sideStreamFn: StreamFn = (_model, context, options) => {
+			capturedContexts.push(context);
+			capturedOptions.push(options ?? {});
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
-				const message = createAssistantMessage("Side answer");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "Side answer", partial: message });
+				const text = `Side answer ${capturedContexts.length}`;
+				const message = createAssistantMessage(text);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
 				stream.push({ type: "done", reason: "stop", message });
 			});
 			return stream;
@@ -1122,53 +1132,589 @@ describe("AgentSession message pipeline", () => {
 		const mainSnapshot = structuredClone(mainMessages);
 		const journalSnapshot = structuredClone(session.sessionManager.getEntries());
 
-		const first = await session.runEphemeralTurn({
-			promptText: "Question?",
-			conversationKey: "topic-a",
-			maxTokens: 321,
-		});
-		const history: readonly Message[] = [
-			{
-				role: "user",
-				content: [{ type: "text", text: "Question?" }],
-				attribution: "agent",
-				timestamp: 2,
-			},
-			first.assistantMessage,
-		];
-		const historySnapshot = structuredClone(history);
-		await session.runEphemeralTurn({ promptText: "Followup?", history, conversationKey: "topic-a" });
-		await session.runEphemeralTurn({ promptText: "Question?", history: [], conversationKey: "topic-b" });
+		const conversation = session.createEphemeralConversation("side instructions");
+		const first = await conversation.prompt("Question 1?");
+		const refreshedConversation = session.createEphemeralConversation("side instructions");
+		session.agent.appendMessage({ role: "user", content: "late main turn", timestamp: Date.now() });
+		const second = await conversation.prompt("Question 2?");
+		const refreshed = await refreshedConversation.prompt("Question after refresh?");
 
-		const [initial, followup, emptyHistory] = contexts;
-		expect(initial.messages.map(message => message.role)).toEqual(["user", "developer", "user"]);
-		expect(followup.messages.map(message => message.role)).toEqual([
-			"user",
-			"developer",
-			"user",
-			"assistant",
-			"user",
-		]);
-		// Compare prompt-bearing fields, not per-request timestamps or usage metadata.
-		const promptMessages = (context: Context) => context.messages.map(({ role, content }) => ({ role, content }));
-		expect(followup.systemPrompt).toEqual(initial.systemPrompt);
-		expect(followup.tools).toEqual(initial.tools);
-		expect(initial.tools?.map(tool => tool.name)).toEqual(["side_tool"]);
-		expect(promptMessages(followup).slice(0, initial.messages.length)).toEqual(promptMessages(initial));
-		expect(followup.messages.at(-2)?.content).toEqual([{ type: "text", text: "Side answer" }]);
-		expect(getConvertedUserText(followup.messages.at(-1))).toBe("Followup?");
-		expect(promptMessages(emptyHistory)).toEqual(promptMessages(initial));
-		expect(options.map(option => option.promptCacheKey)).toEqual(["parent-cache", "parent-cache", "parent-cache"]);
-		expect(options[1]?.sessionId).toBe(options[0]?.sessionId);
-		expect(options[2]?.sessionId).not.toBe(options[0]?.sessionId);
-		for (const option of options) {
-			expect(option.sessionId).toStartWith(`${session.sessionId}:side:`);
-		}
-		expect(options[0]?.maxTokens).toBe(321);
-		expect(history).toEqual(historySnapshot);
-		expect(agent.state.messages).toBe(mainMessages);
-		expect(agent.state.messages).toEqual(mainSnapshot);
+		expect(first.replyText).toBe("Side answer 1");
+		expect(second.replyText).toBe("Side answer 2");
+		expect(conversation.turns.map(turn => turn.input)).toEqual(["Question 1?", "Question 2?"]);
+		expect(refreshed.replyText).toBe("Side answer 3");
+		expect(capturedOptions[0]?.sessionId).toStartWith(`${session.sessionId}:side:`);
+		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts).toHaveLength(3);
+		const [firstContext, secondContext] = capturedContexts;
+		if (!firstContext || !secondContext) throw new Error("Expected both side-conversation provider contexts");
+		expect(secondContext.messages.slice(0, firstContext.messages.length)).toEqual(firstContext.messages);
+		const secondUsers = capturedContexts[1]?.messages.filter(
+			(message): message is Extract<Message, { role: "user" }> => message.role === "user",
+		);
+		expect(secondUsers?.map(getConvertedUserText)).toEqual(["Main question", "Question 1?", "Question 2?"]);
+		expect(capturedContexts[1]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
+			false,
+		);
+		expect(capturedContexts[2]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
+			true,
+		);
+		expect(capturedOptions.map(option => option.promptCacheKey)).toEqual(["parent-cache", "parent-cache", "parent-cache"]);
+		expect(agent.state.messages.slice(0, mainSnapshot.length)).toEqual(mainSnapshot);
 		expect(session.sessionManager.getEntries()).toEqual(journalSnapshot);
+	});
+
+	it("streams durable tool messages and preserves capability history across restore", async () => {
+		const model = buildModel({
+			id: "kimi-k3.5",
+			name: "Kimi K3.5",
+			api: "anthropic-messages",
+			provider: "kimi-code",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const capturedContexts: Context[] = [];
+		const capturedOptions: SimpleStreamOptions[] = [];
+		const deltas: string[] = [];
+		const liveMessageEvents: string[] = [];
+		const endedMessages: AgentMessage[] = [];
+		let executions = 0;
+		const sideStreamFn: StreamFn = (_model, context, options) => {
+			capturedContexts.push(context);
+			capturedOptions.push(options ?? {});
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (capturedContexts.length === 1) {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "side-call-1",
+						name: "side_tool",
+						arguments: {},
+					};
+					const message = createAssistantMessage("");
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+				const text = capturedContexts.length === 2 ? "Recovered without tools" : "Follow-up answer";
+				const message = createAssistantMessage(text);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const tool: AgentTool = {
+			name: "side_tool",
+			label: "Side Tool",
+			description: "Must remain unavailable in side conversations",
+			parameters: { type: "object", properties: {} },
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "executed" }], details: {} };
+			},
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [tool],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		const conversation = session.createEphemeralConversation("side instructions");
+		expect(conversation.getTool("side_tool")?.label).toBe("Side Tool");
+		const first = await conversation.prompt("Question?", {
+			onTextDelta: delta => deltas.push(delta),
+			onMessage: event => {
+				liveMessageEvents.push(`${event.type}:${event.message.role}`);
+				if (event.type === "end") endedMessages.push(event.message);
+			},
+		});
+
+		expect(first.replyText).toBe("Recovered without tools");
+		expect(deltas).toEqual(["Recovered without tools"]);
+		expect(executions).toBe(0);
+		expect(capturedContexts).toHaveLength(2);
+		expect(capturedContexts[0]?.tools?.map(tool => tool.name)).toEqual(["side_tool"]);
+		expect(capturedOptions[0]?.promptCacheKey).toBe(session.sessionId);
+		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts[1]?.messages.find(message => message.role === "toolResult")).toMatchObject({
+			role: "toolResult",
+			toolCallId: "side-call-1",
+			toolName: "side_tool",
+			isError: true,
+		});
+		const checkpoint = conversation.checkpoint();
+		expect(checkpoint.turns[0]?.intermediateMessages).toHaveLength(2);
+		expect(liveMessageEvents.filter(event => event.startsWith("end:"))).toEqual([
+			"end:assistant",
+			"end:toolResult",
+			"end:assistant",
+		]);
+		expect(endedMessages.slice(0, 2)).toMatchObject([
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "side-call-1", name: "side_tool" }],
+			},
+			{
+				role: "toolResult",
+				toolCallId: "side-call-1",
+				toolName: "side_tool",
+				isError: true,
+			},
+		]);
+
+		const restored = session.createEphemeralConversation("side instructions", checkpoint, undefined, {
+			readOnlyTools: true,
+		});
+		await restored.prompt("Follow up?");
+
+		expect(capturedContexts).toHaveLength(3);
+		expect(capturedOptions[2]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts[2]?.messages.find(message => message.role === "toolResult")).toMatchObject({
+			toolCallId: "side-call-1",
+			isError: true,
+		});
+		const restoredMessages = capturedContexts[2]?.messages ?? [];
+		const reminderIndex = (text: string): number =>
+			restoredMessages.findIndex(
+				message =>
+					message.role === "developer" &&
+					JSON.stringify(message.content) === JSON.stringify([{ type: "text", text }]),
+			);
+		const userIndex = (text: string): number =>
+			restoredMessages.findIndex(message => message.role === "user" && getConvertedUserText(message) === text);
+		const noToolsIndex = reminderIndex(sideChannelNoToolsReminder);
+		const readonlyIndex = reminderIndex(sideChannelReadonlyReminder);
+		const quickUserIndex = userIndex("Question?");
+		const durableUserIndex = userIndex("Follow up?");
+		expect(noToolsIndex).toBeGreaterThanOrEqual(0);
+		expect(noToolsIndex).toBeLessThan(quickUserIndex);
+		expect(readonlyIndex).toBeGreaterThan(quickUserIndex);
+		expect(readonlyIndex).toBeLessThan(durableUserIndex);
+	});
+
+	it("prompts for a durable BTW summary without waiting for Main's transcript preview", async () => {
+		const model = buildModel({
+			id: "btw-summary-approval",
+			name: "BTW Summary Approval",
+			api: "anthropic-messages",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		let requests = 0;
+		const sideStreamFn: StreamFn = () => {
+			requests++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (requests === 1) {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "share-summary-call",
+						name: "shareSummaryWithMain",
+						arguments: { summary: "Cache invalidation must happen after commit." },
+					};
+					const message = createAssistantMessage("");
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+				const text = "The summary was not shared.";
+				const message = createAssistantMessage(text);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const select = vi.fn(async (_title: string) => "Deny");
+		const previewWait = vi.fn(async () => {
+			throw new Error("BTW tools must not wait for Main's transcript preview");
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"tools.approvalMode": "yolo",
+		});
+		const modelRegistry = createModelRegistryStub() as never;
+		const toolContextStore = new ToolContextStore(() => ({
+			sessionManager,
+			modelRegistry,
+			model,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+			settings,
+		}));
+		const extensionRunner = {
+			clearManagedTimers: () => {},
+			consumeToolCallEmitted: () => false,
+			getUIContext: () => ({ select }),
+			hasHandlers: () => false,
+			hasUI: () => true,
+			waitForToolApprovalPreview: previewWait,
+		};
+		const shareWithMain = vi.fn(async (_summary: string) => {});
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [],
+				},
+				getToolContext: toolCall => toolContextStore.getContext(toolCall),
+			}),
+			sessionManager,
+			settings,
+			modelRegistry,
+			extensionRunner: extensionRunner as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		const conversation = session.createEphemeralConversation("side instructions", undefined, undefined, {
+			readOnlyTools: true,
+			shareSummaryWithMain: shareWithMain,
+		});
+		const result = await conversation.prompt("Share what we found with Main.");
+
+		expect(result.replyText).toBe("The summary was not shared.");
+		expect(shareWithMain).not.toHaveBeenCalled();
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(select.mock.calls[0]?.[0]).toContain("Cache invalidation must happen after commit.");
+		expect(previewWait).not.toHaveBeenCalled();
+	});
+
+	it("shares an approved durable BTW summary with Main as attributed inbound context", async () => {
+		const model = buildModel({
+			id: "btw-summary-ingress",
+			name: "BTW Summary Ingress",
+			api: "anthropic-messages",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const summary = "Cache entries must be invalidated after the transaction commits.";
+		const mainContexts: Context[] = [];
+		const mainStreamFn: StreamFn = (_model, context) => {
+			mainContexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage(mainContexts.length === 1 ? "Main ready." : "Summary received.");
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		let sideRequests = 0;
+		const sideStreamFn: StreamFn = () => {
+			sideRequests++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (sideRequests === 1) {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "share-summary-call",
+						name: "shareSummaryWithMain",
+						arguments: { summary },
+					};
+					const message = createAssistantMessage("");
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+				const message = createAssistantMessage("Summary shared.");
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const select = vi.fn(async (_title: string) => "Approve");
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [],
+				},
+				streamFn: mainStreamFn,
+				convertToLlm,
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"tools.approvalMode": "yolo",
+			}),
+			modelRegistry: createModelRegistryStub() as never,
+			extensionRunner: {
+				clearManagedTimers: () => {},
+				consumeToolCallEmitted: () => false,
+				getUIContext: () => ({ select }),
+				hasHandlers: () => false,
+				hasUI: () => true,
+			} as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+		const manager = new BtwManager({
+			entries: [],
+			appendEvent: () => {},
+			createConversation: (_modelRef, checkpoint, sideOptions) =>
+				session.createEphemeralConversation("side instructions", checkpoint, model, sideOptions),
+			createSideOptions: source => ({
+				readOnlyTools: true,
+				shareSummaryWithMain: sharedSummary =>
+					session.publishBtwSummary({
+						...source,
+						summary: sharedSummary,
+					}),
+			}),
+			nextKey: () => "btw-cache",
+			now: () => 123,
+		});
+		const threadKey = manager.createChild("Investigate cache invalidation", "main-leaf", {
+			provider: model.provider,
+			id: model.id,
+		});
+
+		const result = await manager.prompt(threadKey, "Share the conclusion with Main.");
+		await session.waitForIdle();
+
+		expect(result.replyText).toBe("Summary shared.");
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(select.mock.calls[0]?.[0]).toContain("Allow tool: shareSummaryWithMain");
+		expect(select.mock.calls[0]?.[0]).toContain(summary);
+		const record = session.agent.state.messages.find(
+			message => message.role === "custom" && message.customType === BTW_SUMMARY_MESSAGE_TYPE,
+		);
+		expect(record).toMatchObject({
+			role: "custom",
+			customType: BTW_SUMMARY_MESSAGE_TYPE,
+			attribution: "agent",
+			display: true,
+			details: {
+				summaries: [
+					{
+						threadKey: "btw-cache",
+						threadTitle: "Investigate cache invalidation",
+						summary,
+					},
+				],
+			} satisfies BtwSummaryMessageDetails,
+		});
+		expect(session.agent.peekSteeringQueue()).toEqual([]);
+		const inbound = mainContexts
+			.at(-1)
+			?.messages.find(
+				message => message.role === "developer" && JSON.stringify(message.content).includes("<btw-summary"),
+			);
+		expect(JSON.stringify(inbound?.content)).toContain("btw-cache");
+		expect(JSON.stringify(inbound?.content)).toContain("Investigate cache invalidation");
+		expect(JSON.stringify(inbound?.content)).toContain(summary);
+	});
+
+	it("blocks inherited object-key tool names in read-only side conversations", async () => {
+		const model = buildModel({
+			id: "readonly-side-model",
+			name: "Readonly Side Model",
+			api: "anthropic-messages",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		let requests = 0;
+		let executions = 0;
+		const sideStreamFn: StreamFn = () => {
+			requests++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (requests === 1) {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "inherited-name-call",
+						name: "constructor",
+						arguments: {},
+					};
+					const message = createAssistantMessage("");
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+				const message = createAssistantMessage("Recovered without executing");
+				stream.push({
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "Recovered without executing",
+					partial: message,
+				});
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const tool: AgentTool = {
+			name: "constructor",
+			label: "Inherited key",
+			description: "Must remain unavailable in read-only side conversations",
+			parameters: { type: "object", properties: {} },
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "executed" }], details: {} };
+			},
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [tool],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		const conversation = session.createEphemeralConversation("side instructions", undefined, undefined, {
+			readOnlyTools: true,
+		});
+		const result = await conversation.prompt("Try the inherited name");
+
+		expect(result.replyText).toBe("Recovered without executing");
+		expect(executions).toBe(0);
+		expect(result.intermediateMessages?.find(message => message.role === "toolResult")).toMatchObject({
+			role: "toolResult",
+			toolCallId: "inherited-name-call",
+			toolName: "constructor",
+			isError: true,
+		});
+	});
+
+	it("migrates a legacy side-conversation checkpoint without refreshing Main context or provider lineage", async () => {
+		const model = buildModel({
+			id: "restored-side-model",
+			name: "Restored Side Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const capturedOptions: SimpleStreamOptions[] = [];
+		const capturedContexts: Context[] = [];
+		const sideStreamFn: StreamFn = (_model, context, options) => {
+			capturedContexts.push(context);
+			capturedOptions.push(options ?? {});
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const text = `Restored answer ${capturedContexts.length}`;
+				const message = createAssistantMessage(text);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [{ role: "user", content: "anchor main turn", timestamp: Date.now() }],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+
+		const original = session.createEphemeralConversation("side instructions");
+		await original.prompt("Question 1?", { dedupeReply: false });
+		const checkpoint = original.checkpoint();
+		const firstTurn = checkpoint.turns[0];
+		if (!firstTurn) throw new Error("Expected one side-conversation turn");
+		const { prefixMessages: _prefixMessages, ...legacyTurn } = firstTurn;
+		const legacyCheckpoint = {
+			...checkpoint,
+			baseMessages: [
+				...checkpoint.baseMessages,
+				{
+					role: "developer" as const,
+					content: [{ type: "text" as const, text: sideChannelNoToolsReminder }],
+					attribution: "agent" as const,
+					timestamp: Date.now(),
+				},
+			],
+			turns: [legacyTurn],
+		};
+		expect(legacyCheckpoint.baseMessages).toHaveLength(checkpoint.baseMessages.length + 1);
+		session.agent.appendMessage({ role: "user", content: "late main turn", timestamp: Date.now() });
+		const restored = session.createEphemeralConversation("side instructions", legacyCheckpoint);
+		await restored.prompt("Question 2?", { dedupeReply: false });
+		const firstMessages = capturedContexts[0]?.messages ?? [];
+		const restoredPrefix = (capturedContexts[1]?.messages ?? []).slice(0, firstMessages.length);
+		expect(restoredPrefix.map(({ timestamp: _timestamp, ...message }) => message)).toEqual(
+			firstMessages.map(({ timestamp: _timestamp, ...message }) => message),
+		);
+		expect(
+			capturedContexts[1]?.messages.some(
+				message =>
+					message.role === "developer" &&
+					JSON.stringify(message.content) === JSON.stringify([{ type: "text", text: sideChannelNoToolsReminder }]),
+			),
+		).toBe(true);
+		expect(restored.turns.map(turn => turn.input)).toEqual(["Question 1?", "Question 2?"]);
+		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
+		expect(capturedContexts[1]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
+			false,
+		);
+		const restoredUsers = capturedContexts[1]?.messages.filter(
+			(message): message is Extract<Message, { role: "user" }> => message.role === "user",
+		);
+		expect(restoredUsers?.map(getConvertedUserText)).toEqual(["anchor main turn", "Question 1?", "Question 2?"]);
 	});
 
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(

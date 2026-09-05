@@ -128,8 +128,6 @@ function sendHerdrNotification(message: string | TerminalNotification, env: Node
 	return true;
 }
 
-const IMAGE_MARKER_SCAN_LIMIT = 512;
-const SIXEL_MARKER_SCAN_LIMIT = 128;
 const KITTY_PLACEHOLDER_HIGH_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(0);
 const KITTY_PLACEHOLDER_LOW_SURROGATE = KITTY_PLACEHOLDER.charCodeAt(1);
 
@@ -166,13 +164,13 @@ export class TerminalInfo {
 	/**
 	 * Whether an image marker begins at `start`. Kept as the shared primitive
 	 * for both standalone image checks and the renderer's combined ANSI/width
-	 * scan, so their protocol windows and sixel grammar cannot drift.
+	 * scan, so their protocol detection and sixel grammar cannot drift.
 	 */
 	hasImageMarkerAt(line: string, start: number): boolean {
 		const protocol = this.imageProtocol;
 		if (!protocol) return false;
 		if (protocol === ImageProtocol.Sixel) {
-			const limit = Math.min(line.length, SIXEL_MARKER_SCAN_LIMIT);
+			const limit = line.length;
 			if (start + 3 > limit || line.charCodeAt(start) !== 0x1b || line.charCodeAt(start + 1) !== 0x50) {
 				return false;
 			}
@@ -188,7 +186,7 @@ export class TerminalInfo {
 			return i < limit && line.charCodeAt(i) === 0x71;
 		}
 
-		const limit = Math.min(line.length, IMAGE_MARKER_SCAN_LIMIT);
+		const limit = line.length;
 		let protocolMatches = start + protocol.length <= limit;
 		for (let offset = 0; protocolMatches && offset < protocol.length; offset++) {
 			protocolMatches = line.charCodeAt(start + offset) === protocol.charCodeAt(offset);
@@ -203,10 +201,9 @@ export class TerminalInfo {
 
 	isImageLine(line: string): boolean {
 		if (!this.imageProtocol) return false;
-		const limit = Math.min(
-			line.length,
-			this.imageProtocol === ImageProtocol.Sixel ? SIXEL_MARKER_SCAN_LIMIT : IMAGE_MARKER_SCAN_LIMIT,
-		);
+		// Workspace panes can follow arbitrarily long ANSI/OSC prefixes. Stop
+		// at the first marker so image payloads are never scanned.
+		const limit = line.length;
 		for (let i = 0; i < limit; i++) {
 			const code = line.charCodeAt(i);
 			if (code !== 0x1b && code !== KITTY_PLACEHOLDER_HIGH_SURROGATE) continue;
@@ -984,19 +981,69 @@ export function encodeKittyPlacement(options: {
 }
 
 /**
- * Exact shape of the direct-placement line {@link Image} emits as its block's
- * last row: optional `ESC 7` + `CUU(rows-1)` prefix, the {@link encodeKittyPlacement}
- * APC, optional `ESC 8` suffix. tmux-passthrough-wrapped lines deliberately do
- * not match (passthrough placements stay untouched).
+ * Direct-placement block tail, either emitted directly or with only the Kitty
+ * APC wrapped in tmux's DCS passthrough envelope.
  */
-const KITTY_DIRECT_PLACEMENT_LINE =
-	/^(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?$/;
+const KITTY_DIRECT_PLACEMENT =
+	/(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?/;
+const KITTY_TMUX_DIRECT_PLACEMENT =
+	/(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1bPtmux;\x1b\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\x1b\\\x1b\\(?:\x1b8)?/;
+const KITTY_PLACEMENT_CLIP_MARKER = /\x1b_pi:kp:(\d+)\x07$/;
 
 export interface ParsedKittyPlacementLine {
 	imageId: number;
 	placementId: number | undefined;
 	columns: number;
 	rows: number;
+}
+
+export interface ParsedKittyPlacementSegment extends ParsedKittyPlacementLine {
+	prefix: string;
+	suffix: string;
+	maxRowsAbove: number | undefined;
+	raw: string;
+	tmuxPassthrough: boolean;
+}
+
+/** Tag every embedded workspace placement with its pane-body row clamp. */
+export function markKittyPlacementClipRows(line: string, maxRowsAbove: number): string {
+	const marker = `\x1b_pi:kp:${Math.max(0, Math.trunc(maxRowsAbove))}\x07`;
+	let remaining = line;
+	let marked = "";
+	for (;;) {
+		const parsed = parseKittyDirectPlacementSegment(remaining);
+		if (!parsed) return marked + remaining;
+		marked += parsed.prefix + marker + parsed.raw;
+		remaining = parsed.suffix;
+	}
+}
+
+/**
+ * Find the first direct-placement segment embedded in a composed row. The
+ * private workspace marker is consumed rather than reaching the terminal.
+ */
+export function parseKittyDirectPlacementSegment(line: string): ParsedKittyPlacementSegment | null {
+	const tmuxPassthrough = line.includes("\x1bPtmux;");
+	const m = (tmuxPassthrough ? KITTY_TMUX_DIRECT_PLACEMENT : KITTY_DIRECT_PLACEMENT).exec(line);
+	if (!m || m.index === undefined) return null;
+	const columns = m[4] !== undefined ? Number(m[4]) : 0;
+	const rows = m[5] !== undefined ? Number(m[5]) : 0;
+	if (columns <= 0 || rows <= 0) return null;
+	let prefix = line.slice(0, m.index);
+	const marker = KITTY_PLACEMENT_CLIP_MARKER.exec(prefix);
+	const maxRowsAbove = marker ? Number(marker[1]) : undefined;
+	if (marker) prefix = prefix.slice(0, marker.index);
+	return {
+		imageId: Number(m[2]),
+		placementId: m[3] !== undefined ? Number(m[3]) : undefined,
+		columns,
+		rows,
+		prefix,
+		raw: m[0],
+		suffix: line.slice(m.index + m[0].length),
+		maxRowsAbove,
+		tmuxPassthrough,
+	};
 }
 
 /**
@@ -1006,16 +1053,21 @@ export interface ParsedKittyPlacementLine {
  * callers fall back to writing the line verbatim.
  */
 export function parseKittyDirectPlacementLine(line: string): ParsedKittyPlacementLine | null {
-	const m = KITTY_DIRECT_PLACEMENT_LINE.exec(line);
-	if (!m) return null;
-	const columns = m[4] !== undefined ? Number(m[4]) : 0;
-	const rows = m[5] !== undefined ? Number(m[5]) : 0;
-	if (columns <= 0 || rows <= 0) return null;
+	const parsed = parseKittyDirectPlacementSegment(line);
+	if (
+		!parsed ||
+		parsed.tmuxPassthrough ||
+		parsed.prefix !== "" ||
+		parsed.suffix !== "" ||
+		parsed.maxRowsAbove !== undefined
+	) {
+		return null;
+	}
 	return {
-		imageId: Number(m[2]),
-		placementId: m[3] !== undefined ? Number(m[3]) : undefined,
-		columns,
-		rows,
+		imageId: parsed.imageId,
+		placementId: parsed.placementId,
+		columns: parsed.columns,
+		rows: parsed.rows,
 	};
 }
 
@@ -1037,12 +1089,17 @@ export function encodeKittyPlacementLine(options: {
 	screenRow: number;
 	/** Source image height in pixels, for the clipped source rectangle. */
 	imageHeightPx: number;
+	/** Optional pane-body clamp supplied by workspace composition. */
+	maxRowsAbove?: number;
+	/** Preserve a tmux passthrough envelope parsed from the source line. */
+	tmuxPassthrough?: boolean;
 }): string {
 	// Without a source pixel height the slice cannot be expressed — emit the
 	// component's own full form (status quo) rather than squashing the whole
 	// image into the reduced row count.
 	const clippable = options.imageHeightPx > 0;
-	const hiddenRows = clippable ? Math.max(0, options.rows - 1 - options.screenRow) : 0;
+	const availableRowsAbove = Math.min(options.screenRow, options.maxRowsAbove ?? options.screenRow);
+	const hiddenRows = clippable ? Math.max(0, options.rows - 1 - availableRowsAbove) : 0;
 	const visibleRows = options.rows - hiddenRows;
 	const params: string[] = ["a=p", "q=2", "C=1", `i=${options.imageId}`, `p=${options.placementId}`];
 	params.push(`c=${options.columns}`, `r=${visibleRows}`);
@@ -1050,11 +1107,10 @@ export function encodeKittyPlacementLine(options: {
 		const srcY = Math.floor((options.imageHeightPx * hiddenRows) / options.rows);
 		params.push(`y=${srcY}`, `h=${Math.max(1, options.imageHeightPx - srcY)}`);
 	}
-	// No tmux passthrough: inside tmux the component's own line arrives
-	// wrapped, never parses, and never reaches this rewrite.
 	const apc = `\x1b_G${params.join(",")}\x1b\\`;
+	const placement = options.tmuxPassthrough ? wrapTmuxPassthrough(apc) : apc;
 	const cuu = visibleRows - 1;
-	return cuu > 0 ? `\x1b7\x1b[${cuu}A${apc}\x1b8` : apc;
+	return cuu > 0 ? `\x1b7\x1b[${cuu}A${placement}\x1b8` : placement;
 }
 
 /**

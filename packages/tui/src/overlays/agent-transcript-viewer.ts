@@ -15,29 +15,26 @@
  */
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { Component, TUI } from "../tui";
-import { Editor } from "../components/editor";
-import { matchesKey } from "../keys";
-import { routeSgrMouseInput } from "../mouse";
-import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
+import { componentContains, renderTargeted, type TargetedRender } from "../tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
-import type { AgentLifecycleLike } from "./agent-hub-types";
-import type { AgentHubRegistry, AgentStatus } from "./agent-hub-types";
 import type { SessionMessageEntryLike } from "../chat/transcript-entry";
-import type { ObservableSession, SessionObserverRegistry } from "./session-observer-registry";
-import { getEditorTheme, theme } from "../theme/theme";
-import { matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import { renderWorkspacePaneHeader } from "../chrome/shared";
+import type { EditorTopBorder } from "../components/composer";
+import { matchesKey } from "../keys";
+import type { MouseRoutable, SgrMouseEvent } from "../mouse";
+import type { TextSelectionRange } from "../text-selection";
+import type { Component, Focusable, TUI } from "../tui";
+import { replaceTabs } from "../utils";
+import type { ViewportHeightAware, WorkspacePaneHeaderProvider } from "../workspace-layout";
+import type { AgentHubRegistry, AgentHubSession, AgentLifecycleLike, AgentStatus } from "./agent-hub-types";
+import { theme } from "../theme/theme";
 import type { AgentHubRemote } from "./agent-hub";
-import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
-import {
-	TranscriptBrowser,
-	type TranscriptBrowserFrame,
-	type TranscriptBrowserRenderContext,
-} from "../chat/transcript-browser";
-import { sanitizeErrorLine } from "../chrome/error-block";
-import type { ScrollRangeAnchor } from "../components/scroll-view";
-import { formatContextUsage } from "../chrome/context-thresholds";
+import { ChatTranscriptPane } from "../chat/chat-transcript-pane";
+import { StatusLineComponent } from "../status-line/component";
+
+type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose">;
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
 export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
@@ -56,8 +53,6 @@ export interface AgentTranscriptViewerDeps {
 	registry: AgentHubRegistry;
 	/** Collab guest: read transcript from the host instead of a local file. */
 	remote?: AgentHubRemote;
-	/** Progress/cost snapshot source for the stats line. */
-	observers?: SessionObserverRegistry;
 	/** Revive+prompt path for messageable local agents. Lazy to avoid touching the global. */
 	lifecycle?: () => AgentLifecycleLike;
 	ui: TUI;
@@ -69,13 +64,16 @@ export interface AgentTranscriptViewerDeps {
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	expandKeys: KeyId[];
-	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
+	/** Build a status line for the current live session resolved by the host. */
+	createStatusLine: (agentId: string) => PaneStatusLine;
+	getStatusLineTransparent?: () => boolean;
+	/** Keys that toggle the Agent Hub (app.agents.hub + app.session.observe). */
 	hubKeys: KeyId[];
 	requestRender: () => void;
-	/** Close just this viewer (Esc), returning to the hub table. */
+	/** Close just this viewer (Esc), returning to its owner. */
 	onClose: () => void;
-	/** Close this viewer AND the hub (hub-toggle keys). */
-	onHubClose: () => void;
+	/** Handle a Hub toggle key according to the viewer's host context. */
+	onHubToggle: () => void;
 }
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
@@ -144,13 +142,12 @@ function statusBadge(status: AgentStatus): string {
 	}
 }
 
-export class AgentTranscriptViewer implements Component {
-	#builder: ChatTranscriptBuilder;
-	#browser: TranscriptBrowser;
-	#editor: Editor | undefined;
-	#notice: string | undefined;
-	#expanded = false;
-
+export class AgentTranscriptViewer
+	implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware, WorkspacePaneHeaderProvider
+{
+	readonly #pane: ChatTranscriptPane;
+	readonly #deps: AgentTranscriptViewerDeps;
+	#model: string | undefined;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
 	// Remote transcript state (incremental; the host caps each read).
@@ -161,36 +158,57 @@ export class AgentTranscriptViewer implements Component {
 	#remoteError = "";
 	#hasRemoteData = false;
 
-	#model: string | undefined;
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
-	#initialEntryId: string | undefined;
-
-	readonly #deps: AgentTranscriptViewerDeps;
+	#statusLine: PaneStatusLine | undefined;
+	#statusLineSession: AgentHubSession | null;
 
 	constructor(deps: AgentTranscriptViewerDeps) {
 		this.#deps = deps;
-		this.#initialEntryId = deps.initialEntryId;
-		this.#builder = new ChatTranscriptBuilder({
-			ui: deps.ui,
-			getTool: deps.getTool,
-			isBuiltInTool: deps.isBuiltInTool,
-			getMessageRenderer: deps.getMessageRenderer,
-			cwd: deps.cwd,
-			hideThinkingBlock: deps.hideThinkingBlock,
-			proseOnlyThinking: deps.proseOnlyThinking,
-			requestRender: deps.requestRender,
+		const displayId = replaceTabs(deps.agentId);
+		this.#statusLineSession = deps.registry.get(deps.agentId)?.session ?? null;
+		this.#statusLine = this.#statusLineSession ? deps.createStatusLine(deps.agentId) : undefined;
+		this.#pane = new ChatTranscriptPane({
+			builder: {
+				ui: deps.ui,
+				getTool: deps.getTool,
+				isBuiltInTool: deps.isBuiltInTool,
+				getMessageRenderer: deps.getMessageRenderer,
+				cwd: deps.cwd,
+				hideThinkingBlock: deps.hideThinkingBlock,
+				proseOnlyThinking: deps.proseOnlyThinking,
+				requestRender: deps.requestRender,
+			},
+			initialEntryId: deps.initialEntryId,
+			editor: this.#sendable
+				? {
+						label: `Message ${displayId}`,
+						placeholder: `Message ${displayId}…`,
+						onSubmit: text => {
+							this.#submit(text);
+							return true;
+						},
+					}
+				: {
+						label: "read-only · advisor",
+						placeholder: "read-only · advisor",
+						readOnly: true,
+					},
+			expandKeys: deps.expandKeys,
+			renderWorkspaceHeader: (width, focused) => this.renderWorkspaceHeader(width, focused),
+			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
+			getPlaceholder: () => this.#placeholder(),
+			getNotice: () => (this.#remoteError && !this.#pane.isEmpty ? this.#remoteError : undefined),
+			onInput: data => {
+				for (const key of deps.hubKeys) {
+					if (!matchesKey(data, key)) continue;
+					deps.onHubToggle();
+					return true;
+				}
+				return false;
+			},
+			onClose: deps.onClose,
 		});
-		this.#browser = new TranscriptBrowser({
-			getHeight: () => this.#deps.ui.terminal?.rows || process.stdout.rows || 40,
-			frame: context => this.#frame(context),
-			followBottom: true,
-		});
-		if (this.#sendable) {
-			this.#editor = new Editor(getEditorTheme());
-			this.#editor.setMaxHeight(4);
-			this.#editor.onSubmit = text => this.#submit(text);
-		}
 		this.#refresh();
 		this.#pollTimer = setInterval(() => this.#refresh(), POLL_MS);
 		this.#pollTimer.unref?.();
@@ -203,11 +221,44 @@ export class AgentTranscriptViewer implements Component {
 		return Boolean(this.#deps.remote || this.#deps.lifecycle);
 	}
 
+	get focused(): boolean {
+		return this.#pane.focused;
+	}
+
+	set focused(focused: boolean) {
+		this.#pane.focused = focused;
+	}
+
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#pane.setUseTerminalCursor(useTerminalCursor);
+	}
+
+	setViewportHeight(height: number): void {
+		this.#pane.setViewportHeight(height);
+	}
+
+	getTextSelection(selection: TextSelectionRange): string | undefined {
+		return this.#pane.getTextSelection(selection);
+	}
+
+	getTextSelectionInset(row: number): number {
+		return this.#pane.getTextSelectionInset(row);
+	}
+
+	getTextSelectionRightInset(row: number): number {
+		return this.#pane.getTextSelectionRightInset(row);
+	}
+
+	getTextSelectionScrollOffset(row: number): number | undefined {
+		return this.#pane.getTextSelectionScrollOffset(row);
+	}
+
 	dispose(): void {
 		this.#disposed = true;
 		this.#stopPolling();
 		this.#remoteToken++;
-		this.#builder.dispose();
+		this.#statusLine?.dispose();
+		this.#pane.dispose();
 	}
 
 	#stopPolling(): void {
@@ -449,95 +500,23 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	#rebuild(entries: SessionMessageEntryLike[]): void {
-		this.#builder.rebuild(entries);
-		this.#deps.requestRender();
+		this.#pane.rebuildEntries(entries);
 	}
 
 	#append(entries: SessionMessageEntryLike[]): void {
-		this.#builder.append(entries);
-		this.#deps.requestRender();
+		this.#pane.appendEntries(entries);
 	}
 
-	// ========================================================================
-	// Input
-	// ========================================================================
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		return this.#pane.routeMouse(event, line, col);
+	}
 
 	handleInput(data: string): void {
-		if (data.startsWith("\x1b[<")) {
-			routeSgrMouseInput(data, event => {
-				if (event.wheel !== null) {
-					this.#browser.scroll(event.wheel * 3);
-					this.#deps.requestRender();
-				}
-				return true;
-			});
-			return;
-		}
-
-		// The hub/observe toggle keys close the whole hub (matches the table view's
-		// toggle semantics), not just this viewer.
-		for (const key of this.#deps.hubKeys) {
-			if (matchesKey(data, key)) {
-				this.#deps.onHubClose();
-				return;
-			}
-		}
-
-		if (matchesKey(data, "escape")) {
-			if (this.#editor && this.#editor.getText().trim() !== "") {
-				this.#editor.setText("");
-				this.#deps.requestRender();
-				return;
-			}
-			this.#deps.onClose();
-			return;
-		}
-
-		for (const key of this.#deps.expandKeys) {
-			if (matchesKey(data, key)) {
-				this.#expanded = !this.#expanded;
-				this.#builder.setExpanded(this.#expanded);
-				this.#deps.requestRender();
-				return;
-			}
-		}
-
-		// Once the reader starts typing a message, the editor owns every key.
-		const editorEmpty = !this.#editor || this.#editor.getText().trim() === "";
-		if (editorEmpty && this.#handleScroll(data)) return;
-
-		if (this.#editor) {
-			this.#editor.handleInput(data);
-			this.#deps.requestRender();
-		}
+		this.#pane.handleInput(data);
 	}
 
-	/** Returns true when the key was a scroll command. The browser owns the offset. */
-	#handleScroll(data: string): boolean {
-		if (this.#browser.handleScrollKey(data)) {
-			this.#deps.requestRender();
-			return true;
-		}
-		if (matchesKey(data, "j") || matchesSelectDown(data)) {
-			this.#browser.scroll(1);
-		} else if (matchesKey(data, "k") || matchesSelectUp(data)) {
-			this.#browser.scroll(-1);
-		} else if (data === "g") {
-			this.#browser.scrollToTop();
-		} else if (data === "G") {
-			this.#browser.scrollToBottom();
-		} else {
-			return false;
-		}
-		this.#deps.requestRender();
-		return true;
-	}
-
-	#submit(text: string): void {
-		const trimmed = text.trim();
-		this.#editor?.setText("");
-		if (!trimmed) return;
-		this.#notice = undefined;
+	#submit(trimmed: string): void {
+		this.#pane.setNotice(undefined);
 		const id = this.#deps.agentId;
 		if (this.#deps.remote) {
 			this.#deps.remote.chat(id, trimmed);
@@ -553,7 +532,7 @@ export class AgentTranscriptViewer implements Component {
 				// Steers a mid-turn agent; sends a normal prompt to an idle one.
 				await session.prompt(trimmed, { streamingBehavior: "steer" });
 			} catch (error) {
-				this.#notice = error instanceof Error ? error.message : String(error);
+				this.#pane.setNotice(error instanceof Error ? error.message : String(error));
 			}
 			this.#deps.requestRender();
 		})();
@@ -564,102 +543,56 @@ export class AgentTranscriptViewer implements Component {
 	// Render
 	// ========================================================================
 
+	containsComponent(component: Component): boolean {
+		return componentContains(this.#pane, component);
+	}
+
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		return renderTargeted(this.#pane, width, targets);
+	}
+
+	invalidate(): void {
+		this.#pane.invalidate();
+	}
+
 	render(width: number): readonly string[] {
-		const lines = this.#browser.render(width);
-		if (this.#initialEntryId && this.#browser.hasAnchored(this.#initialEntryId)) {
-			this.#initialEntryId = undefined;
-		}
-		return lines;
+		return this.#pane.render(width);
 	}
 
-	#frame(context: TranscriptBrowserRenderContext): TranscriptBrowserFrame {
-		// The transcript components carry their own 1-col left gutter, so body
-		// rows are emitted WITHOUT an extra outer space; header/footer rows are
-		// returned raw and the browser adds the one-column inset.
-		const { contentWidth, chromeWidth } = context;
+	renderWorkspaceHeader(width: number, focused: boolean): string {
 		const ref = this.#deps.registry.get(this.#deps.agentId);
-
-		const headerLines = this.#headerLines(ref?.status, ref?.kind, ref?.parentId);
-		const footerLines = this.#footerLines();
-		const noticeLine = this.#notice
-			? theme.fg("error", sanitizeErrorLine(this.#notice, chromeWidth))
-			: this.#remoteError && !this.#builder.isEmpty
-				? theme.fg("error", sanitizeErrorLine(this.#remoteError, chromeWidth))
-				: undefined;
-		// The editor carries no outer gutter; it renders at chrome width and the
-		// browser insets each row.
-		const editorLines = this.#editor ? this.#editor.render(chromeWidth) : [];
-
-		const contentLines = this.#builder.isEmpty
-			? [` ${theme.fg("dim", this.#placeholder(Math.max(10, contentWidth - 1)))}`]
-			: this.#builder.container.render(contentWidth);
-		let anchor: ScrollRangeAnchor | undefined;
-		if (this.#initialEntryId) {
-			const targetRow = this.#builder.rowForEntry(this.#initialEntryId);
-			if (targetRow !== undefined) {
-				anchor = {
-					id: this.#initialEntryId,
-					start: targetRow,
-					end: targetRow + 1,
-					mode: "once",
-					alignment: "start",
-				};
-			}
-		}
-		return {
-			header: headerLines,
-			body: { lines: contentLines, anchor },
-			footer: [...(noticeLine ? [noticeLine] : []), ...editorLines, ...footerLines],
-		};
+		const name = replaceTabs(this.#deps.agentId);
+		const status = ref?.status ? ` ${statusBadge(ref.status)}` : "";
+		const model = this.#model ? theme.fg("muted", ` ${theme.sep.dot} ${replaceTabs(this.#model)}`) : "";
+		const action = focused
+			? width >= 48
+				? theme.fg("dim", this.#sendable ? " · Enter send · Hub · Esc" : " · Hub · Esc")
+				: width >= 34
+					? theme.fg("dim", " · Esc")
+					: ""
+			: "";
+		return renderWorkspacePaneHeader(name, width, focused, `${status}${model}${action}`);
 	}
 
-	#headerLines(status: AgentStatus | undefined, kind: string | undefined, parentId: string | undefined): string[] {
-		const lines = [theme.fg("accent", `Agent Hub ${theme.sep.dot} ${this.#deps.agentId}`)];
-		if (status && kind) {
-			const kindTag = theme.fg("dim", ` ${parentId ? `${kind} ${theme.sep.dot} of ${parentId}` : kind}`);
-			const modelLabel = this.#model ? theme.fg("muted", `${theme.sep.dot}${this.#model}`) : "";
-			lines.push(`${theme.bold(this.#deps.agentId)} ${statusBadge(status)}${kindTag}${modelLabel}`);
+	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
+		const ref = this.#deps.registry.get(this.#deps.agentId);
+		const session = ref?.session ?? null;
+		if (session !== this.#statusLineSession) {
+			this.#statusLine?.dispose();
+			this.#statusLine = session ? this.#deps.createStatusLine(this.#deps.agentId) : undefined;
+			this.#statusLineSession = session;
 		}
-		return lines;
+		if (this.#statusLine) return this.#statusLine.getTopBorder(availableWidth);
+		return StatusLineComponent.getErrorTopBorder(
+			`Status unavailable (${ref?.status ?? "missing"}) · ${this.#deps.agentId} · live session missing`,
+			availableWidth,
+			this.#deps.getStatusLineTransparent?.(),
+		);
 	}
 
-	#footerLines(): string[] {
-		const lines: string[] = [];
-		const statsLine = this.#statsLine();
-		if (statsLine) lines.push(statsLine);
-		const hint = this.#editor
-			? `Enter:send  Esc:close  ${this.#deps.expandKeys[0] ?? "ctrl+o"}:expand  empty input → j/k:scroll  g/G:top/bottom`
-			: `Esc:close  ${this.#deps.expandKeys[0] ?? "ctrl+o"}:expand  j/k:scroll  g/G:top/bottom`;
-		lines.push(theme.fg("dim", hint));
-		return lines;
-	}
-
-	#statsLine(): string {
-		const observed: ObservableSession | undefined = this.#deps.observers?.getSession(this.#deps.agentId);
-		const progress = observed?.progress;
-		if (!progress) return "";
-		const stats: string[] = [];
-		if (progress.contextTokens && progress.contextTokens > 0) {
-			stats.push(
-				progress.contextWindow && progress.contextWindow > 0
-					? formatContextUsage((progress.contextTokens / progress.contextWindow) * 100, progress.contextWindow)
-					: formatNumber(progress.contextTokens),
-			);
-		}
-		if (progress.durationMs > 0) stats.push(formatDuration(progress.durationMs));
-		const parts: string[] = [];
-		if (stats.length > 0 || progress.toolCount > 0) {
-			const toolStat =
-				progress.toolCount > 0 ? `${formatNumber(progress.toolCount)} ${theme.icon.extensionTool}` : "";
-			parts.push(theme.fg("dim", [toolStat, ...stats].filter(Boolean).join(theme.sep.dot)));
-		}
-		if (progress.cost > 0) parts.push(theme.fg("statusLineCost", `$${progress.cost.toFixed(2)}`));
-		return parts.join(theme.sep.dot);
-	}
-
-	#placeholder(maxWidth: number): string {
+	#placeholder(): string {
 		if (this.#deps.remote) {
-			if (this.#remoteError) return sanitizeErrorLine(this.#remoteError, maxWidth);
+			if (this.#remoteError) return this.#remoteError;
 			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
