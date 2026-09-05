@@ -134,6 +134,11 @@ const finalAnswer: AssistantMessage = {
 	timestamp: 1,
 };
 
+class ReplacementBlock extends Block {
+	isTranscriptBlockAppendOnly(): boolean {
+		return false;
+	}
+}
 const frame = { tick: 0, now: 0 };
 
 describe("TranscriptContainer", () => {
@@ -294,6 +299,18 @@ describe("TranscriptContainer", () => {
 		// Both fit: nothing retires, the settled block still renders live.
 		expect(transcript.peekFinalizedBatch(80, 10)).toBeUndefined();
 		expect(transcript.renderViewport(80, 10, frame)).toEqual(["settled", "", "streaming"]);
+	});
+
+	it("keeps finalized replacement blocks mutable under retirement pressure", () => {
+		const transcript = new TranscriptContainer();
+		const replacement = new ReplacementBlock(["initial"], true);
+		transcript.addChild(replacement);
+
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+		expect(transcript.blockStates()).toEqual(["active"]);
+
+		replacement.finalize(["replaced"]);
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["replaced"]);
 	});
 
 	it("retires the settled prefix only under capacity pressure, in order", () => {

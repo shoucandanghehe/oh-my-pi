@@ -22,6 +22,7 @@ import type {
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -35,6 +36,7 @@ import type {
 	SimpleStreamOptions,
 	Static,
 	TextContent,
+	ThinkingContent,
 	TSchema,
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
@@ -1167,16 +1169,37 @@ export type MessageRenderer<T = unknown> = (
 ) => Component | undefined;
 
 export interface AssistantThinkingRenderContext {
+	/**
+	 * Parent assistant message metadata. `timestamp` is stable across streaming partials
+	 * and is the recommended anchor for renderer-local async state keys. `responseId`
+	 * may be absent or appear only after provider finalization; do not key streaming
+	 * state on `responseId` alone.
+	 */
+	message: Readonly<Pick<AssistantMessage, "timestamp" | "responseId" | "api" | "provider" | "model">>;
+	/**
+	 * Provider thinking content item currently being rendered. `itemId` and
+	 * `thinkingSignature` identify provider-native reasoning items when available;
+	 * fall back to `contentIndex` and `thinkingIndex` otherwise.
+	 */
+	content: Readonly<Pick<ThinkingContent, "itemId" | "thinkingSignature">>;
 	contentIndex: number;
 	thinkingIndex: number;
+	/** Current full trimmed thinking snapshot. */
 	text: string;
+	/** Repaint mounted output, or re-run this thinking block's renderers when no component was mounted yet. */
 	requestRender(): void;
 }
+
+export type AssistantThinkingRenderResult =
+	| Component
+	| { type: "append"; component: Component }
+	| { type: "replace"; component: Component }
+	| undefined;
 
 export type AssistantThinkingRenderer = (
 	context: AssistantThinkingRenderContext,
 	theme: Theme,
-) => Component | undefined;
+) => AssistantThinkingRenderResult;
 
 // ============================================================================
 // Command Registration
@@ -1401,7 +1424,7 @@ export interface ExtensionAPI {
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
 
-	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
+	/** Register a renderer for assistant thinking blocks. Legacy Component returns append after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
 
 	/**

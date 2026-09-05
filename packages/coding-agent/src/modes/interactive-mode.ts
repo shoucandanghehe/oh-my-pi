@@ -160,6 +160,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { AnchoredLiveContainer } from "./components/anchored-live-container";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -411,8 +412,6 @@ export interface InteractiveModeOptions {
 
 export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 
-/** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
-class AnchoredLiveContainer extends Container {}
 
 class TodoHudContainer extends AnchoredLiveContainer {
 	constructor(private readonly mode: InteractiveMode) {
@@ -486,7 +485,6 @@ class DeferredCommandPreview implements Component {
 const DEFERRED_PREVIEW_MIN_ROWS = 6;
 /** Ceiling for the preview as a share of the viewport, so the prompt stays visible. */
 const DEFERRED_PREVIEW_VIEWPORT_FRACTION = 0.4;
-
 /** How long the ctrl+p model-role cycle chip track lingers above the editor
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;

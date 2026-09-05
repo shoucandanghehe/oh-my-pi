@@ -27,6 +27,10 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
+// Fullscreen overlays enable 1000/1003/1006; the app viewport enables
+// 1002/1006/1016. Terminal-level cleanup must reset their union because it
+// also owns emergency exits that can bypass TUI.stop().
+const TERMINAL_MOUSE_TRACKING_OFF = "\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 function shouldEnableModifyOtherKeysFallback(env: NodeJS.ProcessEnv = Bun.env): boolean {
 	if (!env.SSH_CONNECTION && !env.SSH_TTY && !env.SSH_CLIENT) return true;
 	return TERMINAL.id !== "base" && TERMINAL.id !== "trueColor";
@@ -421,7 +425,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[?5522l" + // Disable enhanced paste notifications
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
-					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
+					TERMINAL_MOUSE_TRACKING_OFF + // Disable mouse reporting
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
 					// buffer homes the cursor (unconditional CursorRestoreState
@@ -980,7 +984,8 @@ export class ProcessTerminal implements Terminal {
 		// Probe DEC private-mode support via DECRQM. 2026 (synchronized output)
 		// gates the renderer's begin/end markers; 2048 (in-band resize) is enabled
 		// only after the terminal confirms support; 2031 (appearance change
-		// notifications) drives mid-session theme tracking. Xterm ?1010/?1011
+		// notifications) drives mid-session theme tracking; 1016 gates pixel mouse
+		// reports once TUI also has a measured cell size. Xterm ?1010/?1011
 		// are disabled while OMP owns the TTY so typing in the editor does not
 		// force a reader scrolled into native history back to the tail. Each probe
 		// rides the shared DA1 sentinel, so terminals that ignore DECRQM resolve as
@@ -988,6 +993,7 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2026);
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
+		this.#queryPrivateMode(1016);
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
@@ -1733,10 +1739,9 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite("\x1b[?2004l");
 		this.#safeWrite("\x1b[?5522l");
 
-		// Disable mouse tracking (enabled only by fullscreen overlays; safe
-		// no-ops otherwise). Covers crash paths that reach stop() without the
-		// TUI's own overlay teardown running.
-		this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l");
+		// Reset both fullscreen-overlay and app-viewport mouse modes. This path
+		// also handles abrupt exits that bypass TUI.stop().
+		this.#safeWrite(TERMINAL_MOUSE_TRACKING_OFF);
 
 		// Disable Mode 2031 appearance change notifications
 		this.#safeWrite("\x1b[?2031l");

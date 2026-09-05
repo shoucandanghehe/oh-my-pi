@@ -505,6 +505,11 @@ export class InputController {
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ctx.ui.onDebug = () => this.ctx.showDebugSelector();
+		this.ctx.ui.onAppViewportSelectionCopy = text => {
+			void copyToClipboard(text);
+			this.ctx.showStatus("Copied selection to clipboard");
+		};
+		this.ctx.ui.onAppViewportPasteRequest = () => void this.handleImagePaste();
 		this.ctx.editor.setActionKeys("app.model.select", this.ctx.keybindings.getKeys("app.model.select"));
 		this.ctx.editor.onSelectModel = () => this.ctx.showModelSelector();
 		this.ctx.editor.setActionKeys("app.history.search", this.ctx.keybindings.getKeys("app.history.search"));
