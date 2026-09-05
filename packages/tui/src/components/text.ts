@@ -2,6 +2,14 @@ import { styledSpans } from "../native/spans";
 import { backgroundChrome, sampleBackground } from "../native/tone";
 import { node, text } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
+import { RowMeasurement, WrappedText } from "@oh-my-pi/pi-natives";
+import { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
+import {
+	extractMappedTextSelection,
+	mapLogicalTextSelectionRows,
+	type RenderedTextSelectionRow,
+	type TextSelectionRange,
+} from "../text-selection";
 import type { Component } from "../tui";
 import {
 	applyBackgroundToLine,
@@ -51,6 +59,8 @@ export class Text implements Component {
 	#cachedWidthConfigEpoch?: number;
 	#cachedLines?: string[];
 	#native?: { source: string; bg: string | undefined; node: NativeNode };
+	#selectionRows: readonly RenderedTextSelectionRow[] = [];
+	#selectionInset = 0;
 
 	constructor(text: string = "", paddingX: number = 1, paddingY: number = 1, customBgFn?: (text: string) => string) {
 		this.#text = text;
@@ -72,6 +82,18 @@ export class Text implements Component {
 
 	getText(): string {
 		return this.#text;
+	}
+
+	getTextSelection(selection: TextSelectionRange): string | undefined {
+		return extractMappedTextSelection(this.#selectionRows, selection);
+	}
+
+	getTextSelectionInset(_row: number): number {
+		return this.#selectionInset;
+	}
+
+	getTextSelectionRightInset(_row: number): number {
+		return this.#selectionInset;
 	}
 
 	setText(text: string): boolean {
@@ -141,6 +163,30 @@ export class Text implements Component {
 		return described;
 	}
 
+	measureRows(width: number): number {
+		if (!this.#text || this.#text.trim() === "") return 0;
+		// Foreground/background stylers only add zero-width ANSI sequences; row
+		// measurement can wrap the source directly without building painted rows
+		// or text-selection maps for offscreen history.
+		const normalizedText = replaceTabs(this.#text);
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		return wrapTextWithAnsi(normalizedText, contentWidth).length + this.#paddingY * 2;
+	}
+
+	getRowMeasurement(_width: number): RowMeasurement | undefined {
+		if (this.measureRows !== Text.prototype.measureRows) return undefined;
+		if (!this.#text || !this.#text.trim()) return new RowMeasurement([], [], 0, 0);
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		if (!Number.isInteger(paddingX * 2) || paddingX < 0 || paddingX * 2 > 0xffff_ffff) return undefined;
+		return new RowMeasurement(
+			[new WrappedText(replaceTabs(this.#text), DEFAULT_TAB_WIDTH)],
+			[],
+			paddingX * 2,
+			this.#paddingY * 2,
+		);
+	}
+
 	render(width: number): readonly string[] {
 		// Check cache
 		if (
@@ -159,6 +205,8 @@ export class Text implements Component {
 			this.#cachedWidth = width;
 			this.#cachedWidthConfigEpoch = getWidthConfigEpoch();
 			this.#cachedLines = result;
+			this.#selectionRows = [];
+			this.#selectionInset = 0;
 			return result;
 		}
 
@@ -173,6 +221,14 @@ export class Text implements Component {
 		const wrappedLines = wrapLine
 			? normalizedText.split("\n").flatMap(line => wrapLine(line, contentWidth))
 			: wrapTextWithAnsi(normalizedText, contentWidth);
+		const logicalLines = normalizedText.split("\n");
+		const contentSelectionRows = mapLogicalTextSelectionRows(
+			logicalLines,
+			contentWidth,
+			paddingX,
+			wrappedLines,
+			this.#paddingY,
+		);
 
 		// Add margins and background to each line
 		const leftMargin = padding(paddingX);
@@ -207,6 +263,23 @@ export class Text implements Component {
 		}
 
 		const result = [...emptyLines, ...contentLines, ...emptyLines];
+		const topSelectionRows: RenderedTextSelectionRow[] = emptyLines.map((_line, index) => ({
+			logicalLine: index,
+			source: "",
+			sourceStart: 0,
+			sourceEnd: 0,
+			contentStartCol: 0,
+		}));
+		const bottomLogicalLine = this.#paddingY + logicalLines.length;
+		const bottomSelectionRows: RenderedTextSelectionRow[] = emptyLines.map((_line, index) => ({
+			logicalLine: bottomLogicalLine + index,
+			source: "",
+			sourceStart: 0,
+			sourceEnd: 0,
+			contentStartCol: 0,
+		}));
+		this.#selectionRows = [...topSelectionRows, ...contentSelectionRows, ...bottomSelectionRows];
+		this.#selectionInset = paddingX;
 		if (resultWidths !== undefined) {
 			// oxlint-disable-next-line unicorn/no-new-array -- line-width allocation
 			const emptyWidths = new Array<number>(emptyLines.length).fill(width);

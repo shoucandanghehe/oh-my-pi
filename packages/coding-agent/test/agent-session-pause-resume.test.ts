@@ -161,6 +161,47 @@ describe("AgentSession barrier pause resume", () => {
 		expect(session.hasPausedAgents()).toBe(false);
 	});
 
+	it("continues the parked model turn while its goal remains paused", async () => {
+		const mock = createMockModel({ responses: [{ content: ["model turn resumed"] }] });
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [
+					{ role: "user", content: "work on goal", timestamp: Date.now() - 10 },
+					pauseTurnMessage("progress"),
+				],
+			},
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const session = createSession(agent, SessionManager.inMemory(tempDir.path()));
+		const now = Date.now();
+		session.setGoalModeState({
+			enabled: false,
+			mode: "active",
+			goal: {
+				id: "goal-1",
+				objective: "Ship the release",
+				status: "paused",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+		session.recordAgentsPaused([MAIN_AGENT_ID]);
+
+		const result = await session.continuePausedAgents();
+
+		expect(result.continued).toBe(1);
+		expect(result.skipped).toEqual([]);
+		expect(mock.calls).toHaveLength(1);
+		expect(session.getGoalModeState()).toMatchObject({ enabled: false, goal: { status: "paused" } });
+		expect(session.hasPausedAgents()).toBe(false);
+	});
+
 	it("starts every paused agent before awaiting any run completion", async () => {
 		const releaseFirst = Promise.withResolvers<void>();
 		const releaseSecond = Promise.withResolvers<void>();
@@ -319,5 +360,53 @@ describe("AgentSession barrier pause resume", () => {
 		} finally {
 			await reopened.close();
 		}
+	});
+
+	it("prepares side-loop participants before a durable paused exit", async () => {
+		const session = createSession(new Agent(), SessionManager.inMemory(tempDir.path()));
+		let prepared = 0;
+		agentPauseGate.pause();
+
+		await session.disposeForPausedExit([
+			{
+				label: "BTW",
+				prepareForPausedExit: () => {
+					prepared++;
+				},
+				continuePaused: async () => ({ continued: 0, skipped: [], complete: true }),
+			},
+		]);
+
+		expect(prepared).toBe(1);
+	});
+
+	it("keeps the durable pause marker until side-loop continuation succeeds", async () => {
+		const session = createSession(new Agent(), SessionManager.inMemory(tempDir.path()));
+		session.recordAgentsPaused([]);
+		let attempts = 0;
+		const participant = {
+			label: "BTW",
+			prepareForPausedExit: () => {},
+			continuePaused: async () => {
+				attempts++;
+				return attempts === 1
+					? { continued: 0, skipped: ["thread: provider unavailable"], complete: false }
+					: { continued: 1, skipped: [], complete: true };
+			},
+		};
+
+		const first = await session.continuePausedAgents([participant]);
+
+		expect(first).toEqual({
+			continued: 0,
+			skipped: ["BTW: thread: provider unavailable"],
+			complete: false,
+		});
+		expect(session.hasPausedAgents()).toBe(true);
+
+		const second = await session.continuePausedAgents([participant]);
+
+		expect(second).toEqual({ continued: 1, skipped: [], complete: true });
+		expect(session.hasPausedAgents()).toBe(false);
 	});
 });

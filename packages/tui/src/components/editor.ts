@@ -958,6 +958,7 @@ export class Editor implements Component, Focusable {
 	// per-event rebuilds down to one per rendered frame (see #4145).
 	#topBorderContent?: EditorTopBorder;
 	#topBorderProvider?: (availableWidth: number) => EditorTopBorder | undefined;
+	#placeholder: string | undefined;
 	#borderVisible = true;
 	#borderStyle: EditorBorderStyle = "box";
 	constructor(theme: EditorTheme) {
@@ -1005,6 +1006,10 @@ export class Editor implements Component, Focusable {
 	/** Install prose assistance without changing command/file autocomplete. */
 	setTextAssistProvider(provider: EditorTextAssistProvider | undefined): void {
 		this.#textAssistProvider = provider;
+	}
+
+	hasAutocomplete(): boolean {
+		return this.#autocompleteState !== null && this.#autocompleteList !== undefined;
 	}
 
 	/**
@@ -1059,6 +1064,11 @@ export class Editor implements Component, Focusable {
 	/** True while the autocomplete/slash-command menu is open below the editor. */
 	isAutocompleteActive(): boolean {
 		return this.#autocompleteState !== null;
+	}
+
+	/** Displayed as inline hint text while the editor is empty. */
+	setPlaceholder(placeholder: string | undefined): void {
+		this.#placeholder = placeholder;
 	}
 
 	/**
@@ -5417,7 +5427,10 @@ export class Editor implements Component, Focusable {
 			if (hint) return hint;
 		}
 
-		return this.#getWordCompletion();
+		const wordCompletion = this.#getWordCompletion();
+		if (wordCompletion) return wordCompletion;
+		if (this.#state.lines.length === 1 && this.#state.lines[0] === "") return this.#placeholder ?? null;
+		return null;
 	}
 	#getPlaceholder(): string | undefined {
 		if (this.#autocompleteState || !this.#isEditorEmpty() || this.#getPredictionSuffix()) return undefined;

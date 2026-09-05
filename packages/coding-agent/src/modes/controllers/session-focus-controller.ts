@@ -260,6 +260,5 @@ export class SessionFocusController {
 			}
 			throw error;
 		}
-
 	}
 }

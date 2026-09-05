@@ -9,6 +9,8 @@ declare module "@oh-my-pi/pi-agent-core" {
 		hasUI?: boolean;
 		toolNames?: string[];
 		toolCall?: ToolCallContext;
+		/** Child surfaces cannot acknowledge Main transcript tool previews. */
+		toolApprovalPreview?: "auto" | "never";
 		/** Set after the write tool's outer gate approves an `xd://` device call:
 		 *  the `tools.approval` key that gate resolved (the device name). While the
 		 *  input flows through unchanged, the inner wrapper skips its tier-only

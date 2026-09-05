@@ -88,6 +88,45 @@ function makeComponent(statusLineSettings: StatusLineSettings): StatusLineCompon
 }
 
 describe("StatusLineComponent effective settings cache", () => {
+	it("keeps extension statuses session-local while mirroring the same session", () => {
+		const session = makeSession("Main");
+		const main = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		main.updateSettings({ preset: "custom", leftSegments: ["status"], rightSegments: [], showHookStatus: false });
+		main.setHookStatus("rate", "main-only-rate");
+		const other = statusLines.track(main.createPeer(makeSession("Child")));
+		const same = statusLines.track(main.createPeer(session));
+		expect(stripVTControlCharacters(other.getTopBorder(160).content)).not.toContain("main-only-rate");
+		expect(stripVTControlCharacters(same.getTopBorder(160).content)).toContain("main-only-rate");
+		other.setHookStatus("rate", "child-only-rate");
+		main.setHookStatus("rate", "main-updated-rate");
+		expect(stripVTControlCharacters(other.getTopBorder(160).content)).toContain("child-only-rate");
+		expect(stripVTControlCharacters(other.getTopBorder(160).content)).not.toContain("main-updated-rate");
+		expect(stripVTControlCharacters(main.getTopBorder(160).content)).not.toContain("child-only-rate");
+	});
+
+	it("keeps repeated cached renders byte-identical across presets and widths", () => {
+		const cases: StatusLineSettings[] = [
+			{ preset: "default", sessionAccent: false },
+			{ preset: "minimal", sessionAccent: false },
+			{
+				preset: "custom",
+				leftSegments: ["pi", "model"],
+				rightSegments: ["session_name", "context_pct"],
+				separator: "pipe",
+				sessionAccent: false,
+				segmentOptions: { model: { showThinkingLevel: false } },
+			},
+		];
+
+		for (const statusLineSettings of cases) {
+			const component = makeComponent(statusLineSettings);
+			for (const width of [36, 120]) {
+				const first = component.getTopBorder(width);
+				const second = component.getTopBorder(width);
+				expect(second).toEqual(first);
+			}
+		}
+	});
 	it("skips the entire segment pipeline until a visible input invalidates it", () => {
 		const session = makeSession();
 		let snapshotCalls = 0;
@@ -128,6 +167,33 @@ describe("StatusLineComponent effective settings cache", () => {
 		mutableMessages.push({ role: "user", content: "new tail" });
 		component.getTopBorder(120);
 		expect(snapshotCalls).toBe(5);
+	});
+
+	it("creates a peer with byte-identical rendering and live settings", () => {
+		const session = makeSession("Peer Session");
+		const component = new StatusLineComponent(session, statusLineHost);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "model", "context_pct", "path"],
+			rightSegments: ["session_name", "token_total"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+		});
+		const peer = component.createPeer(session);
+		try {
+			expect(peer.getTopBorder(120)).toEqual(component.getTopBorder(120));
+
+			component.updateSettings({
+				preset: "minimal",
+				separator: "slash",
+				sessionAccent: false,
+				transparent: true,
+			});
+			expect(peer.getTopBorder(80)).toEqual(component.getTopBorder(80));
+		} finally {
+			peer.dispose();
+			component.dispose();
+		}
 	});
 
 	it("invalidates on updateSettings and reflects hook visibility changes", () => {

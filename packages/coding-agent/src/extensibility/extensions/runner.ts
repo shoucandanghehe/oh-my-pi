@@ -78,6 +78,8 @@ import type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
+	ExtensionWidgetContent,
+	ExtensionWidgetOptions,
 	InputEvent,
 	InputEventResult,
 	CacheWarmingAction,
@@ -132,6 +134,8 @@ export interface ToolCallPreflight {
 	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
 	cancel?: (toolCallId: string) => void;
 }
+/** Session-owned presentation can be observed without granting an interactive UI host. */
+export type ExtensionPresentationSink = Pick<ExtensionUIContext, "setWidget" | "setStatus">;
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
@@ -202,6 +206,7 @@ function createHandlerUIContext(
 ): ExtensionUIContext {
 	const askDialog = ui.askDialog;
 	const approve = ui.approve;
+	const localAskDialog = ui.localAskDialog;
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
 		timeoutBudget?.pause();
 		try {
@@ -224,6 +229,10 @@ function createHandlerUIContext(
 		approve: approve
 			? (prompt, dialogOptions) =>
 					runDialog(() => approve.call(ui, prompt, attachHandlerSignal(dialogOptions, handlerSignal)))
+			: undefined,
+		localAskDialog: localAskDialog
+			? (questions, dialogOptions) =>
+					runDialog(() => localAskDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
 			: undefined,
 		custom: async (factory, options) => {
 			let customSettled = false;
@@ -250,7 +259,10 @@ function createHandlerUIContext(
 		},
 		editor: (title, prefill, dialogOptions, editorOptions) =>
 			runDialog(() => ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions)),
-	} satisfies Pick<ExtensionUIContext, "select" | "confirm" | "input" | "askDialog" | "approve" | "custom" | "editor">;
+	} satisfies Pick<
+		ExtensionUIContext,
+		"select" | "confirm" | "input" | "askDialog" | "approve" | "localAskDialog" | "custom" | "editor"
+	>;
 	const delegatedMethods = new Map<PropertyKey, unknown>();
 
 	return new Proxy(ui, {
@@ -517,6 +529,27 @@ export const UNAVAILABLE_ANNOTATIONS: ExtensionAnnotationsAPI = Object.freeze({
 
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
+	#hasUI = false;
+	readonly #widgets = new Map<
+		string,
+		{ content: Exclude<ExtensionWidgetContent, undefined>; options?: ExtensionWidgetOptions }
+	>();
+	readonly #statuses = new Map<string, string>();
+	readonly #presentationSinks = new Set<ExtensionPresentationSink>();
+	#widgetHost: ExtensionUIContext["setWidget"] = noOpUIContext.setWidget;
+	#statusHost: ExtensionUIContext["setStatus"] = noOpUIContext.setStatus;
+	readonly #publishWidget: ExtensionUIContext["setWidget"] = (key, content, options) => {
+		if (content === undefined) this.#widgets.delete(key);
+		else this.#widgets.set(key, { content: Array.isArray(content) ? [...content] : content, options });
+		this.#widgetHost(key, content, options);
+		for (const sink of this.#presentationSinks) sink.setWidget(key, content, options);
+	};
+	readonly #publishStatus: ExtensionUIContext["setStatus"] = (key, text) => {
+		if (text === undefined) this.#statuses.delete(key);
+		else this.#statuses.set(key, text);
+		this.#statusHost(key, text);
+		for (const sink of this.#presentationSinks) sink.setStatus(key, text);
+	};
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
@@ -769,7 +802,7 @@ export class ExtensionRunner {
 		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
 		createAnnotations?: ExtensionAnnotationsFactory,
 	) {
-		this.#uiContext = noOpUIContext;
+		this.#uiContext = this.#withPresentation(noOpUIContext);
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
@@ -876,10 +909,12 @@ export class ExtensionRunner {
 			this.#compactFn = commandContextActions.compact;
 		}
 
-		this.#uiContext =
+		this.#uiContext = this.#withPresentation(
 			uiContext && this.#trackUserWait
 				? trackUserWaits(uiContext, this.#trackUserWait)
-				: (uiContext ?? noOpUIContext);
+				: (uiContext ?? noOpUIContext),
+		);
+		this.#hasUI = uiContext !== undefined;
 		this.#mode = mode;
 		this.#initialized = true;
 
@@ -1039,8 +1074,33 @@ export class ExtensionRunner {
 		return this.#uiContext;
 	}
 
+	/** Replay current presentation, then follow changes until this view detaches. */
+	observePresentation(sink: ExtensionPresentationSink): () => void {
+		this.#presentationSinks.add(sink);
+		try {
+			for (const [key, widget] of this.#widgets) sink.setWidget(key, widget.content, widget.options);
+			for (const [key, text] of this.#statuses) sink.setStatus(key, text);
+		} catch (error) {
+			this.#presentationSinks.delete(sink);
+			throw error;
+		}
+		return () => {
+			this.#presentationSinks.delete(sink);
+		};
+	}
+
+	#withPresentation(host: ExtensionUIContext): ExtensionUIContext {
+		// Preserve host prototype methods and live getters (theme, dialog capabilities).
+		const ui = Object.create(host) as ExtensionUIContext;
+		if (host.setWidget !== this.#publishWidget) this.#widgetHost = host.setWidget.bind(host);
+		if (host.setStatus !== this.#publishStatus) this.#statusHost = host.setStatus.bind(host);
+		ui.setWidget = this.#publishWidget;
+		ui.setStatus = this.#publishStatus;
+		return ui;
+	}
+
 	hasUI(): boolean {
-		return this.#uiContext !== noOpUIContext;
+		return this.#hasUI;
 	}
 
 	/**

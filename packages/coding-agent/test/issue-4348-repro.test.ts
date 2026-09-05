@@ -22,6 +22,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
@@ -51,8 +52,11 @@ function transcriptWith(messages: AgentMessage[]): SessionContext {
 	};
 }
 
-function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContext; chatContainer: Container } {
-	const chatContainer = new Container();
+function makeRenderCtx(transcript: SessionContext): {
+	ctx: InteractiveModeContext;
+	chatContainer: TranscriptContainer;
+} {
+	const chatContainer = new TranscriptContainer();
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: new Container(),

@@ -42,7 +42,7 @@ export interface PauseScreenOptions {
  * Slice of `InteractiveModeContext` the pause screen drives. Narrow so tests
  * can exercise the full engage → hold → release lifecycle without a real TUI.
  */
-export interface PauseScreenHost {
+export interface PauseScreenHost<TParticipant = unknown> {
 	ui: {
 		showOverlay(component: Component, options?: OverlayOptions): OverlayHandle;
 		setFocus(component: Component): void;
@@ -53,8 +53,9 @@ export interface PauseScreenHost {
 	readonly sessionName?: string;
 	/** Durable session owner for barrier exit. */
 	session: {
-		disposeForPausedExit(): Promise<void>;
+		disposeForPausedExit(participants?: readonly TParticipant[]): Promise<void>;
 	};
+	readonly pausedExitParticipants?: readonly TParticipant[];
 	/** Optional: process quit after durable pause exit. Defaults to no-op. */
 	quitAfterPausedExit?: () => Promise<void> | void;
 }
@@ -214,7 +215,7 @@ export function renderPauseScreen(
 }
 
 /** Fullscreen overlay component; resolves {@link run} when a resume/exit key lands. */
-export class PauseScreenComponent implements Component, OverlayFocusOwner {
+export class PauseScreenComponent<TParticipant = unknown> implements Component, OverlayFocusOwner {
 	#timer: NodeJS.Timeout | undefined;
 	#done = Promise.withResolvers<PauseScreenOutcome>();
 	#disposed = false;
@@ -225,7 +226,7 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 	#unsubWaiters: (() => void) | undefined;
 
 	constructor(
-		readonly host: PauseScreenHost,
+		readonly host: PauseScreenHost<TParticipant>,
 		readonly options: PauseScreenOptions = {},
 	) {
 		this.#workSnapshot = this.#readWorkSnapshot();
@@ -456,8 +457,8 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
  * release it. On exit, the gate is released only after the session owner has
  * persisted and silently ended every parked loop.
  */
-export async function runPauseScreen(
-	host: PauseScreenHost,
+export async function runPauseScreen<TParticipant>(
+	host: PauseScreenHost<TParticipant>,
 	options?: PauseScreenOptions,
 ): Promise<PauseScreenOutcome | undefined> {
 	if (!agentPauseGate.pause()) return undefined;
@@ -477,12 +478,11 @@ export async function runPauseScreen(
 		component.dispose();
 		host.ui.setFocus(component);
 		overlay.hide();
-
 	}
 
 	if (outcome === "exited") {
 		try {
-			await host.session.disposeForPausedExit();
+			await host.session.disposeForPausedExit(host.pausedExitParticipants);
 			await host.quitAfterPausedExit?.();
 		} finally {
 			// Loops were aborted with PAUSE_SHUTDOWN_ABORT_REASON; release the gate
@@ -494,7 +494,7 @@ export async function runPauseScreen(
 
 	const heldMs = agentPauseGate.resume();
 	if (heldMs !== undefined) {
-		host.showStatus(`Resumed after ${formatDuration(heldMs)} — agents are running again.`);
+		host.showStatus(`Resumed after ${formatCoarseDuration(heldMs)} — agents are running again.`);
 	}
 	return "resumed";
 }

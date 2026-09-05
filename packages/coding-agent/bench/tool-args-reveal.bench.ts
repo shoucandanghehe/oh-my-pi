@@ -8,7 +8,7 @@
  *
  * Run: bun packages/coding-agent/bench/tool-args-reveal.bench.ts
  */
-import { decodeStreamedToolArgs } from "../src/modes/controllers/tool-args-reveal";
+import { decodeStreamedToolArgs } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 
 const PAYLOAD = "x".repeat(1024 * 1024);
 const prefix = `{"content":${JSON.stringify(PAYLOAD).slice(0, 512 * 1024)}`;

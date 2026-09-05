@@ -19,7 +19,6 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
-	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 	SendMessageHandler,
@@ -44,6 +43,7 @@ import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { ExtensionWidgets } from "@oh-my-pi/pi-tui/chrome/extension-widgets";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -61,10 +61,12 @@ const MAX_WIDGET_LINES = 10;
 function guestAskHelpText(enterAction: string, extra = ""): string {
 	return `${formatKeyHints(["up", "down"])} navigate  ${formatKeyHint("enter")} ${enterAction}  ${extra}${formatKeyHint("escape")} cancel`;
 }
-
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+const ASK_DIALOG_CAPABILITIES = Object.freeze({
+	allowCustomInput: true,
+}) satisfies NonNullable<ExtensionUIContext["askDialogCapabilities"]>;
 
 function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): ExtensionUIContext {
 	if (!hasUI || uiContext.openTerminal) return uiContext;
@@ -112,8 +114,7 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
 	#composerShapeDisposers: Array<() => void> = [];
-	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
-	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
+	readonly #hookWidgets: ExtensionWidgets;
 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
 	// selector / input / editor modals, so only one may be presented at a time;
 	// the rest queue. See `#presentDialog`.
@@ -133,7 +134,9 @@ export class ExtensionUiController {
 	 * call with the same picker/dialog primitives a live tool call would get.
 	 */
 	#toolUIContext: ExtensionUIContext | undefined;
-	constructor(private ctx: InteractiveModeContext) {}
+	constructor(private ctx: InteractiveModeContext) {
+		this.#hookWidgets = new ExtensionWidgets(ctx.ui);
+	}
 
 	#syncExtensionComposerShapes(): void {
 		this.disposeComposerShapes();
@@ -185,8 +188,10 @@ export class ExtensionUiController {
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
+			askDialogCapabilities: ASK_DIALOG_CAPABILITIES,
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
 			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
+			localAskDialog: (questions, dialogOptions) => this.#showLocalAskDialog(questions, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			rerenderMessage: timestamp => this.#rerenderAssistantMessage(timestamp),
@@ -409,58 +414,25 @@ export class ExtensionUiController {
 	}
 
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
-		const placement = options?.placement ?? "aboveEditor";
-		this.#removeHookWidget(this.#hookWidgetsAbove, key);
-		this.#removeHookWidget(this.#hookWidgetsBelow, key);
-
-		if (content === undefined) {
-			this.#rebuildHookWidgets();
-			return;
-		}
-
-		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-		target.set(key, this.#createHookWidget(content));
+		this.#hookWidgets.setWidget(key, content, options);
 		this.#rebuildHookWidgets();
 	}
 
-	#removeHookWidget(widgets: Map<string, ExtensionUiComponent>, key: string): void {
-		const existing = widgets.get(key);
-		existing?.dispose?.();
-		widgets.delete(key);
-	}
-
-	#createHookWidget(content: ExtensionWidgetContent): ExtensionUiComponent {
-		if (Array.isArray(content)) {
-			const container = new Container();
-			for (const line of content.slice(0, MAX_WIDGET_LINES)) {
-				container.addChild(new Text(line, 1, 0));
-			}
-			if (content.length > MAX_WIDGET_LINES) {
-				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
-			}
-			return container;
-		}
-		if (content === undefined) {
-			throw new Error("Widget content missing");
-		}
-		return content(this.ctx.ui, theme);
-	}
-
 	#rebuildHookWidgets(): void {
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove, true, true);
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow, false, false);
+		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgets.above, true, true);
+		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgets.below, false, false);
 		this.ctx.ui.requestRender();
 	}
 
 	#renderHookWidgetContainer(
 		container: Container,
-		widgets: Map<string, ExtensionUiComponent>,
+		widgets: Container,
 		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
 		container.clear();
 
-		if (widgets.size === 0) {
+		if (widgets.children.length === 0) {
 			if (spacerWhenEmpty) {
 				container.addChild(new EditorTopGap(() => this.ctx.statusRowOccupied));
 			}
@@ -470,7 +442,7 @@ export class ExtensionUiController {
 		if (leadingSpacer) {
 			container.addChild(new Spacer(1));
 		}
-		for (const widget of widgets.values()) {
+		for (const widget of widgets.children) {
 			container.addChild(widget);
 		}
 	}
@@ -1037,6 +1009,7 @@ export class ExtensionUiController {
 				? { label: displayLabels[index]!, description: sanitizeCarriageReturns(option.description.trim()) }
 				: displayLabels[index]!,
 		);
+		const allowCustomInput = question.allowCustomInput !== false;
 		if (question.multi) {
 			while (true) {
 				const checkedIndices = question.options
@@ -1048,7 +1021,8 @@ export class ExtensionUiController {
 				// (PRRT_kwDOQxs0bc6OFbDW). The remote select has no "disabled" row
 				// concept, so we omit rather than dim it.
 				const hasAnswer = selected.size > 0 || customInput !== undefined;
-				const options = [...baseOptions, ASK_OTHER_OPTION];
+				const options = [...baseOptions];
+				if (allowCustomInput) options.push(ASK_OTHER_OPTION);
 				if (hasAnswer) options.push(ASK_NEXT_OPTION);
 				options.push(ASK_CHAT_OPTION);
 				const choice = await this.#requestGuestUiString(
@@ -1068,7 +1042,7 @@ export class ExtensionUiController {
 				if (choice.kind === "cancelled") return undefined;
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_NEXT_OPTION) break;
-				if (choice.value === ASK_OTHER_OPTION) {
+				if (allowCustomInput && choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
 						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
@@ -1091,13 +1065,16 @@ export class ExtensionUiController {
 					? question.recommended
 					: 0;
 			const initialIndex = Math.max(0, Math.min(recommended, Math.max(0, question.options.length - 1)));
+			const options = allowCustomInput
+				? [...baseOptions, ASK_OTHER_OPTION, ASK_CHAT_OPTION]
+				: [...baseOptions, ASK_CHAT_OPTION];
 			while (true) {
 				const choice = await this.#requestGuestUiString(
 					host,
 					{
 						kind: "select",
 						title: displayQuestion,
-						options: [...baseOptions, ASK_OTHER_OPTION, ASK_CHAT_OPTION],
+						options,
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
@@ -1108,7 +1085,7 @@ export class ExtensionUiController {
 				if (choice.kind === "unavailable") return "unavailable";
 				if (choice.kind === "cancelled") return undefined;
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
-				if (choice.value === ASK_OTHER_OPTION) {
+				if (allowCustomInput && choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
 						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
@@ -1415,14 +1392,7 @@ export class ExtensionUiController {
 	}
 
 	clearHookWidgets(): void {
-		for (const widget of this.#hookWidgetsAbove.values()) {
-			widget.dispose?.();
-		}
-		for (const widget of this.#hookWidgetsBelow.values()) {
-			widget.dispose?.();
-		}
-		this.#hookWidgetsAbove.clear();
-		this.#hookWidgetsBelow.clear();
+		this.#hookWidgets.clear();
 		this.#rebuildHookWidgets();
 	}
 

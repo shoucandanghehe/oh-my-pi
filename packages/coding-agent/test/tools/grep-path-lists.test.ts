@@ -9,7 +9,6 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -70,16 +69,6 @@ async function makeJsonlSessionFile(dirPath: string, entries: object[]): Promise
 	const filePath = path.join(dirPath, "session.jsonl");
 	await Bun.write(filePath, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
 	return filePath;
-}
-
-function makeSubagentRegistry(sessions: ObservableSession[]): SessionObserverRegistry {
-	return {
-		getSessions: () => sessions,
-		getSession: (id: string) => sessions.find(session => session.id === id),
-		onChange: () => () => {},
-		setMainSession: () => {},
-		getActiveSubagentCount: () => sessions.filter(session => session.status === "active").length,
-	} as unknown as SessionObserverRegistry;
 }
 
 let treeEntryCounter = 0;
@@ -336,39 +325,29 @@ describe("tool path arrays", () => {
 				},
 			},
 		]);
-		const observers = makeSubagentRegistry([
-			{
-				id: "search-overlay-session",
-				kind: "subagent",
-				label: "Search Overlay",
-				status: "active",
-				sessionFile,
-				lastUpdate: Date.now(),
-			},
-		]);
 		const agents = new AgentRegistry();
 		agents.register({
 			id: "search-overlay-session",
 			displayName: "search-overlay-session",
 			kind: "sub",
 			parentId: "Main",
-			session: null,
+			session: {} as never,
 			sessionFile,
-			status: "parked",
+			status: "idle",
 		});
 
 		const viewer = new AgentTranscriptViewer({
 			transcript: agentTranscriptSource,
 			agentId: "search-overlay-session",
 			registry: agents,
-			observers,
 			ui: { requestRender: () => {}, requestComponentRender: () => {} } as never,
 			cwd: tmp,
 			expandKeys: ["ctrl+o"],
 			hubKeys: ["ctrl+s"],
+			createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0, revision: 0 }), dispose: () => {} }),
 			requestRender: () => {},
 			onClose: () => {},
-			onHubClose: () => {},
+			onHubToggle: () => {},
 		});
 		const rendered = Bun.stripANSI(viewer.render(120).join("\n"));
 		viewer.dispose();

@@ -266,6 +266,8 @@ function isStructuredThinkingResult(
 	return candidate.type === "append" || candidate.type === "replace";
 }
 
+let nextAssistantImageNamespace = 0;
+
 /**
  * Drop the closing border the renderer draws for a source that ends inside an
  * open fence. That row is not part of the message yet: the live block reaches
@@ -317,6 +319,7 @@ export class AssistantMessageComponent extends Container {
 	#kittyDisplayed = new Map<string, ImageContent>();
 	/** The previous pass's {@link #kittyDisplayed}, readable only during a render pass. */
 	#kittyPreviouslyDisplayed: Map<string, ImageContent> | undefined;
+	readonly #nativeImageNamespace = `assistant-${nextAssistantImageNamespace++}`;
 	#showImages = true;
 	#showToolResultImages = true;
 	/** Charts under numeric tables; off for subagent transcripts. */
@@ -1824,7 +1827,7 @@ export class AssistantMessageComponent extends Container {
 				} else {
 					super.invalidate();
 				}
-				this.onImageUpdate?.();
+				this.#onImageUpdate?.();
 			} catch (error) {
 				logger.warn("Assistant thinking renderer refresh failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1844,7 +1847,7 @@ export class AssistantMessageComponent extends Container {
 	): ThinkingExtensionComponents {
 		const append: Component[] = [];
 		let replacement: Component | undefined;
-		for (const renderer of this.thinkingRenderers) {
+		for (const renderer of this.#thinkingRenderers) {
 			let rerunRenderersOnRequest = true;
 			try {
 				const result: AssistantThinkingRenderResult = renderer(
@@ -2120,7 +2123,7 @@ export class AssistantMessageComponent extends Container {
 							(c.type === "thinking" && resolveThinkingDisplay(c, this.#proseOnlyThinking).visible),
 					);
 
-				if (this.thinkingRenderers.length > 0) {
+				if (this.#thinkingRenderers.length > 0) {
 					this.#visibleThinkingUsesRenderers = true;
 				}
 				const thinkingComponents = this.#renderThinkingExtensions(message, content, i, thinkingIndex, thinkingText);
@@ -2142,7 +2145,8 @@ export class AssistantMessageComponent extends Container {
 					this.#contentContainer.addChild(new Spacer(1));
 				}
 			} else if (content.type === "image" && content.data && content.mimeType) {
-				this.#renderImageEntries([{ image: content, key: `native:${i}` }], hasRenderedContent);
+				const imageKey = `${this.#nativeImageNamespace}:${i}:${content.mimeType}:${String(Bun.hash(content.data))}`;
+				this.#renderImageEntries([{ image: content, key: imageKey }], hasRenderedContent);
 				hasRenderedContent ||= this.#showImages;
 			}
 		}

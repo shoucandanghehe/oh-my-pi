@@ -89,13 +89,10 @@ describe("SDK systemPrompt replacements", () => {
 		).rejects.toThrow("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	});
 
-	it("falls back to the bundled prompt for callbacks when the native template is malformed", async () => {
+	it("runs a callback replacement when the native template is malformed", async () => {
 		await withSession(
 			"{{#if eagerTasks}}",
-			defaultPrompt => {
-				expect(defaultPrompt.join("\n\n")).toContain("§ Tool Policy");
-				return "callback replacement";
-			},
+			() => "callback replacement",
 			async session => {
 				expect(session.systemPrompt).toEqual(["callback replacement"]);
 			},
