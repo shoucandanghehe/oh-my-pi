@@ -49,7 +49,6 @@ pub mod ipc;
 pub mod js;
 pub mod keys;
 pub mod live;
-pub mod memory;
 pub mod mermaid;
 pub mod oauth_callback;
 /// PDF inspection and Markdown conversion.
