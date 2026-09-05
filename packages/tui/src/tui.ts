@@ -3682,6 +3682,12 @@ export class TUI extends Container {
 		height: number,
 		cursorPos: { row: number; col: number } | null,
 	): void {
+		const forceFullRepaint =
+			this.#forceViewportRepaintOnNextRender ||
+			this.#clearScrollbackOnNextRender ||
+			(this.#appViewportPreviousWidth > 0 && this.#appViewportPreviousWidth !== width) ||
+			(this.#appViewportPreviousLines.length > 0 && this.#appViewportPreviousLines.length !== height);
+		if (forceFullRepaint) this.#forgetHardwareCursorState();
 		const previousScrollEnd = this.#appViewportPreviousScrollRegionEnd;
 		this.#appViewportFrameLines = lines;
 		this.#remapAppViewportSelectionForScrollRegionShift(previousScrollEnd);
@@ -3706,6 +3712,7 @@ export class TUI extends Container {
 			fitted = this.#prepareLinesArray(fitted, width);
 		}
 		if (
+			!forceFullRepaint &&
 			this.#appViewportPreviousWidth === width &&
 			this.#appViewportPreviousLines.length === height &&
 			this.#appViewportPreviousScrollbarGlyphs.length === height
@@ -3733,10 +3740,11 @@ export class TUI extends Container {
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of purgeIds) buffer += encodeKittyDeleteImage(id);
 		}
-		buffer += this.#appViewportPaintRows(fitted, scrollbarGlyphs, width, height);
+		buffer += this.#appViewportPaintRows(fitted, scrollbarGlyphs, width, height, forceFullRepaint);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
+		this.#forceViewportRepaintOnNextRender = false;
 		this.#appViewportPreviousLines = fitted;
 		this.#appViewportPreviousScrollbarGlyphs = scrollbarGlyphs;
 		this.#appViewportPreviousWidth = width;
@@ -3744,7 +3752,13 @@ export class TUI extends Container {
 		else this.#recordHardwareCursorHidden();
 	}
 
-	#appViewportPaintRows(lines: string[], scrollbarGlyphs: string[], width: number, height: number): string {
+	#appViewportPaintRows(
+		lines: string[],
+		scrollbarGlyphs: string[],
+		width: number,
+		height: number,
+		forceFullRepaint: boolean,
+	): string {
 		let buffer = "";
 		const contentWidth = Math.max(1, width - 1);
 		const widthChanged = this.#appViewportPreviousWidth !== width;
@@ -3753,15 +3767,19 @@ export class TUI extends Container {
 		for (let row = 0; row < height; row++) {
 			const line = lines[row] ?? "";
 			const previousLine = previousLines[row] ?? "";
-			if (line !== previousLine || (widthChanged && line !== "")) {
-				if (line !== "" || previousLine !== "") {
+			if (forceFullRepaint || line !== previousLine || (widthChanged && line !== "")) {
+				if (forceFullRepaint || line !== "" || previousLine !== "") {
 					buffer += `\x1b[${row + 1};1H${this.#appViewportContentRewriteSequence(line, contentWidth)}`;
 				}
 			}
 			const glyph = scrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
 			const previousGlyph = previousScrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
-			if (glyph !== previousGlyph || (widthChanged && glyph !== APP_VIEWPORT_SCROLLBAR_BLANK)) {
-				if (glyph !== APP_VIEWPORT_SCROLLBAR_BLANK || previousGlyph !== APP_VIEWPORT_SCROLLBAR_BLANK) {
+			if (forceFullRepaint || glyph !== previousGlyph || (widthChanged && glyph !== APP_VIEWPORT_SCROLLBAR_BLANK)) {
+				if (
+					forceFullRepaint ||
+					glyph !== APP_VIEWPORT_SCROLLBAR_BLANK ||
+					previousGlyph !== APP_VIEWPORT_SCROLLBAR_BLANK
+				) {
 					buffer += `\x1b[${row + 1};${width}H${glyph}`;
 				}
 			}

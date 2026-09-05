@@ -156,7 +156,13 @@ import {
 	obfuscateProviderContext,
 	type SecretObfuscator,
 } from "./secrets";
-import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionDisposeOptions,
+	type InitialRetryFallbackState,
+	type PlanYolo,
+	type Prewalk,
+} from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
@@ -3989,7 +3995,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		{
 			const originalDispose = session.dispose.bind(session);
-			session.dispose = async () => {
+			session.dispose = async (options: AgentSessionDisposeOptions = {}) => {
 				try {
 					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
@@ -4013,7 +4019,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
 						await AgentLifecycleManager.global().dispose();
 					}
-					await originalDispose();
+					await originalDispose(options);
 				} finally {
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();

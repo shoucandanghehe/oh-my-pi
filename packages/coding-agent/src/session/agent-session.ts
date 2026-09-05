@@ -34,9 +34,11 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	agentPauseGate,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
 	EventLoopKeepalive,
+	PAUSE_SHUTDOWN_ABORT_REASON,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -181,6 +183,9 @@ import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -235,6 +240,7 @@ import type {
 	AsyncJobSnapshot,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
+	ContinuePausedAgentsResult,
 	DroppedPrompt,
 	FollowUpOptions,
 	FreshSessionResult,
@@ -285,8 +291,12 @@ import {
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
+	AGENTS_CONTINUED_CUSTOM_TYPE,
+	AGENTS_PAUSED_CUSTOM_TYPE,
+	type AgentsPausedData,
 	collectPendingToolCalls,
 	createInterruptedTurnAbortMessage,
+	readAgentsPaused,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
 	summarizeToolArguments,
@@ -2272,18 +2282,20 @@ export class AgentSession {
 		this.sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, data);
 	}
 
-	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
+	#recordSessionExit(reason: postmortem.Reason | "dispose", options?: { pausedExit?: boolean }): void {
 		if (this.#exitRecorded) return;
 		this.#exitRecorded = true;
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
+			!options?.pausedExit &&
 			pendingToolCalls.length === 0 &&
 			!this.sessionManager.getEntries().some(entry => entry.type === "message" && entry.message.role === "assistant")
 		) {
 			return;
 		}
-		const kind: SessionExitData["kind"] =
-			reason === "dispose" || reason === postmortem.Reason.MANUAL
+		const kind: SessionExitData["kind"] = options?.pausedExit
+			? "paused"
+			: reason === "dispose" || reason === postmortem.Reason.MANUAL
 				? "normal"
 				: reason === postmortem.Reason.UNCAUGHT_EXCEPTION || reason === postmortem.Reason.UNHANDLED_REJECTION
 					? "fatal"
@@ -2291,21 +2303,24 @@ export class AgentSession {
 						? "process_exit"
 						: "signal";
 		const data: SessionExitData = {
-			reason,
+			reason: options?.pausedExit ? "agents_paused" : reason,
 			kind,
 			recordedAt: new Date().toISOString(),
 		};
+		// A barrier pause waits for tools to finish, so pending tool calls should
+		// be empty; still attach them if a race left any for diagnostics.
 		if (pendingToolCalls.length > 0) data.pendingToolCalls = pendingToolCalls;
 		try {
 			this.sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, data);
 			this.sessionManager.flushSync();
 			// Only pending tool calls or an abnormal teardown are noteworthy; a
 			// clean dispose logs at debug so routine exits don't read as problems.
-			const exitLog = pendingToolCalls.length > 0 || kind !== "normal" ? logger.warn : logger.debug;
+			const exitLog =
+				pendingToolCalls.length > 0 || (kind !== "normal" && kind !== "paused") ? logger.warn : logger.debug;
 			exitLog("Session exit recorded", {
 				sessionId: this.sessionManager.getSessionId(),
 				sessionFile: this.sessionManager.getSessionFile(),
-				reason,
+				reason: data.reason,
 				kind,
 				pendingToolCalls: pendingToolCalls.length,
 			});
@@ -2313,10 +2328,63 @@ export class AgentSession {
 			logger.error("Failed to record session exit", {
 				sessionId: this.sessionManager.getSessionId(),
 				sessionFile: this.sessionManager.getSessionFile(),
-				reason,
+				reason: data.reason,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+	}
+
+	/**
+	 * Persist the durable "agents parked at model boundary" marker before a
+	 * paused process exit. No-op when the branch already ends with an active
+	 * {@link AGENTS_PAUSED_CUSTOM_TYPE} entry.
+	 */
+	recordAgentsPaused(agentIds: string[]): void {
+		const branch = this.sessionManager.getBranch();
+		if (readAgentsPaused(branch)) return;
+		const data: AgentsPausedData = {
+			pausedAt: new Date().toISOString(),
+			agentIds: [...new Set(agentIds.filter(id => id.length > 0))],
+		};
+		this.sessionManager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, data);
+		this.sessionManager.flushSync();
+	}
+
+	#abortForPausedExit(): void {
+		this.agent.abort(PAUSE_SHUTDOWN_ABORT_REASON);
+		this.#advisors.abort(PAUSE_SHUTDOWN_ABORT_REASON);
+	}
+
+	/**
+	 * Persist and dispose a top-level session after every active loop reached
+	 * the process-wide model boundary. Lifecycle coordination lives here so UI
+	 * hosts cannot forget a live subagent or the paused-exit dispose option.
+	 */
+	async disposeForPausedExit(): Promise<void> {
+		if (this.#agentKind !== "main") {
+			throw new Error("Only the main agent session can coordinate a paused exit");
+		}
+		if (!agentPauseGate.ready) {
+			throw new Error("Cannot exit paused before every active agent reaches the model boundary");
+		}
+
+		const pausedAgentIds = new Set<string>();
+		const liveSessions = new Set<AgentSession>([this]);
+		if (this.isStreaming) pausedAgentIds.add(this.#agentId ?? MAIN_AGENT_ID);
+		for (const ref of AgentRegistry.global().list()) {
+			if (ref.kind === "advisor" || !ref.session) continue;
+			liveSessions.add(ref.session);
+			if (ref.session.isStreaming) pausedAgentIds.add(ref.id);
+		}
+
+		this.recordAgentsPaused([...pausedAgentIds]);
+		for (const session of liveSessions) session.#abortForPausedExit();
+		await this.dispose({ pausedExit: true });
+	}
+
+	/** True when the current branch is waiting on an explicit `/continue`. */
+	hasPausedAgents(): boolean {
+		return readAgentsPaused(this.sessionManager.getBranch()) !== undefined;
 	}
 
 	#queuedExtensionEvents: Promise<void> = Promise.resolve();
@@ -4488,7 +4556,7 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
-		this.#recordSessionExit(options.reason ?? "dispose");
+		this.#recordSessionExit(options.reason ?? "dispose", { pausedExit: options.pausedExit === true });
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
@@ -4501,10 +4569,17 @@ export class AgentSession {
 
 		// Stop fallback extension timers before aborting deferred work they could enqueue.
 		this.#fallbackExtensionTimers?.clearAll();
+		// Abort post-prompt work so the bounded drain below can settle. Paused exit
+		// uses its dedicated reason for every parked main/subagent/advisor loop, so
+		// disposal never synthesizes an aborted assistant turn.
 		this.abortRetry();
 		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
-		this.agent.abort();
+		if (options.pausedExit === true) {
+			this.#abortForPausedExit();
+		} else {
+			this.agent.abort();
+		}
 		try {
 			await withTimeout(
 				postPromptDrain,
@@ -6788,6 +6863,8 @@ export class AgentSession {
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isStreaming) return false;
 		if (this.isRetrying) return false;
+		// Durable barrier pause: stay idle until explicit `/continue`.
+		if (this.hasPausedAgents()) return false;
 		// A queued steer resumes from ANY tail: Agent.continue() runs #runLoop(undefined),
 		// whose initial steering poll injects the steer before the first provider call, so the
 		// request tail becomes the steer (valid) regardless of any injected custom / bashExecution
@@ -8392,6 +8469,82 @@ export class AgentSession {
 	/** Retry the last failed assistant turn when the session is idle. */
 	retry(): Promise<boolean> {
 		return this.#recovery.retry();
+	}
+
+	/**
+	 * Explicitly resume agent loops after opening a session that exited at a
+	 * durable pause barrier. Does not inject user-visible text; starts from the
+	 * last durable transcript tail via {@link Agent.continue}.
+	 *
+	 * The `agents_continued` marker is written only after every recorded agent is
+	 * either resumed or already active/idle, so partial failures remain retryable.
+	 */
+	async continuePausedAgents(): Promise<ContinuePausedAgentsResult> {
+		const paused = readAgentsPaused(this.sessionManager.getBranch());
+		if (!paused) return { continued: 0, skipped: ["no agents_paused marker"], complete: false };
+		await registerPersistedSubagents(AgentRegistry.global(), this.sessionManager.getSessionFile());
+
+		const skipped: string[] = [];
+		let continued = 0;
+		let unresolved = 0;
+
+		const tryContinue = async (session: AgentSession, id: string): Promise<void> => {
+			if (session.isStreaming || session.isCompacting || session.isRetrying) {
+				skipped.push(`${id}: busy`);
+				return;
+			}
+			const messages = session.agent.state.messages;
+			const last = messages[messages.length - 1];
+			if (!last) {
+				skipped.push(`${id}: empty transcript`);
+				unresolved++;
+				return;
+			}
+			// A terminal assistant tail is idle; `pause_turn` explicitly requests
+			// another provider sample and remains continuable without queued input.
+			if (
+				last.role === "assistant" &&
+				last.stopDetails?.type !== "pause_turn" &&
+				!session.agent.hasQueuedMessages()
+			) {
+				skipped.push(`${id}: already idle`);
+				return;
+			}
+			try {
+				await session.agent.continue();
+				continued++;
+			} catch (error) {
+				skipped.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
+				unresolved++;
+			}
+		};
+
+		const lifecycle = AgentLifecycleManager.global();
+		await Promise.all(
+			[...new Set(paused.agentIds)].map(async id => {
+				try {
+					const target = id === MAIN_AGENT_ID ? this : await lifecycle.ensureLive(id);
+					await tryContinue(target, id);
+				} catch (error) {
+					skipped.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
+					unresolved++;
+				}
+			}),
+		);
+
+		// Clear the pause latch only when every recorded agent reached a settled
+		// state; unresolved revives/continuations must remain retryable.
+		const complete = unresolved === 0;
+		if (complete) {
+			this.sessionManager.appendCustomEntry(AGENTS_CONTINUED_CUSTOM_TYPE, {
+				continuedAt: new Date().toISOString(),
+				agentIds: paused.agentIds,
+				continued,
+			});
+			this.sessionManager.flushSync();
+		}
+
+		return { continued, skipped, complete };
 	}
 
 	// =========================================================================

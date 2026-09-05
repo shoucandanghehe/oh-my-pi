@@ -434,6 +434,17 @@ export class SessionAdvisors {
 		await this.detachAndCloseRecorders();
 	}
 
+	/** Aborts every live advisor agent without disposing its runtime. */
+	abort(reason?: unknown): void {
+		for (const advisor of this.#advisors) {
+			try {
+				advisor.agent.abort(reason);
+			} catch {
+				// Advisor aborts can race runtime disposal.
+			}
+		}
+	}
+
 	/** Detaches and drains recorder feeds before transcript artifacts are removed. */
 	async detachAndCloseRecorders(): Promise<void> {
 		const closes: Promise<void>[] = [];

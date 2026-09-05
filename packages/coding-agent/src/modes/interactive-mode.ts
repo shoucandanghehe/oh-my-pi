@@ -41,6 +41,7 @@ import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
+	APP_NAME,
 	adjustHsv,
 	formatNumber,
 	getProjectDir,
@@ -144,7 +145,6 @@ import { formatStartupChangelogSummary, type StartupChangelogSelection } from ".
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
-import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import {
@@ -152,6 +152,7 @@ import {
 	popTerminalTitle,
 	pushTerminalTitle,
 	setSessionTerminalTitle,
+	setTerminalTitleState,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -196,6 +197,7 @@ import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
+import { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
@@ -585,6 +587,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	readonly terminalActivity: TerminalActivityController;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -984,6 +987,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
+		this.terminalActivity = new TerminalActivityController({
+			isProgressEnabled: () => this.settings.get("terminal.showProgress"),
+			setProgress: active => this.ui.terminal.setProgress(active),
+			setTitleState: setTerminalTitleState,
+		});
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.#codexResetFireworksController = new CodexResetFireworksController(this);
 		this.statusLine.setCodexResetFireworksHandler(event => {
@@ -4807,7 +4815,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = false;
 	}
 
-	async shutdown(): Promise<void> {
+	async #finishShutdown(options: {
+		status: string;
+		disposeSession?: () => Promise<void>;
+		resumeHint: (sessionId: string) => string;
+	}): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
 		await this.#teardown();
@@ -4817,7 +4829,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// #resumableSessionId).
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId)}`)}\n`);
+			process.stderr.write(`\n${chalk.dim(options.resumeHint(sessionId))}\n`);
 		}
 
 		await postmortem.quit(0);
@@ -4874,31 +4886,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
 		this.#focusController.dispose();
-
-		// Surface an explicit "Closing session…" line so the user sees a reason
-		// for the pause while `session.dispose()` flushes memory consolidate and
-		// other cleanups (issue #3641). The await on the next line yields the
-		// event loop, giving requestRender() a tick to paint the status before
-		// dispose blocks.
-		this.showStatus("Closing session…");
-
-		// Persist the draft and dispose the session through the shared teardown
-		// so a signal that arrives mid-shutdown cannot fire a second dispose.
-		// The teardown is a promise-memoized singleton; whichever path calls it
-		// first runs the work, the other awaits the same settled promise.
-		// The teardown is registered lazily in `init()` — a `/exit` reached
-		// before `init()` completed falls back to a direct dispose.
-		const stillClosingTimer = setTimeout(() => {
-			this.showStatus("Still closing… (flushing memory backend / network)");
-		}, STILL_CLOSING_DELAY_MS);
-		try {
-			if (this.#signalTeardown) {
-				await this.#signalTeardown();
-			} else {
-				await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+		this.showStatus(options.status);
+		if (options.disposeSession) {
+			const stillClosingTimer = setTimeout(() => {
+				this.showStatus("Still closing… (flushing memory backend / network)");
+			}, STILL_CLOSING_DELAY_MS);
+			try {
+				await options.disposeSession();
+			} finally {
+				clearTimeout(stillClosingTimer);
 			}
-		} finally {
-			clearTimeout(stillClosingTimer);
 		}
 
 		// Do not force a final render during teardown: disposed session/UI state can
@@ -4914,6 +4911,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeTerminalTitleState();
 		popTerminalTitle();
 		this.stop();
+
+	}
+
+	async shutdown(): Promise<void> {
+		await this.#finishShutdown({
+			status: "Closing session…",
+			disposeSession: async () => {
+				// Persist the draft and dispose the session through the shared teardown
+				// so a signal that arrives mid-shutdown cannot fire a second dispose.
+				// The teardown is registered lazily in `init()` — a `/exit` reached
+				// before `init()` completed falls back to a direct dispose.
+				if (this.#signalTeardown) {
+					await this.#signalTeardown();
+				} else {
+					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+				}
+			},
+			resumeHint: sessionId => `Resume this session with ${APP_NAME} --resume ${sessionId}`,
+		});
+	}
+
+	/**
+	 * Finish TUI teardown after a barrier pause already disposed the session
+	 * with `pausedExit`. Does not dispose again.
+	 */
+	async shutdownAfterPausedExit(): Promise<void> {
+		await this.#finishShutdown({
+			status: "Exiting paused — resume with --resume, then /continue",
+			resumeHint: sessionId => `Paused session. Resume with ${APP_NAME} --resume ${sessionId}, then /continue`,
+		});
 	}
 
 	async checkShutdownRequested(): Promise<void> {
