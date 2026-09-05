@@ -1387,6 +1387,8 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
+- Fixed plan approval freezing the TUI for the whole approved-plan run: the `xd://propose` completion started `handlePlanApproval` inside the event controller's serialized dispatch chain, so the operator's review choice and the blocking synthetic execution turn parked every subsequent agent event (streamed deltas, tool cards) behind an in-chain `await` — the agent executed with zero live rendering and the transcript only materialized after the run settled. The approval flow now runs off-chain, so events render in real time while the review is open and while the plan executes.
+- Fixed `omp -r` current-folder scope missing sessions written under the short-lived hashed project-directory scheme (17.2.5-17.2.8): the 17.2.9 revert restored the legacy path-based names but dropped all migration, stranding those sessions. `computeDefaultSessionDir` now performs a one-way migration of the hashed dir back into its legacy name ([#7677](https://github.com/can1357/oh-my-pi/issues/7677)).
 
 ## [17.2.9] - 2026-08-05
 
@@ -1528,6 +1530,46 @@
 - Fixed heavily branched conversation trees shifting linear continuations into disconnected columns.
 - Fixed plugin installation validation failures for legacy compatibility shims.
 - Removed hard-coded references to disabled or absent agents in system and tool prompts.
+### Added
+
+- Added resumable session details to fatal crash output, including an `omp --resume <session-id>` command for every persisted live agent session.
+
+### Fixed
+
+- Fixed unobserved promise continuations from browser helpers such as `tab.waitForResponse()` wedging or killing the tab worker when they reject; browser facade promises now retain native promise behavior while observing every `then`, `catch`, and `finally` continuation, and late user continuation errors are logged instead of dropped after the run ends.
+- Fixed app-viewport selection copies replacing transcript rows that scrolled beyond the pane with blank lines in Main, Agent, and BTW panes.
+- Fixed template argument substitution (`substituteArgs`) executing recursive placeholder expansion when positional argument values contain literal `$@` or `$ARGUMENTS` tokens.
+- Fixed focused-agent status bar dimming darkening Powerline end caps.
+- Fixed the browser relay creating duplicate "omp" tab groups: the bridge now keeps at most one group RPC in flight (a queued drain replaces fire-and-forget per-tab requests), so concurrent requests can no longer race the extension's non-atomic query→create→set-title sequence in the same window. Also fixed an extension reconnect (relay daemon restart, service-worker recycle) being misread as the user dragging every tab out of the omp group — grouping state is reset when the extension socket closes, so tabs regroup on the next hello instead of being permanently opted out.
+- Fixed retained computer `Win` and `El` handles carrying a completed run's abort signal and permissions into later runs; handles now obey the current run while leaked async continuations remain denied.
+- Fixed computer-tool `win.ref("eN")` fabricating an element with empty role/title metadata; it now resolves the ref through the accessibility registry, returning a populated element and throwing `StaleRef` for expired refs.
+- Fixed macOS background keyboard input silently reaching a different window in the same application; ambiguous multi-window delivery now fails with `BackgroundUnavailable`, and foreground retries establish the addressed window as the app's main/focused window before typing.
+- Fixed macOS Chrome accessibility snapshots exposing only browser chrome by activating Chromium's renderer accessibility tree before resolving a window.
+- Fixed unnamed macOS accessibility controls such as Chrome's Back, Forward, and Reload buttons by using `AXDescription` when `AXTitle` is empty in snapshots and title queries.
+- Fixed shake re-eliding artifact recovery reads into a new artifact indefinitely.
+- Fixed Esc during a streaming `/loop` iteration pausing the loop instead of only aborting the current turn ([#7329](https://github.com/can1357/oh-my-pi/issues/7329)).
+- Fixed heavily branched conversation trees shifting linear continuations into disconnected gutter columns and accumulating unnecessary indentation ([#7332](https://github.com/can1357/oh-my-pi/issues/7332)).
+- Fixed the vibe pre-init-kill test racing `registry.kill()` against the worker's job-body dispatch (the mock only registered its AgentRef after the abort signal landed, so a loaded runner could observe no registration); the test now waits for the worker to be mid-initialization before killing.
+- Removed hard-coded `scout` references from agent, system, and tool prompts that leaked into the model even when the scout agent was disabled (`task.disabledAgents`) or absent from the spawn list: the init agent prompt, task tool description, delegation gates, plan-mode and workflowz notices, and glob/grep/ast-grep guidance no longer recommend an unavailable agent, including after live settings changes ([#7313](https://github.com/can1357/oh-my-pi/issues/7313)).
+- Fixed compiled Windows launches misclassifying ConPTY-backed terminals as console-less when `GetConsoleWindow()` returned no HWND, which spawned Python eval kernels with `CREATE_NO_WINDOW` and could deadlock imports of NumPy-backed packages such as Matplotlib ([#7343](https://github.com/can1357/oh-my-pi/issues/7343)).
+- Fixed headless print-mode teardown exceeding its Mnemopi consolidation budget when final retention blocks on a locked SQLite writer, leaving the parent process, embed worker, and MCP children alive after the turn completed ([#7351](https://github.com/can1357/oh-my-pi/issues/7351)).
+- Fixed headless `-p` / `--mode json` runs with `memory.backend: mnemopi` hanging after a completed turn and leaving `__omp_worker_mnemopi_embed` unreaped when the embed worker's fastembed/onnxruntime runtime wedged. Steady-state embed requests were unbounded, so a stuck native runtime blocked the turn's memory recall or shutdown consolidation forever; embeds are now bounded and the wedged worker is reaped on timeout so the next call respawns a fresh child, while initialization remains unbounded so first-time runtime installation and model bootstrap are not killed mid-install (regression of [#5753](https://github.com/can1357/oh-my-pi/issues/5753); [#7352](https://github.com/can1357/oh-my-pi/issues/7352)).
+- Fixed a literal API key configured via `/login` (e.g. OpenCode Zen's free `public` key) being hijacked on Windows by a case-differing system environment variable, causing 401s. `process.env`/`Bun.env` reads are case-insensitive on Windows, so the config-value resolvers' "env var name, else literal" fallback resolved `public` to the built-in `PUBLIC=C:\Users\Public`. Resolution now requires an exact-case env entry (via the new `$envExact` helper) before treating a value as an env-var reference ([#7361](https://github.com/can1357/oh-my-pi/issues/7361)).
+- Fixed redirected stdin being ignored when Bun reports a pipe with an undefined `isTTY`, so JSON/print sessions now process piped prompts and persist them under `--session-dir` or `PI_CODING_AGENT_SESSION_DIR` as requested ([#7378](https://github.com/can1357/oh-my-pi/issues/7378)).
+- Fixed Chromium-backed tests failing during suite registration when the shared availability probe was still initializing ([#7384](https://github.com/can1357/oh-my-pi/pull/7384) by [@paralin](https://github.com/paralin)).
+- Fixed the terminal-tab title dropping to idle (`>`) while an unsuppressed async job was still running — a `/vibe` worker turn or a bash `async` job that re-wakes the director after it settles. `EventController.#handleAgentEnd` now skips the idle/loader teardown on a non-terminal `agent_end` (`isTerminal: false`) and only tears down at the true terminal settle ([#7386](https://github.com/can1357/oh-my-pi/issues/7386)).
+- Fixed `omp setup python` to validate the same configured or discovered interpreter used by the Python eval runtime.
+- Fixed self-update misclassifying glibc Linux hosts with an installed musl loader as musl hosts, which could download an unusable musl binary instead of the glibc release.
+- Fixed a crash where opening the Agent Hub after a resume and moving the selection triggered an unbounded `ExtensionExitError` unhandled-rejection storm and exit 129. The postmortem module bound the native hard-exit at first evaluation; when the bundler deferred that evaluation into a `withHostGuard` window it froze the guard's throwing replacement, poisoning every later signal/fatal exit. The native exit is now resolved per call, and the guard stamps its replacement with the native primitive it shadows so mid-guard signals still exit ([#7393](https://github.com/can1357/oh-my-pi/issues/7393)).
+- Fixed project-scoped session directories using leading-hyphen names and collapsing distinct paths such as `~/project/hail-mary` and `~/project-hail-mary` into one bucket; directory names now use a portable readable prefix plus the canonical cwd hash, and colliding legacy buckets are split by their recorded session cwd during migration ([#7396](https://github.com/can1357/oh-my-pi/issues/7396)).
+- Fixed manual `/shake` leaving the context budget and next pre-turn compaction decision anchored to the stale pre-shake provider token count until another model response arrived.
+- Fixed Mnemopi scoped recall reporting "No relevant memories found" when every scoped target failed internally; target failures now warn, and total recall failure preserves the underlying engine error while healthy targets remain available ([#7364](https://github.com/can1357/oh-my-pi/issues/7364)).
+- Fixed `skill://` resolution ignoring explicitly configured `skills.customDirectories` entries when a same-named skill existed in a default discovery path: the custom-directory skill now wins as the higher-priority source ([#7190](https://github.com/can1357/oh-my-pi/issues/7190)).
+- Fixed image paste failing on Wayland-only Linux sessions by reading PNG clipboard payloads through `wl-paste` before falling back to the native bridge ([#7316](https://github.com/can1357/oh-my-pi/issues/7316)).
+- Fixed prewalk switching to the fast model during read-only investigation: `xd://` devices are dispatched through the `write` tool, so a read-only call such as an `lsp` navigation counted as the first edit/write and armed the one-way hand-off mid-planning. Device dispatches now carry the wrapped tool's approval tier and only trigger the switch at a `write`/`exec` tier — read-only `lsp`, `debug` inspection, and internal-URL `ast_edit` calls no longer downgrade the model ([#7312](https://github.com/can1357/oh-my-pi/issues/7312)).
+### Fixed
+
+- Fixed tabbed lines in multiline Eval display values expanding across app-viewport workspace geometry and erasing the divider between conversation panes.
 
 ## [17.2.4] - 2026-08-01
 
@@ -1630,6 +1672,19 @@
 - Fixed the Python RPC client dropping context, compaction, OAuth URL, and terminal-settlement fields.
 - Fixed the browser tool ignoring the url parameter when opening a new tab on an attached browser.
 - Fixed browser automation disrupting attached browsers by adopting the active foreground tab and avoiding raising new tabs during screenshots.
+- Moved the display-reset default chord (`app.display.reset`) from `Ctrl+L` to `Alt+L` to make room for the live-mode toggle.
+- Updated the hashline edit tool, streaming preview, and plan-mode guidance for the unified `PUT`/`CUT` grammar, `.=` ranges, and named registers.
+### Changed
+
+- BTW thread-rail hover previews and pinned expand/collapse actions now use a short interruptible slide animation.
+- Removed redundant hover/click guidance and the duplicate thread-count heading from the BTW thread rail.
+
+### Fixed
+
+- Fixed collapsed BTW thread-rail previews shifting the transcript and pane chrome left by one column when the overlay boundary crossed a double-width CJK character.
+- Fixed BTW thread-selection clicks being ignored while the thread rail was expanding.
+- Fixed selecting a thread from a hover preview either pinning the rail open or collapsing it immediately; the rail now stays temporary until the pointer leaves, while fixed rails remain open.
+- Fixed durable BTW conversations ending with an empty reply when a model attempted a tool call; denied calls now return an error tool result to the isolated child loop so it can continue with plain text, and the rejection history survives session restore.
 
 ## [17.2.1] - 2026-07-30
 
@@ -1740,6 +1795,46 @@
 ### Removed
 
 - Removed the dangling `MCPManager.setOnNotification` single-slot setter, which had no callers in the runtime. Replaced by `MCPManager.addNotificationListener` — multi-listener, per-listener error isolation, returns an unsubscribe function.
+### Added
+
+- `/btw` now keeps disposable QuickAsk replies inline and upgrades the exact turn with Enter into a durable SideThread inside the app-viewport workspace.
+	- Each parent session can own multiple independently streaming, restorable BTW children in one shared pane with a hover-preview/click-pin thread rail, per-child model lineage, drafts, unread state, and pane-local scroll state.
+	- SideThreads support `/refresh`, `/steer`, `/handoff`, and `/promote`; promotion switches Main from the child's frozen anchor without leaving a second writable copy.
+- `/pause` waits until every live agent loop parks before the next model call, then allows `q` to exit with a durable `agents_paused` marker (`session_exit.kind = "paused"`).
+- `/continue` restarts agents after `omp --resume`; dismissing the pause screen resumes same-process loops, and neither path injects user-visible text.
+- Added explicit assistant thinking renderer result arms for extensions: `{ type: "append", component: Component }` keeps the existing supplemental rendering behavior, while `{ type: "replace", component: Component }` suppresses the default thinking Markdown so extensions can render the block themselves. Bare `Component` returns remain the legacy append shorthand. Thinking render contexts now include parent assistant message metadata and provider thinking content metadata for async renderer state.
+
+### Changed
+
+- Agent Hub now opens selected agents in persistent app-viewport workspace panes beside the sticky main-session editor, with pane-local transcript scrolling and the existing native-scrollback behavior preserved on other backends.
+- Agent transcript workspace panes now use the same reserved-column, draggable Braille scrollbar as the Main pane and global app viewport.
+- Pane drag-and-drop now previews the dragged transcript inside a themed destination frame without reflowing the live workspace.
+- Messageable Agent transcript panes now use the Main composer's full-width chrome, focus styling, labeled border, and empty-input placeholder.
+- Agent transcript workspace panes now use a responsive Main-style conversation shell with workspace-owned identity headers, rich composer metadata, compact low-height rendering, stable read-only Advisor geometry, and hover-aware interaction.
+- Resuming a session exited while paused no longer synthesizes an interrupted-turn abort; the transcript stays idle until `/continue`.
+
+### Fixed
+
+- Fixed right-clicking selected prompt text recalled with Up pasting the clipboard instead of copying the selection.
+- Updated the app-viewport preview workflow to build native addons through the Bazel pipeline after the legacy `build-native` action was removed.
+- `/context`, `/session info`, and other immediate slash-command output now appears in the app viewport as soon as the command completes instead of remaining hidden until another prompt triggers a render.
+- Fixed Ctrl+O appearing to freeze large Advisor transcripts by expanding one viewport-anchored synthetic session update at a time while preserving its full Markdown rendering, instead of synchronously laying out every historical replay dump.
+- Fixed app-viewport sash dragging re-rendering the full main-session history, and restored Agent Hub toggle shortcuts while an agent pane has keyboard focus.
+- Restored the Main pane's proportional virtual scrollbar after moving transcript scrolling into the app-viewport workspace component, reusing the global viewport's Braille thumb style, reserved content column, and drag behavior.
+- Fixed pane drag-and-drop previews alternating between terminal white and the covered content's foreground color instead of using the active accent color.
+- Fixed dragged transcript previews appearing one cell down and right from their framed destination.
+- Fixed clicks in the app-viewport Main pane moving keyboard focus from an active `ask` or hook dialog to the detached editor, which made dialog navigation keys appear unresponsive.
+- Fixed copied text from app-viewport Main and agent panes including visual wrap newlines, per-row gutters, and pane scrollbars instead of logical transcript text, while keeping column-zero tool block content selectable.
+- Fixed active selections in app-viewport Main and agent panes staying on stale screen rows, failing to follow a stationary pointer during wheel scrolling, changing copied content, being cleared when a drag anchor moved offscreen, or highlighting the fixed input outside the origin scroll region.
+- Fixed Agent Hub opening as a partial, two-cell-narrow transparent overlay over an app-viewport workspace instead of an opaque bordered surface covering the full terminal geometry.
+- Fixed terminal progress and run-state titles switching to idle when either side of a concurrent main-session continuation and `/btw` request completed before the other; activity is now aggregated by owner, and non-terminal `agent_end` scheduling boundaries retain main-session ownership.
+- Fixed QuickAsk and durable BTW replies inheriting IRC's 4 KiB flood limit, which truncated visible history and branch promotion while the model retained the full reply.
+- Fixed app-viewport pane focus chrome: all workspace headers now share `●`/`○` markers and focused/muted title colors, unfocused side-pane composers remain visible without showing hint text while focused, Agent/BTW composers use peer instances of Main's `StatusLineComponent` with the same live settings and exact segment/layout/background/cap/overflow rendering, and the BTW thread rail uses a centered divider chevron with a larger hover target; hovering the collapsed chevron peeks the rail without reflowing the transcript, spatial and brief leave tolerance prevent accidental closure, clicking a hovered thread pins it, and single-thread hover feedback remains active.
+- Fixed multi-turn BTW conversations cold-missing Kimi and Anthropic-compatible prompt caches by keeping the no-tools reminder in the frozen side-thread prefix instead of moving it after each completed turn; persisted pre-fix side threads are migrated on restore so the reminder remains present.
+- Fixed Agent workspace panes silently rendering Main's status line when their live `AgentSession` was unavailable; the pane now stays open, reports the missing session in its own status line, and switches in place to the target's `StatusLineComponent` when the session returns.
+- Fixed long-session UI lag during streaming and app-viewport scrolling: every compose re-rendered each settled `ToolExecutionComponent` (thousands of blocks re-walking their Box/renderer subtrees per frame, ~20µs × ~1.5k blocks ≈ 30ms per frame on a real 4k-message transcript). Settled tool blocks now memoize their rendered rows on (width, display key), cutting full frames from ~56ms to ~6ms; blocks with live inline images still re-render every frame to preserve image-budget side effects.
+- Fixed long app-viewport transcripts re-rendering every historical block for tail spinner and streaming updates by reusing unaffected transcript segments.
+- Fixed oversized Todo and BTW live panels hiding the editor in the app viewport; their rows now participate in viewport scrolling.
 
 ## [17.1.8] - 2026-07-28
 

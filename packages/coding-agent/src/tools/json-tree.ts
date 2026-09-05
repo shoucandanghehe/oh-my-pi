@@ -3,7 +3,7 @@
  */
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { Theme } from "../modes/theme/theme";
-import { truncateToWidth } from "./render-utils";
+import { replaceTabs, truncateToWidth } from "./render-utils";
 
 /** Max depth for JSON tree rendering */
 export const JSON_TREE_MAX_DEPTH_COLLAPSED = 2;
@@ -141,7 +141,7 @@ export function renderJsonTreeLines(
 
 				// Special handling for multiline strings
 				if (typeof val === "string" && val.includes("\n")) {
-					const strLines = val.split("\n");
+					const strLines = replaceTabs(val).split("\n");
 					const maxStrLines = Math.min(strLines.length, Math.max(1, maxLines - lines.length - 1));
 					const continuePrefix = buildTreePrefix(theme, ancestors);
 

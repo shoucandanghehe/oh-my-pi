@@ -2333,7 +2333,10 @@ export class SelectorController {
 			overlayHandle?.hide();
 			// A gated empty Hub may never have been mounted. Restoring editor
 			// focus in that case would steal focus from a menu opened meanwhile.
-			if (overlayHandle) this.focusActiveEditorArea();
+			if (overlayHandle) {
+				if (this.ctx.workspaceEnabled) this.ctx.focusMainWorkspacePane();
+				else this.focusActiveEditorArea();
+			}
 			this.ctx.ui.requestRender();
 		};
 
@@ -2354,7 +2357,9 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			createStatusLine: session => this.ctx.statusLine.createPeer(session),
 			focusAgent: id => this.ctx.focusAgentSession(id),
+			openAgent: this.ctx.workspaceEnabled ? id => this.ctx.openAgentWorkspacePane(id) : undefined,
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
 

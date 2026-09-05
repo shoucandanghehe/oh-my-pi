@@ -30,39 +30,29 @@ function makeJsonlSessionFile(dirPath: string, entries: object[]): string {
 	return filePath;
 }
 
-function makeSubagentRegistry(sessions: ObservableSession[]) {
-	return {
-		getSessions: () => sessions,
-		getSession: (id: string) => sessions.find(session => session.id === id),
-		onChange: () => () => {},
-		setMainSession: () => {},
-		getActiveSubagentCount: () => sessions.filter(s => s.status === "active").length,
-	} as unknown as import("@oh-my-pi/pi-coding-agent/modes/session-observer-registry").SessionObserverRegistry;
-}
-
-function makeViewer(sessionFile: string, observed: ObservableSession[]): AgentTranscriptViewer {
+function makeViewer(sessionFile: string, _observed: ObservableSession[]): AgentTranscriptViewer {
 	const agents = new AgentRegistry();
 	agents.register({
 		id: SESSION_ID,
 		displayName: SESSION_ID,
 		kind: "sub",
 		parentId: "Main",
-		session: null,
+		session: {} as never,
 		sessionFile,
-		status: "parked",
+		status: "idle",
 	});
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 	return new AgentTranscriptViewer({
 		agentId: SESSION_ID,
 		registry: agents,
-		observers: makeSubagentRegistry(observed),
 		ui,
 		cwd: path.dirname(sessionFile),
 		expandKeys: ["ctrl+o"],
 		hubKeys: ["ctrl+s"],
+		createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0 }), dispose: () => {} }),
 		requestRender: () => {},
 		onClose: () => {},
-		onHubClose: () => {},
+		onHubToggle: () => {},
 	});
 }
 

@@ -47,8 +47,10 @@ export type * from "./symbols";
 export * from "./terminal";
 // Terminal image support
 export * from "./terminal-capabilities";
+export * from "./text-selection";
 // TTY ID
 export * from "./ttyid";
 export * from "./tui";
 // Utilities
 export * from "./utils";
+export * from "./workspace-layout";

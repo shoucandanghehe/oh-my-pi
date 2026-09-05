@@ -82,6 +82,23 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 	}
 	return { ...message, content, providerPayload: undefined };
 }
+/** Promote the visible ephemeral reply without replay-bound provider metadata. */
+export function sanitizeEphemeralAssistantForPromotion(message: AssistantMessage, replyText: string): AssistantMessage {
+	const sanitized = sanitizeAssistantForReparentedHistory(message);
+	const content: AssistantMessage["content"] = [];
+	let replacedText = false;
+	for (const block of sanitized.content) {
+		if (block.type !== "text") {
+			content.push(block);
+			continue;
+		}
+		if (replacedText) continue;
+		content.push({ type: "text", text: replyText });
+		replacedText = true;
+	}
+	if (!replacedText) content.push({ type: "text", text: replyText });
+	return { ...sanitized, content };
+}
 
 /**
  * Collapses degenerate repeated lines and bounds an ephemeral side-channel

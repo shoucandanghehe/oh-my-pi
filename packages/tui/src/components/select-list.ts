@@ -173,8 +173,8 @@ export class SelectList implements Component, MouseRoutable {
 		this.onSelect?.(item);
 	}
 
-	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
-		routeSelectListMouse(this, event, line);
+	routeMouse(event: SgrMouseEvent, line: number, _col: number): boolean {
+		return routeSelectListMouse(this, event, line);
 	}
 
 	invalidate(): void {

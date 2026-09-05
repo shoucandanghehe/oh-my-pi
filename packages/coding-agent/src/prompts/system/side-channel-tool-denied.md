@@ -1,0 +1,1 @@
+Tool calls are disabled for side-channel conversations. The tool was not executed. Continue by answering with plain text only.

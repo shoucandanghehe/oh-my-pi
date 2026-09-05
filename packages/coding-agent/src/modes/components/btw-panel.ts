@@ -9,6 +9,7 @@ interface BtwPanelComponentOptions {
 	question: string;
 	tui: TUI;
 	canBranch?: () => boolean;
+	continueToThread?: boolean;
 }
 
 class BtwFooter implements Component {
@@ -33,6 +34,7 @@ class BtwFooter implements Component {
 export class BtwPanelComponent extends OverlayPanel {
 	#tui: TUI;
 	#canBranch: (() => boolean) | undefined;
+	#continueToThread: boolean;
 	#state: BtwPanelState = "running";
 	#answer = "";
 	#errorMessage: string | undefined;
@@ -43,6 +45,7 @@ export class BtwPanelComponent extends OverlayPanel {
 		super(`/btw ${replaceTabs(options.question)}`);
 		this.#tui = options.tui;
 		this.#canBranch = options.canBranch;
+		this.#continueToThread = options.continueToThread === true;
 		this.#rebuild();
 	}
 
@@ -125,8 +128,12 @@ export class BtwPanelComponent extends OverlayPanel {
 				return theme.fg("muted", "Esc cancel /btw");
 			case "complete": {
 				if (!this.isCopyable()) return theme.fg("muted", "Esc dismiss");
-				const actions = ["c copy"];
-				if (this.#canBranch?.() ?? this.isBranchable()) actions.push("b branch to chat");
+				const actions: string[] = [];
+				if (this.#continueToThread) actions.push("Enter continue");
+				actions.push("c copy");
+				if (this.#canBranch?.() ?? this.isBranchable()) {
+					actions.push(this.#continueToThread ? "b promote to chat" : "b branch to chat");
+				}
 				actions.push("Esc dismiss");
 				return theme.fg("muted", actions.join(" · "));
 			}

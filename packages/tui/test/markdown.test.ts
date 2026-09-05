@@ -54,6 +54,21 @@ describe("renderInlineMarkdown", () => {
 });
 
 describe("Markdown component", () => {
+	it("recovers logical text across visual wraps without its horizontal padding", () => {
+		const markdown = new Markdown("alpha beta gamma", 1, 0, defaultMarkdownTheme);
+		const lines = markdown.render(9);
+		const selectable = markdown as Component;
+
+		expect(lines.length).toBeGreaterThan(1);
+		expect(
+			selectable.getTextSelection?.({
+				start: { row: 0, col: 0 },
+				end: { row: lines.length - 1, col: 8 },
+			}),
+		).toBe("alpha beta gamma");
+		expect(selectable.getTextSelectionInset?.(0)).toBe(1);
+	});
+
 	describe("Nested lists", () => {
 		it("should render simple nested list", () => {
 			const markdown = new Markdown(

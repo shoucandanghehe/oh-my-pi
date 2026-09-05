@@ -12,11 +12,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentHubRemote } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
+import {
+	AgentTranscriptViewer,
+	type AgentTranscriptViewerDeps,
+} from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import {
+	CURSOR_MARKER,
 	getKittyGraphics,
 	ImageBudget,
 	ImageProtocol,
@@ -24,6 +28,8 @@ import {
 	setTerminalImageProtocol,
 	TERMINAL,
 	type TUI,
+	WorkspaceLayout,
+	WorkspaceModel,
 } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -137,16 +143,22 @@ function messageLine(id: string, content: string): string {
 	});
 }
 
-function makeViewer(file: string, remote?: AgentHubRemote, ui?: TUI) {
+interface ViewerOptions {
+	hubKeys?: AgentTranscriptViewerDeps["hubKeys"];
+	onHubToggle?: () => void;
+	sendable?: boolean;
+}
+
+function makeViewer(file: string, remote?: AgentHubRemote, ui?: TUI, options?: ViewerOptions) {
 	const agents = new AgentRegistry();
 	agents.register({
 		id: "Main/advisor",
 		displayName: "advisor",
-		kind: "advisor",
+		kind: options?.sendable ? "sub" : "advisor",
 		parentId: "Main",
-		session: null,
+		session: {} as never,
 		sessionFile: remote ? undefined : file,
-		status: "parked",
+		status: "idle",
 	});
 	return new AgentTranscriptViewer({
 		agentId: "Main/advisor",
@@ -155,10 +167,16 @@ function makeViewer(file: string, remote?: AgentHubRemote, ui?: TUI) {
 		cwd: "/tmp",
 		remote,
 		expandKeys: ["ctrl+o"],
-		hubKeys: ["ctrl+s"],
+		hubKeys: options?.hubKeys ?? ["ctrl+s"],
+		createStatusLine: () => ({ getTopBorder: () => ({ content: " π model ", width: 9 }), dispose: () => {} }),
+		lifecycle: options?.sendable
+			? () => {
+					throw new Error("Lifecycle is not exercised by composer rendering");
+				}
+			: undefined,
 		requestRender: () => {},
 		onClose: () => {},
-		onHubClose: () => {},
+		onHubToggle: options?.onHubToggle ?? (() => {}),
 	});
 }
 
@@ -168,11 +186,11 @@ function gutter(line: string): number {
 	return stripped.length - stripped.trimStart().length;
 }
 
-function withViewer(fn: (viewer: AgentTranscriptViewer) => void): void {
+function withViewer(fn: (viewer: AgentTranscriptViewer) => void, options?: ViewerOptions): void {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
 	const file = path.join(dir, "__advisor.jsonl");
 	fs.writeFileSync(file, buildJsonl());
-	const viewer = makeViewer(file);
+	const viewer = makeViewer(file, undefined, undefined, options);
 	try {
 		fn(viewer);
 	} finally {
@@ -196,6 +214,18 @@ afterAll(() => {
 });
 
 describe("AgentTranscriptViewer", () => {
+	it("routes the Agent Hub toggle from a focused standalone viewer", () => {
+		let toggles = 0;
+		withViewer(
+			viewer => {
+				viewer.handleInput("\x1ba");
+			},
+			{ hubKeys: ["alt+a"], onHubToggle: () => toggles++ },
+		);
+
+		expect(toggles).toBe(1);
+	});
+
 	let rowsDesc: PropertyDescriptor | undefined;
 
 	beforeEach(() => {
@@ -213,27 +243,119 @@ describe("AgentTranscriptViewer", () => {
 		}
 	});
 
-	it("aligns the title and body content on the same gutter", () => {
+	it("aligns transcript blocks on the same gutter", () => {
 		withViewer(viewer => {
 			viewer.render(80); // populate the scroll view before navigating
 			viewer.handleInput("g"); // scroll to top so the first message is visible
 			const lines = viewer.render(80).map(l => Bun.stripANSI(l));
-			const titleLine = lines.find(l => l.includes("Agent Hub"));
-			const bodyLine = lines.find(l => l.includes("PROMPTMARKER"));
-			expect(titleLine).toBeDefined();
-			expect(bodyLine).toBeDefined();
-			// The body must not sit one column right of the title.
-			expect(gutter(bodyLine!)).toBe(gutter(titleLine!));
+			const promptLine = lines.find(l => l.includes("PROMPTMARKER"));
+			const answerLine = lines.find(l => l.includes("Reviewing step 0."));
+			expect(promptLine).toBeDefined();
+			expect(answerLine).toBeDefined();
+			// Every transcript block uses the same component-owned content gutter.
+			expect(gutter(answerLine!)).toBe(gutter(promptLine!));
 		});
 	});
 
+	it("renders a focused Main-style composer for a messageable subagent", () => {
+		withViewer(
+			viewer => {
+				const unfocusedStatus = viewer.render(80).find(line => line.includes("π model"));
+				expect(viewer.render(80).some(line => line.includes("Message Main/advisor…"))).toBe(true);
+				viewer.focused = true;
+				const lines = viewer.render(80).map(line => Bun.stripANSI(line.replaceAll(CURSOR_MARKER, "")));
+				const status = lines.find(line => line.includes("π model"));
+				const focusedStatus = viewer.render(80).find(line => line.includes("π model"));
+				expect(status?.startsWith("╭")).toBe(true);
+				expect(status?.endsWith("╮")).toBe(true);
+				expect(Bun.stringWidth(status ?? "")).toBe(80);
+				expect(lines.some(line => line.includes("Message Main/advisor…"))).toBe(false);
+				expect(focusedStatus).not.toBe(unfocusedStatus);
+				viewer.handleInput("x");
+				expect(viewer.render(80).some(line => line.includes("Message Main/advisor…"))).toBe(false);
+			},
+			{ sendable: true },
+		);
+	});
+
+	it("honors a parent-assigned viewport height when embedded in a workspace pane", () => {
+		withViewer(viewer => {
+			viewer.setViewportHeight(9);
+			expect(viewer.render(80)).toHaveLength(9);
+		});
+	});
+
+	it("renders as a component-owned viewport inside WorkspaceLayout", () => {
+		withViewer(viewer => {
+			const workspace = new WorkspaceLayout({
+				model: WorkspaceModel.single("advisor"),
+				height: () => 10,
+				requestRender: () => {},
+				panes: [
+					{
+						paneId: "advisor",
+						title: "Advisor",
+						component: viewer,
+						scroll: "component",
+						minWidth: 20,
+						minHeight: 6,
+					},
+				],
+			});
+			const initial = workspace.render(80);
+			const lines = initial.map(line => Bun.stripANSI(line));
+			expect(lines).toHaveLength(10);
+			expect(lines.join("\n")).toContain("π model");
+			const thumbRow = initial.findIndex(line => {
+				const codePoint = Bun.stripANSI(line).at(-1)?.codePointAt(0) ?? 0;
+				return codePoint >= 0x2800 && codePoint <= 0x28ff;
+			});
+			expect(thumbRow).toBeGreaterThan(0);
+			workspace.handleAppViewportMouse({
+				button: 0,
+				col: 79,
+				row: thumbRow,
+				release: false,
+				wheel: null,
+				motion: false,
+				leftClick: true,
+				rightClick: false,
+			});
+			workspace.handleAppViewportMouse({
+				button: 32,
+				col: 79,
+				row: 1,
+				release: false,
+				wheel: null,
+				motion: true,
+				leftClick: false,
+				rightClick: false,
+			});
+			const dragged = workspace
+				.render(80)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			workspace.handleAppViewportMouse({
+				button: 0,
+				col: 79,
+				row: 1,
+				release: true,
+				wheel: null,
+				motion: false,
+				leftClick: false,
+				rightClick: false,
+			});
+			expect(dragged).toContain("PROMPTMARKER");
+			workspace.dispose();
+		});
+	});
 	it("collapses synthetic advisor inputs on cold open and expands their body on ctrl+o", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-collapse-"));
 		const file = path.join(dir, "__advisor.jsonl");
 		// A synthetic `Session update` whose body carries a distinctive marker
 		// far larger than the viewport. Cold open must NOT lay it out; the reader
 		// only sees a compact summary until ctrl+o.
-		const bodyLines = ["### Session update", ""];
+		const bodyLines = ["### Session update", "", "**MARKDOWN-BOLD-MARKER**", ""];
 		for (let i = 0; i < 500; i++) bodyLines.push(`- SYNTHBODYMARKER line ${i}`);
 		const body = bodyLines.join("\n");
 		const jsonl = [
@@ -289,11 +411,65 @@ describe("AgentTranscriptViewer", () => {
 				.map(l => Bun.stripANSI(l))
 				.join("\n");
 			expect(expandedBody).toContain("SYNTHBODYMARKER");
+			expect(expandedBody).toContain("MARKDOWN-BOLD-MARKER");
+			expect(expandedBody).not.toContain("**MARKDOWN-BOLD-MARKER**");
 		} finally {
 			viewer.dispose();
 			removeSyncWithRetries(dir);
 		}
 	});
+
+	it("expands many synthetic advisor inputs without blocking the viewer", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-expand-many-"));
+		const file = path.join(dir, "__advisor.jsonl");
+		const entries = [
+			JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: "adv", timestamp: TS, cwd: "/tmp" }),
+		];
+		for (let message = 0; message < 100; message++) {
+			const body = [
+				`### SYNTH-${message}`,
+				"",
+				...Array.from({ length: 240 }, (_, line) => `- synthetic line ${line}: ${"x".repeat(48)}`),
+				`- SYNTH-TAIL-${message}`,
+			].join("\n");
+			entries.push(
+				JSON.stringify({
+					type: "message",
+					id: `u${message}`,
+					parentId: null,
+					timestamp: TS,
+					message: { role: "user", synthetic: true, attribution: "agent", content: body, timestamp: message },
+				}),
+			);
+		}
+		fs.writeFileSync(file, `${entries.join("\n")}\n`);
+		const viewer = makeViewer(file);
+		try {
+			viewer.render(80);
+			const startedAt = performance.now();
+			viewer.handleInput("\x0f");
+			const expanded = viewer
+				.render(80)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			const elapsed = performance.now() - startedAt;
+
+			// Ctrl+O is a synchronous input path: a multi-second Markdown layout
+			// blocks every TUI event, making the advisor viewer appear frozen.
+			expect(elapsed).toBeLessThan(2_000);
+			expect(expanded).toContain("SYNTH-TAIL-99");
+			viewer.handleInput("g");
+			const top = viewer
+				.render(80)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(top).toContain("SYNTH-0");
+			expect(top).not.toContain("synthetic line");
+		} finally {
+			viewer.dispose();
+			removeSyncWithRetries(dir);
+		}
+	}, 10_000);
 
 	it("scrolls the visible window with j/k and g/G", () => {
 		withViewer(viewer => {
