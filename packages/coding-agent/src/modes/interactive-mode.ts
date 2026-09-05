@@ -61,6 +61,7 @@ import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
+	APP_NAME,
 	adjustHsv,
 	formatDuration,
 	formatNumber,
@@ -274,6 +275,7 @@ import {
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerInterval,
 	setTerminalTitleSpinnerStyle,
+	setTerminalTitleState,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -337,6 +339,7 @@ import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
+import { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, setImageBlobWriter } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
@@ -1411,6 +1414,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	readonly terminalActivity: TerminalActivityController;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -2315,6 +2319,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		// A TSP terminal has no status strip: the tab title carries the PR.
 		this.statusLine.onNativePullRequest = pr => setTerminalTitlePullRequest(pr?.number);
+		this.terminalActivity = new TerminalActivityController({
+			isProgressEnabled: () => this.settings.get("terminal.showProgress"),
+			setProgress: active => this.ui.terminal.setProgress(active),
+			setTitleState: setTerminalTitleState,
+		});
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.#codexResetFireworksController = new CodexResetFireworksController(this);
 		this.statusLine.setCodexResetFireworksHandler(event => {
@@ -8201,15 +8210,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	/**
-	 * Close the session and quit. `cancellable: false` is for closes nobody may
-	 * refuse (fatal workspace states, `ctx.shutdown()`); operator quits are
-	 * cancellable and first ask extensions through `session_before_shutdown`.
-	 */
-	async shutdown(options?: { cancellable?: boolean }): Promise<void> {
+	async #finishShutdown(options: {
+		status: string;
+		cancellable?: boolean;
+		disposeSession?: () => Promise<void>;
+		resumeHint: (sessionId: string) => string;
+	}): Promise<void> {
 		if (this.#isShuttingDown) {
-			// Another close request ends the pending attempt's prompts; that
-			// attempt keeps ownership of teardown and can no longer be cancelled.
 			this.#closeAttempt?.abort();
 			return;
 		}
@@ -8223,7 +8230,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#quitHostOwned(130);
 			return;
 		}
-		const signal = this.#beginClose();
+		const signal = this.#beginClose(options.status);
 		// Reversible decisions first: nothing has been stopped yet, so a refusal
 		// leaves the session exactly as it was.
 		if (options?.cancellable !== false && !(await this.session.confirmClose(signal))) {
@@ -8234,10 +8241,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		// A signal teardown or stop() took over while extensions were asked.
-		if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return;
+		if ((options.disposeSession && this.session.isDisposed) || this.#dialogLifetime.signal.aborted) return;
 		const worktreePlan = await this.#planOwnedWorktreeExit(signal);
 		try {
-			await this.#teardown();
+			await this.#teardown(options);
 		} catch (error) {
 			this.#handleTeardownError("close", error);
 			return;
@@ -8251,8 +8258,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// #resumableSessionId).
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
-			// Command on its own line so triple-click selects just the command (#11001).
-			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
+			process.stderr.write(`\n${chalk.dim(options.resumeHint(sessionId))}\n`);
 		}
 
 		await this.#quitHostOwned(0);
@@ -8371,10 +8377,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * any await: worktree exit planning, live commands, and BTW history writes can
 	 * all stall, and the user must see a reason for the pause.
 	 */
-	#beginClose(): AbortSignal {
+	#beginClose(status = "Closing session…"): AbortSignal {
 		this.#isShuttingDown = true;
 		this.#closeAttempt = new AbortController();
-		this.showStatus("Closing session…");
+		this.showStatus(status);
 		return this.#closeAttempt.signal;
 	}
 
@@ -8385,7 +8391,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
-	async #teardown(): Promise<void> {
+	async #teardown(options?: { status: string; disposeSession?: () => Promise<void> }): Promise<void> {
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -8418,7 +8424,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// first runs the work, the other awaits the same settled promise.
 			// The teardown is registered lazily in `init()` — a `/exit` reached
 			// before `init()` completed falls back to a direct dispose.
-			if (this.#signalTeardown) {
+			if (options) {
+				await options.disposeSession?.();
+			} else if (this.#signalTeardown) {
 				await this.#signalTeardown();
 			} else {
 				await this.session.dispose({
@@ -8446,6 +8454,38 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeProgramStatus();
 		popTerminalTitle();
 		this.stop();
+
+	}
+
+	async shutdown(options?: { cancellable?: boolean }): Promise<void> {
+		await this.#finishShutdown({
+			status: "Closing session…",
+			cancellable: options?.cancellable,
+			disposeSession: async () => {
+				// Persist the draft and dispose the session through the shared teardown
+				// so a signal that arrives mid-shutdown cannot fire a second dispose.
+				// The teardown is registered lazily in `init()` — a `/exit` reached
+				// before `init()` completed falls back to a direct dispose.
+				if (this.#signalTeardown) {
+					await this.#signalTeardown();
+				} else {
+					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+				}
+			},
+			resumeHint: sessionId => `Resume this session with\n${resumeCommand(sessionId)}`,
+		});
+	}
+
+	/**
+	 * Finish TUI teardown after a barrier pause already disposed the session
+	 * with `pausedExit`. Does not dispose again.
+	 */
+	async shutdownAfterPausedExit(): Promise<void> {
+		await this.#finishShutdown({
+			status: "Exiting paused — resume with --resume, then /continue",
+			cancellable: false,
+			resumeHint: sessionId => `Paused session. Resume with\n${resumeCommand(sessionId)}\nthen /continue`,
+		});
 	}
 
 	requestShutdown(): void {
