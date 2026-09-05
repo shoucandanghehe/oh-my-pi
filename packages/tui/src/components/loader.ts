@@ -1,4 +1,4 @@
-import type { TUI } from "../tui";
+import type { Component, TUI } from "../tui";
 import { getPaddingX, padding, sliceByColumn, visibleWidth } from "../utils";
 import { Text } from "./text";
 
@@ -23,6 +23,7 @@ export class Loader extends Text {
 	#frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 	#currentFrame = 0;
 	#intervalId?: NodeJS.Timeout;
+	#additionalRepaintTimer?: NodeJS.Timeout;
 	#ui: TUI | null = null;
 	#lastSpinnerTick = 0;
 	#layoutSource?: readonly string[];
@@ -30,6 +31,7 @@ export class Loader extends Text {
 	#layoutFrames: readonly string[];
 	#layoutFrame: string;
 	#trailer?: () => string | undefined;
+	#additionalRepaintTarget?: Component;
 
 	constructor(
 		ui: TUI,
@@ -122,6 +124,7 @@ export class Loader extends Text {
 		this.#requestPaint();
 		const intervalMs = this.messageColorFn.animated === true ? RENDER_INTERVAL_MS : SPINNER_ADVANCE_MS;
 		this.#scheduleTick(intervalMs, intervalMs);
+		this.#startAdditionalRepaint();
 	}
 
 	stop() {
@@ -129,6 +132,7 @@ export class Loader extends Text {
 			clearTimeout(this.#intervalId);
 			this.#intervalId = undefined;
 		}
+		this.#stopAdditionalRepaint();
 	}
 
 	/** Lifecycle teardown: stop the animation timer. Idempotent. */
@@ -140,6 +144,15 @@ export class Loader extends Text {
 	 * less than a two-cell gap. */
 	setTrailer(trailer: (() => string | undefined) | undefined): void {
 		this.#trailer = trailer;
+	}
+	/**
+	 * Repaint one component that derives animation state from the loader clock
+	 * but lives outside the loader's targeted-render subtree.
+	 */
+	setAdditionalRepaintTarget(target: Component | undefined): void {
+		if (target === this.#additionalRepaintTarget) return;
+		this.#additionalRepaintTarget = target;
+		this.#startAdditionalRepaint();
 	}
 
 	setMessage(message: string) {
@@ -181,6 +194,32 @@ export class Loader extends Text {
 			this.#scheduleTick(intervalMs, Math.max(cadenceDelayMs, backpressureDelayMs));
 		}, delayMs);
 		this.#intervalId = timer;
+	}
+	#startAdditionalRepaint(): void {
+		this.#stopAdditionalRepaint();
+		if (!this.#additionalRepaintTarget || !this.#ui || !this.#intervalId) return;
+		this.#ui.requestComponentRender(this.#additionalRepaintTarget);
+		this.#scheduleAdditionalRepaint();
+	}
+
+	#scheduleAdditionalRepaint(): void {
+		const timer = setTimeout(() => {
+			if (this.#additionalRepaintTimer !== timer) return;
+			const target = this.#additionalRepaintTarget;
+			if (!target || !this.#ui || !this.#intervalId) {
+				this.#additionalRepaintTimer = undefined;
+				return;
+			}
+			this.#ui.requestComponentRender(target);
+			this.#scheduleAdditionalRepaint();
+		}, SPINNER_ADVANCE_MS);
+		this.#additionalRepaintTimer = timer;
+	}
+
+	#stopAdditionalRepaint(): void {
+		if (!this.#additionalRepaintTimer) return;
+		clearTimeout(this.#additionalRepaintTimer);
+		this.#additionalRepaintTimer = undefined;
 	}
 	#resolveMessage(): string {
 		return typeof this.message === "function" ? this.message() : this.message;

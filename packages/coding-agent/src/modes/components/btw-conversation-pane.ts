@@ -1,5 +1,5 @@
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AppViewportHoverProvider,
 	CombinedAutocompleteProvider,
@@ -23,11 +23,12 @@ import type { KeyId } from "../../config/keybindings";
 import type { BtwThreadPhase } from "../../session/btw-manager";
 import type { BtwThreadModelRef } from "../../session/btw-thread";
 import type { EphemeralConversationStatus, EphemeralConversationTurn } from "../../session/ephemeral-conversation";
-import { sanitizeEphemeralAssistantForPromotion } from "../../session/messages";
+import { sanitizeAssistantForReparentedHistory } from "../../session/messages";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
 import { renderWorkspacePaneHeader } from "../shared";
 import { theme } from "../theme/theme";
 import { ChatTranscriptPane } from "./chat-transcript-pane";
+import type { CustomEditor } from "./custom-editor";
 import type { StatusLineComponent } from "./status-line";
 
 export interface BtwThreadView {
@@ -37,6 +38,8 @@ export interface BtwThreadView {
 	readonly model: BtwThreadModelRef;
 	readonly error: string | undefined;
 	readonly draft: string;
+	readonly draftImages?: readonly ImageContent[];
+	readonly draftImageLinks?: readonly (string | undefined)[];
 	readonly turns: readonly EphemeralConversationTurn[];
 	readonly getTool?: (name: string) => AgentTool | undefined;
 	readonly status?: EphemeralConversationStatus;
@@ -44,6 +47,7 @@ export interface BtwThreadView {
 	readonly request:
 		| {
 				readonly input: string;
+				readonly images?: readonly ImageContent[];
 				readonly messages: readonly AgentMessage[];
 				readonly streamMessage: AssistantMessage | undefined;
 				readonly timestamp: number;
@@ -59,12 +63,12 @@ export interface BtwConversationPaneOptions {
 	proseOnlyThinking: () => boolean;
 	requestRender: () => void;
 	statusLine: Pick<StatusLineComponent, "getTopBorder" | "setRuntimeStatus" | "dispose">;
-	onSubmit: (input: string) => boolean;
+	onSubmit: (input: string, images?: ImageContent[], key?: string) => boolean;
 	onNewThread: () => boolean;
 	canCopy: (key: string) => boolean;
 	onCopy: (key: string) => Promise<boolean>;
 	onClose: () => void;
-	onDraftChange: (key: string, text: string) => void;
+	onDraftChange: (key: string, text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]) => void;
 	onPersistDraft: (key: string) => void;
 	onSelectThread: (key: string) => boolean;
 	onMarkRead: (key: string) => void;
@@ -125,6 +129,13 @@ export class BtwConversationPane
 	#selectedKey: string | undefined;
 	#previewKey: string | undefined;
 	#displayedKey: string | undefined;
+	#renderedTurns: readonly EphemeralConversationTurn[] | undefined;
+	#renderedTurnsLength = 0;
+	#renderedRequestInput: string | undefined;
+	#renderedRequestTimestamp: number | undefined;
+	#renderedRequestMessages: readonly AgentMessage[] | undefined;
+	#renderedRequestMessagesLength = 0;
+	#renderedStreamMessage: AssistantMessage | undefined;
 	#railOffset = 0;
 	#railCollapsed = true;
 	#railPeek = false;
@@ -150,12 +161,8 @@ export class BtwConversationPane
 			editor: {
 				label: "Ask BTW",
 				placeholder: "Continue the side conversation…",
-				onSubmit: input => {
-					const selectedKey = this.#selectedKey;
-					const accepted = options.onSubmit(input);
-					if (accepted && selectedKey) options.onDraftChange(selectedKey, "");
-					return accepted;
-				},
+				images: true,
+				onSubmit: (input, images, key) => options.onSubmit(input, images, key),
 				autocompleteProvider: new CombinedAutocompleteProvider(BTW_SLASH_COMMANDS, options.cwd),
 			},
 			expandKeys: options.expandKeys,
@@ -163,8 +170,8 @@ export class BtwConversationPane
 			getPlaceholder: () =>
 				"No threads yet — type a question to start a durable BTW thread, or use /btw <question> from Main.",
 			getNotice: () => this.#selected()?.error,
-			onEditorChange: text => {
-				if (this.#selectedKey) this.#options.onDraftChange(this.#selectedKey, text);
+			onEditorChange: (text, images, imageLinks, key) => {
+				if (key && !this.#abandoned) this.#options.onDraftChange(key, text, images, imageLinks);
 			},
 			onInput: (data, editorEmpty) => this.#handleInput(data, editorEmpty),
 			onClose: options.onClose,
@@ -181,10 +188,11 @@ export class BtwConversationPane
 	}
 
 	wantsAppViewportHover(): boolean {
-		return this.#threads.length > 0;
+		return this.#threads.length > 0 || this.#pane.wantsAppViewportHover();
 	}
 
 	clearAppViewportHover(): void {
+		this.#pane.clearAppViewportHover();
 		if ((!this.#previewKey && !this.#railPeek && !this.#newThreadHovered) || this.#hoverClearTimer) return;
 		this.#hoverClearTimer = setTimeout(() => this.#clearAppViewportHoverNow(), RAIL_PEEK_LEAVE_GRACE_MS);
 		this.#hoverClearTimer.unref();
@@ -199,6 +207,10 @@ export class BtwConversationPane
 		this.#pane.setViewportHeight(this.#height);
 	}
 
+	setTextSelectionActive(active: boolean): void {
+		this.#pane.setTextSelectionActive(active);
+	}
+
 	update(threads: readonly BtwThreadView[], selectedKey: string | undefined): void {
 		const previousSelected = this.#selectedKey;
 		this.#threads = threads;
@@ -211,8 +223,14 @@ export class BtwConversationPane
 		}
 		if (previousSelected !== this.#selectedKey) {
 			if (previousSelected) this.#options.onPersistDraft(previousSelected);
-			this.#pane.setEditorText(selected?.draft ?? "");
+			this.#pane.selectEditor(
+				selected?.key,
+				selected?.draft ?? "",
+				selected?.draftImages,
+				selected?.draftImageLinks,
+			);
 		}
+		this.#pane.retainEditors(threads.map(thread => thread.key));
 		this.#showDisplayedThread();
 		if (selected) this.#options.onMarkRead(selected.key);
 		this.#ensureRailTargetVisible();
@@ -345,6 +363,10 @@ export class BtwConversationPane
 		this.#pane.handleInput(data);
 	}
 
+	getPasteTarget(): CustomEditor | undefined {
+		return this.#pane.getPasteTarget();
+	}
+
 	containsComponent(component: Component): boolean {
 		return componentContains(this.#pane, component);
 	}
@@ -414,8 +436,7 @@ export class BtwConversationPane
 		}
 		this.#stopRailAnimation();
 		if (!this.#abandoned && this.#selectedKey) {
-			this.#options.onDraftChange(this.#selectedKey, this.#pane.getEditorText());
-			this.#options.onPersistDraft(this.#selectedKey);
+			this.#persistCurrentDraft();
 		}
 		this.#pane.dispose();
 		this.#options.statusLine.dispose();
@@ -550,7 +571,67 @@ export class BtwConversationPane
 			this.#scrollOffsets.set(previousKey, this.#pane.getScrollOffset());
 		this.#displayedKey = displayed?.key;
 		this.#options.statusLine.setRuntimeStatus(displayed?.status, displayed?.title);
-		this.#pane.rebuild(displayed ? this.#messages(displayed) : []);
+		const sameRenderedRequest =
+			displayed !== undefined &&
+			displayed.key === previousKey &&
+			displayed.request !== undefined &&
+			this.#renderedTurns === displayed.turns &&
+			this.#renderedTurnsLength === displayed.turns.length &&
+			this.#renderedRequestInput === displayed.request.input &&
+			this.#renderedRequestTimestamp === displayed.request.timestamp;
+		const transcriptUnchanged =
+			displayed !== undefined &&
+			displayed.key === previousKey &&
+			this.#renderedTurns === displayed.turns &&
+			this.#renderedTurnsLength === displayed.turns.length &&
+			this.#renderedRequestInput === displayed.request?.input &&
+			this.#renderedRequestTimestamp === displayed.request?.timestamp &&
+			this.#renderedRequestMessages === displayed.request?.messages &&
+			this.#renderedRequestMessagesLength === (displayed.request?.messages.length ?? 0) &&
+			this.#renderedStreamMessage === displayed.request?.streamMessage;
+		const streamMessage = displayed?.request?.streamMessage;
+		let updatedStream =
+			sameRenderedRequest &&
+			this.#renderedRequestMessages === displayed.request?.messages &&
+			this.#renderedRequestMessagesLength === (displayed.request?.messages.length ?? 0) &&
+			this.#renderedStreamMessage !== undefined &&
+			streamMessage !== undefined &&
+			this.#pane.updateStreamingAssistant(streamMessage);
+		if (
+			!updatedStream &&
+			sameRenderedRequest &&
+			this.#renderedStreamMessage !== undefined &&
+			streamMessage === undefined
+		) {
+			const finalMessage = displayed.request?.messages.at(-1);
+			updatedStream = finalMessage?.role === "assistant" && this.#pane.finalizeStreamingAssistant(finalMessage);
+		}
+		if (
+			!updatedStream &&
+			displayed !== undefined &&
+			displayed.key === previousKey &&
+			displayed.request === undefined &&
+			this.#renderedRequestInput !== undefined &&
+			this.#renderedTurnsLength + 1 === displayed.turns.length
+		) {
+			const completedTurn = displayed.turns.at(-1);
+			if (
+				completedTurn?.input === this.#renderedRequestInput &&
+				completedTurn.timestamp === this.#renderedRequestTimestamp
+			) {
+				updatedStream = this.#pane.finalizeStreamingAssistant(
+					sanitizeAssistantForReparentedHistory(completedTurn.assistantMessage),
+				);
+			}
+		}
+		if (!updatedStream && !transcriptUnchanged) this.#pane.rebuild(displayed ? this.#messages(displayed) : []);
+		this.#renderedTurns = displayed?.turns;
+		this.#renderedTurnsLength = displayed?.turns.length ?? 0;
+		this.#renderedRequestInput = displayed?.request?.input;
+		this.#renderedRequestTimestamp = displayed?.request?.timestamp;
+		this.#renderedRequestMessages = displayed?.request?.messages;
+		this.#renderedRequestMessagesLength = displayed?.request?.messages.length ?? 0;
+		this.#renderedStreamMessage = displayed?.request?.streamMessage;
 		if (displayed && displayed.key !== previousKey) {
 			this.#pane.setScrollOffset(this.#scrollOffsets.get(displayed.key) ?? "bottom");
 		}
@@ -561,16 +642,16 @@ export class BtwConversationPane
 		for (const turn of thread.turns) {
 			messages.push({
 				role: "user",
-				content: [{ type: "text", text: turn.input }],
+				content: [{ type: "text", text: turn.input }, ...(turn.images ?? [])],
 				timestamp: turn.timestamp,
 			});
 			if (turn.intermediateMessages) messages.push(...turn.intermediateMessages);
-			messages.push(sanitizeEphemeralAssistantForPromotion(turn.assistantMessage, turn.replyText));
+			messages.push(sanitizeAssistantForReparentedHistory(turn.assistantMessage));
 		}
 		if (thread.request) {
 			messages.push({
 				role: "user",
-				content: [{ type: "text", text: thread.request.input }],
+				content: [{ type: "text", text: thread.request.input }, ...(thread.request.images ?? [])],
 				timestamp: thread.request.timestamp,
 			});
 			messages.push(...thread.request.messages);
@@ -590,10 +671,17 @@ export class BtwConversationPane
 
 	#persistCurrentDraft(): void {
 		if (!this.#selectedKey) return;
-		this.#options.onDraftChange(this.#selectedKey, this.#pane.getEditorText());
+		const editor = this.#pane.getPasteTarget();
+		this.#options.onDraftChange(
+			this.#selectedKey,
+			this.#pane.getEditorText(),
+			editor?.pendingImages,
+			editor?.pendingImageLinks,
+		);
 		this.#options.onPersistDraft(this.#selectedKey);
 	}
 	#clearAppViewportHoverNow(): void {
+		this.#pane.clearAppViewportHover();
 		if (this.#hoverClearTimer) {
 			clearTimeout(this.#hoverClearTimer);
 			this.#hoverClearTimer = undefined;

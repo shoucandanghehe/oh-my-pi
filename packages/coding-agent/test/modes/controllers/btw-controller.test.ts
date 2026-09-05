@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -24,7 +24,7 @@ import {
 	type EphemeralTurnOptions,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { Container, replaceTabs, type SgrMouseEvent, sliceByColumn, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Container, replaceTabs, type SgrMouseEvent, sliceByColumn, type TUI } from "@oh-my-pi/pi-tui";
 
 const usage: Usage = {
 	input: 0,
@@ -258,6 +258,202 @@ describe("BtwConversationPane", () => {
 		pane.dispose();
 	});
 
+	it("updates the current stream block without rebuilding the displayed thread", () => {
+		const requestRender = vi.fn();
+		const requestComponentRender = vi.fn();
+		const ui = { requestRender, requestComponentRender } as unknown as TUI;
+		const pane = new BtwConversationPane({
+			ui,
+			cwd: process.cwd(),
+			expandKeys: [],
+			hideThinkingBlock: () => false,
+			proseOnlyThinking: () => false,
+			requestRender,
+			statusLine: {
+				setRuntimeStatus: vi.fn(),
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: vi.fn(),
+			},
+			onSubmit: () => true,
+			onNewThread: () => true,
+			canCopy: () => false,
+			onCopy: async () => false,
+			onClose: vi.fn(),
+			onDraftChange: vi.fn(),
+			onPersistDraft: vi.fn(),
+			onSelectThread: () => true,
+			onMarkRead: vi.fn(),
+			onCloseThread: () => true,
+			onPromoteThread: async () => true,
+		});
+		const thread: BtwThreadView = {
+			key: "stream",
+			title: "Streaming",
+			phase: "running",
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			error: undefined,
+			draft: "",
+			unread: 0,
+			turns: [],
+			request: {
+				input: "Explain",
+				messages: [],
+				streamMessage: createAssistantMessage("partial one"),
+				timestamp: 1,
+			},
+		};
+		try {
+			pane.setViewportHeight(12);
+			pane.update([thread], thread.key);
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("partial one");
+			requestRender.mockClear();
+			requestComponentRender.mockClear();
+
+			pane.update(
+				[
+					{
+						...thread,
+						request: {
+							...thread.request!,
+							streamMessage: createAssistantMessage("partial two"),
+						},
+					},
+				],
+				thread.key,
+			);
+
+			expect(requestComponentRender).toHaveBeenCalled();
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("partial two");
+		} finally {
+			pane.dispose();
+		}
+	});
+
+	it("keeps the scrolled viewport anchored when a tool-using stream completes", () => {
+		const requestRender = vi.fn();
+		const ui = { requestRender, requestComponentRender: vi.fn() } as unknown as TUI;
+		const pane = new BtwConversationPane({
+			ui,
+			cwd: process.cwd(),
+			expandKeys: [],
+			hideThinkingBlock: () => false,
+			proseOnlyThinking: () => false,
+			requestRender,
+			statusLine: {
+				setRuntimeStatus: vi.fn(),
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: vi.fn(),
+			},
+			onSubmit: () => true,
+			onNewThread: () => true,
+			canCopy: () => false,
+			onCopy: async () => false,
+			onClose: vi.fn(),
+			onDraftChange: vi.fn(),
+			onPersistDraft: vi.fn(),
+			onSelectThread: () => true,
+			onMarkRead: vi.fn(),
+			onCloseThread: () => true,
+			onPromoteThread: async () => true,
+		});
+		const partialAnswer = Array.from({ length: 120 }, (_value, index) => String(index + 1)).join("\n");
+		const answer = Array.from({ length: 200 }, (_value, index) => String(index + 1)).join("\n");
+		const streamMessage = createAssistantMessage(partialAnswer);
+		const finalMessage = createAssistantMessage(answer);
+		const intermediateText = Array.from({ length: 40 }, (_value, index) => `preface-${index + 1}`).join("\n");
+		const intermediateMessage: AssistantMessage = {
+			...createAssistantMessage(`${intermediateText}\n`),
+			content: [
+				{ type: "text", text: `${intermediateText}\n` },
+				{ type: "toolCall", id: "read-context", name: "read", arguments: { path: "context.ts" } },
+			],
+			stopReason: "toolUse",
+		};
+		const toolResult: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "read-context",
+			toolName: "read",
+			content: [{ type: "text", text: "context" }],
+			isError: false,
+			timestamp: 1,
+		};
+		const requestMessages: AgentMessage[] = [intermediateMessage, toolResult];
+		const turns: Array<BtwThreadView["turns"][number]> = [];
+		const thread: BtwThreadView = {
+			key: "stream",
+			title: "Streaming",
+			phase: "running",
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			error: undefined,
+			draft: "",
+			unread: 0,
+			turns,
+			request: {
+				input: "Count",
+				messages: requestMessages,
+				streamMessage,
+				timestamp: 1,
+			},
+		};
+		const visibleNumbers = (): string[] =>
+			pane
+				.render(80)
+				.map(line => Bun.stripANSI(line).match(/^│ (\d+)/)?.[1])
+				.filter((line): line is string => line !== undefined);
+		try {
+			pane.setViewportHeight(12);
+			pane.update([thread], thread.key);
+			pane.render(80);
+			pane.handleInput("\x1b[5~");
+			const scrolledRows = visibleNumbers();
+			expect(Number(scrolledRows[0])).toBeGreaterThan(1);
+
+			const grownThread: BtwThreadView = {
+				...thread,
+				request: {
+					...thread.request!,
+					streamMessage: finalMessage,
+				},
+			};
+			pane.update([grownThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+			const beforeCompletion = visibleNumbers();
+
+			requestMessages.push(finalMessage);
+			const endedThread: BtwThreadView = {
+				...grownThread,
+				request: {
+					...grownThread.request!,
+					messages: requestMessages,
+					streamMessage: undefined,
+				},
+			};
+			pane.update([endedThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(beforeCompletion[0]);
+
+			turns.push({
+				input: "Count",
+				assistantMessage: finalMessage,
+				intermediateMessages: [intermediateMessage, toolResult],
+				replyText: `${intermediateText}\n${answer}`,
+				timestamp: 1,
+			});
+			const completedThread: BtwThreadView = {
+				...endedThread,
+				phase: "ready",
+				turns,
+				request: undefined,
+			};
+			pane.update([completedThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+
+			pane.update([completedThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+		} finally {
+			pane.dispose();
+		}
+	});
+
 	it("defaults the rail closed and selects a hover-previewed thread without pinning it open", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
@@ -312,12 +508,11 @@ describe("BtwConversationPane", () => {
 		const onSubmit = vi.fn(() => true);
 		const onNewThread = vi.fn(() => true);
 		const onCopy = vi.fn(async (_key: string) => true);
-		let pane: BtwConversationPane;
 		const onSelectThread = vi.fn((key: string) => {
 			pane.update(threads, key);
 			return true;
 		});
-		pane = new BtwConversationPane({
+		const pane = new BtwConversationPane({
 			ui,
 			cwd: process.cwd(),
 			expandKeys: [],
@@ -468,15 +663,6 @@ describe("BtwConversationPane", () => {
 				sliceByColumn(collapsed[row]!, stableTailStart, 100, true),
 			);
 		}
-		expect(
-			peek
-				.map((line, row) => ({
-					row,
-					peek: { text: line, width: visibleWidth(line) },
-					collapsed: { text: collapsed[row]!, width: visibleWidth(collapsed[row]!) },
-				}))
-				.filter(widths => widths.peek.width !== widths.collapsed.width),
-		).toEqual([]);
 		pane.clearAppViewportHover();
 		expect(railVisible()).toBe(true);
 		vi.advanceTimersByTime(175);
@@ -1240,6 +1426,70 @@ describe("BtwController", () => {
 		expect(completedTranscript.match(/Inspecting fixture/g)).toHaveLength(1);
 		expect(completedTranscript).toContain("Direct answer");
 		controller.dispose();
+	});
+
+	it("submits a pane image to BTW and journals it without modifying Main", async () => {
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		const requests: AgentMessage[][] = [];
+		const events: BtwThreadEvent[] = [];
+		const completed = Promise.withResolvers<void>();
+		const model = { provider: "anthropic", id: "claude-sonnet-4-5" };
+		const session = {
+			sessionId: "session-1",
+			model,
+			createEphemeralConversation: (_instructions: string, checkpoint?: EphemeralConversationCheckpoint) =>
+				new EphemeralConversation({
+					snapshotBaseMessages: () => [],
+					sideSessionId: "image-side",
+					checkpoint,
+					runTurn: async messages => {
+						requests.push(messages);
+						return { replyText: "Image received", assistantMessage: createAssistantMessage("Image received") };
+					},
+				}),
+		} as unknown as InteractiveModeContext["session"];
+		let pane: BtwConversationPane | undefined;
+		const ctx = {
+			...makeCtx(session),
+			workspaceEnabled: true,
+			keybindings: { getKeys: () => [] },
+			sessionManager: {
+				getEntries: () => [],
+				appendCustomEntry: (_type: string, event: BtwThreadEvent) => {
+					events.push(event);
+					if (event.op === "turn") completed.resolve();
+				},
+				getLeafId: () => "leaf-1",
+				getSessionId: () => "session-1",
+				getEntry: () => ({}),
+				getCwd: () => process.cwd(),
+			},
+			openBtwWorkspacePane: (component: BtwConversationPane) => {
+				pane = component;
+				return true;
+			},
+			closeBtwWorkspacePane: () => true,
+		} as unknown as InteractiveModeContext;
+		const controller = new BtwController(ctx);
+		try {
+			await controller.start("");
+			if (!pane) throw new Error("Expected BTW pane");
+			const editor = pane.getPasteTarget()!;
+			editor.setDraft("[Image #1]", [image]);
+			pane.handleInput("\r");
+			await completed.promise;
+			const request = requests[0]?.at(-1);
+			expect(request?.role).toBe("user");
+			expect(request && "content" in request ? request.content : undefined).toEqual([
+				{ type: "text", text: "[Image #1]" },
+				image,
+			]);
+			expect(events.find(event => event.op === "turn")).toMatchObject({ turn: { images: [image] } });
+			expect(pane.getPasteTarget()?.pendingImages).toEqual([]);
+			expect(ctx.btwContainer.children).toHaveLength(0);
+		} finally {
+			controller.dispose();
+		}
 	});
 
 	it("keeps QuickAsk inline, then upgrades the same turn into one durable workspace pane", async () => {

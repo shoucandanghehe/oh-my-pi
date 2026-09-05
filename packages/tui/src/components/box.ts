@@ -1,4 +1,4 @@
-import type { Component } from "../tui";
+import { type Component, measureComponentRows } from "../tui";
 import {
 	getPaddingX,
 	getPublishedLineWidths,
@@ -122,6 +122,15 @@ export class Box implements Component {
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
+	}
+
+	measureRows(width: number): number {
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		const border = this.#border && width - 2 >= paddingX * 2 + 1;
+		const contentWidth = Math.max(1, (border ? width - 2 : width) - paddingX * 2);
+		let contentRows = 0;
+		for (const child of this.children) contentRows += measureComponentRows(child, contentWidth);
+		return contentRows === 0 ? 0 : contentRows + this.#paddingY * 2 + (border ? 2 : 0);
 	}
 
 	render(width: number): readonly string[] {

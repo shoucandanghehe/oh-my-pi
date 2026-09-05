@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	copyToClipboard,
+	readClipboardContent,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
 } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as native from "@oh-my-pi/pi-natives/clipboard";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Subprocess } from "bun";
 
 type SpawnOptions = Bun.SpawnOptions.SpawnOptions<
@@ -24,7 +27,7 @@ function streamOf(body: SpawnOutput): ReadableStream<Uint8Array> {
 
 function fakeProcess(stdout: SpawnOutput, exitCode = 0): Subprocess {
 	return {
-		pid: 1,
+		pid: 2_147_483_647,
 		stdout: streamOf(stdout),
 		stderr: streamOf(""),
 		exitCode,
@@ -76,6 +79,7 @@ afterEach(() => {
 		else process.env[key] = prior;
 	}
 	restorePlatform();
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
 
@@ -90,7 +94,7 @@ describe("readImageFromClipboard on WSL", () => {
 		process.env.WAYLAND_DISPLAY = "wayland-0";
 
 		const calls: SpawnCall[] = [];
-		spySpawn(calls, RED_1X1_PNG_BASE64);
+		spySpawn(calls, JSON.stringify({ image: RED_1X1_PNG_BASE64, text: "" }));
 		const nativeSpy = vi.spyOn(native, "readImageFromClipboard");
 
 		const image = await readImageFromClipboard();
@@ -105,18 +109,23 @@ describe("readImageFromClipboard on WSL", () => {
 		expect(nativeSpy).not.toHaveBeenCalled();
 	});
 
-	it("falls back to the native bridge when PowerShell returns no payload and a display is present", async () => {
+	it("does not fall back to a stale Linux image after an authoritative empty Windows clipboard", async () => {
 		setPlatform("linux");
 		process.env.WSL_INTEROP = "/run/WSL/1_interop";
 		process.env.WAYLAND_DISPLAY = "wayland-0";
 
-		spySpawn([], "");
-		const nativeSpy = vi.spyOn(native, "readImageFromClipboard").mockResolvedValue(null);
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, JSON.stringify({ image: null, text: "" }));
+		const nativeSpy = vi.spyOn(native, "readImageFromClipboard").mockResolvedValue({
+			data: Uint8Array.of(1),
+			mimeType: "image/png",
+		});
 
 		const image = await readImageFromClipboard();
 
 		expect(image).toBeNull();
-		expect(nativeSpy).toHaveBeenCalledTimes(1);
+		expect(calls).toHaveLength(1);
+		expect(nativeSpy).not.toHaveBeenCalled();
 	});
 
 	it("falls back to the native bridge when PowerShell exits non-zero (with display)", async () => {
@@ -136,7 +145,7 @@ describe("readImageFromClipboard on WSL", () => {
 		process.env.WSL_DISTRO_NAME = "Ubuntu";
 		// No DISPLAY / WAYLAND_DISPLAY — arboard would reject, so we must short-circuit.
 
-		spySpawn([], "");
+		spySpawn([], JSON.stringify({ image: null, text: "" }));
 		const nativeSpy = vi.spyOn(native, "readImageFromClipboard");
 
 		expect(await readImageFromClipboard()).toBeNull();
@@ -158,7 +167,7 @@ describe("readImageFromClipboard dispatch", () => {
 	it("uses the PowerShell bridge on native Windows when arboard has no image payload", async () => {
 		setPlatform("win32");
 		const calls: SpawnCall[] = [];
-		spySpawn(calls, RED_1X1_PNG_BASE64);
+		spySpawn(calls, JSON.stringify({ image: RED_1X1_PNG_BASE64, text: "" }));
 		vi.spyOn(native, "readImageFromClipboard").mockResolvedValue(null);
 
 		const image = await readImageFromClipboard();
@@ -173,7 +182,7 @@ describe("readImageFromClipboard dispatch", () => {
 	it("falls back to PowerShell when native Windows image conversion fails", async () => {
 		setPlatform("win32");
 		const calls: SpawnCall[] = [];
-		spySpawn(calls, RED_1X1_PNG_BASE64);
+		spySpawn(calls, JSON.stringify({ image: RED_1X1_PNG_BASE64, text: "" }));
 		vi.spyOn(native, "readImageFromClipboard").mockRejectedValue(
 			new Error("The clipboard image could not be converted to the appropriate format."),
 		);
@@ -345,7 +354,7 @@ describe("readTextFromClipboard", () => {
 		// starve every setInterval tick.
 		const DELAY_MS = 80;
 		const slowProc = {
-			pid: 1,
+			pid: 2_147_483_647,
 			stdout: new ReadableStream<Uint8Array>({
 				async start(controller) {
 					await Bun.sleep(DELAY_MS);
@@ -379,4 +388,168 @@ describe("readTextFromClipboard", () => {
 		// test load, where wall-clock tick counts are unreliable.
 		expect(ticks).toBeGreaterThanOrEqual(1);
 	});
+});
+
+describe("readClipboardContent", () => {
+	it("reads image and Unicode text through one WSL host invocation", async () => {
+		setPlatform("linux");
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, JSON.stringify({ image: RED_1X1_PNG_BASE64, text: "截图\r\n第二行" }));
+		const nativeSpy = vi.spyOn(native, "readImageFromClipboard");
+
+		const content = await readClipboardContent();
+
+		expect(content.text).toBe("截图\n第二行");
+		expect(Array.from(content.image!.data.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		expect(calls).toHaveLength(1);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not replace a successful empty host clipboard with stale Linux content", async () => {
+		setPlatform("linux");
+		process.env.WSL_INTEROP = "/run/WSL/1_interop";
+		process.env.DISPLAY = ":0";
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, cmd => (cmd[0] === "powershell.exe" ? '{"image":null,"text":""}' : "stale text"));
+		const nativeSpy = vi.spyOn(native, "readImageFromClipboard").mockResolvedValue({
+			data: Uint8Array.of(1),
+			mimeType: "image/png",
+		});
+
+		expect(await readClipboardContent()).toEqual({ image: null, text: "", fileUrls: [] });
+		expect(calls).toHaveLength(1);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("tries the local clipboard only after a failed bridge, without launching PowerShell twice", async () => {
+		setPlatform("linux");
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		process.env.DISPLAY = ":0";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, ["", "local text"], [1, 0]);
+		vi.spyOn(native, "readImageFromClipboard").mockResolvedValue(null);
+
+		expect(await readClipboardContent()).toEqual({ image: null, text: "local text", fileUrls: [] });
+		expect(calls.map(call => call.cmd[0])).toEqual(["powershell.exe", "xclip"]);
+	});
+
+	it("does not log clipboard payloads when the host envelope is malformed", async () => {
+		setPlatform("linux");
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		spySpawn([], "private clipboard contents: malformed JSON");
+		const warnings = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		expect(await readClipboardContent()).toEqual({ image: null, text: "", fileUrls: [] });
+		expect(warnings).toHaveBeenCalled();
+		expect(JSON.stringify(warnings.mock.calls)).not.toContain("private clipboard contents");
+	});
+});
+
+describe("clipboard subprocess deadlines", () => {
+	it.each(["unreaped process", "inherited stdout"] as const)(
+		"returns at the deadline even with %s and cancellation that never settles",
+		async mode => {
+			setPlatform("darwin");
+			vi.useFakeTimers();
+			const pending = Promise.withResolvers<number>();
+			const cancellation = Promise.withResolvers<void>();
+			const proc = {
+				pid: 2_147_483_647,
+				stdout: new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode("partial clipboard data"));
+					},
+					cancel: () => cancellation.promise,
+				}),
+				stderr: streamOf(""),
+				exitCode: mode === "inherited stdout" ? 0 : null,
+				exited: mode === "inherited stdout" ? Promise.resolve(0) : pending.promise,
+				kill: () => true,
+			} as unknown as Subprocess;
+			vi.spyOn(Bun, "spawn").mockReturnValue(proc);
+			const warnings = vi.spyOn(logger, "warn").mockImplementation(() => {});
+			try {
+				// Partial output must not be mistaken for successful clipboard text.
+				const read = readTextFromClipboard();
+				vi.advanceTimersByTime(2000);
+				expect(await read).toBe("");
+				expect(JSON.stringify(warnings.mock.calls)).toContain("timed out");
+			} finally {
+				cancellation.resolve();
+				pending.resolve(0);
+			}
+		},
+	);
+});
+
+function discardStdout(
+	_chunk: string | Uint8Array,
+	encodingOrCallback?: BufferEncoding | ((err?: Error | null) => void),
+	callback?: (err?: Error | null) => void,
+): boolean {
+	const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+	done?.();
+	return true;
+}
+
+describe("copyToClipboard", () => {
+	it("writes WSL host text over stdin without invoking the blocking native clipboard", async () => {
+		setPlatform("linux");
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		const text = "中文\n'quoted' $text";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "");
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+		vi.spyOn(process.stdout, "write").mockImplementation(discardStdout);
+
+		await copyToClipboard(text);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
+		expect(calls[0]?.options.stdin).toEqual(Buffer.from(text));
+		expect(calls[0]?.cmd.join(" ")).not.toContain(text);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("uses pbcopy rather than running AppKit clipboard writes on the render thread", async () => {
+		setPlatform("darwin");
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "");
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+		vi.spyOn(process.stdout, "write").mockImplementation(discardStdout);
+
+		await copyToClipboard("copied text");
+
+		expect(calls.map(call => call.cmd)).toEqual([["pbcopy"]]);
+		expect(calls[0]?.options.stdin).toEqual(Buffer.from("copied text"));
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+});
+
+it("keeps the most recent copy when an earlier native write is slow", async () => {
+	setPlatform("linux");
+	process.env.DISPLAY = ":0";
+	const firstWrite = Promise.withResolvers<void>();
+	const firstStarted = Promise.withResolvers<void>();
+	let clipboardText = "";
+	vi.spyOn(native, "copyToClipboard").mockImplementation(async text => {
+		if (text === "first") {
+			firstStarted.resolve();
+			await firstWrite.promise;
+		}
+		clipboardText = text;
+	});
+	vi.spyOn(process.stdout, "write").mockImplementation(discardStdout);
+	const first = copyToClipboard("first");
+	const second = copyToClipboard("second");
+	try {
+		await firstStarted.promise;
+	} finally {
+		firstWrite.resolve();
+	}
+	await Promise.all([first, second]);
+	expect(clipboardText).toBe("second");
 });

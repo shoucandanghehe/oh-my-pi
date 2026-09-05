@@ -19,7 +19,6 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isPromise } from "node:util/types";
 
-import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import {
 	type AfterToolCallContext,
@@ -283,6 +282,7 @@ import type {
 	FreshSessionResult,
 	HandoffResult,
 	ModelCycleResult,
+	PausedExitParticipant,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -2977,13 +2977,15 @@ export class AgentSession implements SettingsScope {
 	 * the process-wide model boundary. Lifecycle coordination lives here so UI
 	 * hosts cannot forget a live subagent or the paused-exit dispose option.
 	 */
-	async disposeForPausedExit(): Promise<void> {
+	async disposeForPausedExit(participants: readonly PausedExitParticipant[] = []): Promise<void> {
 		if (this.#agentKind !== "main") {
 			throw new Error("Only the main agent session can coordinate a paused exit");
 		}
 		if (!agentPauseGate.ready) {
 			throw new Error("Cannot exit paused before every active agent reaches the model boundary");
 		}
+
+		for (const participant of participants) participant.prepareForPausedExit();
 
 		const pausedAgentIds = new Set<string>();
 		const liveSessions = new Set<AgentSession>([this]);
@@ -5273,6 +5275,13 @@ export class AgentSession implements SettingsScope {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
+		if (options.pausedExit === true) {
+			try {
+				await this.sessionManager.ensureOnDisk();
+			} catch (error) {
+				logger.warn("Failed to persist paused session before dispose", { error: String(error) });
+			}
+		}
 		this.#recordSessionExit(options.reason ?? "dispose", { pausedExit: options.pausedExit === true });
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
@@ -9831,7 +9840,9 @@ export class AgentSession implements SettingsScope {
 	 * The `agents_continued` marker is written only after every recorded agent is
 	 * either resumed or already active/idle, so partial failures remain retryable.
 	 */
-	async continuePausedAgents(): Promise<ContinuePausedAgentsResult> {
+	async continuePausedAgents(
+		participants: readonly PausedExitParticipant[] = [],
+	): Promise<ContinuePausedAgentsResult> {
 		const paused = readAgentsPaused(this.sessionManager.getBranch());
 		if (!paused) return { continued: 0, skipped: ["no agents_paused marker"], complete: false };
 		await registerPersistedSubagents(AgentRegistry.global(), this.sessionManager.getSessionFile());
@@ -9872,17 +9883,39 @@ export class AgentSession implements SettingsScope {
 		};
 
 		const lifecycle = AgentLifecycleManager.global();
-		await Promise.all(
-			[...new Set(paused.agentIds)].map(async id => {
-				try {
-					const target = id === MAIN_AGENT_ID ? this : await lifecycle.ensureLive(id);
-					await tryContinue(target, id);
-				} catch (error) {
-					skipped.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
-					unresolved++;
-				}
-			}),
-		);
+		const continuationTasks: Promise<void>[] = [];
+		for (const id of new Set(paused.agentIds)) {
+			continuationTasks.push(
+				(async () => {
+					try {
+						const target = id === MAIN_AGENT_ID ? this : await lifecycle.ensureLive(id);
+						await tryContinue(target, id);
+					} catch (error) {
+						skipped.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
+						unresolved++;
+					}
+				})(),
+			);
+		}
+		for (const participant of participants) {
+			continuationTasks.push(
+				(async () => {
+					try {
+						const result = await participant.continuePaused();
+						continued += result.continued;
+						skipped.push(...result.skipped.map(detail => `${participant.label}: ${detail}`));
+						if (!result.complete) {
+							if (result.skipped.length === 0) skipped.push(`${participant.label}: incomplete`);
+							unresolved++;
+						}
+					} catch (error) {
+						skipped.push(`${participant.label}: ${error instanceof Error ? error.message : String(error)}`);
+						unresolved++;
+					}
+				})(),
+			);
+		}
+		await Promise.all(continuationTasks);
 
 		// Clear the pause latch only when every recorded agent reached a settled
 		// state; unresolved revives/continuations must remain retryable.
@@ -10095,7 +10128,7 @@ export class AgentSession implements SettingsScope {
 		snapshot.push(createSideChannelNoToolsMessage());
 		snapshot.push({
 			role: "user",
-			content: [{ type: "text", text: args.promptText }],
+			content: [{ type: "text", text: args.promptText }, ...(args.images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
@@ -11043,7 +11076,7 @@ export class AgentSession implements SettingsScope {
 			for (const turn of turns) {
 				this.sessionManager.appendMessage({
 					role: "user",
-					content: [{ type: "text", text: turn.input }],
+					content: [{ type: "text", text: turn.input }, ...(turn.images ?? [])],
 					attribution: "user",
 					timestamp: turn.timestamp,
 				});

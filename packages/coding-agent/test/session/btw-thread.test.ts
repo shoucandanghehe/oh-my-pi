@@ -1,11 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
+import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import {
 	BTW_THREAD_CUSTOM_TYPE,
 	type BtwThreadEvent,
 	restoreBtwThreads,
 } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { resolveBlobRefsInEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { prepareEntryForPersistence } from "@oh-my-pi/pi-coding-agent/session/session-persistence";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const usage: Usage = {
 	input: 0,
@@ -113,5 +117,75 @@ describe("restoreBtwThreads", () => {
 		];
 
 		expect(restoreBtwThreads(events)).toEqual([]);
+	});
+
+	it("round-trips journal image blobs and missing draft links while keeping legacy draft clears readable", async () => {
+		using tempDir = TempDir.createSync("@btw-image-journal-");
+		const blobStore = new BlobStore(tempDir.path());
+		const image: ImageContent = {
+			type: "image",
+			data: Buffer.alloc(1500, 7).toString("base64"),
+			mimeType: "image/png",
+		};
+		const firstTurn = {
+			input: "",
+			images: [image],
+			replyText: "First",
+			assistantMessage: assistant("First", 10),
+			timestamp: 10,
+		};
+		const secondTurn = {
+			input: "Again",
+			images: [image],
+			replyText: "Second",
+			assistantMessage: assistant("Second", 20),
+			timestamp: 20,
+		};
+		const events = [
+			entry(1, {
+				version: 1,
+				op: "create",
+				key: "thread-a",
+				title: "Image",
+				createdAt: 10,
+				anchorLeafId: "main-leaf",
+				model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+				sideSessionId: "side-a",
+				baseMessages: [],
+				turns: [firstTurn],
+			}),
+			entry(2, { version: 1, op: "turn", key: "thread-a", turn: secondTurn }),
+			entry(3, {
+				version: 1,
+				op: "draft",
+				key: "thread-a",
+				text: "",
+				images: [image, image],
+				imageLinks: [undefined, "local://image.png"],
+			}),
+			entry(4, { version: 1, op: "request", key: "thread-a", input: "", images: [image], timestamp: 30 }),
+		];
+		const persisted = events.map(event =>
+			prepareEntryForPersistence(event, blobStore),
+		) as CustomEntry<BtwThreadEvent>[];
+		const draft = persisted[2]?.data;
+		if (draft?.op !== "draft") throw new Error("Expected draft event");
+		expect(isBlobRef(draft.images?.[0]?.data ?? "")).toBe(true);
+		const loaded = JSON.parse(JSON.stringify(persisted)) as CustomEntry<BtwThreadEvent>[];
+		await resolveBlobRefsInEntries(loaded, blobStore);
+
+		const restored = restoreBtwThreads(loaded)[0]!;
+		expect(restored.turns).toEqual([firstTurn, secondTurn]);
+		expect(restored.draftImages).toEqual([image, image]);
+		expect(restored.draftImageLinks).toEqual([undefined, "local://image.png"]);
+		expect(restored.pausedRequest).toEqual({ input: "", images: [image], timestamp: 30 });
+		expect(restored.phase).toBe("ready");
+
+		loaded.push(entry(5, { version: 1, op: "draft", key: "thread-a", text: "Text only" }));
+		expect(restoreBtwThreads(loaded)[0]).toMatchObject({
+			draft: "Text only",
+			draftImages: [],
+			draftImageLinks: [],
+		});
 	});
 });

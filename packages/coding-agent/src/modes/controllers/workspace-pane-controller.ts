@@ -8,6 +8,11 @@ export interface WorkspacePaneOptions {
 	title: string;
 	minWidth: number;
 	minHeight: number;
+	focus?: boolean;
+	placement?: { targetPaneId: string; edge: WorkspaceEdge };
+	replacePaneId?: string;
+	/** A caller transferring an existing component retains it when docking fails. */
+	disposeOnFailure?: boolean;
 	createPane: (close: () => void) => Component;
 }
 
@@ -24,7 +29,9 @@ export class WorkspacePaneController {
 
 	open(options: WorkspacePaneOptions): boolean {
 		const existing = this.#paneIdByKey.get(options.key);
-		if (existing && this.workspace.model.hasPane(existing)) return this.workspace.focusPane(existing);
+		if (existing && this.workspace.model.hasPane(existing)) {
+			return options.focus === false || this.workspace.focusPane(existing);
+		}
 		if (existing) this.#paneIdByKey.delete(options.key);
 
 		const component = options.createPane(() => {
@@ -32,41 +39,52 @@ export class WorkspacePaneController {
 		});
 		const headerProvider = component as Component & Partial<WorkspacePaneHeaderProvider>;
 		const renderHeader = headerProvider.renderWorkspaceHeader?.bind(headerProvider);
-		const candidates = [...(this.workspace.frame?.panes.keys() ?? [])]
+		const pane = {
+			paneId: options.paneId,
+			title: options.title,
+			component,
+			renderHeader,
+			focusTarget: component,
+			scroll: "component" as const,
+			minWidth: options.minWidth,
+			minHeight: options.minHeight,
+		};
+		if (options.replacePaneId) {
+			if (this.workspace.replacePane(options.replacePaneId, pane)) {
+				this.#paneIdByKey.set(options.key, options.paneId);
+				if (options.placement) {
+					this.workspace.movePane(options.paneId, options.placement.targetPaneId, options.placement.edge);
+				}
+				return true;
+			}
+			if (options.disposeOnFailure !== false) component.dispose?.();
+			return false;
+		}
+		const frame = this.workspace.getLayoutFrame();
+		const candidates = [...(frame?.panes.keys() ?? [])]
 			.filter(paneId => paneId !== MAIN_WORKSPACE_PANE_ID && paneId !== options.paneId)
 			.sort((a, b) => {
-				const aRect = this.workspace.frame?.panes.get(a);
-				const bRect = this.workspace.frame?.panes.get(b);
+				const aRect = frame?.panes.get(a);
+				const bRect = frame?.panes.get(b);
 				return (bRect?.width ?? 0) * (bRect?.height ?? 0) - (aRect?.width ?? 0) * (aRect?.height ?? 0);
 			});
 		candidates.push(MAIN_WORKSPACE_PANE_ID);
-		for (const targetPaneId of candidates) {
-			const rect = this.workspace.frame?.panes.get(targetPaneId);
+		for (const targetPaneId of options.placement ? [options.placement.targetPaneId] : candidates) {
+			const rect = frame?.panes.get(targetPaneId);
 			const preferred: WorkspaceEdge = rect && rect.height > rect.width ? "bottom" : "right";
 			const alternate: WorkspaceEdge = preferred === "right" ? "bottom" : "right";
-			for (const edge of [preferred, alternate]) {
-				if (
-					this.workspace.splitPane(
-						targetPaneId,
-						{
-							paneId: options.paneId,
-							title: options.title,
-							component,
-							renderHeader,
-							focusTarget: component,
-							scroll: "component",
-							minWidth: options.minWidth,
-							minHeight: options.minHeight,
-						},
-						edge,
-					)
-				) {
+			for (const edge of options.placement ? [options.placement.edge] : [preferred, alternate]) {
+				if (this.workspace.splitPane(targetPaneId, pane, edge, { focus: options.focus })) {
 					this.#paneIdByKey.set(options.key, options.paneId);
 					return true;
 				}
 			}
 		}
-		component.dispose?.();
+		if (!options.placement && this.workspace.reflowPane(pane, { focus: options.focus })) {
+			this.#paneIdByKey.set(options.key, options.paneId);
+			return true;
+		}
+		if (options.disposeOnFailure !== false) component.dispose?.();
 		return false;
 	}
 
@@ -79,7 +97,7 @@ export class WorkspacePaneController {
 	}
 
 	dispose(): void {
-		for (const key of [...this.#paneIdByKey.keys()]) this.close(key);
+		for (const key of this.#paneIdByKey.keys()) this.close(key);
 	}
 
 	focusMain(): boolean {

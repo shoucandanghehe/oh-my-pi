@@ -2,8 +2,8 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { TranscriptContainer, type TranscriptStableRow } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { highlightCode, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { type Component, Container } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
 	#rows: string[];
@@ -18,6 +18,10 @@ class Block implements Component {
 	finalize(rows: string[]): void {
 		this.#rows = rows;
 		this.#finalized = true;
+	}
+
+	update(rows: string[]): void {
+		this.#rows = rows;
 	}
 
 	isTranscriptBlockFinalized(): boolean {
@@ -134,6 +138,54 @@ const finalAnswer: AssistantMessage = {
 class ReplacementBlock extends Block {
 	isTranscriptBlockAppendOnly(): boolean {
 		return false;
+	}
+}
+
+class CountingFinalizedBlock implements Component {
+	renderCount = 0;
+	measureCount = 0;
+
+	constructor(readonly rows: readonly string[]) {}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+	measureRows(): number {
+		this.measureCount++;
+		return this.rows.length;
+	}
+
+	render(): readonly string[] {
+		this.renderCount++;
+		return this.rows;
+	}
+}
+
+class HighlightedFinalizedBlock implements Component {
+	coloredMeasureCount = 0;
+	measureCount = 0;
+	readonly #code: string;
+
+	constructor(index: number) {
+		this.#code = Array.from(
+			{ length: 40 },
+			(_value, line) => `def unique_${index}_${line}(value: int) -> int: return value * ${index + line}`,
+		).join("\n");
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	measureRows(width: number): number {
+		this.measureCount++;
+		const highlighted = highlightCode(`${this.#code}\n# width ${width}`, "python");
+		if (highlighted.some(line => line.includes("\x1b["))) this.coloredMeasureCount++;
+		return highlighted.length;
+	}
+
+	render(width: number): readonly string[] {
+		return highlightCode(`${this.#code}\n# width ${width}`, "python");
 	}
 }
 const frame = { tick: 0, now: 0 };
@@ -623,5 +675,230 @@ describe("TranscriptContainer viewport click spans", () => {
 		transcript.renderViewport(80, 10, frame);
 		transcript.clear();
 		expect(transcript.getLastViewportSpans()).toEqual([]);
+	});
+});
+
+describe("TranscriptContainer virtual viewport", () => {
+	it("renders only the visible tail and overscan from estimated history", () => {
+		const blocks = Array.from(
+			{ length: 10_000 },
+			(_value, index) => new CountingFinalizedBlock([`history-${index}`]),
+		);
+		const transcript = new TranscriptContainer();
+		for (const block of blocks) transcript.addChild(block);
+
+		const rendered = transcript.renderVirtualViewport(80, {
+			rows: 40,
+			offset: 0,
+			followBottom: true,
+		});
+
+		expect(rendered.lines).toHaveLength(40);
+		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(40);
+	});
+
+	it("keeps the first scrollbar jump stable after calibrating uniform unseen history", () => {
+		const blocks = Array.from(
+			{ length: 10_000 },
+			(_value, index) =>
+				new CountingFinalizedBlock(Array.from({ length: 8 }, (_rowValue, row) => `history-${index}-${row}`)),
+		);
+		const transcript = new TranscriptContainer();
+		for (const block of blocks) transcript.addChild(block);
+		transcript.prepareVirtualStructure();
+
+		const tail = transcript.renderVirtualViewport(80, {
+			rows: 40,
+			offset: 0,
+			followBottom: true,
+		});
+		const requestedOffset = Math.floor((tail.estimatedTotalRows - 40) / 2);
+		const middle = transcript.renderVirtualViewport(80, {
+			rows: 40,
+			offset: requestedOffset,
+			followBottom: false,
+		});
+		const requestedProgress = requestedOffset / (tail.estimatedTotalRows - 40);
+		const renderedProgress = middle.offset / (middle.estimatedTotalRows - 40);
+
+		expect(tail.estimatedTotalRows).toBe(89_999);
+		expect(Math.abs(renderedProgress - requestedProgress)).toBeLessThan(0.001);
+		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(80);
+	});
+
+	it("publishes an exact stable scrollbar range before heterogeneous history is visited", () => {
+		const blocks = Array.from(
+			{ length: 100 },
+			(_value, index) =>
+				new CountingFinalizedBlock(
+					Array.from({ length: index < 90 ? 8 : 1 }, (_rowValue, row) => `history-${index}-${row}`),
+				),
+		);
+		const transcript = new TranscriptContainer();
+		for (const block of blocks) transcript.addChild(block);
+		transcript.prepareVirtualStructure();
+
+		const tail = transcript.renderVirtualViewport(80, {
+			rows: 10,
+			offset: 0,
+			followBottom: true,
+		});
+		const requestedOffset = Math.floor((tail.estimatedTotalRows - 10) / 2);
+		const middle = transcript.renderVirtualViewport(80, {
+			rows: 10,
+			offset: requestedOffset,
+			followBottom: false,
+		});
+
+		expect(tail.estimatedTotalRows).toBe(829);
+		expect(middle.estimatedTotalRows).toBe(tail.estimatedTotalRows);
+		expect(middle.offset).toBe(requestedOffset);
+		expect(blocks.reduce((total, block) => total + block.measureCount, 0)).toBe(100);
+		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(40);
+	});
+
+	it("keeps background work viewport-bound while following a large transcript tail", async () => {
+		const blocks = Array.from(
+			{ length: 2_000 },
+			(_value, index) =>
+				new CountingFinalizedBlock(
+					Array.from({ length: (index % 9) + 1 }, (_rowValue, row) => `history-${index}-${row}`),
+				),
+		);
+		const transcript = new TranscriptContainer();
+		for (const block of blocks) transcript.addChild(block);
+
+		transcript.renderVirtualViewport(80, { rows: 40, offset: 0, followBottom: true });
+		const rendersAfterFrame = blocks.reduce((total, block) => total + block.renderCount, 0);
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		await promise;
+
+		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBe(rendersAfterFrame);
+	});
+
+	it("adopts a prepared large transcript without a cold first-frame rebuild", () => {
+		const blocks = Array.from(
+			{ length: 100_000 },
+			(_value, index) => new CountingFinalizedBlock([`history-${index}`]),
+		);
+		const staged = new TranscriptContainer();
+		for (const block of blocks) staged.addChild(block);
+		staged.prepareVirtualStructure();
+		const transcript = new TranscriptContainer();
+		transcript.adoptContentsFrom(staged);
+
+		const startedAt = performance.now();
+		const rendered = transcript.renderVirtualViewport(80, {
+			rows: 40,
+			offset: 0,
+			followBottom: true,
+		});
+		const frameCost = performance.now() - startedAt;
+
+		expect(staged.children).toHaveLength(0);
+		expect(rendered.lines.at(-1)).toBe("history-99999");
+		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(40);
+		expect(frameCost).toBeLessThan(10);
+	});
+
+	it("does not add a phantom separator after measuring empty history", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new CountingFinalizedBlock([]));
+		transcript.renderVirtualViewport(40, { rows: 5, offset: 0, followBottom: true });
+
+		transcript.addChild(new CountingFinalizedBlock(["first", "second"]));
+		const rendered = transcript.renderVirtualViewport(40, {
+			rows: 5,
+			offset: 0,
+			followBottom: true,
+		});
+
+		expect(rendered.lines).toEqual(["first", "second"]);
+		expect(rendered.estimatedTotalRows).toBe(2);
+	});
+
+	it("keeps repeated tail appends within the app-viewport frame budget on large histories", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 100_000; index++) {
+			transcript.addChild(new CountingFinalizedBlock([`history-${index}`]));
+		}
+		transcript.renderVirtualViewport(80, { rows: 40, offset: 0, followBottom: true });
+
+		const startedAt = performance.now();
+		for (let index = 0; index < 25; index++) {
+			transcript.addChild(new CountingFinalizedBlock([`live-${index}`]));
+			transcript.renderVirtualViewport(80, { rows: 40, offset: 0, followBottom: true });
+		}
+
+		expect(performance.now() - startedAt).toBeLessThan(100);
+	});
+
+	it("keeps direct and nested targeted animations within the frame budget on large histories", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 100_000; index++) {
+			transcript.addChild(new CountingFinalizedBlock([`history-${index}`]));
+		}
+		const owner = new Container();
+		const active = new Block(["waiting"], false);
+		owner.addChild(active);
+		transcript.addChild(owner);
+		transcript.renderVirtualViewport(80, { rows: 40, offset: 0, followBottom: true });
+		expect(transcript.containsComponent(owner)).toBe(true);
+		expect(transcript.containsComponent(active)).toBe(true);
+
+		const targets = [owner, active];
+		const startedAt = performance.now();
+		for (let frame = 0; frame < 100; frame++) {
+			transcript.renderVirtualViewportTargeted(80, { rows: 40, offset: 0, followBottom: true }, targets);
+		}
+
+		expect(performance.now() - startedAt).toBeLessThan(10);
+	});
+
+	it("keeps syntax-highlighted history reflow within the interactive resize budget", async () => {
+		await initTheme(false);
+		const blocks = Array.from({ length: 100 }, (_value, index) => new HighlightedFinalizedBlock(index));
+		const transcript = new TranscriptContainer();
+		for (const block of blocks) transcript.addChild(block);
+		const initial = transcript.renderVirtualViewport(160, { rows: 40, offset: 0, followBottom: true });
+		for (const block of blocks) {
+			block.measureCount = 0;
+			block.coloredMeasureCount = 0;
+		}
+
+		const startedAt = performance.now();
+		const resized = transcript.renderVirtualViewport(140, { rows: 40, offset: 0, followBottom: true });
+		const resizeCost = performance.now() - startedAt;
+
+		expect(resized.estimatedTotalRows).toBe(initial.estimatedTotalRows);
+		expect(blocks.reduce((total, block) => total + block.measureCount, 0)).toBe(100);
+		expect(blocks.reduce((total, block) => total + block.coloredMeasureCount, 0)).toBe(0);
+		expect(resizeCost).toBeLessThan(50);
+	});
+
+	it("remeasures an offscreen targeted stream before the user scrolls back toward it", () => {
+		const transcript = new TranscriptContainer();
+		for (let index = 0; index < 100; index++) {
+			transcript.addChild(new CountingFinalizedBlock([`history-${index}`]));
+		}
+		const stream = new Block(["stream-0"], false);
+		transcript.addChild(stream);
+		transcript.renderVirtualViewport(80, { rows: 10, offset: 0, followBottom: true });
+		const scrolledUp = transcript.renderVirtualViewport(80, {
+			rows: 10,
+			offset: 0,
+			followBottom: false,
+		});
+
+		stream.update(Array.from({ length: 100 }, (_value, index) => `stream-${index}`));
+		const updated = transcript.renderVirtualViewportTargeted(
+			80,
+			{ rows: 10, offset: scrolledUp.offset, followBottom: false },
+			[stream],
+		);
+
+		expect(updated.offset).toBe(scrolledUp.offset);
+		expect(updated.estimatedTotalRows).toBe(scrolledUp.estimatedTotalRows + 99);
 	});
 });

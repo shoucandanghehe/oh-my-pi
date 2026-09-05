@@ -18,6 +18,7 @@ import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { type Component, matchesKey, type OverlayFocusOwner, type OverlayHandle, type OverlayOptions } from "../index";
 import { formatCoarseDuration } from "../chrome/format";
 import { centerLine } from "../utils";
+import { visibleWidth } from "../utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
 
@@ -36,8 +37,9 @@ export interface PauseScreenHost {
 	readonly sessionName?: string;
 	/** Durable session owner for barrier exit. */
 	session: {
-		disposeForPausedExit(): Promise<void>;
+		disposeForPausedExit(participants?: readonly PausedExitParticipant[]): Promise<void>;
 	};
+	readonly pausedExitParticipants?: readonly PausedExitParticipant[];
 	/** Optional: process quit after durable pause exit. Defaults to no-op. */
 	quitAfterPausedExit?: () => Promise<void> | void;
 }
@@ -253,7 +255,7 @@ export async function runPauseScreen(host: PauseScreenHost): Promise<PauseScreen
 
 	if (outcome === "exited") {
 		try {
-			await host.session.disposeForPausedExit();
+			await host.session.disposeForPausedExit(host.pausedExitParticipants);
 			await host.quitAfterPausedExit?.();
 		} finally {
 			// Loops were aborted with PAUSE_SHUTDOWN_ABORT_REASON; release the gate

@@ -3,6 +3,7 @@ import {
 	type AppViewportInputOwner,
 	type AppViewportScrollRegion,
 	type Component,
+	Container,
 	CURSOR_MARKER,
 	type Focusable,
 	type SgrMouseEvent,
@@ -190,6 +191,45 @@ class CountingTranscript implements Component, AppViewportScrollRegion {
 }
 
 describe("TUI app viewport backend", () => {
+	it("uses a bounded app provider instead of native history or full-history resize frames", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 4);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const nativeFrame = vi.fn(() => ({ viewport: ["native"] }));
+			const nativeResize = vi.fn(() => ["native-resize"]);
+			const appViewports: Array<{ columns: number; rows: number }> = [];
+			tui.setFrameProvider({
+				renderFrame: nativeFrame,
+				acknowledgeHistory() {},
+				renderResizeFrame: nativeResize,
+			});
+			tui.setAppViewportFrameProvider({
+				renderAppViewportFrame(viewport) {
+					appViewports.push(viewport);
+					return {
+						viewport: ["app"],
+						estimatedTotalRows: 1,
+						offset: 0,
+						stickyRows: 0,
+						cursor: null,
+						rowMap: [0],
+					};
+				},
+			});
+
+			try {
+				tui.start();
+				await scheduler.drain(term);
+				expect(appViewports.at(-1)).toEqual({ columns: 19, rows: 4 });
+				expect(nativeFrame).not.toHaveBeenCalled();
+				expect(nativeResize).not.toHaveBeenCalled();
+				expect(viewportContent(term)).toContain("app");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
 	it("delegates normalized mouse events to a workspace input owner", async () => {
 		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
 			const term = new VirtualTerminal(40, 8);
@@ -1292,7 +1332,7 @@ describe("TUI app viewport backend", () => {
 			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
 			const imageId = tui.imageBudget.acquireId("workspace-direct-clip");
 			tui.imageBudget.registerPlacementGeometry(imageId, 40, 60);
-			const placement = `\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=${imageId},p=${imageId},c=4,r=4\x1b\\\x1b8` + "\x1b[0m│";
+			const placement = `\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=${imageId},p=${imageId},c=4,r=4\x1b\\\x1b8\x1b[0m│`;
 			const model = WorkspaceModel.single("left");
 			expect(model.splitPane("left", "image", "right")).toBe(true);
 			const split = model.root;
@@ -1389,6 +1429,91 @@ describe("TUI app viewport backend", () => {
 				tui.removeChild(image);
 				tui.requestRender();
 				await scheduler.drain(term);
+				expect(writes.join("")).toContain(`a=d,d=I,i=${imageId},q=2`);
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("retires removed Kitty ids when a stricter budget retries the same frame", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 6);
+			const writes = captureWrites(term);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.setMaxInlineImages(1);
+			const oldImageId = tui.imageBudget.acquireId("retry-retired-old");
+			const oldImage = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: text => text },
+				{ budget: tui.imageBudget, imageKey: "retry-retired-old", maxWidthCells: 4, maxHeightCells: 4 },
+				{ widthPx: 40, heightPx: 40 },
+			);
+			tui.addChild(oldImage);
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				tui.start();
+				await scheduler.drain(term);
+				writes.length = 0;
+
+				tui.removeChild(oldImage);
+				for (const key of ["retry-new-1", "retry-new-2", "retry-new-3"]) {
+					tui.addChild(
+						new Image(
+							"AAAA",
+							"image/png",
+							{ fallbackColor: text => text },
+							{ budget: tui.imageBudget, imageKey: key, maxWidthCells: 4, maxHeightCells: 4 },
+							{ widthPx: 40, heightPx: 40 },
+						),
+					);
+				}
+				tui.requestRender();
+				await scheduler.drain(term);
+
+				expect(writes.join("")).toContain(`a=d,d=I,i=${oldImageId},q=2`);
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("retires the last Kitty image removed by a targeted fallback frame", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 6);
+			const writes = captureWrites(term);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const root = new Container();
+			const imageId = tui.imageBudget.acquireId("targeted-last-image");
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: text => text },
+				{ budget: tui.imageBudget, imageKey: "targeted-last-image", maxWidthCells: 4, maxHeightCells: 4 },
+				{ widthPx: 40, heightPx: 40 },
+			);
+			root.addChild(image);
+			tui.addChild(root);
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				tui.start();
+				await scheduler.drain(term);
+				writes.length = 0;
+
+				root.removeChild(image);
+				root.addChild(new Text("image removed", 0, 0));
+				tui.requestComponentRender(root);
+				await scheduler.drain(term);
+
 				expect(writes.join("")).toContain(`a=d,d=I,i=${imageId},q=2`);
 			} finally {
 				tui.stop();

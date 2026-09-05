@@ -1,5 +1,20 @@
-import { type Component, Container, type HistoryBatch } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import {
+	type Component,
+	componentContains,
+	Container,
+	type HistoryBatch,
+	type VirtualViewportFrame,
+	type VirtualViewportProvider,
+	type VirtualViewportRequest,
+} from "../tui";
+import {
+	extractComponentTextSelection,
+	normalizeTextSelection,
+	type TextSelectionRange,
+} from "../text-selection";
+import { measureComponentRows } from "../tui";
+import { withCodeHighlightingDisabledForLayout } from "../theme/tui-adapters";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -55,6 +70,16 @@ interface FinalizableBlock {
 	renderTranscriptBlockEmergencyRow?(width: number): string | undefined;
 	/** Whether finalized rows may retire into immutable terminal history. */
 	isTranscriptBlockAppendOnly?(): boolean;
+	getTranscriptBlockVersion?(): number;
+}
+
+interface ExpandableBlock {
+	setExpanded(expanded: boolean): void;
+}
+
+function setBlockExpanded(component: Component, expanded: boolean): void {
+	const candidate = component as Component & Partial<ExpandableBlock>;
+	candidate.setExpanded?.(expanded);
 }
 
 /**
@@ -94,21 +119,50 @@ type Offered =
 	| { batch: HistoryBatch; kind: "commit"; end: number }
 	| { batch: HistoryBatch; kind: "replay" };
 
+interface VirtualBlockExtent {
+	component: Component;
+	contribution: readonly string[] | undefined;
+	rawRef: readonly string[] | undefined;
+	bodyRows: number;
+	measuredWidth: number;
+	measuredGeneration: number;
+	measuredVersion: number | undefined;
+	layoutWidth: number;
+	layoutGeneration: number;
+	layoutVersion: number | undefined;
+	startRow: number;
+	rowCount: number;
+	sep: number;
+}
+
 const MAX_LIVE_BLOCKS = 256;
 /** Grace before a pressure-blocked frontier is reported; a streaming block may legitimately hold it briefly. */
 const PINNED_FRONTIER_WARN_MS = 30_000;
 const EMPTY_ROWS: readonly string[] = [];
 const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
+const VIRTUAL_OVERSCAN_BLOCKS = 8;
+
+function isBlockFinalized(component: Component): boolean {
+	return (component as Component & FinalizableBlock).isTranscriptBlockFinalized?.() ?? true;
+}
+
+function isBlockExplicitlyFinalized(component: Component): boolean {
+	return (component as Component & FinalizableBlock).isTranscriptBlockFinalized?.() === true;
+}
 
 function canRetire(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
-	return (block.isTranscriptBlockFinalized?.() ?? true) && (block.isTranscriptBlockAppendOnly?.() ?? true);
+	return isBlockFinalized(component) && (block.isTranscriptBlockAppendOnly?.() ?? true);
 }
 
 function blockMode(component: Component): TranscriptBlockMode {
 	return (component as Component & Partial<AppendOnlyTranscriptBlock>).transcriptBlockMode === "appendOnly"
 		? "appendOnly"
 		: "mutable";
+}
+
+function getBlockVersion(component: Component): number | undefined {
+	return (component as Component & FinalizableBlock).getTranscriptBlockVersion?.();
 }
 
 function isPlainBlank(line: string): boolean {
@@ -149,7 +203,7 @@ export interface TranscriptViewportSpan {
 }
 
 /** Owns transcript order, live capacity, and ordered immutable retirement. */
-export class TranscriptContainer extends Container {
+export class TranscriptContainer extends Container implements VirtualViewportProvider {
 	#entries: TranscriptEntry[] = [];
 	#frontier = 0;
 	#nextBatchId = 1;
@@ -157,18 +211,38 @@ export class TranscriptContainer extends Container {
 	#replayPending = false;
 	#replayRequested = false;
 	#toolActivityVisible = true;
+	#expanded = false;
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
 	#childStartRows = new Map<Component, number>();
+	// Canonical O(1) owner lookup for component-scoped animation frames. Without
+	// this, every spinner tick walks the complete transcript once per ancestor.
+	#directChildIndices = new Map<Component, number>();
+	#targetOwnerIndices = new WeakMap<Component, number>();
 	// Watchdog for the wedge where an unfinalized frontier block pins pressure
 	// retirement: everything behind it stays live and degrades to one-line
 	// allocations. Logs once per pinned episode after a grace period.
 	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
 	/** Block spans of the last `renderViewport` output, for click hit-testing. */
 	#lastViewportSpans: TranscriptViewportSpan[] = [];
+	#virtualEntries: VirtualBlockExtent[] = [];
+	#measuredVirtualEntries = new Set<VirtualBlockExtent>();
+	#visibleVirtualEntries = new Set<VirtualBlockExtent>();
+	#virtualTotalRows = 0;
+	#virtualStructureDirty = true;
+	#virtualLayoutDirtyFrom = 0;
+	#virtualWidth = -1;
+	#virtualGeneration = -1;
+	#generation = 0;
+
 	override addChild(component: Component): void {
-		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
+		// New transcript blocks arrive on the frame hot path. Extend the prepared
+		// ledger in place; removals and pre-structure batches still take full reconcile.
+		const canExtendVirtualLedger =
+			!this.#virtualStructureDirty && this.#virtualEntries.length === this.children.length;
 		super.addChild(component);
+		this.#directChildIndices.set(component, this.children.length - 1);
+		this.#applyPresentationState(component);
 		this.#entries.push({
 			component,
 			state: "active",
@@ -179,19 +253,50 @@ export class TranscriptContainer extends Container {
 			emitted: 0,
 			stableFrozen: false,
 		});
+		if (!canExtendVirtualLedger) {
+			this.#virtualStructureDirty = true;
+			this.#virtualLayoutDirtyFrom = 0;
+			return;
+		}
+		const bodyRows = 0;
+		const sep = 0;
+		const rowCount = bodyRows;
+		this.#virtualEntries.push({
+			component,
+			rawRef: undefined,
+			contribution: undefined,
+			bodyRows,
+			measuredWidth: -1,
+			measuredGeneration: -1,
+			measuredVersion: undefined,
+			layoutWidth: -1,
+			layoutGeneration: -1,
+			layoutVersion: undefined,
+			startRow: this.#virtualTotalRows,
+			rowCount,
+			sep,
+		});
+		this.#virtualLayoutDirtyFrom = Math.min(this.#virtualLayoutDirtyFrom, this.#virtualEntries.length - 1);
+		this.#virtualTotalRows += rowCount;
 	}
 
 	override removeChild(component: Component): void {
 		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
 		super.removeChild(component);
 		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
+		this.#directChildIndices = new Map(this.children.map((child, index) => [child, index]));
+		this.#targetOwnerIndices = new WeakMap();
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
+		this.#virtualStructureDirty = true;
+		this.#virtualLayoutDirtyFrom = 0;
 	}
 
 	override clear(): void {
 		super.clear();
 		this.#entries = [];
+		this.#directChildIndices = new Map();
+		this.#targetOwnerIndices = new WeakMap();
 		this.#frontier = 0;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
@@ -199,6 +304,110 @@ export class TranscriptContainer extends Container {
 		this.#replayPending = false;
 		this.#replayRequested = false;
 		this.#lastViewportSpans = [];
+		this.#virtualEntries = [];
+		this.#measuredVirtualEntries = new Set<VirtualBlockExtent>();
+		this.#visibleVirtualEntries = new Set<VirtualBlockExtent>();
+		this.#virtualTotalRows = 0;
+		this.#virtualStructureDirty = true;
+		this.#virtualLayoutDirtyFrom = 0;
+		this.#generation++;
+	}
+
+	/**
+	 * Reconcile child identities without rendering. Incremental transcript
+	 * builders call this at yield boundaries; exact row heights are measured
+	 * once when the viewport supplies its width.
+	 */
+	prepareVirtualStructure(): void {
+		this.#syncVirtualStructure();
+	}
+
+	/**
+	 * Move an already-built transcript into this empty container without
+	 * rebuilding child lifecycle or virtual-layout state.
+	 */
+	adoptContentsFrom(source: TranscriptContainer): void {
+		if (source === this) return;
+		if (this.children.length > 0) {
+			throw new Error("TranscriptContainer.adoptContentsFrom requires an empty destination");
+		}
+		const children = source.children;
+		const directChildIndices = source.#directChildIndices;
+		const targetOwnerIndices = source.#targetOwnerIndices;
+		const entries = source.#entries;
+		const frontier = source.#frontier;
+		const nextBatchId = source.#nextBatchId;
+		const offered = source.#offered;
+		const toolActivityVisible = source.#toolActivityVisible;
+		const expanded = source.#expanded;
+		const lastFrame = source.#lastFrame;
+		const virtualEntries = source.#virtualEntries;
+		const measuredVirtualEntries = source.#measuredVirtualEntries;
+		const visibleVirtualEntries = source.#visibleVirtualEntries;
+		const virtualTotalRows = source.#virtualTotalRows;
+		const virtualStructureDirty = source.#virtualStructureDirty;
+		const virtualLayoutDirtyFrom = source.#virtualLayoutDirtyFrom;
+		const virtualWidth = source.#virtualWidth;
+		const virtualGeneration = source.#virtualGeneration;
+		const generation = source.#generation;
+
+		source.clear();
+		super.clear();
+		this.children = children;
+		this.#entries = entries;
+		this.#directChildIndices = directChildIndices;
+		this.#targetOwnerIndices = targetOwnerIndices;
+		this.#frontier = frontier;
+		this.#nextBatchId = nextBatchId;
+		this.#offered = offered;
+		this.#toolActivityVisible = toolActivityVisible;
+		this.#expanded = expanded;
+		this.#lastFrame = lastFrame;
+		this.#virtualEntries = virtualEntries;
+		this.#measuredVirtualEntries = measuredVirtualEntries;
+		this.#visibleVirtualEntries = visibleVirtualEntries;
+		this.#virtualTotalRows = virtualTotalRows;
+		this.#virtualStructureDirty = virtualStructureDirty;
+		this.#virtualLayoutDirtyFrom = virtualLayoutDirtyFrom;
+		this.#virtualWidth = virtualWidth;
+		this.#virtualGeneration = virtualGeneration;
+		this.#generation = generation;
+	}
+
+	override containsComponent(component: Component): boolean {
+		return component === this || this.#ownerIndex(component) >= 0;
+	}
+
+	#ownerIndex(component: Component): number {
+		const directIndex = this.#directChildIndices.get(component);
+		if (directIndex !== undefined) return directIndex;
+		const cachedIndex = this.#targetOwnerIndices.get(component);
+		if (cachedIndex !== undefined) {
+			const cachedOwner = this.children[cachedIndex];
+			if (cachedOwner !== undefined && componentContains(cachedOwner, component)) return cachedIndex;
+		}
+		const ownerIndex = this.children.findIndex(child => componentContains(child, component));
+		if (ownerIndex >= 0) this.#targetOwnerIndices.set(component, ownerIndex);
+		else this.#targetOwnerIndices.delete(component);
+		return ownerIndex;
+	}
+
+	override invalidate(): void {
+		this.#generation++;
+		super.invalidate();
+	}
+
+	setExpanded(expanded: boolean): void {
+		if (this.#expanded === expanded) return;
+		this.#expanded = expanded;
+		for (const entry of this.#visibleVirtualEntries) this.#applyPresentationState(entry.component);
+		for (const entry of this.#measuredVirtualEntries) {
+			if (entry.contribution !== undefined) entry.bodyRows = entry.contribution.length;
+			entry.contribution = undefined;
+			entry.rawRef = undefined;
+		}
+		this.#measuredVirtualEntries.clear();
+		this.#generation++;
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -613,27 +822,40 @@ export class TranscriptContainer extends Container {
 
 	/** Full semantic render used by exports and non-terminal commands. */
 	override render(width: number): readonly string[] {
+		width = Math.max(1, width);
 		this.#syncEntries();
 		this.#childStartRows.clear();
+		this.#syncVirtualEntries(width);
 		const rows: string[] = [];
-		for (const entry of this.#entries) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			const block = this.#renderEntry(entry, width);
+		for (let index = 0; index < this.#entries.length; index++) {
+			const entry = this.#entries[index]!;
+			const component = entry.component;
+			this.#setAllocation(component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+			const raw = component.render(width);
+			const block = this.#renderEntry(entry, width, raw);
+			this.#recordVirtualMeasurement(index, width, raw, block);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
 			this.#childStartRows.set(entry.component, rows.length);
 			rows.push(...block);
 		}
+		this.#rebuildVirtualRows(0);
 		return rows;
 	}
 
-	/** Rendered row where a child's block begins in the last full render() (transcript deep-links). */
-	getChildStartRow(child: Component): number | undefined {
+	/** Rendered row where a child's block begins in the full or virtual transcript. */
+	getChildStartRow(child: Component, width?: number): number | undefined {
+		if (width !== undefined) {
+			this.#syncVirtualEntries(Math.max(1, width));
+			const index = this.children.indexOf(child);
+			const entry = index >= 0 ? this.#virtualEntries[index] : undefined;
+			if (entry) return entry.startRow + entry.sep;
+		}
 		return this.#childStartRows.get(child);
 	}
 
-	#renderEntry(entry: TranscriptEntry, width: number): readonly string[] {
-		const rendered = trimBlankEdges(entry.component.render(width));
+	#renderEntry(entry: TranscriptEntry, width: number, raw?: readonly string[]): readonly string[] {
+		const rendered = trimBlankEdges(raw ?? entry.component.render(width));
 		if (entry.mode === "mutable" || entry.stableFrozen) return rendered;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		const stable = appendOnly.getTranscriptStableRows();
@@ -786,6 +1008,426 @@ export class TranscriptContainer extends Container {
 		this.#replayPending = this.#frontier > 0 || (head?.mode === "appendOnly" && head.emitted > 0);
 		this.#replayRequested = false;
 	}
+	override renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		width = Math.max(1, width);
+		this.#syncVirtualEntries(width);
+		if (
+			targets.length === 0 ||
+			targets.includes(this) ||
+			this.#virtualEntries.some(entry => entry.contribution === undefined)
+		) {
+			return this.render(width);
+		}
+		let changedFrom = this.#virtualEntries.length;
+		const measured = new Set<Component>();
+		for (const target of targets) {
+			const index = this.#ownerIndex(target);
+			if (index < 0 || measured.has(this.children[index]!)) continue;
+			measured.add(this.children[index]!);
+			if (this.#measureVirtualEntry(index, width)) changedFrom = Math.min(changedFrom, index);
+		}
+		if (measured.size === 0) return this.render(width);
+		if (changedFrom < this.#virtualEntries.length) this.#rebuildVirtualRows(changedFrom);
+		return this.#renderVirtualRows(0, this.#virtualTotalRows);
+	}
+
+	override hasVirtualViewport(): boolean {
+		return true;
+	}
+
+	override getEstimatedVirtualRows(width: number): number {
+		this.#syncVirtualEntries(Math.max(1, width));
+		return this.#virtualTotalRows;
+	}
+
+	override renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportFrame {
+		return this.#renderVirtualViewport(width, request);
+	}
+
+	override renderVirtualViewportTargeted(
+		width: number,
+		request: VirtualViewportRequest,
+		targets: readonly Component[],
+	): VirtualViewportFrame {
+		const targeted = new Set<number>();
+		for (const target of targets) {
+			if (target === this) return this.#renderVirtualViewport(width, request);
+			const ownerIndex = this.#ownerIndex(target);
+			if (ownerIndex < 0) return this.#renderVirtualViewport(width, request);
+			targeted.add(ownerIndex);
+		}
+		return this.#renderVirtualViewport(width, request, targeted);
+	}
+
+	override renderViewportTail(width: number, maxRows: number): readonly string[] {
+		return this.#renderVirtualViewport(width, {
+			rows: Math.max(0, Math.trunc(maxRows)),
+			offset: 0,
+			followBottom: true,
+		}).lines;
+	}
+
+	/** Direct transcript blocks intersecting an inclusive estimated virtual row range. */
+	getVirtualBlocksInRowRange(width: number, startRow: number, endRow: number): readonly Component[] {
+		this.#syncVirtualEntries(Math.max(1, width));
+		const start = Math.max(0, Math.trunc(startRow));
+		const end = Math.max(start, Math.trunc(endRow));
+		const blocks: Component[] = [];
+		let index = this.#findVirtualEntry(start);
+		while (index >= 0 && index < this.#virtualEntries.length) {
+			const entry = this.#virtualEntries[index]!;
+			if (entry.startRow > end) break;
+			const contentStart = entry.startRow + entry.sep;
+			const contentEnd = entry.startRow + entry.rowCount - 1;
+			if (entry.rowCount > entry.sep && contentStart <= end && contentEnd >= start) blocks.push(entry.component);
+			index++;
+		}
+		return blocks;
+	}
+
+	override getVirtualTextSelectionInset(width: number, row: number): number {
+		return this.#getVirtualTextSelectionInset(width, row, false);
+	}
+
+	override getVirtualTextSelectionRightInset(width: number, row: number): number {
+		return this.#getVirtualTextSelectionInset(width, row, true);
+	}
+
+	override getVirtualTextSelection(width: number, selection: TextSelectionRange): string | undefined {
+		this.#syncVirtualEntries(Math.max(1, width));
+		const normalized = normalizeTextSelection(selection);
+		if (normalized.start.row < 0 || normalized.end.row >= this.#virtualTotalRows) return undefined;
+		let text = "";
+		let selected = false;
+		const append = (part: string): void => {
+			if (selected) text += "\n";
+			text += part;
+			selected = true;
+		};
+		let index = this.#findVirtualEntry(normalized.start.row);
+		while (index >= 0 && index < this.#virtualEntries.length) {
+			const entry = this.#virtualEntries[index]!;
+			if (entry.startRow > normalized.end.row) break;
+			const entryEnd = entry.startRow + entry.rowCount - 1;
+			const contentStart = entry.startRow + entry.sep;
+			if (entry.sep > 0 && normalized.start.row <= entry.startRow && normalized.end.row >= entry.startRow) {
+				append("");
+			}
+			const overlapStart = Math.max(normalized.start.row, contentStart);
+			const overlapEnd = Math.min(normalized.end.row, entryEnd);
+			if (overlapStart <= overlapEnd) {
+				const raw = entry.rawRef;
+				if (!raw) return undefined;
+				let leadingBlankRows = 0;
+				while (leadingBlankRows < raw.length && isPlainBlank(raw[leadingBlankRows]!)) leadingBlankRows++;
+				const part = extractComponentTextSelection(entry.component, raw, {
+					start: {
+						row: leadingBlankRows + overlapStart - contentStart,
+						col: overlapStart === normalized.start.row ? normalized.start.col : 0,
+					},
+					end: {
+						row: leadingBlankRows + overlapEnd - contentStart,
+						col: overlapEnd === normalized.end.row ? normalized.end.col : Number.MAX_SAFE_INTEGER,
+					},
+				});
+				if (part === undefined) return undefined;
+				append(part);
+			}
+			index++;
+		}
+		return selected ? text : undefined;
+	}
+
+	#getVirtualTextSelectionInset(width: number, row: number, right: boolean): number {
+		this.#syncVirtualEntries(Math.max(1, width));
+		const targetRow = Math.trunc(row);
+		if (targetRow < 0 || targetRow >= this.#virtualTotalRows) return 0;
+		const entry = this.#virtualEntries[this.#findVirtualEntry(targetRow)];
+		if (!entry?.rawRef) return 0;
+		const contentStart = entry.startRow + entry.sep;
+		if (targetRow < contentStart) return 0;
+		let leadingBlankRows = 0;
+		while (leadingBlankRows < entry.rawRef.length && isPlainBlank(entry.rawRef[leadingBlankRows]!)) {
+			leadingBlankRows++;
+		}
+		const componentRow = leadingBlankRows + targetRow - contentStart;
+		return right
+			? (entry.component.getTextSelectionRightInset?.(componentRow) ?? 0)
+			: (entry.component.getTextSelectionInset?.(componentRow) ?? 0);
+	}
+	#renderVirtualViewport(
+		width: number,
+		request: VirtualViewportRequest,
+		targeted?: ReadonlySet<number>,
+	): VirtualViewportFrame {
+		width = Math.max(1, width);
+		const rows = Math.max(0, Math.trunc(request.rows));
+		this.#syncVirtualEntries(width);
+
+		let totalRows = this.#virtualTotalRows;
+		let offset = request.followBottom
+			? Math.max(0, totalRows - rows)
+			: Math.max(0, Math.min(Math.trunc(request.offset), Math.max(0, totalRows - rows)));
+		const anchorIndex = request.followBottom ? -1 : this.#findVirtualEntry(offset);
+		const anchorIntraRow =
+			anchorIndex < 0 ? 0 : Math.max(0, offset - (this.#virtualEntries[anchorIndex]?.startRow ?? 0));
+		const measured = new Set<number>();
+
+		if (targeted) {
+			let changedFrom = this.#virtualEntries.length;
+			for (const index of targeted) {
+				measured.add(index);
+				if (this.#measureVirtualEntry(index, width, true)) changedFrom = Math.min(changedFrom, index);
+			}
+			if (changedFrom < this.#virtualEntries.length) {
+				this.#rebuildVirtualRows(changedFrom);
+				totalRows = this.#virtualTotalRows;
+				if (request.followBottom) {
+					offset = Math.max(0, totalRows - rows);
+				} else if (anchorIndex >= 0) {
+					const anchor = this.#virtualEntries[anchorIndex];
+					const anchored = anchor
+						? anchor.startRow + Math.min(anchorIntraRow, Math.max(0, anchor.rowCount - 1))
+						: offset;
+					offset = Math.max(0, Math.min(anchored, Math.max(0, totalRows - rows)));
+				}
+			}
+		}
+
+		if (rows === 0 || totalRows === 0) {
+			this.#visibleVirtualEntries.clear();
+			return { lines: EMPTY_ROWS, estimatedTotalRows: totalRows, offset: 0 };
+		}
+
+		while (totalRows > 0) {
+			const firstVisible = this.#findVirtualEntry(offset);
+			const lastVisible = this.#findVirtualEntry(Math.min(totalRows - 1, offset + rows - 1));
+			if (firstVisible < 0 || lastVisible < 0) break;
+			const first = Math.max(0, firstVisible - VIRTUAL_OVERSCAN_BLOCKS);
+			const last = Math.min(this.#virtualEntries.length - 1, lastVisible + VIRTUAL_OVERSCAN_BLOCKS);
+			let changedFrom = this.#virtualEntries.length;
+			for (let index = first; index <= last; index++) {
+				if (measured.has(index)) continue;
+				measured.add(index);
+				if (targeted && !targeted.has(index) && this.#virtualEntries[index]?.contribution !== undefined) continue;
+				if (this.#measureVirtualEntry(index, width)) changedFrom = Math.min(changedFrom, index);
+			}
+			if (changedFrom === this.#virtualEntries.length) break;
+			this.#rebuildVirtualRows(changedFrom);
+			totalRows = this.#virtualTotalRows;
+			if (request.followBottom) {
+				offset = Math.max(0, totalRows - rows);
+			} else if (anchorIndex >= 0) {
+				const anchor = this.#virtualEntries[anchorIndex];
+				const anchored = anchor
+					? anchor.startRow + Math.min(anchorIntraRow, Math.max(0, anchor.rowCount - 1))
+					: offset;
+				offset = Math.max(0, Math.min(anchored, Math.max(0, totalRows - rows)));
+			}
+		}
+
+		const lines = this.#renderVirtualRows(offset, rows);
+		this.#visibleVirtualEntries.clear();
+		const finalFirst = this.#findVirtualEntry(offset);
+		const finalLast = this.#findVirtualEntry(Math.min(this.#virtualTotalRows - 1, offset + rows - 1));
+		for (let index = finalFirst; index >= 0 && index <= finalLast; index++) {
+			const entry = this.#virtualEntries[index];
+			if (entry) this.#visibleVirtualEntries.add(entry);
+		}
+		const frame = {
+			lines,
+			estimatedTotalRows: this.#virtualTotalRows,
+			offset,
+		};
+		return frame;
+	}
+
+	#syncVirtualEntries(width: number): void {
+		const structureChanged = this.#syncVirtualStructure();
+		const widthChanged = this.#virtualWidth !== width;
+		const epochChanged = widthChanged || this.#virtualGeneration !== this.#generation;
+		let measurementsCleared = false;
+		if (epochChanged) {
+			measurementsCleared = this.#measuredVirtualEntries.size > 0;
+			for (const entry of this.#measuredVirtualEntries) {
+				if (entry.contribution !== undefined) entry.bodyRows = entry.contribution.length;
+				entry.contribution = undefined;
+				entry.rawRef = undefined;
+			}
+			this.#measuredVirtualEntries.clear();
+			this.#virtualWidth = width;
+			this.#virtualGeneration = this.#generation;
+			this.#virtualLayoutDirtyFrom = 0;
+		}
+		let changedFrom = this.#virtualEntries.length;
+		withCodeHighlightingDisabledForLayout(() => {
+			for (let index = this.#virtualLayoutDirtyFrom; index < this.#virtualEntries.length; index++) {
+				if (this.#measureVirtualLayout(index, width)) changedFrom = Math.min(changedFrom, index);
+			}
+		});
+		this.#virtualLayoutDirtyFrom = this.#virtualEntries.length;
+		if (
+			changedFrom < this.#virtualEntries.length ||
+			measurementsCleared ||
+			(!structureChanged && this.#virtualEntries.length === 0 && this.#virtualTotalRows !== 0)
+		) {
+			this.#rebuildVirtualRows(changedFrom < this.#virtualEntries.length ? changedFrom : 0);
+		}
+	}
+
+	#syncVirtualStructure(): boolean {
+		const children = this.children;
+		const entries = this.#virtualEntries;
+		const structureChanged = this.#virtualStructureDirty || entries.length !== children.length;
+		if (!structureChanged) return false;
+
+		const previous = new Map(entries.map(entry => [entry.component, entry]));
+		const next = children.map(component => {
+			const retained = previous.get(component);
+			if (retained) return retained;
+			return {
+				component,
+				rawRef: undefined,
+				contribution: undefined,
+				bodyRows: 0,
+				measuredWidth: -1,
+				measuredGeneration: -1,
+				measuredVersion: undefined,
+				layoutWidth: -1,
+				layoutGeneration: -1,
+				layoutVersion: undefined,
+				startRow: 0,
+				rowCount: 0,
+				sep: 0,
+			};
+		});
+		this.#virtualEntries = next;
+		this.#directChildIndices = new Map(children.map((component, index) => [component, index]));
+		this.#targetOwnerIndices = new WeakMap();
+		this.#virtualLayoutDirtyFrom = 0;
+		this.#virtualStructureDirty = false;
+		if (this.#measuredVirtualEntries.size > 0) {
+			const retained = new Set(next);
+			for (const entry of this.#measuredVirtualEntries) {
+				if (!retained.has(entry)) this.#measuredVirtualEntries.delete(entry);
+			}
+		}
+		this.#rebuildVirtualRows(0);
+		return true;
+	}
+
+	#measureVirtualLayout(index: number, width: number): boolean {
+		const entry = this.#virtualEntries[index];
+		if (!entry) return false;
+		const currentVersion = getBlockVersion(entry.component);
+		if (
+			entry.layoutWidth === width &&
+			entry.layoutGeneration === this.#generation &&
+			entry.layoutVersion === currentVersion &&
+			(isBlockExplicitlyFinalized(entry.component) || currentVersion !== undefined)
+		) {
+			return false;
+		}
+		this.#applyPresentationState(entry.component);
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		const previousRows = entry.bodyRows;
+		entry.bodyRows = Math.max(0, Math.trunc(measureComponentRows(entry.component, width)));
+		entry.layoutWidth = width;
+		entry.layoutGeneration = this.#generation;
+		entry.layoutVersion = currentVersion;
+		return entry.bodyRows !== previousRows;
+	}
+
+	#measureVirtualEntry(index: number, width: number, force = false): boolean {
+		const entry = this.#virtualEntries[index];
+		if (!entry) return false;
+		this.#applyPresentationState(entry.component);
+		const currentVersion = getBlockVersion(entry.component);
+		if (
+			!force &&
+			entry.contribution !== undefined &&
+			entry.rawRef !== undefined &&
+			entry.measuredWidth === width &&
+			entry.measuredGeneration === this.#generation &&
+			entry.measuredVersion === currentVersion &&
+			isBlockExplicitlyFinalized(entry.component)
+		) {
+			return false;
+		}
+		const previousRows = entry.contribution?.length ?? entry.bodyRows;
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		const raw = entry.component.render(width);
+		const contribution = trimBlankEdges(raw);
+		this.#recordVirtualMeasurement(index, width, raw, contribution);
+		return contribution.length !== previousRows;
+	}
+
+	#recordVirtualMeasurement(
+		index: number,
+		width: number,
+		raw: readonly string[],
+		contribution: readonly string[],
+	): void {
+		const entry = this.#virtualEntries[index];
+		if (!entry) return;
+		entry.rawRef = raw;
+		entry.contribution = contribution;
+		entry.bodyRows = contribution.length;
+		entry.measuredWidth = width;
+		entry.measuredGeneration = this.#generation;
+		entry.measuredVersion = getBlockVersion(entry.component);
+		entry.layoutWidth = width;
+		entry.layoutGeneration = this.#generation;
+		entry.layoutVersion = entry.measuredVersion;
+		this.#measuredVirtualEntries.add(entry);
+	}
+
+	#rebuildVirtualRows(startIndex: number): void {
+		const entries = this.#virtualEntries;
+		const start = Math.max(0, Math.min(Math.trunc(startIndex), entries.length));
+		let row = start === 0 ? 0 : (entries[start - 1]?.startRow ?? 0) + (entries[start - 1]?.rowCount ?? 0);
+		let hasVisible = row > 0;
+		for (let index = start; index < entries.length; index++) {
+			const entry = entries[index]!;
+			const bodyRows = entry.contribution?.length ?? entry.bodyRows;
+			entry.startRow = row;
+			entry.sep = bodyRows > 0 && hasVisible ? 1 : 0;
+			entry.rowCount = entry.sep + bodyRows;
+			row += entry.rowCount;
+			if (bodyRows > 0) hasVisible = true;
+		}
+		this.#virtualTotalRows = row;
+	}
+
+	#findVirtualEntry(row: number): number {
+		let low = 0;
+		let high = this.#virtualEntries.length;
+		while (low < high) {
+			const middle = (low + high) >>> 1;
+			const entry = this.#virtualEntries[middle]!;
+			if (entry.startRow + entry.rowCount <= row) low = middle + 1;
+			else high = middle;
+		}
+		return low < this.#virtualEntries.length ? low : -1;
+	}
+
+	#renderVirtualRows(offset: number, rows: number): readonly string[] {
+		const end = Math.min(this.#virtualTotalRows, offset + rows);
+		const lines: string[] = [];
+		let index = this.#findVirtualEntry(offset);
+		while (index >= 0 && index < this.#virtualEntries.length && lines.length < rows) {
+			const entry = this.#virtualEntries[index]!;
+			if (entry.startRow >= end) break;
+			const from = Math.max(offset, entry.startRow);
+			const to = Math.min(end, entry.startRow + entry.rowCount);
+			for (let row = from; row < to; row++) {
+				const local = row - entry.startRow;
+				lines.push(local < entry.sep ? "" : (entry.contribution?.[local - entry.sep] ?? ""));
+			}
+			index++;
+		}
+		return lines;
+	}
 
 	#renderEmergency(
 		shown: readonly { entry: TranscriptEntry; index: number }[],
@@ -854,7 +1496,13 @@ export class TranscriptContainer extends Container {
 	}
 
 	#setAllocation(component: Component, rows: number, frame: AnimationFrame): void {
+		this.#applyPresentationState(component);
 		(component as Component & TranscriptPresentationTarget).setTranscriptAllocation?.(rows, frame);
+	}
+
+	#applyPresentationState(component: Component): void {
+		setBlockExpanded(component, this.#expanded);
+		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 	}
 
 	#settleFinalized(): void {

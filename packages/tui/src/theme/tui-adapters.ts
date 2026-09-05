@@ -62,6 +62,22 @@ const HIGHLIGHT_CACHE_MAX = 256;
 const highlightCache = new LRUCache<string, string>({ max: HIGHLIGHT_CACHE_MAX });
 let highlightCacheTheme: Theme | undefined;
 
+let layoutOnlyHighlightDepth = 0;
+
+/**
+ * Run synchronous row measurement without tokenizing code that will not be
+ * displayed. Native highlighting only inserts zero-width ANSI sequences, so
+ * plain source has the same layout while avoiding full-history tokenizer work.
+ */
+export function withCodeHighlightingDisabledForLayout<T>(measure: () => T): T {
+	layoutOnlyHighlightDepth++;
+	try {
+		return measure();
+	} finally {
+		layoutOnlyHighlightDepth--;
+	}
+}
+
 function highlightCached(code: string, validLang: string | undefined, highlightTheme: Theme): string | null {
 	if (validLang === undefined) return code;
 	if (highlightCacheTheme !== highlightTheme) {
@@ -88,6 +104,7 @@ function highlightCached(code: string, validLang: string | undefined, highlightT
  * Returns array of highlighted lines.
  */
 export function highlightCode(code: string, lang?: string, highlightTheme: Theme = theme): string[] {
+	if (layoutOnlyHighlightDepth > 0) return code.split("\n");
 	const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;
 	const highlighted = highlightCached(code, validLang, highlightTheme);
 	// Always return a fresh array: callers (e.g. renderCodeCell) push extra lines
@@ -230,6 +247,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 			if (highlighted !== null) return highlighted.split("\n");
 			return code.split("\n").map(line => theme.fg("mdCodeBlock", line));
 		},
+		highlightCodeForLayout: code => code.split("\n"),
 		createHighlightStream: lang => createHighlightStream(lang, theme),
 	};
 	cachedMarkdownTheme = markdownTheme;

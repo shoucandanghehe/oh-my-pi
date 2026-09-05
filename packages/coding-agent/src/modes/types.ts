@@ -21,6 +21,7 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { PausedExitParticipant } from "../session/agent-session-types";
 import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
@@ -158,6 +159,8 @@ export interface InteractiveModeContext {
 	readonly workspaceEnabled: boolean;
 	/** Create or focus a persistent transcript pane for an agent. */
 	openAgentWorkspacePane(id: string): Promise<void>;
+	/** Open a local fake pane and play the real subagent petrification/close path. */
+	previewSubagentExitAnimation(): void;
 	/** Create or focus the session-scoped ephemeral /btw pane. */
 	openBtwWorkspacePane(component: Component): boolean;
 	/** Close only the /btw view; its side conversation remains in memory. */
@@ -520,6 +523,7 @@ export interface InteractiveModeContext {
 	/** Queue a message for delivery only after the active agent turn would stop. */
 	handleQueueCommand(message: string): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
+	getPausedExitParticipants?(): readonly PausedExitParticipant[];
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;

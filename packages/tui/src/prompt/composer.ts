@@ -3,9 +3,13 @@ import { Spacer } from "../components/spacer";
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
+	type AppViewportFramePlan,
+	type AppViewportFrameProvider,
 	type Component,
 	Container,
 	type ResizeScrollbackMode,
+	componentContains,
+	renderTargeted,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
 	TUI,
@@ -207,7 +211,8 @@ function rowTargetCandidates(target: Component): ((local: number) => string[]) |
  * It owns the terminal, welcome header, and editor; InteractiveMode later supplies authoritative
  * data and mounts the session-aware runtime children without replacing the visible header.
  */
-export class Composer implements TerminalFrameProvider {
+export class Composer implements TerminalFrameProvider, AppViewportFrameProvider {
+	/** Terminal renderer shared with InteractiveMode after adoption. */
 	readonly ui: TUI;
 	#editor: CustomEditor;
 	readonly #header = new Container();
@@ -302,10 +307,12 @@ export class Composer implements TerminalFrameProvider {
 			options.tuiOptions,
 		);
 		this.ui.setFrameProvider(this);
+		this.ui.setAppViewportFrameProvider(this);
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
 		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
 		this.#editor = new CustomEditor(getEditorTheme());
+		this.ui.enableScopedInputRender(this.#editor);
 		this.editor.disableSubmit = true;
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
@@ -514,7 +521,71 @@ export class Composer implements TerminalFrameProvider {
 		this.#hoveredClickId = id;
 	}
 
-	/** Acknowledges one accepted header, replay, or transcript batch. */
+	renderAppViewportFrame(viewport: ViewportSize, targets: readonly Component[]): AppViewportFramePlan {
+		if (!this.#started || this.#stopped) {
+			return {
+				viewport: [],
+				estimatedTotalRows: 0,
+				offset: 0,
+				stickyRows: 0,
+				cursor: null,
+				rowMap: [],
+			};
+		}
+		const width = Math.max(1, viewport.columns);
+		const rows = Math.max(0, viewport.rows);
+		if (!this.#runtimeMounted) {
+			const scroll = this.#header.render(width);
+			const sticky = this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
+			const stickyRows = Math.min(rows, sticky.length);
+			const scrollHeight = Math.max(0, rows - stickyRows);
+			const offset = Math.max(0, scroll.length - scrollHeight);
+			const visibleScroll = scroll.slice(offset, offset + scrollHeight);
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+			const padding = new Array<string>(Math.max(0, scrollHeight - visibleScroll.length)).fill("");
+			const visibleSticky = sticky.slice(sticky.length - stickyRows);
+			const frame = [...visibleScroll, ...padding, ...visibleSticky];
+			return {
+				viewport: frame,
+				estimatedTotalRows: scroll.length,
+				offset,
+				stickyRows,
+				cursor: null,
+				rowMap: frame.map((_line, index) => (index < visibleScroll.length ? offset + index : -1)),
+			};
+		}
+		const roots = this.#runtimeChildren;
+		let rendered: string[];
+		if (targets.length === 0) {
+			rendered = this.#renderRoots(roots, width);
+		} else {
+			const grouped = roots.map(root => ({
+				root,
+				targets: targets.filter(target => componentContains(root, target)),
+			}));
+			const matched = grouped.reduce((total, group) => total + group.targets.length, 0);
+			rendered =
+				matched === targets.length
+					? grouped.flatMap(group =>
+							group.targets.length > 0
+								? renderTargeted(group.root, width, group.targets)
+								: group.root.render(width),
+						)
+					: this.#renderRoots(roots, width);
+		}
+		const offset = Math.max(0, rendered.length - rows);
+		const visible = rendered.slice(offset, offset + rows);
+		return {
+			viewport: visible,
+			estimatedTotalRows: rendered.length,
+			offset,
+			stickyRows: 0,
+			cursor: null,
+			rowMap: visible.map((_line, index) => offset + index),
+		};
+	}
+
+	/** Retire an accepted terminal history batch (header, then transcript prefixes). */
 	acknowledgeHistory(id: number): void {
 		const offered = this.#offeredHistory;
 		if (offered === undefined || offered.id !== id) return;

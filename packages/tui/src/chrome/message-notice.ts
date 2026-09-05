@@ -96,6 +96,10 @@ export class MessageNoticeComponent extends Container {
 		this.#box.clear();
 	}
 
+	override measureRows(width: number): number {
+		return this.#toolActivityVisible ? super.measureRows(width) : 0;
+	}
+
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return NO_LINES;
 		return super.render(width);

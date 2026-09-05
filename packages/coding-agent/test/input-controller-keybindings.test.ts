@@ -9,7 +9,7 @@ import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
+import { type Component, type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
 type FakeEditor = {
@@ -221,7 +221,7 @@ async function createContext() {
 		settings: Settings.isolated(),
 		workspaceEnabled: false,
 		isMainWorkspacePaneFocused: vi.fn(() => true),
-		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
+		chatContainer: { children: [], setToolActivityVisible: vi.fn(), setExpanded: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
 		handleClearCommand: vi.fn(),
@@ -882,6 +882,24 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 		// The editor is the default focus target in the harness.
 		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+
+	it("delegates expansion without walking the full virtual transcript", async () => {
+		const { ctx, listeners } = await setup();
+		let directUpdates = 0;
+		const children: Component[] = Array.from({ length: 10_000 }, () => ({
+			render(): readonly string[] {
+				return [];
+			},
+			setExpanded() {
+				directUpdates++;
+			},
+		}));
+		ctx.chatContainer.children = children;
+
+		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
+		expect(directUpdates).toBe(0);
+		expect(ctx.chatContainer.setExpanded).toHaveBeenCalledWith(true);
 	});
 
 	it("defers to a focused non-Main app-viewport pane", async () => {

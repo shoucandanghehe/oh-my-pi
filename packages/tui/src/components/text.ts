@@ -124,6 +124,17 @@ export class Text implements Component {
 		this.#cachedLines = undefined;
 	}
 
+	measureRows(width: number): number {
+		if (!this.#text || this.#text.trim() === "") return 0;
+		// Foreground/background stylers only add zero-width ANSI sequences; row
+		// measurement can wrap the source directly without building painted rows
+		// or text-selection maps for offscreen history.
+		const normalizedText = replaceTabs(this.#text);
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		return wrapTextWithAnsi(normalizedText, contentWidth).length + this.#paddingY * 2;
+	}
+
 	render(width: number): readonly string[] {
 		// Check cache
 		if (

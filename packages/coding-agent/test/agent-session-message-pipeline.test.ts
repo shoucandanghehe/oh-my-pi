@@ -1481,6 +1481,7 @@ describe("AgentSession message pipeline", () => {
 				getUIContext: () => ({ select }),
 				hasHandlers: () => false,
 				hasUI: () => true,
+				runScoped: <T>(run: () => T): T => run(),
 			} as never,
 			sideStreamFn,
 		});

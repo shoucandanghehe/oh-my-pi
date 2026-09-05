@@ -1089,7 +1089,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#resetJjRequests();
 		if (this.#owner) this.#owner.#peers.delete(this);
 		this.#owner = undefined;
-		for (const peer of [...this.#peers]) peer.dispose();
+		for (const peer of this.#peers) peer.dispose();
 		this.#peers.clear();
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
@@ -2740,7 +2740,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				: (this.session
 						.getAsyncJobSnapshot()
 						?.running.filter(
-							job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
+							job =>
+								job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
 						).length ?? 0);
 			if (runningBackgroundJobs > 0) {
 				const count = placeholders ? "…" : `${runningBackgroundJobs}`;

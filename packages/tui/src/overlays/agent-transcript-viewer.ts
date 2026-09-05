@@ -16,6 +16,7 @@
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { componentContains, renderTargeted, type TargetedRender } from "../tui";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
@@ -30,9 +31,13 @@ import { replaceTabs } from "../utils";
 import type { ViewportHeightAware, WorkspacePaneHeaderProvider } from "../workspace-layout";
 import type { AgentHubRegistry, AgentHubSession, AgentLifecycleLike, AgentStatus } from "./agent-hub-types";
 import { theme } from "../theme/theme";
+import type { AppViewportHoverProvider } from "../tui";
+import { fgAnsi } from "../theme/color";
 import type { AgentHubRemote } from "./agent-hub";
 import { ChatTranscriptPane } from "../chat/chat-transcript-pane";
 import { StatusLineComponent } from "../status-line/component";
+import type { CustomEditor } from "../prompt/custom-editor";
+import { sanitizeErrorLine } from "../chrome/error-block";
 
 type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose">;
 
@@ -43,6 +48,19 @@ export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_chan
 export interface AgentTranscriptSource {
 	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync">;
 	parseEntries(text: string): AgentTranscriptEntry[];
+	/** Stream message/model entries from a bounded snapshot without completing its partial tail. */
+	visitEntries(
+		filePath: string,
+		visit: (entry: AgentTranscriptEntry) => void | boolean,
+		options: {
+			maxBytes?: number;
+			yieldEveryEntries?: number;
+			shouldContinue?: () => boolean;
+			onTrailingPartial?: (bytes: Uint8Array) => void;
+			onBytesConsumed?: (bytes: number) => void;
+			throwIfMissing?: boolean;
+		},
+	): Promise<unknown>;
 }
 
 export interface AgentTranscriptViewerDeps {
@@ -78,8 +96,12 @@ export interface AgentTranscriptViewerDeps {
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
+const AUTO_CLOSE_FRAME_MS = 16;
+const AUTO_CLOSE_DURATION_MS = 3_000;
+const AUTO_CLOSE_FRAMES = Math.ceil(AUTO_CLOSE_DURATION_MS / AUTO_CLOSE_FRAME_MS);
 
 const SENTINEL_BYTES = 4096;
+const ASYNC_LOCAL_LOAD_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
 interface LocalTranscriptSentinel {
 	offset: number;
@@ -142,14 +164,181 @@ function statusBadge(status: AgentStatus): string {
 	}
 }
 
+function stoneNoise(row: number, col: number): number {
+	const mixed = Math.imul(row + 0x9e3779b9, 0x85ebca6b) ^ Math.imul(col + 0xc2b2ae35, 0x27d4eb2f);
+	const hashed = (mixed ^ (mixed >>> 16)) >>> 0;
+	return hashed / 4294967296;
+}
+
+const STONE_GRADIENT_STEPS = 6;
+const STONE_GRADIENT_SETTLE_PROGRESS = 0.24;
+let stoneGradientCache: { key: string; ansi: readonly string[] } | undefined;
+
+function hexRgb(hex: string): readonly [number, number, number] {
+	const value = Number.parseInt(hex.slice(1), 16);
+	return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+}
+
+function stoneGradientAnsi(): readonly string[] {
+	const lightHex = theme.getColorHex("muted");
+	const darkHex = theme.getColorHex("dim");
+	const mode = theme.getColorMode();
+	const key = `${mode}:${lightHex}:${darkHex}`;
+	if (stoneGradientCache?.key === key) return stoneGradientCache.ansi;
+
+	const light = hexRgb(lightHex);
+	const dark = hexRgb(darkHex);
+	const ansi = Array.from({ length: STONE_GRADIENT_STEPS }, (_value, index) => {
+		const ratio = index / (STONE_GRADIENT_STEPS - 1);
+		const channels = light.map((channel, channelIndex) =>
+			Math.round(channel + ((dark[channelIndex] ?? channel) - channel) * ratio),
+		);
+		const hex = `#${channels.map(channel => channel.toString(16).padStart(2, "0")).join("")}`;
+		return fgAnsi(hex, mode);
+	});
+	stoneGradientCache = { key, ansi };
+	return ansi;
+}
+
+function ansiSequenceEnd(text: string, start: number): number {
+	const kind = text.charCodeAt(start + 1);
+	if (kind === 0x5b) {
+		for (let index = start + 2; index < text.length; index++) {
+			const code = text.charCodeAt(index);
+			if (code >= 0x40 && code <= 0x7e) return index + 1;
+		}
+		return text.length;
+	}
+	if (kind === 0x5d) {
+		for (let index = start + 2; index < text.length; index++) {
+			if (text.charCodeAt(index) === 0x07) return index + 1;
+			if (text.charCodeAt(index) === 0x1b && text.charCodeAt(index + 1) === 0x5c) return index + 2;
+		}
+		return text.length;
+	}
+	if (kind === 0x50 || kind === 0x58 || kind === 0x5e || kind === 0x5f) {
+		for (let index = start + 2; index < text.length; index++) {
+			if (text.charCodeAt(index) === 0x1b && text.charCodeAt(index + 1) === 0x5c) return index + 2;
+		}
+		return text.length;
+	}
+	return Math.min(text.length, start + 2);
+}
+
+function foregroundAnsiAfterSgr(sequence: string, current: string): string {
+	if (!sequence.startsWith("\x1b[") || !sequence.endsWith("m")) return current;
+	const params = sequence.slice(2, -1);
+	if (params === "") return "\x1b[39m";
+	const tokens = params.split(";");
+	let foreground = current;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index] ?? "";
+		if (token.startsWith("38:")) {
+			foreground = `\x1b[${token}m`;
+			continue;
+		}
+		const value = Number(token || "0");
+		if (value === 0 || value === 39) {
+			foreground = "\x1b[39m";
+			continue;
+		}
+		if ((value >= 30 && value <= 37) || (value >= 90 && value <= 97)) {
+			foreground = `\x1b[${value}m`;
+			continue;
+		}
+		if (value !== 38) continue;
+		const mode = tokens[index + 1];
+		const last = mode === "2" ? index + 4 : mode === "5" ? index + 2 : index;
+		if (last === index || last >= tokens.length) continue;
+		foreground = `\x1b[${tokens.slice(index, last + 1).join(";")}m`;
+		index = last;
+	}
+	return foreground;
+}
+
+function renderPetrificationFrame(
+	lines: readonly string[],
+	frame: number,
+	rowOffset: number,
+	totalRows: number,
+): string[] {
+	const progress = Math.min(1, (frame + 1) / AUTO_CLOSE_FRAMES);
+	const height = Math.max(1, totalRows);
+	const totalCols = Math.max(1, ...lines.map(line => Bun.stringWidth(Bun.stripANSI(line))));
+	const gradient = stoneGradientAnsi();
+
+	return lines.map((line, row) => {
+		const absoluteRow = Math.max(0, rowOffset + row);
+		const rowRatio = absoluteRow / Math.max(1, height - 1);
+		if (progress < rowRatio * 0.58 * 0.85 - 0.02) return line;
+
+		let index = 0;
+		let col = 0;
+		let changed = false;
+		let rendered = "";
+		let originalForeground = "\x1b[39m";
+		while (index < line.length) {
+			if (line.charCodeAt(index) === 0x1b) {
+				const end = ansiSequenceEnd(line, index);
+				const sequence = line.slice(index, end);
+				rendered += sequence;
+				originalForeground = foregroundAnsiAfterSgr(sequence, originalForeground);
+				index = end;
+				continue;
+			}
+
+			const codePoint = line.codePointAt(index);
+			if (codePoint === undefined) break;
+			const glyph = String.fromCodePoint(codePoint);
+			index += glyph.length;
+			const glyphWidth = Bun.stringWidth(glyph);
+			if (glyphWidth <= 0 || glyph === " ") {
+				rendered += glyph;
+				if (glyphWidth > 0) col += glyphWidth;
+				continue;
+			}
+
+			const colRatio = col / Math.max(1, totalCols - 1);
+			const noise = stoneNoise(absoluteRow, col);
+			const threshold = Math.max(
+				0,
+				Math.min(0.85, (rowRatio * 0.58 + colRatio * 0.42) * 0.85 + (noise - 0.5) * 0.04),
+			);
+			if (progress < threshold) {
+				rendered += glyph;
+			} else {
+				changed = true;
+				const age = progress - threshold;
+				const step = Math.min(
+					gradient.length - 1,
+					Math.floor((age / STONE_GRADIENT_SETTLE_PROGRESS) * gradient.length),
+				);
+				const stoneForeground = gradient[Math.max(0, step)] ?? gradient.at(-1) ?? theme.getFgAnsi("dim");
+				rendered += `${stoneForeground}${glyph}${originalForeground}`;
+			}
+			col += glyphWidth;
+		}
+		return changed ? rendered : line;
+	});
+}
+
 export class AgentTranscriptViewer
-	implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware, WorkspacePaneHeaderProvider
+	implements
+		Component,
+		Focusable,
+		MouseRoutable,
+		TargetedRender,
+		ViewportHeightAware,
+		WorkspacePaneHeaderProvider,
+		AppViewportHoverProvider
 {
 	readonly #pane: ChatTranscriptPane;
 	readonly #deps: AgentTranscriptViewerDeps;
 	#model: string | undefined;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
+	#localLoadToken = 0;
+	#localLoading: { path: string; dev: number; ino: number } | undefined;
 	// Remote transcript state (incremental; the host caps each read).
 	#remoteBytes = 0;
 	#remoteFetchInFlight = false;
@@ -162,6 +351,10 @@ export class AgentTranscriptViewer
 	#disposed = false;
 	#statusLine: PaneStatusLine | undefined;
 	#statusLineSession: AgentHubSession | null;
+	#autoClose: { frame: number; onComplete: () => void } | undefined;
+	#autoCloseTimer: NodeJS.Timeout | undefined;
+	#autoCloseAbandoned = false;
+	#lastRenderedBodyRows = 1;
 
 	constructor(deps: AgentTranscriptViewerDeps) {
 		this.#deps = deps;
@@ -184,8 +377,9 @@ export class AgentTranscriptViewer
 				? {
 						label: `Message ${displayId}`,
 						placeholder: `Message ${displayId}…`,
-						onSubmit: text => {
-							this.#submit(text);
+						images: !deps.remote,
+						onSubmit: (text, images) => {
+							this.#submit(text, images);
 							return true;
 						},
 					}
@@ -226,7 +420,13 @@ export class AgentTranscriptViewer
 	}
 
 	set focused(focused: boolean) {
+		if (focused) this.#abandonAutoClose();
 		this.#pane.focused = focused;
+		if (!focused) this.#pane.clearAppViewportHover();
+	}
+
+	getPasteTarget(): CustomEditor | undefined {
+		return this.#sendable ? this.#pane.getPasteTarget() : undefined;
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
@@ -235,6 +435,18 @@ export class AgentTranscriptViewer
 
 	setViewportHeight(height: number): void {
 		this.#pane.setViewportHeight(height);
+	}
+
+	setTextSelectionActive(active: boolean): void {
+		this.#pane.setTextSelectionActive(active);
+	}
+
+	wantsAppViewportHover(): boolean {
+		return this.#pane.wantsAppViewportHover();
+	}
+
+	clearAppViewportHover(): void {
+		this.#pane.clearAppViewportHover();
 	}
 
 	getTextSelection(selection: TextSelectionRange): string | undefined {
@@ -253,9 +465,43 @@ export class AgentTranscriptViewer
 		return this.#pane.getTextSelectionScrollOffset(row);
 	}
 
+	get autoCloseProtected(): boolean {
+		return this.focused || this.#autoCloseAbandoned;
+	}
+
+	startAutoClose(onComplete: () => void): void {
+		if (this.#disposed || this.autoCloseProtected || this.#autoClose) return;
+		this.#autoClose = { frame: 0, onComplete };
+		this.#autoCloseTimer = setInterval(() => {
+			const animation = this.#autoClose;
+			if (!animation || this.#disposed) return;
+			animation.frame++;
+			if (animation.frame >= AUTO_CLOSE_FRAMES) {
+				this.#clearAutoCloseTimer();
+				this.#autoClose = undefined;
+				animation.onComplete();
+				return;
+			}
+			this.deps.ui.requestComponentRender(this);
+		}, AUTO_CLOSE_FRAME_MS);
+		this.#autoCloseTimer.unref();
+		this.deps.ui.requestComponentRender(this);
+	}
+
+	cancelAutoClose(): void {
+		if (!this.#autoClose) return;
+		this.#clearAutoCloseTimer();
+		this.#autoClose = undefined;
+		this.deps.ui.requestComponentRender(this);
+	}
+
 	dispose(): void {
 		this.#disposed = true;
+		this.#clearAutoCloseTimer();
+		this.#autoClose = undefined;
 		this.#stopPolling();
+		this.#localLoadToken++;
+		this.#localLoading = undefined;
 		this.#remoteToken++;
 		this.#statusLine?.dispose();
 		this.#pane.dispose();
@@ -290,6 +536,8 @@ export class AgentTranscriptViewer
 			this.#clearLocal("missing");
 			return;
 		}
+		const loading = this.#localLoading;
+		if (loading && loading.path === sessionFile && loading.dev === stat.dev && loading.ino === stat.ino) return;
 		const state = this.#localState;
 		if (state && this.#canAppendLocal(sessionFile, stat, state)) {
 			if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) return;
@@ -302,7 +550,9 @@ export class AgentTranscriptViewer
 	}
 
 	#clearLocal(reason: string): void {
-		if (!this.#localState && this.#localUnavailable === reason) return;
+		if (!this.#localState && !this.#localLoading && this.#localUnavailable === reason) return;
+		this.#localLoadToken++;
+		this.#localLoading = undefined;
 		this.#localState = undefined;
 		this.#localUnavailable = reason;
 		this.#model = undefined;
@@ -333,28 +583,35 @@ export class AgentTranscriptViewer
 	}
 
 	#loadLocalFull(sessionFile: string, stat: fs.Stats): void {
+		if (stat.size < ASYNC_LOCAL_LOAD_THRESHOLD_BYTES) {
+			this.#localLoadToken++;
+			this.#localLoading = undefined;
+			this.#loadLocalFullSync(sessionFile, stat);
+			return;
+		}
+		const token = ++this.#localLoadToken;
+		this.#localLoading = { path: sessionFile, dev: stat.dev, ino: stat.ino };
+		this.#localState = undefined;
+		this.#localUnavailable = "";
+		this.#model = undefined;
+		this.#rebuild([]);
+		void this.#loadLocalFullAsync(sessionFile, stat, token);
+	}
+
+	#loadLocalFullSync(sessionFile: string, stat: fs.Stats): void {
 		let data: Buffer;
 		try {
 			data = this.#deps.transcript.fs.readFileSync(sessionFile);
 		} catch (err) {
-			// Leave #localState unchanged so a transient read error retries next poll.
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
-		// The file may have grown between the earlier `statSync` and this read.
-		// Anchor the tail cursor to what we actually consumed so the next poll's
-		// `#appendLocal` never re-renders bytes already in the rebuilt transcript;
-		// re-stat for mtime/identity so the post-read clock matches what's on disk.
 		let post: fs.Stats;
 		try {
 			post = this.#deps.transcript.fs.statSync(sessionFile);
 		} catch {
 			post = stat;
 		}
-		// A reader that opens the file mid-append sees a trailing partial line
-		// (no terminating newline). Carry those bytes as `pending` so the next
-		// poll's `#appendLocal` joins them with the completion bytes instead of
-		// parsing a headless line fragment and dropping the entry.
 		const text = data.toString("utf-8");
 		const lastNewline = text.lastIndexOf("\n");
 		const complete = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
@@ -372,6 +629,64 @@ export class AgentTranscriptViewer
 		};
 		this.#model = undefined;
 		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete)));
+	}
+
+	async #loadLocalFullAsync(sessionFile: string, stat: fs.Stats, token: number): Promise<void> {
+		const batch: AgentTranscriptEntry[] = [];
+		const decoder = new TextDecoder();
+		let pending = "";
+		let bytesConsumed = 0;
+		try {
+			await this.#deps.transcript.visitEntries(
+				sessionFile,
+				entry => {
+					batch.push(entry);
+					if (batch.length < 128) return;
+					this.#append(this.#extractMessages(batch));
+					batch.length = 0;
+				},
+				{
+					maxBytes: stat.size,
+					yieldEveryEntries: 128,
+					throwIfMissing: true,
+					onBytesConsumed: bytes => {
+						bytesConsumed += bytes;
+					},
+					shouldContinue: () => token === this.#localLoadToken && !this.#disposed,
+					onTrailingPartial: bytes => {
+						pending = decoder.decode(bytes);
+					},
+				},
+			);
+		} catch (err) {
+			if (token === this.#localLoadToken) {
+				this.#localLoading = undefined;
+				logger.debug("transcript viewer: incremental load failed", { err: String(err) });
+			}
+			return;
+		}
+		if (token !== this.#localLoadToken || this.#disposed) return;
+		if (batch.length > 0) this.#append(this.#extractMessages(batch));
+		let sentinels: LocalTranscriptSentinel[];
+		try {
+			sentinels = sentinelsFromFile(this.#deps.transcript.fs, sessionFile, bytesConsumed);
+		} catch (err) {
+			this.#localLoading = undefined;
+			logger.debug("transcript viewer: sentinel load failed", { err: String(err) });
+			return;
+		}
+		this.#localState = {
+			path: sessionFile,
+			dev: stat.dev,
+			ino: stat.ino,
+			size: bytesConsumed,
+			mtimeMs: stat.mtimeMs,
+			offset: bytesConsumed,
+			pending,
+			sentinels,
+		};
+		this.#localLoading = undefined;
+		this.#deps.requestRender();
 	}
 
 	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState): void {
@@ -508,14 +823,16 @@ export class AgentTranscriptViewer
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		this.#abandonAutoClose();
 		return this.#pane.routeMouse(event, line, col);
 	}
 
 	handleInput(data: string): void {
+		this.#abandonAutoClose();
 		this.#pane.handleInput(data);
 	}
 
-	#submit(trimmed: string): void {
+	#submit(trimmed: string, images?: ImageContent[]): void {
 		this.#pane.setNotice(undefined);
 		const id = this.#deps.agentId;
 		if (this.#deps.remote) {
@@ -530,7 +847,7 @@ export class AgentTranscriptViewer
 				// Revives a parked agent; returns the live session for running/idle.
 				const session = await lifecycle().ensureLive(id);
 				// Steers a mid-turn agent; sends a normal prompt to an idle one.
-				await session.prompt(trimmed, { streamingBehavior: "steer" });
+				await session.prompt(trimmed, { streamingBehavior: "steer", images });
 			} catch (error) {
 				this.#pane.setNotice(error instanceof Error ? error.message : String(error));
 			}
@@ -548,7 +865,11 @@ export class AgentTranscriptViewer
 	}
 
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
-		return renderTargeted(this.#pane, width, targets);
+		const lines = renderTargeted(this.#pane, width, targets);
+		this.#lastRenderedBodyRows = lines.length;
+		return this.#autoClose
+			? renderPetrificationFrame(lines, this.#autoClose.frame, 1, this.#lastRenderedBodyRows + 1)
+			: lines;
 	}
 
 	invalidate(): void {
@@ -556,7 +877,11 @@ export class AgentTranscriptViewer
 	}
 
 	render(width: number): readonly string[] {
-		return this.#pane.render(width);
+		const lines = this.#pane.render(width);
+		this.#lastRenderedBodyRows = lines.length;
+		return this.#autoClose
+			? renderPetrificationFrame(lines, this.#autoClose.frame, 1, this.#lastRenderedBodyRows + 1)
+			: lines;
 	}
 
 	renderWorkspaceHeader(width: number, focused: boolean): string {
@@ -571,9 +896,23 @@ export class AgentTranscriptViewer
 					? theme.fg("dim", " · Esc")
 					: ""
 			: "";
-		return renderWorkspacePaneHeader(name, width, focused, `${status}${model}${action}`);
+		const header = renderWorkspacePaneHeader(name, width, focused, `${status}${model}${action}`);
+		return this.#autoClose
+			? (renderPetrificationFrame([header], this.#autoClose.frame, 0, this.#lastRenderedBodyRows + 1)[0] ?? "")
+			: header;
 	}
 
+	#abandonAutoClose(): void {
+		if (!this.#autoClose) return;
+		this.#autoCloseAbandoned = true;
+		this.cancelAutoClose();
+	}
+
+	#clearAutoCloseTimer(): void {
+		if (!this.#autoCloseTimer) return;
+		clearInterval(this.#autoCloseTimer);
+		this.#autoCloseTimer = undefined;
+	}
 	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
 		const ref = this.#deps.registry.get(this.#deps.agentId);
 		const session = ref?.session ?? null;
@@ -596,6 +935,7 @@ export class AgentTranscriptViewer
 			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
+		if (this.#localLoading) return "Loading transcript…";
 		if (!this.#deps.registry.get(this.#deps.agentId)?.sessionFile) return "No session file available yet.";
 		return "No messages yet.";
 	}
