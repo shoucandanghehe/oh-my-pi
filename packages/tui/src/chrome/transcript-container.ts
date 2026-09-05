@@ -73,6 +73,8 @@ interface FinalizableBlock {
 	isTranscriptBlockPending?(): boolean;
 	/** Render the row that must remain represented under emergency viewport pressure. */
 	renderTranscriptBlockEmergencyRow?(width: number): string | undefined;
+	/** Whether finalized rows may retire into immutable terminal history. */
+	isTranscriptBlockAppendOnly?(): boolean;
 }
 
 /**
@@ -232,6 +234,15 @@ function isVoidNode(described: NativeNode, cx: DescribeContext, depth: number): 
 		if ("k" in child ? !isVoidNode(child, cx, depth + 1) : !describesNothing(child, cx, depth + 1)) return false;
 	}
 	return true;
+}
+
+function canRetire(component: Component): boolean {
+	const block = component as Component & FinalizableBlock;
+	return (
+		(block.isTranscriptBlockFinalized?.() ?? true) &&
+		block.isTranscriptBlockPending?.() !== true &&
+		(block.isTranscriptBlockAppendOnly?.() ?? true)
+	);
 }
 
 function blockMode(component: Component): TranscriptBlockMode {
@@ -1904,7 +1915,7 @@ export class TranscriptContainer extends Container {
 	#settleFinalized(): void {
 		for (let index = this.#frontier; index < this.#entries.length; index++) {
 			const entry = this.#entries[index]!;
-			if (entry.state === "active" && isFinalized(entry.component)) entry.state = "settled";
+			if (entry.state === "active" && canRetire(entry.component)) entry.state = "settled";
 		}
 	}
 
