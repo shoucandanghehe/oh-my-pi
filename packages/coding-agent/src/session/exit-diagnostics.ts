@@ -4,6 +4,8 @@ import type { SessionEntry } from "./session-entries";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
 export const SESSION_EXIT_CUSTOM_TYPE = "session_exit";
+export const AGENTS_PAUSED_CUSTOM_TYPE = "agents_paused";
+export const AGENTS_CONTINUED_CUSTOM_TYPE = "agents_continued";
 
 /**
  * Compact projection of tool-call arguments persisted with the start marker.
@@ -38,9 +40,20 @@ export interface PendingToolCallDiagnostic {
 /** Session shutdown marker written during normal and fatal process teardown. */
 export interface SessionExitData {
 	reason: string;
-	kind: "normal" | "signal" | "fatal" | "process_exit";
+	kind: "normal" | "signal" | "fatal" | "process_exit" | "paused";
 	recordedAt: string;
 	pendingToolCalls?: PendingToolCallDiagnostic[];
+}
+
+/**
+ * Durable marker written when every live agent has parked at the model-call
+ * boundary and the process exits while still paused. Resume loads the session
+ * idle; `/continue` restarts the loops from the last durable tail.
+ */
+export interface AgentsPausedData {
+	pausedAt: string;
+	/** Registry ids that were mid-turn (main + live subagents). */
+	agentIds: string[];
 }
 
 interface PendingToolCallRecord extends PendingToolCallDiagnostic {
@@ -85,7 +98,7 @@ function readSessionExit(entry: SessionEntry): SessionExitData | undefined {
 	const { reason, kind, recordedAt } = entry.data;
 	if (
 		typeof reason !== "string" ||
-		(kind !== "normal" && kind !== "signal" && kind !== "fatal" && kind !== "process_exit") ||
+		(kind !== "normal" && kind !== "signal" && kind !== "fatal" && kind !== "process_exit" && kind !== "paused") ||
 		typeof recordedAt !== "string"
 	) {
 		return undefined;
@@ -96,6 +109,23 @@ function readSessionExit(entry: SessionEntry): SessionExitData | undefined {
 		recordedAt,
 		pendingToolCalls: readPendingToolCalls(entry.data.pendingToolCalls),
 	};
+}
+
+/** Latest `agents_paused` entry on the branch, if not yet continued. */
+export function readAgentsPaused(entries: readonly SessionEntry[]): AgentsPausedData | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]!;
+		if (entry.type !== "custom") continue;
+		if (entry.customType === AGENTS_CONTINUED_CUSTOM_TYPE) return undefined;
+		if (entry.customType !== AGENTS_PAUSED_CUSTOM_TYPE || !isObject(entry.data)) continue;
+		const pausedAt = entry.data.pausedAt;
+		const agentIds = entry.data.agentIds;
+		if (typeof pausedAt !== "string" || !Array.isArray(agentIds) || !agentIds.every(id => typeof id === "string")) {
+			return undefined;
+		}
+		return { pausedAt, agentIds: agentIds as string[] };
+	}
+	return undefined;
 }
 
 /**
@@ -115,7 +145,7 @@ export function createInterruptedTurnAbortMessage(
 		exit = candidate;
 		break;
 	}
-	if (!exit || (exit.kind === "normal" && !exit.pendingToolCalls?.length)) return undefined;
+	if (!exit || exit.kind === "paused" || (exit.kind === "normal" && !exit.pendingToolCalls?.length)) return undefined;
 
 	let tailIndex = -1;
 	let tail: AgentMessage | undefined;
