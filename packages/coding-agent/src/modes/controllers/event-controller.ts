@@ -65,7 +65,6 @@ import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { type RunStatus, setRunStatus } from "../../utils/run-status";
-import { setTerminalTitleState } from "../../utils/title-generator";
 import {
 	assistantMessageLinkTargets,
 	createAssistantMessageComponent,
@@ -90,7 +89,6 @@ import {
 	cfgDisplaySmoothStreaming,
 	cfgErrorNotify,
 	cfgTerminalShowImages,
-	cfgTerminalShowProgress,
 } from "../settings";
 import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
@@ -312,14 +310,6 @@ export class EventController {
 	#toolArgsReveal: ToolArgsRevealController;
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
-	#terminalProgressActive = false;
-	/**
-	 * Whether the running auto-compaction turned terminal progress on itself.
-	 * Only then does its end turn progress off: a compaction inside a live turn
-	 * leaves the turn's progress for that turn's `agent_end`, so Tern (which
-	 * reads progress as busy state) never sees the agent stop mid-run.
-	 */
-	#compactionOwnsProgress = false;
 	/** Bumped at every `agent_start`; a settle watch stands down once a new run begins. */
 	#runEpoch = 0;
 	/** Epoch of the in-flight {@link #finishWhenRunSettles} watch, if any. */
@@ -354,6 +344,9 @@ export class EventController {
 	// once instead of twice.
 	#vocalizedMessageUpdates = new WeakSet<object>();
 	static readonly #MESSAGE_UPDATE_COALESCE_MS = 33;
+	readonly #agentTerminalActivityOwner = {};
+	readonly #maintenanceTerminalActivityOwner = {};
+	readonly #attentionTerminalActivityOwner = {};
 
 	constructor(private ctx: InteractiveModeContext) {
 		// Enhanced speech (`speech.enhanced`) rewrites blocks through the
@@ -495,7 +488,7 @@ export class EventController {
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
 		this.composerPrediction.cancel();
-		this.#setTerminalProgress(false);
+		this.resetTerminalActivity();
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}
@@ -1098,22 +1091,10 @@ export class EventController {
 		await run(event);
 	}
 
-	#setTerminalProgress(active: boolean): void {
-		if (active) {
-			// Tern reads the progress as the pane's busy state (its tab's live
-			// dot), so it gets it whatever the setting says. Tern's panes carry
-			// `KITTY_WINDOW_ID`, so `TERMINAL.id` says kitty there.
-			const wanted =
-				Bun.env.TERM_PROGRAM?.toLowerCase() === "tern" ||
-				(this.ctx.settings ? cfgTerminalShowProgress.get(this.ctx.settings) : undefined) === true;
-			if (this.#terminalProgressActive || !wanted) return;
-			this.ctx.ui.terminal.setProgress(true);
-			this.#terminalProgressActive = true;
-			return;
-		}
-		if (!this.#terminalProgressActive) return;
-		this.ctx.ui.terminal.setProgress(false);
-		this.#terminalProgressActive = false;
+	resetTerminalActivity(): void {
+		this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
+		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 	}
 
 	#trackRetrySupersededAssistantComponent(component: AssistantMessageComponent | undefined): void {
@@ -1209,9 +1190,8 @@ export class EventController {
 		}
 		this.composerPrediction.cancel();
 		this.ctx.statusLine.markActivityStart();
-		// The turn owns progress from here; a compaction that started it hands it over.
-		this.#compactionOwnsProgress = false;
-		this.#setTerminalProgress(true);
+		this.ctx.terminalActivity.set(this.#agentTerminalActivityOwner, "working");
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 		this.ctx.ensureLoadingAnimation();
 		this.#runActive = true;
 		this.#syncComposerActivity();
@@ -1976,6 +1956,7 @@ export class EventController {
 		if (blocked) {
 			this.#blockingPrompts.set(event.toolCallId, blocked);
 			setRunStatus(blocked);
+			this.ctx.terminalActivity.set(this.#attentionTerminalActivityOwner, "attention");
 		}
 		this.#resolveDisplaceablePoll(renderToolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
@@ -2220,6 +2201,9 @@ export class EventController {
 		// leaking ids until turn end.
 		if (this.#blockingPrompts.delete(event.toolCallId)) {
 			setRunStatus(this.#blockingPrompts.values().next().value ?? { state: "working" });
+			if (this.#blockingPrompts.size === 0) {
+				this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
+			}
 		}
 		if (event.toolName === "read") {
 			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
@@ -2397,7 +2381,7 @@ export class EventController {
 			// `working` its `agent_start` sets. The OSC 7501 record stays `working`:
 			// the run is not over, it resumes or settles without the user.
 			if (event.awaitingAsyncWork === true) {
-				setTerminalTitleState("idle");
+				this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
 				this.#showAsyncWait(event);
 			}
 			void this.#finishWhenRunSettles(event);
@@ -2548,7 +2532,8 @@ export class EventController {
 		options?: { interrupted?: boolean },
 	): Promise<void> {
 		this.#asyncWaitEnd = undefined;
-		this.#setTerminalProgress(false);
+		this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();
 		this.#streamingReveal.stop();
@@ -2646,10 +2631,8 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
 		this.composerPrediction.cancel();
-		if (!this.#terminalProgressActive) {
-			this.#setTerminalProgress(true);
-			this.#compactionOwnsProgress = this.#terminalProgressActive;
-		}
+		this.ctx.terminalActivity.set(this.#maintenanceTerminalActivityOwner, "working");
+		this.ctx.terminalActivity.release(this.#attentionTerminalActivityOwner);
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
 		const reasonText =
@@ -2694,10 +2677,9 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
-		if (this.#compactionOwnsProgress) {
-			this.#compactionOwnsProgress = false;
-			this.#setTerminalProgress(false);
-		}
+		this.#cancelIdleCompaction();
+		this.#cancelIdleRecap();
+		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();
 			this.ctx.autoCompactionLoader = undefined;

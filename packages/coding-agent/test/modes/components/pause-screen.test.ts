@@ -29,10 +29,12 @@ interface FakeHost {
 	statuses: string[];
 	requestCount(): number;
 	hiddenCount(): number;
+	pausedExitCount(): number;
 }
 function makeHost(rows = 24): FakeHost {
 	const shown: Component[] = [];
 	const statuses: string[] = [];
+	let pausedExits = 0;
 	let hidden = 0;
 	let requests = 0;
 	const host: PauseScreenHost = {
@@ -40,12 +42,10 @@ function makeHost(rows = 24): FakeHost {
 			showOverlay(component) {
 				shown.push(component);
 				return {
-					hide: () => {
+					hide() {
 						hidden++;
 					},
-					setHidden() {},
-					isHidden: () => false,
-				};
+				} as never;
 			},
 			setFocus() {},
 			requestRender() {
@@ -56,8 +56,13 @@ function makeHost(rows = 24): FakeHost {
 		showStatus(message) {
 			statuses.push(message);
 		},
+		session: {
+			async disposeForPausedExit() {
+				pausedExits++;
+			},
+		},
 	};
-	return { host, shown, statuses, requestCount: () => requests, hiddenCount: () => hidden };
+	return { host, shown, statuses, requestCount: () => requests, hiddenCount: () => hidden, pausedExitCount: () => pausedExits };
 }
 
 describe("pause screen", () => {
@@ -153,12 +158,14 @@ describe("pause screen", () => {
 			for (const line of lines) expect(Bun.stringWidth(stripAnsi(line))).toBeLessThanOrEqual(16);
 		});
 
-		it("drops to the compact card on small terminals", () => {
-			const lines = renderPauseScreen(40, 10, 3_000);
+		it("shows PAUSING while waiting for the barrier", () => {
+			const lines = renderPauseScreen(40, 10, 3_000, undefined, { unsettledTurns: 1, unfinishedJobs: 0 }, false);
 			expect(lines.length).toBe(10);
 			const text = lines.map(stripAnsi).join("\n");
-			expect(text).toContain("▌▌ P A U S E D");
+			expect(text).toContain("▌▌ P A U S I N G");
 			expect(text).toContain("paused for 0:03");
+			expect(text).toContain("Unsettled turns: 1");
+			expect(text).toContain("to resume");
 			expect(text).not.toContain("█".repeat(5)); // no room for the big glyph
 		});
 
@@ -574,6 +581,25 @@ describe("pause screen", () => {
 			await runPauseScreen(host); // must resolve immediately, not park
 			expect(shown.length).toBe(0);
 			expect(agentPauseGate.paused).toBe(true); // foreign pause not stolen
+		});
+
+		it("exits paused only when the barrier is ready", async () => {
+			const { host, shown, pausedExitCount, statuses } = makeHost();
+			const run = runPauseScreen(host);
+			await Bun.sleep(1);
+
+			const component = shown[0];
+			expect(component).toBeInstanceOf(PauseScreenComponent);
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected PauseScreenComponent");
+
+			// No active loops → ready immediately; q should exit paused.
+			expect(agentPauseGate.ready).toBe(true);
+			component.handleInput("q");
+			const outcome = await run;
+			expect(outcome).toBe("exited");
+			expect(pausedExitCount()).toBe(1);
+			expect(agentPauseGate.paused).toBe(false);
+			expect(statuses.some(message => message.includes("Resumed after"))).toBe(false);
 		});
 	});
 });

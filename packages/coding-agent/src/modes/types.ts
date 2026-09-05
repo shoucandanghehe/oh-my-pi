@@ -59,6 +59,7 @@ import type { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-con
 import type { EventController } from "./controllers/event-controller";
 import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
+import type { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { ConversationPosition } from "./utils/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -187,6 +188,7 @@ export interface InteractiveModeContext {
 	 * changes how links are drawn.
 	 */
 	syncExtensionLinks(): void;
+	terminalActivity: TerminalActivityController;
 
 	// Session access
 	session: AgentSession;
@@ -364,6 +366,11 @@ export interface InteractiveModeContext {
 	restart(): Promise<void>;
 	/** Request graceful shutdown at the next fully settled boundary, including background turns. */
 	requestShutdown(): void;
+	/**
+	 * Finish TUI teardown and exit after `/pause` already disposed the session
+	 * with `pausedExit`. Must not dispose again.
+	 */
+	shutdownAfterPausedExit(): Promise<void>;
 	checkShutdownRequested(): Promise<void>;
 
 	// Extension UI integration
