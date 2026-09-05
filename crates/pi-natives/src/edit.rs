@@ -44,8 +44,6 @@ use pi_edit::{
 	text::normalize_to_lf,
 };
 
-use crate::memory::{self, Settled, native_work};
-
 fn parse_mode(mode: &str) -> Result<EditMode> {
 	EditMode::parse(mode)
 		.ok_or_else(|| napi::Error::from_reason(format!("Unknown edit mode: {mode}")))
@@ -404,7 +402,6 @@ impl Shared {
 	/// is never previewed or applied again, so a fresh one is equivalent.
 	fn release(session: &mut Session) {
 		*session = Session::new(session.config().clone(), session.store().clone());
-		memory::released();
 	}
 
 	/// `true` when the pump must stop. Releases the session's buffers only
@@ -692,9 +689,6 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 		let Some(batch) = settled_preview(&shared).await else {
 			continue;
 		};
-		// Held until the delivery below has converted and released the batch
-		// on the JS thread, however this iteration ends.
-		let _settled = Settled::new(());
 		let is_final = !batch.streaming;
 		if shared.closed.load(Ordering::Acquire) {
 			return;
@@ -721,9 +715,6 @@ async fn preview_pump(shared: Arc<Shared>, rx: flume::Receiver<()>, on_preview: 
 /// `None` when nothing is pending, the session closed, or the blocking task
 /// failed.
 async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
-	// Every pass's batch and misses are freed by the time this returns,
-	// including passes abandoned while a URL resolver ran.
-	let _settled = Settled::new(());
 	let mut resolved = HashSet::new();
 	loop {
 		if shared.closed.load(Ordering::Acquire) {
@@ -731,7 +722,6 @@ async fn settled_preview(shared: &Arc<Shared>) -> Option<PreviewBatch> {
 		}
 		let compute = Arc::clone(shared);
 		let pass = napi::bindgen_prelude::spawn_blocking(move || {
-			let _work = native_work();
 			compute.preview_pass(&mut compute.session.blocking_lock())
 		})
 		.await;

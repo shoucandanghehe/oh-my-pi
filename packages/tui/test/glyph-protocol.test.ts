@@ -219,7 +219,7 @@ describe("glyph protocol probe", () => {
 			process.stdin.emit("data", SUPPORT_REPLY);
 			// Drain the FIFO (earlier probes, then the ignored support-phase
 			// sentinel) until the confirmation-phase sentinel lands with no `q` answer.
-			for (let i = 0; i < 10 && reports.length === 0; i++) process.stdin.emit("data", DA1_REPLY);
+			for (let i = 0; i < 16 && reports.length === 0; i++) process.stdin.emit("data", DA1_REPLY);
 			expect(reports).toEqual([false]);
 			expect(TERMINAL.glyphProtocol).toBe(false);
 		} finally {
