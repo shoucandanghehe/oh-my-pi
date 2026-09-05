@@ -474,6 +474,7 @@ export class BtwController {
 			}
 			this.#refreshHistory();
 			if (sheet && !previous) this.#showHistory(store).showRecord(record.id);
+			this.ctx.terminalActivity.set(request, "working");
 			void this.#runRequest(request);
 			return true;
 		} catch (error) {
@@ -646,6 +647,8 @@ export class BtwController {
 				if (cancelled) request.component.markAborted();
 				else request.component.markError(message);
 			}
+		} finally {
+			this.ctx.terminalActivity.release(request);
 		}
 		this.#persist(request);
 		if (this.#isActiveRequest(request)) this.#refreshHistory();

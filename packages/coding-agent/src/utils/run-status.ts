@@ -1,9 +1,8 @@
 /**
- * The agent's run status, published to every terminal surface that shows it:
- * the title's run-state separator, and the root record of the OSC 7501 Program
- * Status Protocol (https://mitchellh.com/writing/program-status-osc7501),
- * which tabs, multiplexers, and agent inboxes read from the PTY instead of
- * scraping the title.
+ * The main agent's run status, published as the root record of the OSC 7501
+ * Program Status Protocol (https://mitchellh.com/writing/program-status-osc7501).
+ * Tabs, multiplexers, and agent inboxes read it from the PTY instead of scraping
+ * the title. Concurrent title and progress activity is aggregated separately.
  *
  * A report replaces the terminal's record whole, so each one carries `app` and
  * the full status. omp only writes the root record; teardown and opting out
@@ -12,7 +11,6 @@
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { APP_NAME, isTerminalHeadless, sanitizeText } from "@oh-my-pi/pi-utils";
-import { setTerminalTitleState, type TerminalTitleState } from "./title-generator";
 
 /** What a blocked run waits on: an approval prompt or an `ask` question. */
 export type BlockedKind = "permission" | "question";
@@ -53,11 +51,6 @@ const runtime: {
 	reported: undefined,
 };
 
-function titleState(status: RunStatus): TerminalTitleState {
-	if (status.state === "working") return "working";
-	if (status.state === "blocked") return "attention";
-	return "idle";
-}
 
 /**
  * Base64 of `text` as one line of control-free UTF-8 within the `msg` limit, or
@@ -96,13 +89,11 @@ function clear(): void {
 }
 
 /**
- * Publish a run status transition from the interactive event flow: the title
- * separator (`tui.titleState`) and, unless `terminal.programStatus` is off, the
- * OSC 7501 root record.
+ * Publish a main-run status transition as the OSC 7501 root record, unless
+ * `terminal.programStatus` is off.
  */
 export function setRunStatus(status: RunStatus): void {
 	runtime.status = status;
-	setTerminalTitleState(titleState(status));
 	report();
 }
 
