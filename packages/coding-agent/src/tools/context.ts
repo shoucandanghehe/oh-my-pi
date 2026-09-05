@@ -8,6 +8,12 @@ declare module "@oh-my-pi/pi-agent-core" {
 		hasUI?: boolean;
 		toolNames?: string[];
 		toolCall?: ToolCallContext;
+		/**
+		 * Whether approval should wait for the interactive transcript's tool preview.
+		 * Child surfaces that render their own restricted tool set use `never` because
+		 * the Main transcript cannot acknowledge their tool lifecycle.
+		 */
+		toolApprovalPreview?: "auto" | "never";
 		/** Set on `xd://` device dispatches: the write tool's outer approval gate
 		 *  already resolved this call at the mounted tool's tier, so the inner
 		 *  wrapper must not re-prompt for the same action (explicit per-tool

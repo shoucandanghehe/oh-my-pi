@@ -94,40 +94,6 @@ describe("restoreBtwThreads", () => {
 		expect(threads[0]?.turns).toEqual([firstTurn, secondTurn]);
 	});
 
-	it("replaces a child's frozen Main anchor without discarding its side turns", () => {
-		const turn = { input: "Before?", replyText: "Kept", assistantMessage: assistant("Kept", 10), timestamp: 10 };
-		const refreshedBase = [{ role: "user" as const, content: "new Main", timestamp: 20 }];
-		const events = [
-			entry(1, {
-				version: 1,
-				op: "create",
-				key: "thread-a",
-				title: "Before?",
-				createdAt: 10,
-				anchorLeafId: "anchor-old",
-				model: { provider: "anthropic", id: "claude-sonnet-4-5" },
-				sideSessionId: "side-old",
-				baseMessages: [],
-				turns: [turn],
-			}),
-			entry(2, {
-				version: 1,
-				op: "refresh",
-				key: "thread-a",
-				anchorLeafId: "anchor-new",
-				sideSessionId: "side-new",
-				baseMessages: refreshedBase,
-			}),
-		];
-
-		expect(restoreBtwThreads(events)[0]).toMatchObject({
-			anchorLeafId: "anchor-new",
-			sideSessionId: "side-new",
-			baseMessages: refreshedBase,
-			turns: [turn],
-		});
-	});
-
 	it("removes a promoted child instead of restoring a second writable copy", () => {
 		const turn = { input: "Promote?", replyText: "Yes", assistantMessage: assistant("Yes", 10), timestamp: 10 };
 		const events = [

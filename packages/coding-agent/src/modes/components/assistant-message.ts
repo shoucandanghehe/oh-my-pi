@@ -190,6 +190,8 @@ function isStructuredThinkingResult(
 	return candidate.type === "append" || candidate.type === "replace";
 }
 
+let nextAssistantImageNamespace = 0;
+
 /**
  * Renders an assistant message; streaming content remains mutable until the
  * provider finalizes it because later deltas can revise earlier Markdown.
@@ -207,6 +209,7 @@ export class AssistantMessageComponent extends Container {
 	#emergencyText?: Markdown;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
 	#convertedKittyImages = new Map<string, ImageContent>();
+	readonly #nativeImageNamespace = `assistant-${nextAssistantImageNamespace++}`;
 	#showImages = true;
 	#showToolResultImages = true;
 	#kittyConversionsInFlight = new Set<string>();
@@ -1184,7 +1187,8 @@ export class AssistantMessageComponent extends Container {
 					this.#contentContainer.addChild(new Spacer(1));
 				}
 			} else if (content.type === "image" && content.data && content.mimeType) {
-				this.#renderImageEntries([{ image: content, key: `native:${i}` }], hasRenderedContent);
+				const imageKey = `${this.#nativeImageNamespace}:${i}:${content.mimeType}:${String(Bun.hash(content.data))}`;
+				this.#renderImageEntries([{ image: content, key: imageKey }], hasRenderedContent);
 				hasRenderedContent ||= this.#showImages;
 			}
 		}

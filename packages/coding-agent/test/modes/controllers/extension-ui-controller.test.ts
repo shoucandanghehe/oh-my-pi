@@ -63,6 +63,7 @@ function makeHarness() {
 		setFocus,
 		showOverlay,
 		fakeHandle,
+		ctx,
 		controller,
 		async init(): Promise<ExtensionUIContext> {
 			await controller.initHooksAndCustomTools();
@@ -243,6 +244,77 @@ describe("ExtensionUiController editor UI", () => {
 		await Promise.resolve();
 		ask?.handleInput?.("!");
 		expect(harness.editor.getText()).toBe("half typed prompt!");
+	});
+
+	it("keeps localAskDialog on the host while preserving long-preview paging and submit", async () => {
+		const harness = makeHarness();
+		const requestGuestUi = vi.fn();
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+		if (!ui.localAskDialog) throw new Error("localAskDialog was not registered");
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
+		try {
+			const preview = `\`\`\`\n${Array.from({ length: 80 }, (_, index) => `PREVIEW-${index}`).join("\n")}\n\`\`\``;
+			const pending = ui.localAskDialog([
+				{
+					id: "approval",
+					question: "Approve this exact message?",
+					options: [{ label: "Approve", preview }],
+				},
+			]);
+			const ask = harness.editorContainer.children[0];
+			expect(ask).toBeInstanceOf(AskDialogComponent);
+			expect(ask?.render?.(80).join("\n")).toContain("PREVIEW-0");
+
+			for (let page = 0; page < 10; page++) ask?.handleInput?.("\x1b[6~");
+			expect(ask?.render?.(80).join("\n")).toContain("PREVIEW-79");
+			for (let page = 0; page < 10; page++) ask?.handleInput?.("\x1b[5~");
+			expect(ask?.render?.(80).join("\n")).toContain("PREVIEW-0");
+			ask?.handleInput?.("\n");
+
+			expect(await pending).toEqual({
+				kind: "submit",
+				results: [
+					{
+						id: "approval",
+						question: "Approve this exact message?",
+						options: ["Approve"],
+						multi: false,
+						selectedOptions: ["Approve"],
+						customInput: undefined,
+						note: undefined,
+						timedOut: undefined,
+					},
+				],
+			});
+			expect(requestGuestUi).not.toHaveBeenCalled();
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("cancels localAskDialog locally without requesting a guest answer", async () => {
+		const harness = makeHarness();
+		const requestGuestUi = vi.fn();
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+		if (!ui.localAskDialog) throw new Error("localAskDialog was not registered");
+
+		const pending = ui.localAskDialog([
+			{
+				id: "approval",
+				question: "Approve?",
+				options: [{ label: "Approve" }, { label: "Reject" }],
+			},
+		]);
+		const ask = harness.editorContainer.children[0];
+		expect(ask).toBeInstanceOf(AskDialogComponent);
+		ask?.handleInput?.("\x1b");
+
+		expect(await pending).toBeUndefined();
+		expect(requestGuestUi).not.toHaveBeenCalled();
 	});
 
 	it("bridges addAutocompleteProvider factories to the interactive mode context (#4919)", async () => {

@@ -1,13 +1,16 @@
 import { matchesKey } from "./keys";
 import type { MouseRoutable, SgrMouseEvent } from "./mouse";
+import { markKittyPlacementClipRows } from "./terminal-capabilities";
 import type { TextSelectionRange } from "./text-selection";
 import type {
 	AppViewportHoverProvider,
 	AppViewportInputOwner,
 	AppViewportTextSelectionRect,
 	Component,
+	TargetedRender,
 	ViewportTailProvider,
 } from "./tui";
+import { componentContains, renderTargeted } from "./tui";
 import { padding, sliceByColumn, TERMINAL_STATE_TERMINATOR, truncateToWidth, visibleWidth } from "./utils";
 
 export type WorkspaceAxis = "x" | "y";
@@ -68,6 +71,12 @@ export interface ViewportHeightAware {
 	setViewportHeight(height: number): void;
 }
 
+/** Component-owned viewport that explicitly manages its own follow-bottom state. */
+export interface ComponentViewportTailProvider extends ViewportTailProvider {
+	readonly componentViewportTail: true;
+	renderViewportTailTargeted?(width: number, maxRows: number, targets: readonly Component[]): readonly string[];
+}
+
 export interface WorkspacePaneHeaderProvider {
 	renderWorkspaceHeader(width: number, focused: boolean): string;
 }
@@ -92,6 +101,7 @@ export interface WorkspaceLayoutOptions {
 	panes: readonly WorkspacePane[];
 	height: () => number;
 	requestRender: () => void;
+	requestComponentRender?: (component: Component) => void;
 	focus?: (component: Component) => void;
 	renderHeader?: (pane: WorkspacePane, width: number, focused: boolean) => string;
 	/** Style or replace sash glyphs. Output must preserve the input's visible width. */
@@ -551,12 +561,13 @@ interface WorkspacePaneViewport {
  * App-viewport workspace compositor with recursively nested panes. The layout
  * tree owns geometry; pane components retain their own content and scroll state.
  */
-export class WorkspaceLayout implements Component, AppViewportInputOwner {
+export class WorkspaceLayout implements Component, AppViewportInputOwner, TargetedRender {
 	readonly #model: WorkspaceModel;
 	readonly #panes = new Map<string, WorkspacePane>();
 	readonly #viewports = new Map<string, WorkspacePaneViewport>();
 	readonly #height: () => number;
 	readonly #requestRender: () => void;
+	readonly #requestComponentRender: ((component: Component) => void) | undefined;
 	readonly #focus: ((component: Component) => void) | undefined;
 	readonly #renderHeader: ((pane: WorkspacePane, width: number, focused: boolean) => string) | undefined;
 	readonly #renderSash: (text: string, axis: WorkspaceAxis) => string;
@@ -568,11 +579,19 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 	#dropTarget: WorkspaceDropTarget | undefined;
 	#dragSnapshot: readonly string[] | undefined;
 	#hoveredPaneId: string | undefined;
+	#paneRenderCache = new Map<string, { component: Component; width: number; height: number; lines: string[] }>();
+	#targetedPaneTargets: Map<string, Component[]> | undefined;
+	readonly #chromeRenderTarget: Component = { render: () => [] };
+	#targetPaneCache = new WeakMap<Component, { paneId: string; component: Component }>();
+	#renderWidth = 0;
+	#renderHeight = 0;
+	#renderRoot: WorkspaceLayoutNode | undefined;
 
 	constructor(options: WorkspaceLayoutOptions) {
 		this.#model = options.model;
 		this.#height = options.height;
 		this.#requestRender = options.requestRender;
+		this.#requestComponentRender = options.requestComponentRender;
 		this.#focus = options.focus;
 		this.#renderHeader = options.renderHeader;
 		this.#renderSash = options.renderSash ?? (text => text);
@@ -597,12 +616,44 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		return this.#focusedPaneId;
 	}
 
+	containsComponent(component: Component): boolean {
+		if (component === this.#chromeRenderTarget) return true;
+		return this.#findTargetPane(component) !== undefined;
+	}
+
+	#findTargetPane(target: Component): string | undefined {
+		const cached = this.#targetPaneCache.get(target);
+		if (
+			cached !== undefined &&
+			this.#panes.get(cached.paneId)?.component === cached.component &&
+			componentContains(cached.component, target)
+		) {
+			return cached.paneId;
+		}
+		for (const [paneId, pane] of this.#panes) {
+			if (!componentContains(pane.component, target)) continue;
+			this.#targetPaneCache.set(target, { paneId, component: pane.component });
+			return paneId;
+		}
+		this.#targetPaneCache.delete(target);
+		return undefined;
+	}
+
 	focusPane(paneId: string): boolean {
 		const pane = this.#panes.get(paneId);
 		if (!pane) return false;
+		const previousPane = this.#panes.get(this.#focusedPaneId);
+		const previousFocus = previousPane ? this.#paneFocusComponent(previousPane) : undefined;
+		const nextFocus = this.#paneFocusComponent(pane);
 		this.#focusedPaneId = paneId;
-		this.#focus?.(this.#paneFocusComponent(pane));
-		this.#requestRender();
+		this.#focus?.(nextFocus);
+		if (this.#requestComponentRender) {
+			this.#requestComponentRender(this.#chromeRenderTarget);
+			if (previousFocus) this.#requestComponentRender(previousFocus);
+			this.#requestComponentRender(nextFocus);
+		} else {
+			this.#requestRender();
+		}
 		return true;
 	}
 
@@ -623,6 +674,7 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		if (this.#panes.has(pane.paneId) || !this.#canDock(targetPaneId, pane, edge)) return false;
 		if (!this.#model.splitPane(targetPaneId, pane.paneId, edge)) return false;
 		this.#panes.set(pane.paneId, pane);
+		this.#targetPaneCache = new WeakMap();
 		this.focusPane(pane.paneId);
 		return true;
 	}
@@ -632,7 +684,9 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		if (this.#hoveredPaneId === paneId) this.#setHoveredPane(undefined);
 		const pane = this.#panes.get(paneId);
 		this.#panes.delete(paneId);
+		this.#targetPaneCache = new WeakMap();
 		this.#viewports.delete(paneId);
+		this.#paneRenderCache.delete(paneId);
 		pane?.component.dispose?.();
 		if (this.#focusedPaneId === paneId) {
 			this.#focusedPaneId = firstPaneId(this.#model.root);
@@ -675,7 +729,6 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		}
 		if (pane?.scroll === "component") {
 			pane.component.handleInput?.(data);
-			this.#requestRender();
 			return true;
 		}
 		const page = Math.max(1, (this.#frame?.panes.get(this.#focusedPaneId)?.height ?? 3) - 2);
@@ -844,13 +897,13 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		if (mouseTarget.routeMouse) {
 			const handled = mouseTarget.routeMouse(event, line, col);
 			if (handled === false) return false;
-			this.#requestRender();
+			if (pane.scroll !== "component") this.#requestRender();
 			return true;
 		}
 		if (pane.component.handleInput && event.wheel !== null) {
 			const suffix = event.release ? "m" : "M";
 			pane.component.handleInput(`\x1b[<${event.button};${col + 1};${line + 1}${suffix}`);
-			this.#requestRender();
+			if (pane.scroll !== "component") this.#requestRender();
 			return true;
 		}
 		return event.wheel !== null;
@@ -868,10 +921,43 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 			const rect = this.#frame.panes.get(this.#dropTarget.paneId);
 			if (rect) this.#paintDropPreview(lines, canvasWidth, rect, this.#dropTarget.edge);
 		}
+		this.#renderWidth = canvasWidth;
+		this.#renderHeight = height;
+		this.#renderRoot = this.#model.root;
 		return lines;
 	}
 
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		const height = Math.max(1, Math.trunc(this.#height()));
+		const canvasWidth = Math.max(1, Math.trunc(width));
+		if (
+			targets.length === 0 ||
+			this.#frame === undefined ||
+			this.#renderWidth !== canvasWidth ||
+			this.#renderHeight !== height ||
+			this.#renderRoot !== this.#model.root
+		) {
+			return this.render(width);
+		}
+		const grouped = new Map<string, Component[]>();
+		for (const target of targets) {
+			if (target === this.#chromeRenderTarget) continue;
+			const ownerId = this.#findTargetPane(target);
+			if (!ownerId) return this.render(width);
+			const paneTargets = grouped.get(ownerId);
+			if (paneTargets) paneTargets.push(target);
+			else grouped.set(ownerId, [target]);
+		}
+		this.#targetedPaneTargets = grouped;
+		try {
+			return this.render(width);
+		} finally {
+			this.#targetedPaneTargets = undefined;
+		}
+	}
+
 	invalidate(): void {
+		this.#paneRenderCache.clear();
 		for (const pane of this.#panes.values()) pane.component.invalidate?.();
 	}
 
@@ -879,6 +965,8 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		this.#setHoveredPane(undefined);
 		for (const pane of this.#panes.values()) pane.component.dispose?.();
 		this.#panes.clear();
+		this.#targetPaneCache = new WeakMap();
+		this.#paneRenderCache.clear();
 		this.#viewports.clear();
 		this.#frame = undefined;
 		this.#drag = undefined;
@@ -938,6 +1026,18 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		const pane = this.#panes.get(paneId);
 		if (!pane)
 			return Array.from({ length: rect.height }, () => fitWorkspaceLine(`Missing pane: ${paneId}`, rect.width));
+		const paneTargets = this.#targetedPaneTargets?.get(paneId);
+		if (this.#targetedPaneTargets && !paneTargets) {
+			const cached = this.#paneRenderCache.get(paneId);
+			if (
+				cached &&
+				cached.component === pane.component &&
+				cached.width === rect.width &&
+				cached.height === rect.height
+			) {
+				return cached.lines;
+			}
+		}
 		const focused = paneId === this.#focusedPaneId;
 		const header = pane.renderHeader
 			? pane.renderHeader(rect.width, focused)
@@ -948,23 +1048,39 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 		const heightAware = pane.component as Component & Partial<ViewportHeightAware>;
 		const componentOwnsViewport = pane.scroll === "component";
 		if (componentOwnsViewport) heightAware.setViewportHeight?.(contentHeight);
-		let content: readonly string[];
+		const componentWidth = Math.max(1, rect.width);
 		const tailProvider = pane.component as Component & Partial<ViewportTailProvider>;
+		const componentTailProvider = pane.component as Component & Partial<ComponentViewportTailProvider>;
+		let content: readonly string[];
 		if (componentOwnsViewport) {
-			content =
-				this.#drag?.kind === "resize" && tailProvider.renderViewportTail
-					? tailProvider.renderViewportTail(rect.width, contentHeight)
-					: pane.component.render(Math.max(1, rect.width)).slice(0, contentHeight);
+			if (
+				paneTargets &&
+				componentTailProvider.componentViewportTail &&
+				componentTailProvider.renderViewportTailTargeted
+			) {
+				content = componentTailProvider.renderViewportTailTargeted(rect.width, contentHeight, paneTargets);
+			} else if (paneTargets) {
+				content = renderTargeted(pane.component, componentWidth, paneTargets).slice(0, contentHeight);
+			} else if (componentTailProvider.componentViewportTail && componentTailProvider.renderViewportTail) {
+				content = componentTailProvider.renderViewportTail(rect.width, contentHeight);
+			} else {
+				content = pane.component.render(componentWidth).slice(0, contentHeight);
+			}
 		} else {
+			const targetedContent = paneTargets ? renderTargeted(pane.component, componentWidth, paneTargets) : undefined;
+			const useTail =
+				targetedContent === undefined &&
+				this.#drag?.kind === "resize" &&
+				tailProvider.renderViewportTail !== undefined;
 			const viewport = this.#viewports.get(paneId) ?? {
 				offset: 0,
 				maxOffset: 0,
 				followBottom: pane.overflow === "tail",
 			};
-			if (this.#drag?.kind === "resize" && viewport.followBottom && tailProvider.renderViewportTail) {
-				content = tailProvider.renderViewportTail(rect.width, contentHeight);
+			if (useTail && viewport.followBottom) {
+				content = tailProvider.renderViewportTail!(rect.width, contentHeight);
 			} else {
-				const rendered = pane.component.render(Math.max(1, rect.width));
+				const rendered = targetedContent ?? pane.component.render(componentWidth);
 				viewport.maxOffset = Math.max(0, rendered.length - contentHeight);
 				viewport.offset = viewport.followBottom
 					? viewport.maxOffset
@@ -974,11 +1090,20 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner {
 			}
 		}
 		const lines = [fitWorkspaceLine(header, rect.width)];
-		for (let row = 0; row < contentHeight; row++) lines.push(fitWorkspaceLine(content[row] ?? "", rect.width));
+		for (let row = 0; row < contentHeight; row++) {
+			const contentLine = content[row] ?? "";
+			lines.push(fitWorkspaceLine(markKittyPlacementClipRows(contentLine, row), rect.width));
+		}
 		const drag = this.#drag;
 		if (drag?.kind === "move" && drag.active && drag.paneId === paneId && !this.#dragSnapshot) {
 			this.#dragSnapshot = lines.map(line => Bun.stripANSI(line));
 		}
+		this.#paneRenderCache.set(paneId, {
+			component: pane.component,
+			width: rect.width,
+			height: rect.height,
+			lines,
+		});
 		return lines;
 	}
 

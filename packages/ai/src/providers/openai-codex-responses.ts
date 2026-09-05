@@ -4520,6 +4520,18 @@ export function resolveCodexResponsesUrl(baseUrl: string | undefined): string {
 	return `${normalized}/codex/responses`;
 }
 
+/** Resolve the standalone Codex Alpha Search endpoint from the configured Codex base URL. */
+export function resolveCodexAlphaSearchUrl(baseUrl: string | undefined): string {
+	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : CODEX_BASE_URL;
+	const normalized = raw.replace(/\/+$/, "");
+	if (normalized.endsWith("/codex/alpha/search")) return normalized;
+	if (normalized.endsWith("/codex/responses")) {
+		return `${normalized.slice(0, -"/responses".length)}/alpha/search`;
+	}
+	if (normalized.endsWith("/codex")) return `${normalized}/alpha/search`;
+	return `${normalized}/codex/alpha/search`;
+}
+
 function convertMessages(model: Model<"openai-codex-responses">, context: Context): ResponseInput {
 	const messages: ResponseInput = [];
 

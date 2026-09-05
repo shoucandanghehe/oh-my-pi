@@ -648,6 +648,11 @@ export class Editor implements Component, Focusable {
 	/** Install prose assistance without changing command/file autocomplete. */
 	setTextAssistProvider(provider: EditorTextAssistProvider | undefined): void {
 		this.#textAssistProvider = provider;
+
+	}
+
+	hasAutocomplete(): boolean {
+		return this.#autocompleteState !== null && this.#autocompleteList !== undefined;
 	}
 
 	/**

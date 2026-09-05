@@ -19,6 +19,8 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isPromise } from "node:util/types";
 
+import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
+import { type } from "@oh-my-pi/omptype";
 import {
 	type AfterToolCallContext,
 	type AfterToolCallResult,
@@ -181,9 +183,11 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
+import sideChannelReadonlyReminder from "../prompts/system/side-channel-readonly.md" with { type: "text" };
 import sideChannelToolDenied from "../prompts/system/side-channel-tool-denied.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import videoAttachmentPrompt from "../prompts/system/video-attachment.md" with { type: "text" };
+import shareSummaryWithMainDescription from "../prompts/tools/share-summary-with-main.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
@@ -212,6 +216,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { replaceTabs } from "../tools/render-utils";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -294,6 +299,7 @@ import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
+	type EphemeralConversationSideOptions,
 	type EphemeralTurnOptions,
 	type EphemeralTurnResult,
 } from "./ephemeral-conversation";
@@ -320,11 +326,14 @@ import {
 } from "./launch-completion";
 import {
 	type BashExecutionMessage,
+	BTW_SUMMARY_MESSAGE_TYPE,
+	type BtwSummary,
 	buildReplanTitleContext,
 	CHECKPOINT_ACTIVE_REMINDER_TYPE,
 	type CustomMessage,
 	type CustomMessagePayload,
 	convertToLlm,
+	createBtwSummaryMessage,
 	dedupeEphemeralReply,
 	demoteInterruptedThinking,
 	didSessionMessagesChange,
@@ -404,6 +413,48 @@ const createSideChannelNoToolsMessage = (): AgentMessage => ({
 	attribution: "agent",
 	timestamp: Date.now(),
 });
+
+const createSideChannelReadonlyMessage = (): AgentMessage => ({
+	role: "developer",
+	content: [{ type: "text", text: sideChannelReadonlyReminder }],
+	attribution: "agent",
+	timestamp: Date.now(),
+});
+
+const shareSummaryWithMainSchema = type({
+	summary: type("string").describe(
+		"A concise summary of facts, conclusions, decisions, and unresolved questions from this side-thread.",
+	),
+});
+
+function createShareSummaryWithMainTool(
+	shareSummaryWithMain: (summary: string) => void | Promise<void>,
+): AgentTool<typeof shareSummaryWithMainSchema> {
+	return {
+		name: SHARE_SUMMARY_WITH_MAIN_TOOL_NAME,
+		label: "Share Summary with Main",
+		description: shareSummaryWithMainDescription,
+		parameters: shareSummaryWithMainSchema,
+		intent: "omit",
+		approval: {
+			tier: "write",
+			policy: "prompt",
+			reason: "Sharing a BTW-authored summary with Main requires user confirmation",
+		},
+		formatApprovalDetails: args => [
+			`Summary:\n${replaceTabs((args as typeof shareSummaryWithMainSchema.infer).summary)}`,
+		],
+		async execute(_toolCallId: string, params: typeof shareSummaryWithMainSchema.infer) {
+			await shareSummaryWithMain(params.summary);
+			return { content: [{ type: "text", text: "Summary shared with the main agent." }] };
+		},
+	};
+}
+
+/** Side-thread tool names allowed to execute when read-only tools are enabled. */
+const BTW_READ_ONLY_TOOL_NAMES: Record<string, true> = { read: true, glob: true, grep: true };
+
+export const SHARE_SUMMARY_WITH_MAIN_TOOL_NAME = "shareSummaryWithMain";
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
@@ -1487,6 +1538,9 @@ export class AgentSession {
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
 		});
+		this.yieldQueue.register<BtwSummary>(BTW_SUMMARY_MESSAGE_TYPE, {
+			build: summaries => (summaries.length === 0 ? null : createBtwSummaryMessage(summaries)),
+		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
 		// injection boundary, but also expose a non-consuming interrupt peek so
@@ -2392,6 +2446,7 @@ export class AgentSession {
 			if (ref.session.isStreaming) pausedAgentIds.add(ref.id);
 		}
 
+		await this.sessionManager.ensureOnDisk();
 		this.recordAgentsPaused([...pausedAgentIds]);
 		for (const session of liveSessions) session.#abortForPausedExit();
 		await this.dispose({ pausedExit: true });
@@ -6910,6 +6965,13 @@ export class AgentSession {
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
+	publishBtwSummary(summary: BtwSummary): Promise<void> {
+		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before BTW summary delivery"));
+		const delivered = this.yieldQueue.enqueueWithReceipt(BTW_SUMMARY_MESSAGE_TYPE, summary);
+		this.yieldQueue.requestIdleFlush();
+		return delivered;
+	}
+
 	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
 		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
 		const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
@@ -8745,23 +8807,34 @@ export class AgentSession {
 		instructions: string,
 		checkpoint?: EphemeralConversationCheckpoint,
 		modelOverride?: Model,
+		options?: EphemeralConversationSideOptions,
 	): EphemeralConversation {
 		const model = modelOverride ?? this.model;
 		if (!model) {
 			throw new Error("No active model on session");
 		}
+		const readOnlyTools = options?.readOnlyTools === true;
+		const shareSummaryWithMain = options?.shareSummaryWithMain;
+		const shareSummaryWithMainTool = shareSummaryWithMain
+			? this.#tools.wrapRuntimeTool(createShareSummaryWithMainTool(shareSummaryWithMain))
+			: undefined;
 		const cacheSessionId = this.sessionId;
 		const sideSessionId = checkpoint?.sideSessionId ?? `${cacheSessionId}:side:${Snowflake.next()}`;
 		const child = this.agent.createChild({
 			initialState: {
 				model,
 				messages: [],
+				...(shareSummaryWithMainTool ? { tools: [...this.agent.state.tools, shareSummaryWithMainTool] } : {}),
 			},
 			sessionId: sideSessionId,
 			promptCacheKey: cacheSessionId,
 			streamFn: this.#sideStreamFn,
 			convertToLlm: this.#convertToLlm,
 			transformContext: async (messages, signal) => this.#transformContext(messages, signal),
+			// The side transcript renders its own restricted tool set. Its lifecycle
+			// never reaches Main's EventController, so waiting on Main's approval
+			// preview gate would deadlock before the interactive prompt can open.
+			transformToolContext: context => (context ? { ...context, toolApprovalPreview: "never" as const } : context),
 			providerSessionState: this.#providerSessionState,
 			getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
 			onPayload: this.#onPayload,
@@ -8769,22 +8842,23 @@ export class AgentSession {
 			onSseEvent: this.#onSseEvent,
 			preferWebsockets: this.#preferWebsockets,
 			serviceTier: this.#models.effectiveServiceTier(model),
-			beforeToolCall: () => ({ block: true, reason: sideChannelToolDenied }),
+			beforeToolCall: ctx => {
+				if (readOnlyTools && Object.hasOwn(BTW_READ_ONLY_TOOL_NAMES, ctx.toolCall.name)) return undefined;
+				if (shareSummaryWithMainTool && ctx.toolCall.name === SHARE_SUMMARY_WITH_MAIN_TOOL_NAME) {
+					return this.#extensionRunner
+						? undefined
+						: { block: true, reason: "shareSummaryWithMain requires interactive user approval." };
+				}
+				return { block: true, reason: sideChannelToolDenied };
+			},
 			transformAssistantMessage: message => {
 				if (!this.#obfuscator?.hasSecrets()) return;
 				message.content = deobfuscateAssistantContent(this.#obfuscator, message.content);
 			},
 		});
-		let normalizedCheckpoint = checkpoint;
-		if (checkpoint?.baseMessages) {
-			const reminder = createSideChannelNoToolsMessage();
-			if (!checkpoint.baseMessages.some(message => sameMessageContent(message, reminder))) {
-				normalizedCheckpoint = {
-					...checkpoint,
-					baseMessages: [...checkpoint.baseMessages, reminder],
-				};
-			}
-		}
+		const createCapabilityReminder = readOnlyTools
+			? createSideChannelReadonlyMessage
+			: createSideChannelNoToolsMessage;
 		return new EphemeralConversation({
 			snapshotBaseMessages: () => {
 				const baseMessages = this.#buildEphemeralBaseSnapshot();
@@ -8794,10 +8868,17 @@ export class AgentSession {
 					attribution: "agent",
 					timestamp: Date.now(),
 				});
-				baseMessages.push(createSideChannelNoToolsMessage());
 				return baseMessages;
 			},
-			checkpoint: normalizedCheckpoint,
+			checkpoint,
+			getTool: name => child.state.tools.find(tool => tool.name === name),
+			turnPrefixMessages: () => [createCapabilityReminder()],
+			getRuntimeState: () => ({
+				model: child.state.model,
+				thinkingLevel: child.state.thinkingLevel,
+				isStreaming: child.state.isStreaming,
+				streamMessage: child.state.streamMessage?.role === "assistant" ? child.state.streamMessage : null,
+			}),
 			runTurn: (messages, options) => this.#runEphemeralConversationTurn(child, messages, options),
 			sideSessionId,
 		});
@@ -8821,8 +8902,19 @@ export class AgentSession {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		const unsubscribe = child.subscribe(event => {
-			if (event.type !== "message_update" || event.assistantMessageEvent.type !== "text_delta") return;
-			providerReplyText += event.assistantMessageEvent.delta;
+			if (event.type === "message_end") {
+				if (event.message.role !== "user") args.onMessage?.({ type: "end", message: event.message });
+				return;
+			}
+			if (event.type !== "message_update" || event.message.role !== "assistant") return;
+			args.onMessage?.({ type: "update", message: event.message });
+			const assistantEvent = event.assistantMessageEvent;
+			if (assistantEvent.type === "thinking_delta") {
+				args.onThinkingDelta?.(assistantEvent.delta);
+				return;
+			}
+			if (assistantEvent.type !== "text_delta") return;
+			providerReplyText += assistantEvent.delta;
 			if (!args.onTextDelta) return;
 			const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
 			if (readyText.length <= emittedReplyText.length) return;

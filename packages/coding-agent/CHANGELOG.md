@@ -743,6 +743,7 @@
 - Fixed prompt input lag under CPU load while file and macOS spelling completions are active.
 - Fixed blank `mnemopi.dbPath` settings silently creating volatile memory banks instead of using persistent agent storage ([#9360](https://github.com/can1357/oh-my-pi/issues/9360)).
 - Fixed legacy Pi extensions being reparsed on every startup because their persistent parse cache could not be created ([#9339](https://github.com/can1357/oh-my-pi/pull/9339) by [@walodayeet](https://github.com/walodayeet)).
+- Fixed subagent pane updates shifting or overwriting content in the Main workspace pane.
 - Fixed Kitty text-sized Markdown headings activating before `tui.textSizing` is enabled.
 - Fixed terminal-title updates racing the TUI's off-thread output pump, which could tear an escape sequence mid-frame and print the title (e.g. `0;π ∴ <session title>`) into the editor line as if typed.
 - Fixed the edit tool corrupting files on unified-diff-shaped payloads: missing-separator recovery no longer hijacks `-`/`+` bodies (which deleted matched anchors and duplicated the surrounding block); they now flow to the unified-diff reinterpretation.
@@ -1053,6 +1054,11 @@
 ### Fixed
 
 - Fixed `omp stats` and `/stats` dashboards being unreachable from container hosts by accepting an explicit `--host` bind address while preserving the `127.0.0.1` default.
+- Added a host-local `localAskDialog` extension UI method for rich, scrollable decisions that must never be delegated to collaboration guests.
+
+### Fixed
+
+- Fixed inline BTW shortcuts stealing composer input after the panel was dismissed or while attachments were pending, and prevented late BTW operations from mutating replaced sessions.
 
 ## [17.3.5] - 2026-08-16
 
@@ -1204,6 +1210,9 @@
 - Fixed retry-fallback selection switching to a fallback model with a context window too small to hold the current session context.
 - Fixed OpenCode discovery ignoring `opencode.jsonc` files and rejecting comments in `opencode.json`.
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
+### Fixed
+
+- Fixed durable BTW tools that require approval hanging before the prompt opens because the side transcript was waiting on Main's unrelated tool-preview gate.
 
 ## [17.2.15] - 2026-08-12
 
@@ -1291,6 +1300,19 @@
 
 - Removed the `resolveAgentModelSource` model-resolver export, whose only use was being fed to `resolveExplicitModelRole`. Replaced by `resolveAgentModelSelection`, which returns the expanded `patterns` and the pre-expansion `role` together so a spawn path cannot derive one without the other ([#7910](https://github.com/can1357/oh-my-pi/pull/7910) by [@enieuwy](https://github.com/enieuwy)).
 - A run is now attributed to the model that actually produced its output, not whichever model the session was last pointed at. A retry fallback that errored on its first request — an exhausted quota, a hard provider error — was credited with the whole run in the Agent Hub row and the settled task result, even when the previous model did every turn. Sessions expose the serving model directly, holding the last model that produced output while a candidate is armed but unproven, and transcript-derived history stops at the newest turn that produced output.
+### Added
+
+- Added `/delete` to remove the selected durable BTW thread.
+
+### Changed
+
+- Changed durable BTW knowledge sharing: `shareSummaryWithMain` now publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
+- Changed durable BTW panes to open with the thread rail collapsed by default, provide a `+ New BTW` action that immediately creates a blank thread, and let `/new` omit its first question.
+
+### Fixed
+
+- Fixed durable BTW panes diverging from Main's transcript rendering: live and completed side turns now use the same tool cards, runtime tool metadata, and streamed-argument decoding.
+- Fixed the durable BTW pane's `New BTW` action to render as a hoverable button, reuse the active blank thread, and delete untouched blank threads when the pane closes.
 
 ## [17.2.12] - 2026-08-08
 
@@ -1304,6 +1326,21 @@
 - Fixed long-running sessions leaking memory for every completed keep-alive `task`/scout subagent: a disposed (parked) subagent's `AgentSession` stayed pinned through the lifecycle adoption record's reviver closure, and `dispose()` never released the message array, append-only provider transcript, session-manager entries, or the raw-SSE debug buffer, so heavy transcripts and captured provider wire frames accumulated for the process lifetime ([#8003](https://github.com/can1357/oh-my-pi/issues/8003)).
 - Fixed Z.AI web search dropping sources and exposing raw JSON when MCP responses double-encode content text ([#8000](https://github.com/can1357/oh-my-pi/issues/8000)).
 - Fixed `/handoff` masking empty/whitespace-only generation and harness-initiated aborts as "Handoff cancelled"; manual empty generation now surfaces a logged failure, harness aborts preserve their reason (or report "Handoff aborted by session"), and auto-handoff still falls back to context-full compaction ([#7993](https://github.com/can1357/oh-my-pi/issues/7993)).
+### Added
+
+- Added durable BTW thread upgrades: threads can be created directly from the pane (`/new <question>` or just typing when no thread exists), durable threads get read-only tools (`read`/`glob`/`grep`), a `steerMain` tool that delivers a one-way message into the main agent's input queue (replacing the `/steer` pane command), slash-command autocomplete in the pane editor, and streaming rendering of thinking blocks while a reply runs.
+
+### Fixed
+
+- Fixed durable BTW capability gaps: bare `/btw` now opens an empty pane for direct thread creation, promoted QuickAsk conversations gain durable read-only and `steerMain` capabilities without rewriting their original no-tools prompt history, Main-bound messages use the session queue while Main is streaming, and inherited object keys cannot bypass the read-only tool whitelist.
+- Fixed durable BTW `steerMain` autonomy: the model may call it only for an explicit user request, and every proposed message now requires user approval before delivery to Main.
+- Fixed BTW promotion dropping unsubmitted drafts of sibling threads: `abandon()` after a session transition must not write into the new session, so every durable child's draft is persisted before the branch is attempted.
+- Fixed silent loss of pane input submitted while a durable BTW reply is streaming: the submit is now consumed at the editor layer (the editor clears itself unconditionally on submit), keeping the drafted question and reporting that the reply is still running.
+- Fixed durable BTW pane status lines to follow the selected side thread's model, context usage, usage totals, session identity, and streaming state instead of Main, including live updates when switching threads.
+
+### Removed
+
+- Removed the durable BTW `/refresh` command and refresh journal event so a thread's frozen Main context and promotion anchor remain immutable for its lifetime.
 
 ## [17.2.11] - 2026-08-07
 
@@ -1387,6 +1424,11 @@
 - Fixed parsing of POSIX `$EDITOR` commands that contain quoted arguments or executable paths with spaces.
 - Fixed persisted Agent Hub rows losing the explicit caller model role when a subagent used a model override, preserving role provenance across restarts.
 - Fixed unobserved promise rejections in browser helpers (such as `tab.waitForResponse()`) causing tab workers to hang or crash.
+### Fixed
+
+- Fixed Codex web search falling through GPT-5.6 Responses-Lite models to GPT-5.5: Lite models now use the native `/alpha/search` transport, including configured Codex proxy endpoints, while non-Lite models retain hosted Responses search ([#7319](https://github.com/can1357/oh-my-pi/issues/7319)).
+
+
 - Fixed plan approval freezing the TUI for the whole approved-plan run: the `xd://propose` completion started `handlePlanApproval` inside the event controller's serialized dispatch chain, so the operator's review choice and the blocking synthetic execution turn parked every subsequent agent event (streamed deltas, tool cards) behind an in-chain `await` — the agent executed with zero live rendering and the transcript only materialized after the run settled. The approval flow now runs off-chain, so events render in real time while the review is open and while the plan executes.
 - Fixed `omp -r` current-folder scope missing sessions written under the short-lived hashed project-directory scheme (17.2.5-17.2.8): the 17.2.9 revert restored the legacy path-based names but dropped all migration, stranding those sessions. `computeDefaultSessionDir` now performs a one-way migration of the hashed dir back into its legacy name ([#7677](https://github.com/can1357/oh-my-pi/issues/7677)).
 

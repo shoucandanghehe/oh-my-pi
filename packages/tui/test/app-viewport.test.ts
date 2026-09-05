@@ -11,7 +11,16 @@ import {
 	WorkspaceLayout,
 	WorkspaceModel,
 } from "@oh-my-pi/pi-tui";
-import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { Image } from "@oh-my-pi/pi-tui/components/image";
+import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
+import {
+	getCellDimensions,
+	ImageProtocol,
+	setCellDimensions,
+	setTerminalImageProtocol,
+	TERMINAL,
+} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { StressRenderScheduler } from "./render-stress-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
 const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform");
@@ -721,7 +730,7 @@ describe("TUI app viewport backend", () => {
 			}
 		});
 	});
-	it("selects visible transcript text by dragging", async () => {
+	it("selects visible transcript text without repainting untouched rows", async () => {
 		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
 			const term = new VirtualTerminal(40, 4);
 			const writes = captureWrites(term);
@@ -731,11 +740,17 @@ describe("TUI app viewport backend", () => {
 			try {
 				tui.start();
 				await flushRender(term);
+				writes.length = 0;
 
 				term.sendInput("\x1b[<0;7;1M");
 				term.sendInput("\x1b[<32;10;1M");
 				term.sendInput("\x1b[<0;10;1m");
 				await flushRender(term);
+				const selectionPaint = writes.join("");
+				expect(selectionPaint).toContain("\x1b[1;1H");
+				expect(selectionPaint).not.toContain("\x1b[2;1H");
+				expect(selectionPaint).not.toContain("\x1b[3;1H");
+				expect(selectionPaint).not.toContain("\x1b[4;1H");
 
 				expect(term.getViewportRowBackgroundColumns(0)).toEqual([6, 7, 8, 9]);
 				term.sendInput("\x03");
@@ -746,6 +761,35 @@ describe("TUI app viewport backend", () => {
 				await flushRender(term);
 
 				expect(term.getViewportRowBackgroundColumns(0)).toEqual([]);
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("reconciles topology changes with a differential repaint", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const term = new VirtualTerminal(40, 4);
+			const writes = captureWrites(term);
+			const transcript = new TranscriptComponent(["alpha", "removed", "stable"]);
+			const tui = new TUI(term);
+			tui.addChild(transcript);
+
+			try {
+				tui.start();
+				await flushRender(term);
+				writes.length = 0;
+
+				transcript.setLines(["changed", "stable"]);
+				tui.reconcileRenderTopology();
+				await flushRender(term);
+
+				const topologyPaint = writes.join("");
+				expect(viewportContent(term)).toEqual(["changed", "stable", "", ""]);
+				expect(topologyPaint).toContain("\x1b[1;1H");
+				expect(topologyPaint).toContain("\x1b[2;1H");
+				expect(topologyPaint).toContain("\x1b[3;1H");
+				expect(topologyPaint).not.toContain("\x1b[4;1H");
 			} finally {
 				tui.stop();
 			}
@@ -1133,6 +1177,285 @@ describe("TUI app viewport backend", () => {
 				expect(writes.join("")).toContain(`\x1b]52;c;${Buffer.from("alpha beta gamma").toString("base64")}\x07`);
 			} finally {
 				tui.stop();
+			}
+		});
+	});
+
+	it("replays visible SIXEL atomically when another viewport row changes", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 4);
+			const writes = captureWrites(term);
+			const wideSixel = "\x1bPqWIDE~\x1b\\";
+			const narrowSixel = "\x1bPqNARROW~\x1b\\";
+			const transcript = new TranscriptComponent(["\x1b[0m", wideSixel, "status-0"]);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.addChild(transcript);
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Sixel);
+				tui.start();
+				await scheduler.drain(term);
+				writes.length = 0;
+
+				transcript.setLines(["\x1b[0m", narrowSixel, "status-1"]);
+				tui.requestComponentRender(transcript);
+				await scheduler.drain(term);
+
+				const repaint = writes.join("");
+				expect(repaint).toContain(narrowSixel);
+				expect(repaint.indexOf("\x1b[?2J")).toBeLessThan(repaint.indexOf(narrowSixel));
+				expect(repaint).toContain("\x1b[2J\x1b[?2J\x1b[H");
+				for (let row = 1; row <= term.rows; row++) expect(repaint).toContain(`\x1b[${row};1H`);
+
+				writes.length = 0;
+				transcript.setLines(["\x1b[0m", narrowSixel, "status-stream"]);
+				tui.requestComponentRender(transcript);
+				await scheduler.drain(term);
+				expect(writes.join("")).not.toContain("\x1b[2J");
+				expect(writes.join("")).not.toContain(narrowSixel);
+
+				expect(writes.join("")).not.toContain("\x1b[?2J");
+
+				writes.length = 0;
+				transcript.setLines(["", "", "status-2"]);
+				tui.requestComponentRender(transcript);
+				await scheduler.drain(term);
+				expect(writes.join("")).toContain("\x1b[2J\x1b[?2J\x1b[H");
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("clears the old SIXEL footprint when only a workspace split width changes", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(40, 5);
+			const writes = captureWrites(term);
+			const widths: number[] = [];
+			const imagePane: Component = {
+				render(width: number): readonly string[] {
+					widths.push(width);
+					return ["\x1b[0m", `\x1bPqwidth-${width}~\x1b\\`];
+				},
+			};
+			const model = WorkspaceModel.single("image");
+			expect(model.splitPane("image", "text", "right")).toBe(true);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const workspace = new WorkspaceLayout({
+				model,
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(),
+				panes: [
+					{ paneId: "image", title: "Image", component: imagePane },
+					{ paneId: "text", title: "Text", component: new StaticLines(["right-pane"]) },
+				],
+			});
+			tui.addChild(workspace);
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Sixel);
+				tui.start();
+				await scheduler.drain(term);
+				const oldWidth = widths.at(-1)!;
+				const split = model.root;
+				if (split.kind !== "split") throw new Error("Expected split workspace");
+				writes.length = 0;
+
+				expect(model.resizeSplit(split.splitId, 0, 8, 32)).toBe(true);
+				tui.requestRender();
+				await scheduler.drain(term);
+
+				const newWidth = widths.at(-1)!;
+				const repaint = writes.join("");
+				const newSixel = `\x1bPqwidth-${newWidth}~\x1b\\`;
+				expect(newWidth).toBeLessThan(oldWidth);
+				expect(repaint.indexOf("\x1b[?2J")).toBeLessThan(repaint.indexOf(newSixel));
+				expect(repaint).toContain("right-pane");
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("clips an embedded workspace Kitty placement to the pane body", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(120, 4);
+			const writes = captureWrites(term);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const imageId = tui.imageBudget.acquireId("workspace-direct-clip");
+			tui.imageBudget.registerPlacementGeometry(imageId, 40, 60);
+			const placement = `\x1b7\x1b[3A\x1b_Ga=p,q=2,C=1,i=${imageId},p=${imageId},c=4,r=4\x1b\\\x1b8` + "\x1b[0m│";
+			const model = WorkspaceModel.single("left");
+			expect(model.splitPane("left", "image", "right")).toBe(true);
+			const split = model.root;
+			if (split.kind !== "split") throw new Error("Expected split workspace");
+			expect(model.resizeSplit(split.splitId, 0, 80, 39)).toBe(true);
+			const workspace = new WorkspaceLayout({
+				model,
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(),
+				panes: [
+					{ paneId: "left", title: "Left", component: new StaticLines(["left-pane"]) },
+					{
+						paneId: "image",
+						title: "Image",
+						component: new TranscriptComponent(["", "", "", placement]),
+						overflow: "tail",
+					},
+				],
+			});
+			tui.addChild(workspace);
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				tui.start();
+				await scheduler.drain(term);
+				const output = writes.join("");
+				expect(output).toContain(`i=${imageId},p=1,c=4,r=3,y=15,h=45`);
+				expect(output).toContain(`\x1b7\x1b[2A\x1b_Ga=p`);
+				expect(output).not.toContain("\x1b_pi:kp:");
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("flushes retired Kitty ids on an unchanged frame after a protocol switch", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 4);
+			const writes = captureWrites(term);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const imageId = tui.imageBudget.acquireId("protocol-switch-retire");
+			let active = true;
+			tui.addChild({
+				render(): readonly string[] {
+					if (active) tui.imageBudget.observe(imageId);
+					return ["unchanged"];
+				},
+			});
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				tui.start();
+				await scheduler.drain(term);
+				writes.length = 0;
+
+				active = false;
+				setTerminalImageProtocol(ImageProtocol.Sixel);
+				tui.requestRender();
+				await scheduler.drain(term);
+				expect(writes.join("")).toContain(`a=d,d=I,i=${imageId},q=2`);
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("retires a Kitty image removed from the app viewport frame", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 6);
+			const writes = captureWrites(term);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const imageId = tui.imageBudget.acquireId("removed-app-image");
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: text => text },
+				{ budget: tui.imageBudget, imageKey: "removed-app-image", maxWidthCells: 4, maxHeightCells: 4 },
+				{ widthPx: 40, heightPx: 40 },
+			);
+			tui.addChild(image);
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				tui.start();
+				await scheduler.drain(term);
+				writes.length = 0;
+
+				tui.removeChild(image);
+				tui.requestRender();
+				await scheduler.drain(term);
+				expect(writes.join("")).toContain(`a=d,d=I,i=${imageId},q=2`);
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("emits a virtual placement when a workspace first shows a placeholder block mid-slice", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const previousGraphics = { ...getKittyGraphics() };
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(30, 4);
+			const writes = captureWrites(term);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const imageId = tui.imageBudget.acquireId("sliced-placeholder");
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: text => text },
+				{ budget: tui.imageBudget, imageKey: "sliced-placeholder", maxWidthCells: 4, maxHeightCells: 4 },
+				{ widthPx: 40, heightPx: 40 },
+			);
+			const workspace = new WorkspaceLayout({
+				model: WorkspaceModel.single("image"),
+				height: () => term.rows,
+				requestRender: () => tui.requestRender(),
+				panes: [{ paneId: "image", title: "Image", component: image, overflow: "tail" }],
+			});
+			tui.addChild(workspace);
+
+			try {
+				setKittyGraphics({ unicodePlaceholders: true });
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				tui.start();
+				await scheduler.drain(term);
+				expect(writes.join("")).toContain(`a=p,U=1,q=2,i=${imageId}`);
+			} finally {
+				tui.stop();
+				setKittyGraphics(previousGraphics);
+				setTerminalImageProtocol(previousProtocol);
+			}
+		});
+	});
+
+	it("clips direct Kitty placements that straddle the app viewport top", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const previousProtocol = TERMINAL.imageProtocol;
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 4);
+			const writes = captureWrites(term);
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			const imageId = tui.imageBudget.acquireId("app-viewport-direct-clip");
+			tui.imageBudget.registerPlacementGeometry(imageId, 40, 60);
+			const placement = `\x1b7\x1b[5A\x1b_Ga=p,q=2,C=1,i=${imageId},p=${imageId},c=4,r=6\x1b\\\x1b8`;
+			tui.addChild(new TranscriptComponent(["", "", placement]));
+
+			try {
+				setTerminalImageProtocol(ImageProtocol.Kitty);
+				tui.start();
+				await scheduler.drain(term);
+
+				expect(writes.join("")).toContain(`i=${imageId},p=1,c=4,r=3,y=30,h=30`);
+			} finally {
+				tui.stop();
+				setTerminalImageProtocol(previousProtocol);
 			}
 		});
 	});

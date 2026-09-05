@@ -49,7 +49,7 @@ function makeViewer(sessionFile: string, _observed: ObservableSession[]): AgentT
 		cwd: path.dirname(sessionFile),
 		expandKeys: ["ctrl+o"],
 		hubKeys: ["ctrl+s"],
-		createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0 }), dispose: () => {} }),
+		createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0, revision: 0 }), dispose: () => {} }),
 		requestRender: () => {},
 		onClose: () => {},
 		onHubToggle: () => {},

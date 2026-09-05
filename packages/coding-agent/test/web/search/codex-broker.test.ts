@@ -5,30 +5,20 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
 
-function makeSseResponse(): string {
-	return [
-		`data: ${JSON.stringify({ type: "response.web_search_call.completed", item_id: "ws_test" })}`,
-		"",
-		`data: ${JSON.stringify({
-			type: "response.output_item.done",
-			item: {
-				type: "message",
-				content: [
-					{
-						type: "output_text",
-						text: "Broker-backed Codex answer",
-						annotations: [{ type: "url_citation", url: "https://example.com/broker", title: "Broker" }],
-					},
-				],
+function makeNativeSearchResponse(): string {
+	return JSON.stringify({
+		encrypted_output: "encrypted-search-output",
+		output: "Broker-backed Codex answer",
+		results: [
+			{
+				type: "text_result",
+				ref_id: "turn0search0",
+				title: "Broker",
+				url: "https://example.com/broker",
+				snippet: "Broker-backed Codex answer",
 			},
-		})}`,
-		"",
-		`data: ${JSON.stringify({
-			type: "response.completed",
-			response: { id: "resp_codex_broker", model: "gpt-5-codex-mini" },
-		})}`,
-		"",
-	].join("\n");
+		],
+	});
 }
 
 describe("Codex web search broker auth", () => {
@@ -43,7 +33,10 @@ describe("Codex web search broker auth", () => {
 
 		const fetchMock: FetchImpl = async (_url, init) => {
 			requestHeaders = new Headers(init?.headers);
-			return new Response(makeSseResponse(), { status: 200, headers: { "Content-Type": "text/event-stream" } });
+			return new Response(makeNativeSearchResponse(), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
 		};
 
 		const params: SearchParams = {
