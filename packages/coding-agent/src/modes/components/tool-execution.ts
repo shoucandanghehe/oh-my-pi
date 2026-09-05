@@ -794,6 +794,7 @@ export class ToolExecutionComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.#renderMemo = undefined;
 		this.#updateDisplay();
 	}
 
@@ -802,12 +803,17 @@ export class ToolExecutionComponent extends Container {
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
+		const key = this.#displayKey();
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
 		this.#rebuildDisplay();
 		this.#displayBuilt = true;
+	}
+
+	/** All inputs #rebuildDisplay consumes, in one comparable key. */
+	#displayKey(): string {
+		return `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
 	}
 
 	#rendererFlag(name: "forceResultViewportRepaintOnSettle"): boolean {
@@ -846,20 +852,40 @@ export class ToolExecutionComponent extends Container {
 
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0) return [];
+		const key = `${this.#displayKey()}|${this.#allocation}`;
+		if (this.#renderedImageCount === 0) {
+			const memo = this.#renderMemo;
+			if (memo !== undefined && memo.width === width && memo.key === key) {
+				this.#trackPaintedShapes();
+				return memo.lines;
+			}
+			const lines = this.#renderAllocated(width);
+			this.#renderMemo = { width, key, lines };
+			this.#trackPaintedShapes();
+			return lines;
+		}
+		const lines = this.#renderAllocated(width);
+		this.#trackPaintedShapes();
+		return lines;
+	}
+
+	#renderMemo: { width: number; key: string; lines: readonly string[] } | undefined;
+
+	#renderAllocated(width: number): readonly string[] {
 		let lines = super.render(width);
 		if (this.#allocation < 3) {
-			// A squeezed allocation degrades only blocks that genuinely overflow it.
-			// The allocator measures blocks by trimmed height and never squeezes one
-			// below that, so inline tools whose real content is 1-2 rows (hub
-			// receipts, one-line results) keep that content instead of an equally
-			// tall but contentless frame.
+			// Degrade only blocks that genuinely overflow their allocation; compact
+			// inline tools retain their actual one- or two-row content.
 			const trimmed = trimBlankEdges(lines);
 			if (trimmed.length > this.#allocation) return this.#renderCompact(width);
 			lines = trimmed;
 		}
+		return lines;
+	}
+
+	#trackPaintedShapes(): void {
 		this.#firstResultViewportRepaintShapePainted = this.#needsFirstResultViewportRepaintAtRender();
 		this.#partialResultShapePainted = this.#result !== undefined && this.#isPartial;
-		return lines;
 	}
 
 	#renderCompact(width: number): readonly string[] {

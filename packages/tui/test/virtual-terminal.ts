@@ -95,6 +95,7 @@ export class VirtualTerminal implements Terminal {
 	#viewportY = 0;
 	#inputHandler?: (data: string) => void;
 	#resizeHandler?: () => void;
+	#privateModeReportCallbacks: Array<(mode: number, supported: boolean, confirmed?: boolean) => void> = [];
 	#pendingEngineResize = false;
 	// Memoized text of committed scrollback rows, keyed by absolute offset. A
 	// resize, clear, or bounded-history eviction renumbers offsets; those paths
@@ -168,6 +169,15 @@ export class VirtualTerminal implements Terminal {
 
 	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {
 		// No-op for virtual terminal.
+	}
+
+	onPrivateModeReport(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void {
+		this.#privateModeReportCallbacks.push(callback);
+	}
+
+	/** Deliver a DECRQM capability result to the active TUI under test. */
+	reportPrivateMode(mode: number, supported: boolean, confirmed = true): void {
+		for (const callback of this.#privateModeReportCallbacks) callback(mode, supported, confirmed);
 	}
 
 	moveBy(lines: number): void {
