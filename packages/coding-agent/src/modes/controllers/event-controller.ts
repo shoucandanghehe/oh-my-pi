@@ -65,8 +65,8 @@ import {
 } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { isWarpCliAgentProtocolActive } from "../warp-events";
 import { ComposerPredictionController } from "./composer-prediction-controller";
-import { StreamingRevealController } from "./streaming-reveal";
-import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
+import { StreamingRevealController } from "@oh-my-pi/pi-tui/chat/streaming-reveal";
+import { streamingStringKeysForTool, ToolArgsRevealController } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 
 import {
 	cfgCompletionNotify,
@@ -1463,11 +1463,15 @@ export class EventController {
 	}
 
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
+		const hadWorkingLoader = this.ctx.loadingAnimation !== undefined;
 		this.#ensureWorkingLoaderWhileStreaming();
+		const workingLoaderAdded = !hadWorkingLoader && this.ctx.loadingAnimation !== undefined;
 		if (!this.#vocalizedMessageUpdates.delete(event)) {
 			this.#vocalizeDelta(event);
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
+			let transcriptStructureChanged = workingLoaderAdded;
+			const renderTargets = new Set<Component>([this.ctx.streamingComponent]);
 			const unlockedThinkingVisibility = this.ctx.noteDisplayableThinkingContent(event.message);
 			if (unlockedThinkingVisibility) {
 				this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.effectiveHideThinkingBlock);
@@ -1525,8 +1529,8 @@ export class EventController {
 						if (existing) {
 							this.#trackReadToolCall(content.id, content.arguments);
 							existing.updateArgs(content.arguments, content.id);
+							renderTargets.add(existing);
 						} else if (!this.#toolTimelineComponents.has(content.id)) {
-							// A completed read remains in the timeline after leaving pendingTools.
 							this.#resolveDisplaceablePoll(renderToolName);
 							this.#trackReadToolCall(content.id, content.arguments);
 							const group = this.#getReadGroup();
@@ -1534,6 +1538,7 @@ export class EventController {
 							this.ctx.pendingTools.set(content.id, group);
 							this.#toolTimelineComponents.set(content.id, group);
 							this.#settleHeldCompletionIfPresent(content.id, group);
+							transcriptStructureChanged = true;
 						}
 						continue;
 					}
@@ -1594,15 +1599,18 @@ export class EventController {
 					// A held completion settles only the new card; its user-facing
 					// side effects already ran on first arrival.
 					this.#settleHeldCompletionIfPresent(content.id, component);
+					transcriptStructureChanged = true;
 				} else {
 					const component = this.ctx.pendingTools.get(content.id);
 					if (component) {
 						component.updateArgs(renderArgs, content.id);
 						this.#toolArgsReveal.bind(content.id, component);
+						renderTargets.add(component);
 					}
 				}
 			}
 			for (const [toolCallId, segment] of timeline.afterToolCalls) {
+				const existed = this.#postToolAssistantComponents.has(toolCallId);
 				if (this.#postToolAssistantComponents.get(toolCallId)?.isTranscriptBlockFinalized()) continue;
 				const closed = toolCallId !== timeline.lastToolCallId;
 				const linkTargets = closed ? await refreshAssistantMessageLinkTargets(this.ctx, [segment]) : undefined;
@@ -1613,6 +1621,10 @@ export class EventController {
 					closed ? undefined : { transient: true },
 				);
 				if (closed) component?.markTranscriptBlockFinalized();
+				if (component) {
+					renderTargets.add(component);
+					if (!existed) transcriptStructureChanged = true;
+				}
 			}
 
 			// Update working message with the intent of the LAST intent-bearing
@@ -1642,7 +1654,11 @@ export class EventController {
 				break;
 			}
 
-			this.ctx.ui.requestRender();
+			if (transcriptStructureChanged) {
+				this.ctx.ui.requestRender();
+			} else {
+				for (const component of renderTargets) this.ctx.ui.requestComponentRender(component);
+			}
 		}
 	}
 
@@ -1976,7 +1992,9 @@ export class EventController {
 	async #handleToolExecutionUpdate(
 		event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>,
 	): Promise<void> {
+		const hadWorkingLoader = this.ctx.loadingAnimation !== undefined;
 		this.#ensureWorkingLoaderWhileStreaming();
+		const workingLoaderAdded = !hadWorkingLoader && this.ctx.loadingAnimation !== undefined;
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
 			const isFinalAsyncState = isSettledJobFrame(event.partialResult.details);
@@ -1995,7 +2013,8 @@ export class EventController {
 				const isError = asyncJobState(event.partialResult.details) === "failed";
 				component.updateResult({ ...event.partialResult, isError }, true, event.toolCallId);
 			}
-			this.ctx.ui.requestRender();
+			if (workingLoaderAdded || isTerminal) this.ctx.ui.requestRender();
+			else this.ctx.ui.requestComponentRender(component);
 		}
 	}
 

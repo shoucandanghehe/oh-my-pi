@@ -1,18 +1,10 @@
 /**
- * Builds transcript components from persisted session message entries — the
- * file/remote-backed counterpart to {@link UiHelpers.addMessageToChat} (which is
- * bound to the live InteractiveModeContext). Used by the fullscreen transcript
- * viewer ({@link AgentTranscriptViewer}) to render a parked subagent / advisor /
- * collab-guest transcript that has no live session.
- *
- * Unlike incremental transcript sync, {@link ChatTranscriptBuilder.rebuild}
- * always discards prior components and rebuilds the whole transcript from the
- * supplied entries. Re-rendering a growing transcript is therefore O(n) in the
- * entry count, but it cannot duplicate or misorder rows the way incremental
- * component reuse could.
+ * Builds transcript components from ordered agent messages for detached
+ * transcript panes. Callers own message loading; this module owns rendering.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import { displayArgsForToolCall } from "./tool-args-reveal";
 import { type Component, type TUI } from "../tui";
 import type { AdvisorMessageDetails } from "./messages";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "./messages";
@@ -86,10 +78,11 @@ export interface ChatTranscriptBuilderDeps {
 	/** Draw charts under numeric tables; false for transcripts that are not the main session's. Default: true. */
 	tableCharts?: boolean;
 	requestRender: () => void;
+	onVirtualLayoutUpdate?: (component: Component) => void;
 }
 
 export class ChatTranscriptBuilder {
-	readonly container = new TranscriptContainer();
+	readonly container: TranscriptContainer;
 	#pendingTools = new Map<string, ToolExecutionComponent | ReadToolGroupComponent>();
 	#readArgs = new Map<string, Record<string, unknown>>();
 	#readGroup: ReadToolGroupComponent | null = null;
@@ -106,13 +99,19 @@ export class ChatTranscriptBuilder {
 	#waitingPoll: ToolExecutionComponent | null = null;
 	#todoSnapshot: ToolExecutionComponent | null = null;
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
+	#syntheticExpandables: CollapsedSyntheticMessageComponent[] = [];
 	#expanded = false;
 	#entryComponents = new Map<string, Component[]>();
+	#streamingAssistantComponent: AssistantMessageComponent | undefined;
 
 	readonly #deps: ChatTranscriptBuilderDeps;
+	readonly #previousUsage: Usage | undefined;
 
-	constructor(deps: ChatTranscriptBuilderDeps) {
+	constructor(deps: ChatTranscriptBuilderDeps, previousUsage?: Usage) {
 		this.#deps = deps;
+		this.#previousUsage = previousUsage;
+		this.container = new TranscriptContainer(deps.onVirtualLayoutUpdate);
+		this.#lastAssistantUsage = previousUsage;
 		this.container.setToolActivityVisible(!displayPreferences.hideToolActivity);
 	}
 
@@ -122,43 +121,82 @@ export class ChatTranscriptBuilder {
 	}
 
 	/** Discard all components and rebuild the whole transcript from `entries`. */
-	rebuild(entries: TranscriptEntry[]): void {
+	rebuild(entries: readonly TranscriptEntry[]): void {
 		this.reset();
 		for (const entry of entries) this.#appendEntry(entry);
-		// Flush the trailing turn's usage row only once its tools are materialized
-		// (a read whose result has not arrived stays pending); otherwise the row
-		// would sit above its tools. The drain happens here at the end of the pass.
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
-	append(entries: TranscriptEntry[]): void {
+	append(entries: readonly TranscriptEntry[]): void {
 		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
-	/**
-	 * Toggle tool-output expansion across every expandable component. Cards a
-	 * TSP terminal collapsed or expanded locally mirror that into their own
-	 * state, so this re-applies the transcript-wide state to every one of them
-	 * even when it equals the previous value.
-	 */
+	/** Update the mutable assistant block at the transcript tail without rebuilding prior messages. */
+	updateStreamingAssistant(
+		message: Extract<AgentMessage, { role: "assistant" }>,
+	): AssistantMessageComponent | undefined {
+		const component = this.#streamingAssistantComponent;
+		if (!component || message.content.some(content => content.type === "toolCall")) return undefined;
+		component.updateContent(message, { transient: true });
+		return component;
+	}
+
+	/** Seal the mutable assistant tail in place so its measured viewport extent survives stream completion. */
+	finalizeStreamingAssistant(
+		message: Extract<AgentMessage, { role: "assistant" }>,
+	): AssistantMessageComponent | undefined {
+		const component = this.#streamingAssistantComponent;
+		if (!component || message.content.some(content => content.type === "toolCall")) return undefined;
+		component.updateContent(message);
+		if (!component.isTranscriptBlockFinalized()) component.markTranscriptBlockFinalized();
+		return component;
+	}
+
+	/** Set global expansion across normal blocks and synthetic replay bodies. */
 	setExpanded(expanded: boolean): void {
 		this.#expanded = expanded;
+		this.container.setExpanded(expanded);
 		for (const component of this.#expandables) component.setExpanded(expanded);
+		for (const component of this.#syntheticExpandables) component.setBodyExpanded(expanded);
 	}
 
 	get expanded(): boolean {
 		return this.#expanded;
 	}
 
-	/** Rendered row where a persisted entry begins, after the container has painted once. */
-	rowForEntry(entryId: string): number | undefined {
+	/** Toggle normal expandables globally and one viewport-anchored synthetic replay dump. */
+	toggleExpanded(visibleBlocks: readonly Component[], preferLast: boolean): void {
+		const visible = new Set(visibleBlocks);
+		const visibleSynthetic = this.#syntheticExpandables.filter(component => visible.has(component));
+		const target = preferLast ? visibleSynthetic[visibleSynthetic.length - 1] : visibleSynthetic[0];
+		const expanded = target ? !target.expanded : !this.#expanded;
+		this.#expanded = expanded;
+		this.container.setExpanded(expanded);
+		for (const component of this.#expandables) component.setExpanded(expanded);
+		for (const component of this.#syntheticExpandables) {
+			component.setBodyExpanded(expanded && component === target);
+		}
+		this.container.invalidate();
+	}
+
+	/** Rendered row where a persisted entry begins in the transcript at `width`. */
+	rowForEntry(entryId: string, width?: number): number | undefined {
 		for (const component of this.#entryComponents.get(entryId) ?? []) {
-			const row = this.container.getChildStartRow(component);
+			const row = this.container.getChildStartRow(component, width);
 			if (row !== undefined) return row;
 		}
 		return undefined;
+	}
+
+	/** Close a detached replay at the next user-turn boundary without appending that prompt. */
+	finishReplayTurn(): void {
+		this.#flushPendingUsage();
+		this.#readGroup?.seal();
+		this.#readGroup = null;
+		this.#resolveWaitingPoll();
+		this.#resolveTodoSnapshot();
 	}
 
 	/** Tear down components (sealing pending spinners) and clear build state. */
@@ -175,12 +213,14 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageElapsedMs = undefined;
 		this.#turnStartedAt = undefined;
 		this.#turnUsage.reset();
-		this.#lastAssistantUsage = undefined;
+		this.#lastAssistantUsage = this.#previousUsage;
 		this.#servedModelTracker = new ServedModelTracker();
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
+		this.#streamingAssistantComponent = undefined;
 		this.#expandables = [];
 		this.#entryComponents.clear();
+		this.#syntheticExpandables = [];
 		this.container.dispose();
 		this.container.clear();
 	}
@@ -281,6 +321,7 @@ export class ChatTranscriptBuilder {
 	}
 
 	#appendChatMessage(message: AgentMessage): void {
+		this.#streamingAssistantComponent = undefined;
 		if (message.role !== "toolResult") this.#flushPendingUsage();
 		if (message.role !== "assistant" && message.role !== "toolResult") {
 			this.#readGroup?.seal();
@@ -320,13 +361,13 @@ export class ChatTranscriptBuilder {
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					// Synthetic (agent-attributed) inputs — chiefly the advisor's `Session
-					// update` replay dumps — can be hundreds of KiB of Markdown each.
-					// Rendering their full body on cold open blocked the TUI (issue #6308);
-					// collapse them behind a compact summary that builds Markdown only on
-					// ctrl+o expand. Real user prompts stay fully rendered.
+					// update` replay dumps — can be hundreds of KiB each. Collapse them
+					// behind a compact summary on cold open; ctrl+o renders one anchored
+					// replay as Markdown instead of every historical copy at once.
 					if (isSynthetic) {
 						const collapsed = new CollapsedSyntheticMessageComponent(userText);
-						this.#trackExpandable(collapsed);
+						collapsed.setBodyExpanded(this.#expanded);
+						this.#syntheticExpandables.push(collapsed);
 						this.container.addChild(collapsed);
 					} else {
 						this.container.addChild(
@@ -424,6 +465,9 @@ export class ChatTranscriptBuilder {
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
 		let lastAssistantComponent = assistantComponent;
+		if (!message.content.some(content => content.type === "toolCall")) {
+			this.#streamingAssistantComponent = assistantComponent;
+		}
 
 		if (displayPreferences.cacheMissMarker) {
 			const invalidation = detectCacheInvalidation(this.#lastAssistantUsage, message.usage);
@@ -451,7 +495,7 @@ export class ChatTranscriptBuilder {
 				hideThinkingBlock,
 				() => this.#deps.requestRender(),
 				this.#deps.getMessageRenderer ? undefined : [],
-				undefined,
+				this.#deps.ui.imageBudget,
 				proseOnlyThinking,
 				this.#deps.linkTargets,
 				expandThinkingBlocks,
@@ -494,7 +538,7 @@ export class ChatTranscriptBuilder {
 			this.#readGroup = null;
 			const component = new ToolExecutionComponent(
 				content.name,
-				content.arguments,
+				displayArgsForToolCall(content),
 				{
 					useBuiltInRenderer: this.#deps.isBuiltInTool?.(content.name) ?? true,
 					// Stable ids and Kitty placeholder cells keep images anchored

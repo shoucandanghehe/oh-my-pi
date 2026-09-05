@@ -1,8 +1,9 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { type Component, getSegmenter } from "@oh-my-pi/pi-tui";
+import type { Component } from "../tui";
+import { getSegmenter } from "../utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { formatThinkingForDisplay, hasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
-import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
+import type { AssistantMessageComponent } from "./assistant-message";
 
 export const STREAMING_REVEAL_FRAME_MS = 1000 / 30;
 export const MIN_STEP = 3;

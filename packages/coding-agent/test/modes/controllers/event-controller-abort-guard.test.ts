@@ -21,9 +21,9 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 
 import { cfgCompletionNotify, cfgErrorNotify } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -374,6 +374,7 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 				waitForIdle: () => continuation.promise,
 			},
 		});
+		const releaseActivity = vi.spyOn(ctx.terminalActivity, "release");
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const tornDown = Promise.withResolvers<void>();
 		markActivityEnd.mockImplementation(() => tornDown.resolve());
@@ -386,6 +387,7 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 		await nextMacrotask();
 		// The agent's own continuation follows: never drop to `idle`, never run #finishAgentEnd teardown.
 		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(releaseActivity).not.toHaveBeenCalled();
 		expect(markActivityEnd).not.toHaveBeenCalled();
 		// The automatic continuation must still pick up a queued plan-mode model switch.
 		expect(flushPendingModelSwitch).toHaveBeenCalledTimes(1);
@@ -452,13 +454,13 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 		expect(markActivityEnd).not.toHaveBeenCalled();
 	});
 
-	it("transitions to idle and tears down on the terminal agent_end", async () => {
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+	it("releases terminal activity and tears down on the terminal agent_end", async () => {
 		const ctx = makeTurnEndContext();
+		const releaseActivity = vi.spyOn(ctx.terminalActivity, "release");
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
 		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("stop")]));
-		expect(stateSpy).toHaveBeenCalledWith("idle");
+		expect(releaseActivity).toHaveBeenCalled();
 		expect(markActivityEnd).toHaveBeenCalledTimes(1);
 	});
 });

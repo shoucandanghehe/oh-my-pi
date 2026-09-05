@@ -12,18 +12,11 @@ import {
 	type ExtensionUiComponent,
 	type ExtensionUiComponentFactory,
 	type ExtensionWidgetContent,
+	type ExtensionWidgetOptions,
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
-export {
-	type ExtensionUiComponent,
-	type ExtensionUiComponentFactory,
-	type ExtensionWidgetContent,
-	type MessageRenderOptions,
-	type MessageRenderer,
-	type AssistantThinkingRenderContext,
-	type AssistantThinkingRenderer,
-} from "@oh-my-pi/pi-tui/chat/extension-types";
+export * from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
@@ -40,7 +33,6 @@ import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	Api,
-	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -54,7 +46,6 @@ import type {
 	SimpleStreamOptions,
 	Static,
 	TextContent,
-	ThinkingContent,
 	TSchema,
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
@@ -237,12 +228,6 @@ export interface ExtensionUIDialogOptions {
 /** Raw terminal input listener for extensions. */
 export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
-export type WidgetPlacement = "aboveEditor" | "belowEditor";
-
-export interface ExtensionWidgetOptions {
-	placement?: WidgetPlacement;
-}
-
 /** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
 export interface ExtensionCustomOptions {
 	/** Render the component as an overlay over the transcript instead of replacing the editor area. */
@@ -298,6 +283,15 @@ export interface ExtensionUIContext {
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
+	/**
+	 * Features this UI context guarantees for rich ask dialogs.
+	 * Treat an absent capability as unsupported.
+	 */
+	readonly askDialogCapabilities?: {
+		/** `allowCustomInput: false` hides custom answers in every dialog presentation path. */
+		readonly allowCustomInput: true;
+	};
+
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(
 		questions: ExtensionAskDialogQuestion[],
@@ -314,6 +308,16 @@ export interface ExtensionUIContext {
 		prompt: ExtensionApprovalPrompt,
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionApprovalAnswer>;
+
+	/**
+	 * Show the rich ask dialog on the host's local interactive TUI only.
+	 * Unlike `askDialog`, this never delegates the answer to collaboration guests.
+	 * Unavailable in headless and remote UI modes.
+	 */
+	localAskDialog?(
+		questions: ExtensionAskDialogQuestion[],
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionAskDialogResult | undefined>;
 
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -1563,7 +1567,6 @@ export type {
 // ============================================================================
 // Message Rendering
 // ============================================================================
-
 
 // ============================================================================
 // Command Registration

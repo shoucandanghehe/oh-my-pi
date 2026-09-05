@@ -2,6 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -14,13 +15,14 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import { restoreBtwThreads } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
+import type { EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-function answer(text: string) {
-	const assistantMessage: AssistantMessage = {
+function answer(text: string): AssistantMessage {
+	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
 		api: "anthropic-messages",
@@ -37,12 +39,11 @@ function answer(text: string) {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 	};
-	return { replyText: text, assistantMessage };
 }
 
 interface SideTurn {
 	signal?: AbortSignal;
-	resolve: (result: { replyText: string; assistantMessage: AssistantMessage }) => void;
+	finished: Promise<EphemeralTurnResult>;
 }
 
 describe("BTW session boundaries", () => {
@@ -54,9 +55,10 @@ describe("BTW session boundaries", () => {
 	let btw: BtwController;
 	let sourceFile: string;
 	let sourceId: string;
-	let recordPath: string;
-	let originalRecord: string;
+	let sourceThreadKey: string;
 	let turns: SideTurn[];
+	let responses: Array<(text: string) => void>;
+	let providerStarted: PromiseWithResolvers<void>;
 	let extensionRunner: ExtensionRunner;
 
 	beforeAll(() => initTheme());
@@ -68,19 +70,46 @@ describe("BTW session boundaries", () => {
 		const registry = new ModelRegistry(auth);
 		const model = registry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model");
+		vi.spyOn(registry, "resolver").mockReturnValue(async () => "test-api-key");
 		manager = SessionManager.create(directory.path(), directory.path());
-		manager.appendMessage({ role: "user", content: "Source session", timestamp: Date.now() });
+		const sourceMessage = { role: "user" as const, content: "Source session", timestamp: Date.now() };
+		manager.appendMessage(sourceMessage);
 		await manager.ensureOnDisk();
 		extensionRunner = new ExtensionRunner([], new ExtensionRuntime(), directory.path(), manager, registry);
+		turns = [];
+		responses = [];
+		providerStarted = Promise.withResolvers<void>();
 		session = new AgentSession({
-			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [sourceMessage] } }),
 			sessionManager: manager,
 			settings: Settings.isolated(),
 			modelRegistry: registry,
 			extensionRunner,
 			rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
+			sideStreamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				responses.push(text => {
+					const message = answer(text);
+					stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				providerStarted.resolve();
+				return stream;
+			},
+		});
+		const createConversation = session.createEphemeralConversation.bind(session);
+		vi.spyOn(session, "createEphemeralConversation").mockImplementation((...args) => {
+			const conversation = createConversation(...args);
+			const prompt = conversation.prompt.bind(conversation);
+			vi.spyOn(conversation, "prompt").mockImplementation((input, options) => {
+				const finished = prompt(input, options);
+				turns.push({ signal: options?.signal, finished });
+				return finished;
+			});
+			return conversation;
 		});
 		mode = new InteractiveMode(session, "test");
+		Object.defineProperty(mode, "workspaceEnabled", { value: false });
 		mode.ui.requestRender = vi.fn();
 		mode.ui.requestComponentRender = vi.fn();
 		mode.ui.setFocus = vi.fn();
@@ -94,39 +123,40 @@ describe("BTW session boundaries", () => {
 		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
 		vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 		vi.spyOn(mode, "showError").mockImplementation(() => {});
-		turns = [];
-		vi.spyOn(session, "runEphemeralTurn").mockImplementation(args => {
-			const pending = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
-			turns.push({ signal: args.signal, resolve: pending.resolve });
-			return pending.promise;
-		});
 		const start = BtwController.prototype.start;
 		vi.spyOn(BtwController.prototype, "start").mockImplementation(function (this: BtwController, question) {
 			btw = this;
 			return start.call(this, question);
 		});
 		await mode.handleBtwCommand("Slow side question");
+		await providerStarted.promise;
 		sourceFile = manager.getSessionFile()!;
 		sourceId = manager.getSessionId();
-		const artifacts = manager.getArtifactsDir()!;
-		const record = (await BtwHistoryStore.open(artifacts)).getRecords()[0]!;
-		recordPath = path.join(artifacts, "btw-history", `entry-${record.id}.json`);
-		originalRecord = await Bun.file(recordPath).text();
+		const thread = restoreBtwThreads(manager.getEntries())[0];
+		if (!thread) throw new Error("Expected a durable inline thread with workspace disabled");
+		sourceThreadKey = thread.key;
 	});
+
 	afterEach(async () => {
-		for (const turn of turns) turn.resolve(answer("Cleanup"));
-		// Restore only this test's deliberately corrupted/deleted checkpoint so even
-		// a failing pre-fix run can drain the sticky write before fixture removal.
-		if (!(await Bun.file(recordPath).exists())) await Bun.write(recordPath, originalRecord);
-		vi.restoreAllMocks();
-		await btw.flush();
-		await btw.dispose();
+		for (const complete of responses) complete("Cleanup");
+		await Promise.allSettled(turns.map(turn => turn.finished));
+		await btw?.dispose();
 		mode.stop();
+		vi.restoreAllMocks();
 		await session.dispose();
 		auth.close();
 		directory.removeSync();
 		resetSettingsForTest();
 	});
+
+	async function savedThreads(file: string) {
+		const saved = await SessionManager.open(file, directory.path());
+		try {
+			return restoreBtwThreads(saved.getEntries());
+		} finally {
+			await saved.close();
+		}
+	}
 
 	async function targetSession(): Promise<string> {
 		const target = SessionManager.create(directory.path(), directory.path());
@@ -189,65 +219,67 @@ describe("BTW session boundaries", () => {
 		return { finished: done.promise };
 	}
 
+	async function completeDestinationQuestion() {
+		manager.appendMessage({ role: "user", content: "Destination context", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		providerStarted = Promise.withResolvers<void>();
+		await mode.handleBtwCommand("Destination side question");
+		await providerStarted.promise;
+		responses.at(-1)!("Destination answer");
+		await turns.at(-1)!.finished;
+		await manager.flush();
+		const destination = await savedThreads(manager.getSessionFile()!);
+		expect(destination.find(thread => thread.title === "Destination side question")?.turns.at(-1)?.replyText).toBe(
+			"Destination answer",
+		);
+		expect(destination.some(thread => thread.key === sourceThreadKey)).toBe(false);
+	}
+
 	it.each(["delete command", "picker delete", "picker resume"] as const)(
-		"%s waits for cancelled BTW persistence before changing the source session",
+		"%s aborts BTW before the journal write barrier and ignores late provider output",
 		async action => {
 			const entered = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
-			const upsert = BtwHistoryStore.prototype.upsert;
-			vi.spyOn(BtwHistoryStore.prototype, "upsert").mockImplementationOnce(
-				async function (this: BtwHistoryStore, record) {
-					entered.resolve();
-					await release.promise;
-					await upsert.call(this, record);
-				},
-			);
+			const flush = manager.flush.bind(manager);
+			vi.spyOn(manager, "flush").mockImplementationOnce(async () => {
+				entered.resolve();
+				await release.promise;
+				await flush();
+			});
 			try {
 				const { finished } = await startTransition(action);
 				await entered.promise;
 				expect(turns[0]!.signal?.aborted).toBe(true);
 				expect(manager.getSessionId()).toBe(sourceId);
 				expect(await Bun.file(sourceFile).exists()).toBe(true);
-				expect(await Bun.file(recordPath).text()).toBe(originalRecord);
 				release.resolve();
 				await finished;
 				expect(manager.getSessionId()).not.toBe(sourceId);
-				turns[0]!.resolve(answer("Late answer must not resurrect deleted history"));
-				await Promise.resolve();
-				await btw.flush();
+				responses[0]!("Late answer from the source");
+				await Promise.allSettled([turns[0]!.finished]);
 				if (action === "picker resume") {
-					expect((await Bun.file(recordPath).json()).status).toBe("cancelled");
+					const source = await savedThreads(sourceFile);
+					expect(source.map(thread => thread.key)).toEqual([sourceThreadKey]);
+					expect(source[0]!.turns).toEqual([]);
 				} else {
 					expect(await Bun.file(sourceFile).exists()).toBe(false);
-					expect(await Bun.file(recordPath).exists()).toBe(false);
 				}
-				await mode.handleBtwCommand("New session side question");
-				expect(turns).toHaveLength(2);
-				turns[1]!.resolve(answer("New session answer"));
-				await Promise.resolve();
-				await btw.flush();
-				expect((await BtwHistoryStore.open(manager.getArtifactsDir() ?? undefined)).getRecords()[0]?.answer).toBe(
-					"New session answer",
-				);
+				await completeDestinationQuestion();
 			} finally {
 				release.resolve();
 			}
 		},
 	);
 
-	it.each(["delete", "resume"] as const)("keeps the source intact when BTW persistence blocks %s", async action => {
+	it.each(["delete", "resume"] as const)("keeps the source journal when persistence blocks %s", async action => {
 		const target = action === "resume" ? await targetSession() : undefined;
-		const corrupt = "{broken checkpoint";
-		await Bun.write(recordPath, corrupt);
-		try {
-			const operation = action === "delete" ? mode.handleSessionDeleteCommand() : mode.handleResumeSession(target!);
-			await expect(operation).rejects.toThrow("BTW history could not be saved");
-			expect(manager.getSessionId()).toBe(sourceId);
-			expect(await Bun.file(sourceFile).exists()).toBe(true);
-			expect(await Bun.file(recordPath).text()).toBe(corrupt);
-		} finally {
-			await Bun.write(recordPath, originalRecord);
-		}
+		const failure = new Error("session journal unavailable");
+		vi.spyOn(manager, "flush").mockRejectedValueOnce(failure);
+		const operation = action === "delete" ? mode.handleSessionDeleteCommand() : mode.handleResumeSession(target!);
+		await expect(operation).rejects.toThrow(failure.message);
+		expect(manager.getSessionId()).toBe(sourceId);
+		expect(await Bun.file(sourceFile).exists()).toBe(true);
+		expect(restoreBtwThreads(manager.getEntries()).map(thread => thread.key)).toEqual([sourceThreadKey]);
 	});
 
 	it("leaves BTW running when the delete confirmation is declined", async () => {
@@ -255,7 +287,7 @@ describe("BTW session boundaries", () => {
 		await mode.handleSessionDeleteCommand();
 		expect(manager.getSessionId()).toBe(sourceId);
 		expect(turns[0]!.signal?.aborted).toBe(false);
-		expect(await Bun.file(recordPath).text()).toBe(originalRecord);
+		expect(restoreBtwThreads(manager.getEntries()).map(thread => thread.key)).toEqual([sourceThreadKey]);
 	});
 
 	it("deletes an inactive picker entry without interrupting the current BTW", async () => {
@@ -275,63 +307,37 @@ describe("BTW session boundaries", () => {
 		expect(await Bun.file(target).exists()).toBe(false);
 		expect(manager.getSessionId()).toBe(sourceId);
 		expect(turns[0]!.signal?.aborted).toBe(false);
-		expect(await Bun.file(recordPath).text()).toBe(originalRecord);
 	});
 
 	describe.each(["initial", "reinitialized"] as const)("%s extension command context", binding => {
-		async function transition(action: "newSession" | "switchSession" | "branch") {
-			const controller = new ExtensionUiController(mode);
-			await controller.initHooksAndCustomTools();
-			if (binding === "reinitialized") controller.initializeHookRunner(extensionRunner.getUIContext(), true);
-			const context = extensionRunner.createCommandContext();
-			const target = action === "switchSession" ? await targetSession() : manager.getLeafId()!;
-			return () => {
-				if (action === "newSession") return context.newSession();
-				if (action === "switchSession") return context.switchSession(target);
-				return context.branch(target);
-			};
-		}
-
 		it.each(["newSession", "switchSession", "branch"] as const)(
-			"%s settles BTW before switching and ignores the old request's late answer",
+			"%s preserves the source thread and cannot append its late reply to the destination",
 			async action => {
-				const run = await transition(action);
-				expect(await run()).toEqual({ cancelled: false });
+				const controller = new ExtensionUiController(mode);
+				await controller.initHooksAndCustomTools();
+				if (binding === "reinitialized") controller.initializeHookRunner(extensionRunner.getUIContext(), true);
+				const context = extensionRunner.createCommandContext();
+				const target =
+					action === "switchSession"
+						? await targetSession()
+						: restoreBtwThreads(manager.getEntries())[0]!.anchorLeafId;
+				const result =
+					action === "newSession"
+						? await context.newSession()
+						: action === "switchSession"
+							? await context.switchSession(target)
+							: await context.branch(target);
+				expect(result).toEqual({ cancelled: false });
 				expect(manager.getSessionId()).not.toBe(sourceId);
 				expect(turns[0]!.signal?.aborted).toBe(true);
-				const saved = await Bun.file(recordPath).text();
-				expect(JSON.parse(saved).status).toBe("cancelled");
-				turns[0]!.resolve(answer("Late answer from the old session"));
-				await Promise.resolve();
-				await btw.flush();
-				expect(await Bun.file(recordPath).text()).toBe(saved);
-				await mode.handleBtwCommand("Side question in the destination");
-				expect(turns).toHaveLength(2);
-				turns[1]!.resolve(answer("Destination answer"));
-				await Promise.resolve();
-				await btw.flush();
-				expect(
-					(await BtwHistoryStore.open(manager.getArtifactsDir() ?? undefined))
-						.getRecords()
-						.find(record => record.question === "Side question in the destination")?.answer,
-				).toBe("Destination answer");
-			},
-		);
-
-		it.each(["newSession", "switchSession", "branch"] as const)(
-			"%s leaves the source session intact when the BTW checkpoint cannot be saved",
-			async action => {
-				const run = await transition(action);
-				const corrupt = "{invalid checkpoint";
-				await Bun.write(recordPath, corrupt);
-				try {
-					await expect(run()).rejects.toThrow("BTW history could not be saved");
-					expect(manager.getSessionId()).toBe(sourceId);
-					expect(await Bun.file(sourceFile).exists()).toBe(true);
-					expect(await Bun.file(recordPath).text()).toBe(corrupt);
-				} finally {
-					await Bun.write(recordPath, originalRecord);
-				}
+				const saved = await Bun.file(sourceFile).text();
+				responses[0]!("Late answer from the source");
+				await Promise.allSettled([turns[0]!.finished]);
+				expect(await Bun.file(sourceFile).text()).toBe(saved);
+				const source = await savedThreads(sourceFile);
+				expect(source.map(thread => thread.key)).toEqual([sourceThreadKey]);
+				expect(source[0]!.turns).toEqual([]);
+				await completeDestinationQuestion();
 			},
 		);
 	});

@@ -103,6 +103,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			},
 			restorePendingToolResults() {},
 			markViewIdle() {},
+			resetTerminalActivity: () => {},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {

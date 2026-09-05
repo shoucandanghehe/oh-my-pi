@@ -112,6 +112,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 			setFocus: vi.fn(),
 			getFocused: () => undefined,
 			requestRender: vi.fn(),
+			renderNow: vi.fn(),
 			terminal: { rows: 24 },
 		},
 		renderInitialMessages,

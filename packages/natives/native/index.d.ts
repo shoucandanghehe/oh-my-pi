@@ -469,6 +469,15 @@ export declare class PtySession {
   kill(): void
 }
 
+/**
+ * Immutable sum of exact text measurements and fixed rows, with a shared width
+ * inset.
+ */
+export declare class RowMeasurement {
+  constructor(texts: Array<WrappedText>, children: Array<RowMeasurement>, horizontalInset: number, fixedRows: number)
+  measureRows(width: number): number
+}
+
 /** Persistent brush-core shell session. */
 export declare class Shell {
   /**
@@ -798,6 +807,16 @@ export declare class VcsRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List tracked or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+}
+
+/**
+ * Prepared text whose wrap data can also be shared by a composed row
+ * measurement.
+ */
+export declare class WrappedText {
+  constructor(text: string, tabWidth: number)
+  /** Exact length of `wrapTextWithAnsi(text, width, tabWidth)`. */
+  measureRows(width: number): number
 }
 
 /**
@@ -1270,7 +1289,7 @@ export interface ContextLine {
  * # Errors
  * Returns an error if clipboard access fails.
  */
-export declare function copyToClipboard(text: string): void
+export declare function copyToClipboard(text: string): Promise<undefined>
 
 /**
  * All pairs `(i, j)` with `i < j` whose cosine similarity meets `threshold`.

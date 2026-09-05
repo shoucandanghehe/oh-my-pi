@@ -8,12 +8,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { truncateToVisualLines } from "@oh-my-pi/pi-tui/chrome/visual-truncate";
 import { WelcomeComponent } from "@oh-my-pi/pi-tui/prompt/welcome";
-import {
-	BlockUnitCounter,
-	buildDisplayMessage,
-	nextStep,
-	visibleUnits,
-} from "../src/modes/controllers/streaming-reveal";
+import { BlockUnitCounter, buildDisplayMessage, nextStep, visibleUnits } from "@oh-my-pi/pi-tui/chat/streaming-reveal";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "../src/tools";
 import { ReadTool } from "../src/tools/read";

@@ -1,26 +1,34 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Buffer } from "node:buffer";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as natives from "@oh-my-pi/pi-natives/clipboard";
+import * as ptree from "@oh-my-pi/pi-utils/ptree";
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+const ENV_KEYS = ["TERMUX_VERSION", "LANG", "LC_ALL"] as const;
+let savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
 function setPlatform(value: string): void {
 	Object.defineProperty(process, "platform", { value, configurable: true });
 }
 
-/** Minimal stand-in for the `pbcopy` child: empty stdout, given exit code. */
-function fakeProcess(exitCode: number): Bun.Subprocess {
+/** Clipboard writes only consume the managed child's completion and exit state. */
+function fakeProcess(exitCode: number, finish: () => Promise<void> = async () => {}): ptree.ChildProcess {
+	let currentExitCode: number | null = null;
 	return {
-		stdout: new ReadableStream<Uint8Array>({
-			start(controller) {
-				controller.close();
-			},
-		}),
-		exited: Promise.resolve(exitCode),
-		exitCode,
+		get exitCode() {
+			return currentExitCode;
+		},
+		async wait(): Promise<ptree.ExecResult> {
+			await finish();
+			currentExitCode = exitCode;
+			if (exitCode !== 0) throw new ptree.NonZeroExitError(exitCode, "");
+			return { stdout: "", stderr: "", exitCode, ok: true };
+		},
 		kill: () => {},
-	} as unknown as Bun.Subprocess;
+		proc: { kill: () => {} },
+	} as unknown as ptree.ChildProcess;
 }
 
 type SpawnCall = { cmd: string[]; stdin: string; env: Record<string, string | undefined> | undefined };
@@ -38,18 +46,29 @@ type SpawnCall = { cmd: string[]; stdin: string; env: Record<string, string | un
  * whatever the developer has on the pasteboard.
  */
 describe("copyToClipboard local backend order", () => {
+	beforeEach(() => {
+		savedEnv = {};
+		for (const key of ENV_KEYS) {
+			savedEnv[key] = process.env[key];
+			delete process.env[key];
+		}
+		Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true });
+	});
+
 	afterEach(() => {
 		vi.restoreAllMocks();
 		if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+		for (const key of ENV_KEYS) {
+			const prior = savedEnv[key];
+			if (prior === undefined) delete process.env[key];
+			else process.env[key] = prior;
+		}
 	});
 
-	function captureSpawns(calls: SpawnCall[], onPbcopy: () => Bun.Subprocess) {
-		return vi.spyOn(Bun, "spawn").mockImplementation((...args: unknown[]) => {
-			const first = args[0];
-			const cmd = Array.isArray(first) ? (first as string[]) : ((first as { cmd?: string[] }).cmd ?? []);
-			const options = (Array.isArray(first) ? args[1] : first) as
-				| { stdin?: unknown; env?: Record<string, string | undefined> }
-				| undefined;
+	function captureSpawns(calls: SpawnCall[], onPbcopy: () => ptree.ChildProcess) {
+		return vi.spyOn(ptree, "spawn").mockImplementation((cmd, options) => {
 			const stdin = options?.stdin;
 			calls.push({
 				cmd,
@@ -63,7 +82,7 @@ describe("copyToClipboard local backend order", () => {
 
 	it("writes through pbcopy, never the AppKit path", async () => {
 		setPlatform("darwin");
-		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 		const calls: SpawnCall[] = [];
 		captureSpawns(calls, () => fakeProcess(0));
 
@@ -81,7 +100,7 @@ describe("copyToClipboard local backend order", () => {
 	] as const)("keeps the latest %s copy after a slower earlier write", async (_backend, latest, firstExitCode) => {
 		setPlatform("darwin");
 		let clipboard = "";
-		vi.spyOn(natives, "copyToClipboard").mockImplementation(text => {
+		vi.spyOn(natives, "copyToClipboard").mockImplementation(async text => {
 			clipboard = text;
 		});
 		const firstFinished = Promise.withResolvers<void>();
@@ -90,13 +109,10 @@ describe("copyToClipboard local backend order", () => {
 			const text = calls.at(-1)!.stdin;
 			const exitCode = text === "older" ? firstExitCode : 0;
 			const ready = text === "older" ? firstFinished.promise : Promise.resolve();
-			return {
-				...fakeProcess(exitCode),
-				exited: ready.then(() => {
-					if (exitCode === 0) clipboard = text;
-					return exitCode;
-				}),
-			};
+			return fakeProcess(exitCode, async () => {
+				await ready;
+				if (exitCode === 0) clipboard = text;
+			});
 		});
 
 		const writes = [copyToClipboard("older"), copyToClipboard(latest)];
@@ -110,7 +126,9 @@ describe("copyToClipboard local backend order", () => {
 
 	it("hands pbcopy a UTF-8 locale so non-ASCII text survives LANG=C", async () => {
 		setPlatform("darwin");
-		vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		process.env.LANG = "C";
+		process.env.LC_ALL = "C";
+		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 		const calls: SpawnCall[] = [];
 		captureSpawns(calls, () => fakeProcess(0));
 
@@ -119,11 +137,12 @@ describe("copyToClipboard local backend order", () => {
 		expect(calls[0]?.stdin).toBe("привет — non-ASCII");
 		expect(calls[0]?.env?.LANG).toBe("en_US.UTF-8");
 		expect(calls[0]?.env?.LC_ALL).toBe("en_US.UTF-8");
+		expect(nativeCopy).not.toHaveBeenCalled();
 	});
 
 	it("keeps PDF-header text off pbcopy, which would type it as a document", async () => {
 		setPlatform("darwin");
-		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 		const calls: SpawnCall[] = [];
 		captureSpawns(calls, () => fakeProcess(0));
 
@@ -135,7 +154,7 @@ describe("copyToClipboard local backend order", () => {
 
 	it("preserves literal RTF source instead of letting pbcopy interpret it as rich text", async () => {
 		setPlatform("darwin");
-		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 		const calls: SpawnCall[] = [];
 		captureSpawns(calls, () => fakeProcess(0));
 		const text = String.raw`{\rtf1\ansi Literal \b bold\b0 text}`;
@@ -148,7 +167,7 @@ describe("copyToClipboard local backend order", () => {
 
 	it("still reaches the native write when pbcopy is unavailable", async () => {
 		setPlatform("darwin");
-		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 		const calls: SpawnCall[] = [];
 		captureSpawns(calls, () => {
 			throw new Error("spawn pbcopy ENOENT");
@@ -162,7 +181,7 @@ describe("copyToClipboard local backend order", () => {
 
 	it("falls back when pbcopy exits non-zero", async () => {
 		setPlatform("darwin");
-		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		const nativeCopy = vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 		const calls: SpawnCall[] = [];
 		captureSpawns(calls, () => fakeProcess(1));
 

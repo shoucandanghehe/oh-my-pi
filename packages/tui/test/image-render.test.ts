@@ -283,6 +283,11 @@ describe("terminal image rendering", () => {
 		expect(color[2]).toBeCloseTo(44, 0);
 	});
 
+	it("recognizes SIXEL rows after a wide workspace prefix", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		expect(TERMINAL.isImageLine(`${"x".repeat(9_000)}\x1bPq~\x1b\\`)).toBe(true);
+	});
+
 	it("moves back up before multi-row direct Kitty output and restores the cursor below it", () => {
 		terminal.imageProtocol = ImageProtocol.Kitty;
 		const image = new Image(

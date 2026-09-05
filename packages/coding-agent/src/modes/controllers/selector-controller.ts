@@ -1,3 +1,4 @@
+import { AgentRegistry } from "../../registry/agent-registry";
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, UsageReport } from "@oh-my-pi/pi-ai";
@@ -1341,7 +1342,7 @@ export class SelectorController {
 			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
 			onCancel: done,
 		});
-		if (selector.targetCount === 0) {
+		if (!selector.hasTargets) {
 			selector.dispose();
 			this.ctx.showStatus("No messages to branch from");
 			return;
@@ -1535,6 +1536,7 @@ export class SelectorController {
 
 					// Ask about summarization
 					done(); // Close selector first
+					this.ctx.ui.renderNow();
 
 					// Pure-rewind probe (before navigation mutates the leaf): when the
 					// target sits on the current leaf's path and no summary is added,
@@ -2503,7 +2505,8 @@ export class SelectorController {
 			}
 			menu.handle?.hide();
 			this.#releaseMenu("agent-hub", menu);
-			this.focusActiveEditorArea();
+			if (this.ctx.workspaceEnabled) this.ctx.focusMainWorkspacePane();
+			else this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
 
@@ -2529,7 +2532,14 @@ export class SelectorController {
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			expandThinkingBlocks: () => this.ctx.expandThinkingBlocks,
+			createStatusLine: id => {
+				const session = AgentRegistry.global().get(id)?.session;
+				return session ? this.ctx.statusLine.createPeer(session) : undefined;
+			},
+			getStatusLineTransparent: () => this.ctx.settings.get("statusLine.transparent"),
+			getExtensionPresentation: id => AgentRegistry.global().get(id)?.session?.extensionRunner,
 			focusAgent: id => this.ctx.focusAgentSession(id),
+			openAgent: this.ctx.workspaceEnabled ? id => this.ctx.openAgentWorkspacePane(id) : undefined,
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
 
