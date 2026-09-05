@@ -48,23 +48,23 @@ function makeViewer(sessionFile: string, observed: ObservableSession[]): AgentTr
 		displayName: SESSION_ID,
 		kind: "sub",
 		parentId: "Main",
-		session: null,
+		session: {} as never,
 		sessionFile,
-		status: "parked",
+		status: "idle",
 	});
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 	return new AgentTranscriptViewer({
 		transcript: agentTranscriptSource,
 		agentId: SESSION_ID,
 		registry: agents,
-		observers: makeSubagentRegistry(observed),
 		ui,
 		cwd: path.dirname(sessionFile),
 		expandKeys: ["ctrl+o"],
 		hubKeys: ["ctrl+s"],
+		createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0, revision: 0 }), dispose: () => {} }),
 		requestRender: () => {},
 		onClose: () => {},
-		onHubClose: () => {},
+		onHubToggle: () => {},
 	});
 }
 
