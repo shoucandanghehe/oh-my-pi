@@ -16,6 +16,7 @@
 import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
+	type AppViewportHoverProvider,
 	type Component,
 	componentContains,
 	type EditorTopBorder,
@@ -40,6 +41,7 @@ import type { FileEntry, SessionMessageEntry } from "../../session/session-entri
 import { parseSessionEntries, visitEntriesFromFileStream } from "../../session/session-loader";
 import { replaceTabs } from "../../tools/render-utils";
 import { renderWorkspacePaneHeader } from "../shared";
+import { fgAnsi } from "../theme/color";
 import { theme } from "../theme/theme";
 import type { AgentHubRemote } from "./agent-hub";
 import { ChatTranscriptPane } from "./chat-transcript-pane";
@@ -77,6 +79,9 @@ export interface AgentTranscriptViewerDeps {
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
+const AUTO_CLOSE_FRAME_MS = 16;
+const AUTO_CLOSE_DURATION_MS = 3_000;
+const AUTO_CLOSE_FRAMES = Math.ceil(AUTO_CLOSE_DURATION_MS / AUTO_CLOSE_FRAME_MS);
 
 const SENTINEL_BYTES = 4096;
 const ASYNC_LOCAL_LOAD_THRESHOLD_BYTES = 2 * 1024 * 1024;
@@ -142,8 +147,173 @@ function statusBadge(status: AgentStatus): string {
 	}
 }
 
+function stoneNoise(row: number, col: number): number {
+	const mixed = Math.imul(row + 0x9e3779b9, 0x85ebca6b) ^ Math.imul(col + 0xc2b2ae35, 0x27d4eb2f);
+	const hashed = (mixed ^ (mixed >>> 16)) >>> 0;
+	return hashed / 4294967296;
+}
+
+const STONE_GRADIENT_STEPS = 6;
+const STONE_GRADIENT_SETTLE_PROGRESS = 0.24;
+let stoneGradientCache: { key: string; ansi: readonly string[] } | undefined;
+
+function hexRgb(hex: string): readonly [number, number, number] {
+	const value = Number.parseInt(hex.slice(1), 16);
+	return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+}
+
+function stoneGradientAnsi(): readonly string[] {
+	const lightHex = theme.getColorHex("muted");
+	const darkHex = theme.getColorHex("dim");
+	const mode = theme.getColorMode();
+	const key = `${mode}:${lightHex}:${darkHex}`;
+	if (stoneGradientCache?.key === key) return stoneGradientCache.ansi;
+
+	const light = hexRgb(lightHex);
+	const dark = hexRgb(darkHex);
+	const ansi = Array.from({ length: STONE_GRADIENT_STEPS }, (_value, index) => {
+		const ratio = index / (STONE_GRADIENT_STEPS - 1);
+		const channels = light.map((channel, channelIndex) =>
+			Math.round(channel + ((dark[channelIndex] ?? channel) - channel) * ratio),
+		);
+		const hex = `#${channels.map(channel => channel.toString(16).padStart(2, "0")).join("")}`;
+		return fgAnsi(hex, mode);
+	});
+	stoneGradientCache = { key, ansi };
+	return ansi;
+}
+
+function ansiSequenceEnd(text: string, start: number): number {
+	const kind = text.charCodeAt(start + 1);
+	if (kind === 0x5b) {
+		for (let index = start + 2; index < text.length; index++) {
+			const code = text.charCodeAt(index);
+			if (code >= 0x40 && code <= 0x7e) return index + 1;
+		}
+		return text.length;
+	}
+	if (kind === 0x5d) {
+		for (let index = start + 2; index < text.length; index++) {
+			if (text.charCodeAt(index) === 0x07) return index + 1;
+			if (text.charCodeAt(index) === 0x1b && text.charCodeAt(index + 1) === 0x5c) return index + 2;
+		}
+		return text.length;
+	}
+	if (kind === 0x50 || kind === 0x58 || kind === 0x5e || kind === 0x5f) {
+		for (let index = start + 2; index < text.length; index++) {
+			if (text.charCodeAt(index) === 0x1b && text.charCodeAt(index + 1) === 0x5c) return index + 2;
+		}
+		return text.length;
+	}
+	return Math.min(text.length, start + 2);
+}
+
+function foregroundAnsiAfterSgr(sequence: string, current: string): string {
+	if (!sequence.startsWith("\x1b[") || !sequence.endsWith("m")) return current;
+	const params = sequence.slice(2, -1);
+	if (params === "") return "\x1b[39m";
+	const tokens = params.split(";");
+	let foreground = current;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index] ?? "";
+		if (token.startsWith("38:")) {
+			foreground = `\x1b[${token}m`;
+			continue;
+		}
+		const value = Number(token || "0");
+		if (value === 0 || value === 39) {
+			foreground = "\x1b[39m";
+			continue;
+		}
+		if ((value >= 30 && value <= 37) || (value >= 90 && value <= 97)) {
+			foreground = `\x1b[${value}m`;
+			continue;
+		}
+		if (value !== 38) continue;
+		const mode = tokens[index + 1];
+		const last = mode === "2" ? index + 4 : mode === "5" ? index + 2 : index;
+		if (last === index || last >= tokens.length) continue;
+		foreground = `\x1b[${tokens.slice(index, last + 1).join(";")}m`;
+		index = last;
+	}
+	return foreground;
+}
+
+function renderPetrificationFrame(
+	lines: readonly string[],
+	frame: number,
+	rowOffset: number,
+	totalRows: number,
+): string[] {
+	const progress = Math.min(1, (frame + 1) / AUTO_CLOSE_FRAMES);
+	const height = Math.max(1, totalRows);
+	const totalCols = Math.max(1, ...lines.map(line => Bun.stringWidth(Bun.stripANSI(line))));
+	const gradient = stoneGradientAnsi();
+
+	return lines.map((line, row) => {
+		const absoluteRow = Math.max(0, rowOffset + row);
+		const rowRatio = absoluteRow / Math.max(1, height - 1);
+		if (progress < rowRatio * 0.58 * 0.85 - 0.02) return line;
+
+		let index = 0;
+		let col = 0;
+		let changed = false;
+		let rendered = "";
+		let originalForeground = "\x1b[39m";
+		while (index < line.length) {
+			if (line.charCodeAt(index) === 0x1b) {
+				const end = ansiSequenceEnd(line, index);
+				const sequence = line.slice(index, end);
+				rendered += sequence;
+				originalForeground = foregroundAnsiAfterSgr(sequence, originalForeground);
+				index = end;
+				continue;
+			}
+
+			const codePoint = line.codePointAt(index);
+			if (codePoint === undefined) break;
+			const glyph = String.fromCodePoint(codePoint);
+			index += glyph.length;
+			const glyphWidth = Bun.stringWidth(glyph);
+			if (glyphWidth <= 0 || glyph === " ") {
+				rendered += glyph;
+				if (glyphWidth > 0) col += glyphWidth;
+				continue;
+			}
+
+			const colRatio = col / Math.max(1, totalCols - 1);
+			const noise = stoneNoise(absoluteRow, col);
+			const threshold = Math.max(
+				0,
+				Math.min(0.85, (rowRatio * 0.58 + colRatio * 0.42) * 0.85 + (noise - 0.5) * 0.04),
+			);
+			if (progress < threshold) {
+				rendered += glyph;
+			} else {
+				changed = true;
+				const age = progress - threshold;
+				const step = Math.min(
+					gradient.length - 1,
+					Math.floor((age / STONE_GRADIENT_SETTLE_PROGRESS) * gradient.length),
+				);
+				const stoneForeground = gradient[Math.max(0, step)] ?? gradient.at(-1) ?? theme.getFgAnsi("dim");
+				rendered += `${stoneForeground}${glyph}${originalForeground}`;
+			}
+			col += glyphWidth;
+		}
+		return changed ? rendered : line;
+	});
+}
+
 export class AgentTranscriptViewer
-	implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware, WorkspacePaneHeaderProvider
+	implements
+		Component,
+		Focusable,
+		MouseRoutable,
+		TargetedRender,
+		ViewportHeightAware,
+		WorkspacePaneHeaderProvider,
+		AppViewportHoverProvider
 {
 	readonly #pane: ChatTranscriptPane;
 	#localState: LocalTranscriptState | undefined;
@@ -162,6 +332,10 @@ export class AgentTranscriptViewer
 	#disposed = false;
 	#statusLine: PaneStatusLine | undefined;
 	#statusLineSession: AgentSession | null;
+	#autoClose: { frame: number; onComplete: () => void } | undefined;
+	#autoCloseTimer: NodeJS.Timeout | undefined;
+	#autoCloseAbandoned = false;
+	#lastRenderedBodyRows = 1;
 
 	constructor(private readonly deps: AgentTranscriptViewerDeps) {
 		const displayId = replaceTabs(deps.agentId);
@@ -225,7 +399,9 @@ export class AgentTranscriptViewer
 	}
 
 	set focused(focused: boolean) {
+		if (focused) this.#abandonAutoClose();
 		this.#pane.focused = focused;
+		if (!focused) this.#pane.clearAppViewportHover();
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
@@ -234,6 +410,18 @@ export class AgentTranscriptViewer
 
 	setViewportHeight(height: number): void {
 		this.#pane.setViewportHeight(height);
+	}
+
+	setTextSelectionActive(active: boolean): void {
+		this.#pane.setTextSelectionActive(active);
+	}
+
+	wantsAppViewportHover(): boolean {
+		return this.#pane.wantsAppViewportHover();
+	}
+
+	clearAppViewportHover(): void {
+		this.#pane.clearAppViewportHover();
 	}
 
 	getTextSelection(selection: TextSelectionRange): string | undefined {
@@ -252,8 +440,36 @@ export class AgentTranscriptViewer
 		return this.#pane.getTextSelectionScrollOffset(row);
 	}
 
+	startAutoClose(onComplete: () => void): void {
+		if (this.#disposed || this.#autoCloseAbandoned || this.#autoClose) return;
+		this.#autoClose = { frame: 0, onComplete };
+		this.#autoCloseTimer = setInterval(() => {
+			const animation = this.#autoClose;
+			if (!animation || this.#disposed) return;
+			animation.frame++;
+			if (animation.frame >= AUTO_CLOSE_FRAMES) {
+				this.#clearAutoCloseTimer();
+				this.#autoClose = undefined;
+				animation.onComplete();
+				return;
+			}
+			this.deps.ui.requestComponentRender(this);
+		}, AUTO_CLOSE_FRAME_MS);
+		this.#autoCloseTimer.unref();
+		this.deps.ui.requestComponentRender(this);
+	}
+
+	cancelAutoClose(): void {
+		if (!this.#autoClose) return;
+		this.#clearAutoCloseTimer();
+		this.#autoClose = undefined;
+		this.deps.ui.requestComponentRender(this);
+	}
+
 	dispose(): void {
 		this.#disposed = true;
+		this.#clearAutoCloseTimer();
+		this.#autoClose = undefined;
 		this.#stopPolling();
 		this.#localLoadToken++;
 		this.#localLoading = undefined;
@@ -540,10 +756,12 @@ export class AgentTranscriptViewer
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		this.#abandonAutoClose();
 		return this.#pane.routeMouse(event, line, col);
 	}
 
 	handleInput(data: string): void {
+		this.#abandonAutoClose();
 		this.#pane.handleInput(data);
 	}
 
@@ -580,7 +798,11 @@ export class AgentTranscriptViewer
 	}
 
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
-		return renderTargeted(this.#pane, width, targets);
+		const lines = renderTargeted(this.#pane, width, targets);
+		this.#lastRenderedBodyRows = lines.length;
+		return this.#autoClose
+			? renderPetrificationFrame(lines, this.#autoClose.frame, 1, this.#lastRenderedBodyRows + 1)
+			: lines;
 	}
 
 	invalidate(): void {
@@ -588,7 +810,11 @@ export class AgentTranscriptViewer
 	}
 
 	render(width: number): readonly string[] {
-		return this.#pane.render(width);
+		const lines = this.#pane.render(width);
+		this.#lastRenderedBodyRows = lines.length;
+		return this.#autoClose
+			? renderPetrificationFrame(lines, this.#autoClose.frame, 1, this.#lastRenderedBodyRows + 1)
+			: lines;
 	}
 
 	renderWorkspaceHeader(width: number, focused: boolean): string {
@@ -602,9 +828,23 @@ export class AgentTranscriptViewer
 					? theme.fg("dim", " · Esc")
 					: ""
 			: "";
-		return renderWorkspacePaneHeader(name, width, focused, `${status}${action}`);
+		const header = renderWorkspacePaneHeader(name, width, focused, `${status}${action}`);
+		return this.#autoClose
+			? (renderPetrificationFrame([header], this.#autoClose.frame, 0, this.#lastRenderedBodyRows + 1)[0] ?? "")
+			: header;
 	}
 
+	#abandonAutoClose(): void {
+		if (!this.#autoClose) return;
+		this.#autoCloseAbandoned = true;
+		this.cancelAutoClose();
+	}
+
+	#clearAutoCloseTimer(): void {
+		if (!this.#autoCloseTimer) return;
+		clearInterval(this.#autoCloseTimer);
+		this.#autoCloseTimer = undefined;
+	}
 	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
 		const ref = this.deps.registry.get(this.deps.agentId);
 		const session = ref?.session ?? null;

@@ -106,7 +106,7 @@ export class ImageBudget {
 	#purgeIds: number[] = [];
 	/** Ids present in the previous authoritative frame but absent from the latest. */
 	#authoritativeIds = new Set<number>();
-	#retiredIds: number[] = [];
+	#retiredIds = new Set<number>();
 	/** Tallest rendered graphic block per immutable image occurrence. */
 	#renderedRows = new Map<number, number>();
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
@@ -195,7 +195,12 @@ export class ImageBudget {
 		this.#passIds.length = 0;
 		this.#passSuppression.clear();
 		this.#stablePass = stable;
-		this.#applyingReset = !stable && this.#cap > 0 && this.#planned > this.#onTerminal;
+		const applyingReset = !stable && this.#cap > 0 && this.#planned > this.#onTerminal;
+		// Retirements span only the immediate discovery/reset retry pair. App-
+		// viewport emitters consume them after the final pass; native history
+		// deliberately archives them, so a later frame must not retain the ids.
+		if (!applyingReset) this.#retiredIds.clear();
+		this.#applyingReset = applyingReset;
 	}
 
 	/**
@@ -233,9 +238,11 @@ export class ImageBudget {
 		const total = this.#passIds.length;
 		this.#lastTotal = total;
 		const currentIds = new Set(this.#passIds);
-		this.#retiredIds = [...this.#authoritativeIds].filter(id => !currentIds.has(id));
+		for (const id of this.#authoritativeIds) {
+			if (!currentIds.has(id)) this.#retiredIds.add(id);
+		}
+		for (const id of currentIds) this.#retiredIds.delete(id);
 		this.#authoritativeIds = currentIds;
-		let reset = false;
 		if (this.#applyingReset) {
 			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
 				const id = this.#passIds[i];
@@ -278,7 +285,7 @@ export class ImageBudget {
 		this.#watchedPlacements.clear();
 		this.#authoritativeIds.clear();
 		this.#renderedRows.clear();
-		this.#retiredIds = [];
+		this.#retiredIds.clear();
 		return ids;
 	}
 
@@ -297,9 +304,9 @@ export class ImageBudget {
 	 * native-scrollback callers deliberately leave them archived.
 	 */
 	takeRetiredIds(): readonly number[] {
-		if (this.#retiredIds.length === 0) return EMPTY_IDS;
-		const ids = this.#retiredIds;
-		this.#retiredIds = [];
+		if (this.#retiredIds.size === 0) return EMPTY_IDS;
+		const ids = [...this.#retiredIds];
+		this.#retiredIds.clear();
 		for (const id of ids) {
 			this.#transmitted.delete(id);
 			this.#deletePlacementState(id);

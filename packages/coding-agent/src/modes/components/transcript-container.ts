@@ -6,7 +6,13 @@ import type {
 	VirtualViewportProvider,
 	VirtualViewportRequest,
 } from "@oh-my-pi/pi-tui";
-import { Container, componentContains, extractComponentTextSelection, normalizeTextSelection } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	componentContains,
+	extractComponentTextSelection,
+	measureComponentRows,
+	normalizeTextSelection,
+} from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { isToolActivityComponent } from "./tool-activity";
 
@@ -109,29 +115,16 @@ interface VirtualBlockExtent {
 	component: Component;
 	contribution: readonly string[] | undefined;
 	rawRef: readonly string[] | undefined;
-	estimatedBodyRows: number;
+	bodyRows: number;
 	measuredWidth: number;
 	measuredGeneration: number;
 	measuredVersion: number | undefined;
+	layoutWidth: number;
+	layoutGeneration: number;
+	layoutVersion: number | undefined;
 	startRow: number;
 	rowCount: number;
 	sep: number;
-}
-
-interface VirtualWarmMeasurement {
-	entry: VirtualBlockExtent;
-	raw: readonly string[];
-	contribution: readonly string[];
-	version: number | undefined;
-}
-
-interface VirtualWarmup {
-	token: number;
-	width: number;
-	generation: number;
-	expanded: boolean;
-	entries: VirtualBlockExtent[];
-	promise: Promise<void>;
 }
 
 const MAX_LIVE_BLOCKS = 256;
@@ -140,8 +133,6 @@ const PINNED_FRONTIER_WARN_MS = 30_000;
 const EMPTY_ROWS: readonly string[] = [];
 const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 const VIRTUAL_OVERSCAN_BLOCKS = 8;
-const VIRTUAL_WARMUP_CHUNK_ENTRIES = 32;
-const VIRTUAL_WARMUP_CHUNK_MS = 4;
 
 function isBlockFinalized(component: Component): boolean {
 	return (component as Component & FinalizableBlock).isTranscriptBlockFinalized?.() ?? true;
@@ -218,21 +209,16 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	#visibleVirtualEntries = new Set<VirtualBlockExtent>();
 	#virtualTotalRows = 0;
 	#virtualStructureDirty = true;
+	#virtualLayoutDirtyFrom = 0;
 	#virtualWidth = -1;
 	#virtualGeneration = -1;
-	#virtualEstimateSeeded = false;
-	#virtualEstimatedBodyRows = 1;
-	#virtualWarmupToken = 0;
-	#virtualWarmup: VirtualWarmup | undefined;
-	#virtualExact = false;
 	#generation = 0;
 
 	override addChild(component: Component): void {
-		// New transcript blocks arrive on the frame hot path. Extend the warmed
-		// ledger in place; removals and pre-warm batches still take full reconcile.
+		// New transcript blocks arrive on the frame hot path. Extend the prepared
+		// ledger in place; removals and pre-structure batches still take full reconcile.
 		const canExtendVirtualLedger =
 			!this.#virtualStructureDirty && this.#virtualEntries.length === this.children.length;
-		if (this.#virtualWarmup || this.#virtualExact) this.#cancelVirtualWarmup();
 		super.addChild(component);
 		this.#applyPresentationState(component);
 		this.#entries.push({
@@ -246,23 +232,28 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		});
 		if (!canExtendVirtualLedger) {
 			this.#virtualStructureDirty = true;
+			this.#virtualLayoutDirtyFrom = 0;
 			return;
 		}
-		const estimatedBodyRows = this.#virtualEstimatedBodyRows;
-		const sep = this.#virtualTotalRows > 0 ? 1 : 0;
-		const rowCount = sep + estimatedBodyRows;
+		const bodyRows = 0;
+		const sep = 0;
+		const rowCount = bodyRows;
 		this.#virtualEntries.push({
 			component,
 			rawRef: undefined,
 			contribution: undefined,
-			estimatedBodyRows,
+			bodyRows,
 			measuredWidth: -1,
 			measuredGeneration: -1,
 			measuredVersion: undefined,
+			layoutWidth: -1,
+			layoutGeneration: -1,
+			layoutVersion: undefined,
 			startRow: this.#virtualTotalRows,
 			rowCount,
 			sep,
 		});
+		this.#virtualLayoutDirtyFrom = Math.min(this.#virtualLayoutDirtyFrom, this.#virtualEntries.length - 1);
 		this.#virtualTotalRows += rowCount;
 	}
 
@@ -273,11 +264,10 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
 		this.#virtualStructureDirty = true;
-		this.#cancelVirtualWarmup();
+		this.#virtualLayoutDirtyFrom = 0;
 	}
 
 	override clear(): void {
-		this.#cancelVirtualWarmup();
 		super.clear();
 		this.#entries = [];
 		this.#frontier = 0;
@@ -291,63 +281,17 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#visibleVirtualEntries = new Set<VirtualBlockExtent>();
 		this.#virtualTotalRows = 0;
 		this.#virtualStructureDirty = true;
-		this.#virtualEstimateSeeded = false;
-		this.#virtualEstimatedBodyRows = 1;
-		this.#virtualExact = false;
+		this.#virtualLayoutDirtyFrom = 0;
 		this.#generation++;
 	}
 
 	/**
-	 * Reconcile child identities and estimated row offsets without rendering.
-	 * Incremental transcript builders call this at yield boundaries so later
-	 * appends extend an already-warmed ledger in constant time.
+	 * Reconcile child identities without rendering. Incremental transcript
+	 * builders call this at yield boundaries; exact row heights are measured
+	 * once when the viewport supplies its width.
 	 */
 	prepareVirtualStructure(): void {
 		this.#syncVirtualStructure();
-	}
-
-	/**
-	 * Measure every transcript block in bounded event-loop chunks. The live
-	 * scrollbar keeps its current estimate until the complete exact ledger can
-	 * replace it atomically.
-	 */
-	warmVirtualViewport(width: number): Promise<void> {
-		width = Math.max(1, Math.trunc(width));
-		this.#syncVirtualEntries(width);
-		if (this.#virtualExact) return Promise.resolve();
-		const current = this.#virtualWarmup;
-		if (
-			current &&
-			current.width === width &&
-			current.generation === this.#generation &&
-			current.expanded === this.#expanded &&
-			current.entries === this.#virtualEntries
-		) {
-			return current.promise;
-		}
-
-		const token = ++this.#virtualWarmupToken;
-		const { promise, resolve } = Promise.withResolvers<void>();
-		const warmup: VirtualWarmup = {
-			token,
-			width,
-			generation: this.#generation,
-			expanded: this.#expanded,
-			entries: this.#virtualEntries,
-			promise,
-		};
-		this.#virtualWarmup = warmup;
-		setImmediate(() => {
-			void this.#runVirtualWarmup(warmup)
-				.catch(error => {
-					logger.debug("Transcript virtual-height warmup stopped", { error: String(error) });
-				})
-				.finally(() => {
-					if (this.#virtualWarmup === warmup) this.#virtualWarmup = undefined;
-					resolve();
-				});
-		});
-		return promise;
 	}
 
 	/**
@@ -372,11 +316,9 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		const visibleVirtualEntries = source.#visibleVirtualEntries;
 		const virtualTotalRows = source.#virtualTotalRows;
 		const virtualStructureDirty = source.#virtualStructureDirty;
+		const virtualLayoutDirtyFrom = source.#virtualLayoutDirtyFrom;
 		const virtualWidth = source.#virtualWidth;
 		const virtualGeneration = source.#virtualGeneration;
-		const virtualEstimateSeeded = source.#virtualEstimateSeeded;
-		const virtualEstimatedBodyRows = source.#virtualEstimatedBodyRows;
-		const virtualExact = source.#virtualExact;
 		const generation = source.#generation;
 
 		source.clear();
@@ -394,16 +336,13 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#visibleVirtualEntries = visibleVirtualEntries;
 		this.#virtualTotalRows = virtualTotalRows;
 		this.#virtualStructureDirty = virtualStructureDirty;
+		this.#virtualLayoutDirtyFrom = virtualLayoutDirtyFrom;
 		this.#virtualWidth = virtualWidth;
 		this.#virtualGeneration = virtualGeneration;
-		this.#virtualEstimateSeeded = virtualEstimateSeeded;
-		this.#virtualEstimatedBodyRows = virtualEstimatedBodyRows;
-		this.#virtualExact = virtualExact;
 		this.#generation = generation;
 	}
 
 	override invalidate(): void {
-		this.#cancelVirtualWarmup();
 		this.#generation++;
 		super.invalidate();
 	}
@@ -411,15 +350,14 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded === expanded) return;
 		this.#expanded = expanded;
-		this.#cancelVirtualWarmup();
 		for (const entry of this.#visibleVirtualEntries) this.#applyPresentationState(entry.component);
 		for (const entry of this.#measuredVirtualEntries) {
-			if (entry.contribution !== undefined) entry.estimatedBodyRows = entry.contribution.length;
+			if (entry.contribution !== undefined) entry.bodyRows = entry.contribution.length;
 			entry.contribution = undefined;
 			entry.rawRef = undefined;
 		}
 		this.#measuredVirtualEntries.clear();
-		this.#virtualEstimateSeeded = false;
+		this.#generation++;
 	}
 
 	setToolActivityVisible(visible: boolean): void {
@@ -1081,7 +1019,6 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		width = Math.max(1, width);
 		const rows = Math.max(0, Math.trunc(request.rows));
 		this.#syncVirtualEntries(width);
-		if (!request.followBottom && this.#virtualWarmup) this.#cancelVirtualWarmup();
 
 		let totalRows = this.#virtualTotalRows;
 		let offset = request.followBottom
@@ -1115,7 +1052,6 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 
 		if (rows === 0 || totalRows === 0) {
 			this.#visibleVirtualEntries.clear();
-			if (request.followBottom) void this.warmVirtualViewport(width);
 			return { lines: EMPTY_ROWS, estimatedTotalRows: totalRows, offset: 0 };
 		}
 
@@ -1132,7 +1068,6 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 				if (targeted && !targeted.has(index) && this.#virtualEntries[index]?.contribution !== undefined) continue;
 				if (this.#measureVirtualEntry(index, width)) changedFrom = Math.min(changedFrom, index);
 			}
-			if (!this.#virtualEstimateSeeded && this.#calibrateVirtualEstimates(measured)) changedFrom = 0;
 			if (changedFrom === this.#virtualEntries.length) break;
 			this.#rebuildVirtualRows(changedFrom);
 			totalRows = this.#virtualTotalRows;
@@ -1160,130 +1095,37 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			estimatedTotalRows: this.#virtualTotalRows,
 			offset,
 		};
-		if (request.followBottom) void this.warmVirtualViewport(width);
 		return frame;
-	}
-
-	#cancelVirtualWarmup(): void {
-		this.#virtualWarmupToken++;
-		this.#virtualWarmup = undefined;
-		this.#virtualExact = false;
-	}
-
-	#virtualWarmupIsCurrent(warmup: VirtualWarmup): boolean {
-		return (
-			this.#virtualWarmupToken === warmup.token &&
-			this.#virtualEntries === warmup.entries &&
-			this.#generation === warmup.generation &&
-			this.#expanded === warmup.expanded &&
-			this.#virtualWidth === warmup.width
-		);
-	}
-
-	async #runVirtualWarmup(warmup: VirtualWarmup): Promise<void> {
-		const measurements = new Array<VirtualWarmMeasurement | undefined>(warmup.entries.length);
-		let index = 0;
-		while (index < warmup.entries.length) {
-			if (!this.#virtualWarmupIsCurrent(warmup)) return;
-			const chunkStartedAt = performance.now();
-			let chunkEntries = 0;
-			while (
-				index < warmup.entries.length &&
-				chunkEntries < VIRTUAL_WARMUP_CHUNK_ENTRIES &&
-				performance.now() - chunkStartedAt < VIRTUAL_WARMUP_CHUNK_MS
-			) {
-				const entry = warmup.entries[index]!;
-				this.#applyPresentationState(entry.component);
-				const currentVersion = getBlockVersion(entry.component);
-				let raw = entry.rawRef;
-				let contribution = entry.contribution;
-				if (
-					raw === undefined ||
-					contribution === undefined ||
-					entry.measuredWidth !== warmup.width ||
-					entry.measuredGeneration !== warmup.generation ||
-					entry.measuredVersion !== currentVersion ||
-					!isBlockFinalized(entry.component)
-				) {
-					this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-					raw = entry.component.render(warmup.width);
-					contribution = trimBlankEdges(raw);
-				}
-				measurements[index] = {
-					entry,
-					raw,
-					contribution,
-					version: getBlockVersion(entry.component),
-				};
-				index++;
-				chunkEntries++;
-			}
-			if (index < warmup.entries.length) {
-				const { promise, resolve } = Promise.withResolvers<void>();
-				setImmediate(resolve);
-				await promise;
-			}
-		}
-		if (!this.#virtualWarmupIsCurrent(warmup)) return;
-
-		let bodyRows = 0;
-		let visibleEntries = 0;
-		for (let measurementIndex = 0; measurementIndex < measurements.length; measurementIndex++) {
-			const measurement = measurements[measurementIndex];
-			if (
-				!measurement ||
-				warmup.entries[measurementIndex] !== measurement.entry ||
-				!isBlockFinalized(measurement.entry.component) ||
-				getBlockVersion(measurement.entry.component) !== measurement.version
-			) {
-				return;
-			}
-			bodyRows += measurement.contribution.length;
-			if (measurement.contribution.length > 0) visibleEntries++;
-		}
-
-		const exactEntries = new Set<VirtualBlockExtent>();
-		for (const measurement of measurements) {
-			if (!measurement) return;
-			const entry = measurement.entry;
-			entry.rawRef = measurement.raw;
-			entry.contribution = measurement.contribution;
-			entry.estimatedBodyRows = measurement.contribution.length;
-			entry.measuredWidth = warmup.width;
-			entry.measuredGeneration = warmup.generation;
-			entry.measuredVersion = measurement.version;
-			exactEntries.add(entry);
-		}
-		this.#measuredVirtualEntries = exactEntries;
-		this.#virtualEstimatedBodyRows = visibleEntries > 0 ? Math.max(1, Math.round(bodyRows / visibleEntries)) : 1;
-		this.#virtualEstimateSeeded = true;
-		this.#rebuildVirtualRows(0);
-		this.#virtualExact = true;
 	}
 
 	#syncVirtualEntries(width: number): void {
 		const structureChanged = this.#syncVirtualStructure();
 		const widthChanged = this.#virtualWidth !== width;
-		if (widthChanged && (this.#virtualWarmup || this.#virtualExact)) this.#cancelVirtualWarmup();
 		const epochChanged = widthChanged || this.#virtualGeneration !== this.#generation;
 		let measurementsCleared = false;
 		if (epochChanged) {
 			measurementsCleared = this.#measuredVirtualEntries.size > 0;
 			for (const entry of this.#measuredVirtualEntries) {
-				if (entry.contribution !== undefined) entry.estimatedBodyRows = entry.contribution.length;
+				if (entry.contribution !== undefined) entry.bodyRows = entry.contribution.length;
 				entry.contribution = undefined;
 				entry.rawRef = undefined;
 			}
 			this.#measuredVirtualEntries.clear();
 			this.#virtualWidth = width;
 			this.#virtualGeneration = this.#generation;
-			if (widthChanged) this.#virtualEstimateSeeded = false;
+			this.#virtualLayoutDirtyFrom = 0;
 		}
+		let changedFrom = this.#virtualEntries.length;
+		for (let index = this.#virtualLayoutDirtyFrom; index < this.#virtualEntries.length; index++) {
+			if (this.#measureVirtualLayout(index, width)) changedFrom = Math.min(changedFrom, index);
+		}
+		this.#virtualLayoutDirtyFrom = this.#virtualEntries.length;
 		if (
+			changedFrom < this.#virtualEntries.length ||
 			measurementsCleared ||
 			(!structureChanged && this.#virtualEntries.length === 0 && this.#virtualTotalRows !== 0)
 		) {
-			this.#rebuildVirtualRows(0);
+			this.#rebuildVirtualRows(changedFrom < this.#virtualEntries.length ? changedFrom : 0);
 		}
 	}
 
@@ -1292,7 +1134,6 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		const entries = this.#virtualEntries;
 		const structureChanged = this.#virtualStructureDirty || entries.length !== children.length;
 		if (!structureChanged) return false;
-		if (this.#virtualWarmup || this.#virtualExact) this.#cancelVirtualWarmup();
 
 		const previous = new Map(entries.map(entry => [entry.component, entry]));
 		const next = children.map(component => {
@@ -1302,16 +1143,20 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 				component,
 				rawRef: undefined,
 				contribution: undefined,
-				estimatedBodyRows: this.#virtualEstimatedBodyRows,
+				bodyRows: 0,
 				measuredWidth: -1,
 				measuredGeneration: -1,
 				measuredVersion: undefined,
+				layoutWidth: -1,
+				layoutGeneration: -1,
+				layoutVersion: undefined,
 				startRow: 0,
 				rowCount: 0,
 				sep: 0,
 			};
 		});
 		this.#virtualEntries = next;
+		this.#virtualLayoutDirtyFrom = 0;
 		this.#virtualStructureDirty = false;
 		if (this.#measuredVirtualEntries.size > 0) {
 			const retained = new Set(next);
@@ -1321,6 +1166,28 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		}
 		this.#rebuildVirtualRows(0);
 		return true;
+	}
+
+	#measureVirtualLayout(index: number, width: number): boolean {
+		const entry = this.#virtualEntries[index];
+		if (!entry) return false;
+		const currentVersion = getBlockVersion(entry.component);
+		if (
+			entry.layoutWidth === width &&
+			entry.layoutGeneration === this.#generation &&
+			entry.layoutVersion === currentVersion &&
+			(isBlockExplicitlyFinalized(entry.component) || currentVersion !== undefined)
+		) {
+			return false;
+		}
+		this.#applyPresentationState(entry.component);
+		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+		const previousRows = entry.bodyRows;
+		entry.bodyRows = Math.max(0, Math.trunc(measureComponentRows(entry.component, width)));
+		entry.layoutWidth = width;
+		entry.layoutGeneration = this.#generation;
+		entry.layoutVersion = currentVersion;
+		return entry.bodyRows !== previousRows;
 	}
 
 	#measureVirtualEntry(index: number, width: number, force = false): boolean {
@@ -1335,11 +1202,11 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			entry.measuredWidth === width &&
 			entry.measuredGeneration === this.#generation &&
 			entry.measuredVersion === currentVersion &&
-			(isBlockExplicitlyFinalized(entry.component) || (this.#virtualExact && isBlockFinalized(entry.component)))
+			isBlockExplicitlyFinalized(entry.component)
 		) {
 			return false;
 		}
-		const previousRows = entry.contribution?.length ?? entry.estimatedBodyRows;
+		const previousRows = entry.contribution?.length ?? entry.bodyRows;
 		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 		const raw = entry.component.render(width);
 		const contribution = trimBlankEdges(raw);
@@ -1357,31 +1224,14 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		if (!entry) return;
 		entry.rawRef = raw;
 		entry.contribution = contribution;
-		entry.estimatedBodyRows = contribution.length;
+		entry.bodyRows = contribution.length;
 		entry.measuredWidth = width;
 		entry.measuredGeneration = this.#generation;
 		entry.measuredVersion = getBlockVersion(entry.component);
+		entry.layoutWidth = width;
+		entry.layoutGeneration = this.#generation;
+		entry.layoutVersion = entry.measuredVersion;
 		this.#measuredVirtualEntries.add(entry);
-	}
-
-	#calibrateVirtualEstimates(measured: ReadonlySet<number>): boolean {
-		const samples: number[] = [];
-		for (const index of measured) {
-			const rows = this.#virtualEntries[index]?.contribution?.length;
-			if (rows !== undefined && rows > 0) samples.push(rows);
-		}
-		this.#virtualEstimateSeeded = true;
-		if (samples.length === 0) return false;
-		const total = samples.reduce((sum, rows) => sum + rows, 0);
-		const estimate = Math.max(1, Math.round(total / samples.length));
-		this.#virtualEstimatedBodyRows = estimate;
-		let changed = false;
-		for (const entry of this.#virtualEntries) {
-			if (entry.contribution !== undefined || entry.estimatedBodyRows === estimate) continue;
-			entry.estimatedBodyRows = estimate;
-			changed = true;
-		}
-		return changed;
 	}
 
 	#rebuildVirtualRows(startIndex: number): void {
@@ -1391,7 +1241,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		let hasVisible = row > 0;
 		for (let index = start; index < entries.length; index++) {
 			const entry = entries[index]!;
-			const bodyRows = entry.contribution?.length ?? entry.estimatedBodyRows;
+			const bodyRows = entry.contribution?.length ?? entry.bodyRows;
 			entry.startRow = row;
 			entry.sep = bodyRows > 0 && hasVisible ? 1 : 0;
 			entry.rowCount = entry.sep + bodyRows;

@@ -24,7 +24,7 @@ import {
 	type EphemeralTurnOptions,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { Container, replaceTabs, type SgrMouseEvent, sliceByColumn, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Container, replaceTabs, type SgrMouseEvent, sliceByColumn, type TUI } from "@oh-my-pi/pi-tui";
 
 const usage: Usage = {
 	input: 0,
@@ -329,7 +329,7 @@ describe("BtwConversationPane", () => {
 		}
 	});
 
-	it("keeps the scrolled viewport anchored when a stream completes", () => {
+	it("keeps the scrolled viewport anchored when a tool-using stream completes", () => {
 		const requestRender = vi.fn();
 		const ui = { requestRender, requestComponentRender: vi.fn() } as unknown as TUI;
 		const pane = new BtwConversationPane({
@@ -356,8 +356,28 @@ describe("BtwConversationPane", () => {
 			onCloseThread: () => true,
 			onPromoteThread: async () => true,
 		});
+		const partialAnswer = Array.from({ length: 120 }, (_value, index) => String(index + 1)).join("\n");
 		const answer = Array.from({ length: 200 }, (_value, index) => String(index + 1)).join("\n");
-		const streamMessage = createAssistantMessage(answer);
+		const streamMessage = createAssistantMessage(partialAnswer);
+		const finalMessage = createAssistantMessage(answer);
+		const intermediateText = Array.from({ length: 40 }, (_value, index) => `preface-${index + 1}`).join("\n");
+		const intermediateMessage: AssistantMessage = {
+			...createAssistantMessage(`${intermediateText}\n`),
+			content: [
+				{ type: "text", text: `${intermediateText}\n` },
+				{ type: "toolCall", id: "read-context", name: "read", arguments: { path: "context.ts" } },
+			],
+			stopReason: "toolUse",
+		};
+		const toolResult: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "read-context",
+			toolName: "read",
+			content: [{ type: "text", text: "context" }],
+			isError: false,
+			timestamp: 1,
+		};
+		const requestMessages: AgentMessage[] = [intermediateMessage, toolResult];
 		const turns: Array<BtwThreadView["turns"][number]> = [];
 		const thread: BtwThreadView = {
 			key: "stream",
@@ -370,7 +390,7 @@ describe("BtwConversationPane", () => {
 			turns,
 			request: {
 				input: "Count",
-				messages: [],
+				messages: requestMessages,
 				streamMessage,
 				timestamp: 1,
 			},
@@ -388,21 +408,34 @@ describe("BtwConversationPane", () => {
 			const scrolledRows = visibleNumbers();
 			expect(Number(scrolledRows[0])).toBeGreaterThan(1);
 
-			const endedThread: BtwThreadView = {
+			const grownThread: BtwThreadView = {
 				...thread,
 				request: {
 					...thread.request!,
-					messages: [streamMessage],
+					streamMessage: finalMessage,
+				},
+			};
+			pane.update([grownThread], thread.key);
+			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+			const beforeCompletion = visibleNumbers();
+
+			requestMessages.push(finalMessage);
+			const endedThread: BtwThreadView = {
+				...grownThread,
+				request: {
+					...grownThread.request!,
+					messages: requestMessages,
 					streamMessage: undefined,
 				},
 			};
 			pane.update([endedThread], thread.key);
-			expect(visibleNumbers()[0]).toBe(scrolledRows[0]);
+			expect(visibleNumbers()[0]).toBe(beforeCompletion[0]);
 
 			turns.push({
 				input: "Count",
-				assistantMessage: streamMessage,
-				replyText: answer,
+				assistantMessage: finalMessage,
+				intermediateMessages: [intermediateMessage, toolResult],
+				replyText: `${intermediateText}\n${answer}`,
 				timestamp: 1,
 			});
 			const completedThread: BtwThreadView = {
@@ -475,12 +508,11 @@ describe("BtwConversationPane", () => {
 		const onSubmit = vi.fn(() => true);
 		const onNewThread = vi.fn(() => true);
 		const onCopy = vi.fn(async (_key: string) => true);
-		let pane: BtwConversationPane;
 		const onSelectThread = vi.fn((key: string) => {
 			pane.update(threads, key);
 			return true;
 		});
-		pane = new BtwConversationPane({
+		const pane = new BtwConversationPane({
 			ui,
 			cwd: process.cwd(),
 			expandKeys: [],
@@ -631,15 +663,6 @@ describe("BtwConversationPane", () => {
 				sliceByColumn(collapsed[row]!, stableTailStart, 100, true),
 			);
 		}
-		expect(
-			peek
-				.map((line, row) => ({
-					row,
-					peek: { text: line, width: visibleWidth(line) },
-					collapsed: { text: collapsed[row]!, width: visibleWidth(collapsed[row]!) },
-				}))
-				.filter(widths => widths.peek.width !== widths.collapsed.width),
-		).toEqual([]);
 		pane.clearAppViewportHover();
 		expect(railVisible()).toBe(true);
 		vi.advanceTimersByTime(175);

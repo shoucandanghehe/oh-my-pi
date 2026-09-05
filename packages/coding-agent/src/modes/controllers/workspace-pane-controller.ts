@@ -8,6 +8,7 @@ export interface WorkspacePaneOptions {
 	title: string;
 	minWidth: number;
 	minHeight: number;
+	focus?: boolean;
 	createPane: (close: () => void) => Component;
 }
 
@@ -24,14 +25,28 @@ export class WorkspacePaneController {
 
 	open(options: WorkspacePaneOptions): boolean {
 		const existing = this.#paneIdByKey.get(options.key);
-		if (existing && this.workspace.model.hasPane(existing)) return this.workspace.focusPane(existing);
+		if (existing && this.workspace.model.hasPane(existing)) {
+			return options.focus === false || this.workspace.focusPane(existing);
+		}
 		if (existing) this.#paneIdByKey.delete(options.key);
+
+		const previousPaneId = this.workspace.focusedPaneId;
 
 		const component = options.createPane(() => {
 			this.close(options.key);
 		});
 		const headerProvider = component as Component & Partial<WorkspacePaneHeaderProvider>;
 		const renderHeader = headerProvider.renderWorkspaceHeader?.bind(headerProvider);
+		const pane = {
+			paneId: options.paneId,
+			title: options.title,
+			component,
+			renderHeader,
+			focusTarget: component,
+			scroll: "component" as const,
+			minWidth: options.minWidth,
+			minHeight: options.minHeight,
+		};
 		const candidates = [...(this.workspace.frame?.panes.keys() ?? [])]
 			.filter(paneId => paneId !== MAIN_WORKSPACE_PANE_ID && paneId !== options.paneId)
 			.sort((a, b) => {
@@ -45,26 +60,17 @@ export class WorkspacePaneController {
 			const preferred: WorkspaceEdge = rect && rect.height > rect.width ? "bottom" : "right";
 			const alternate: WorkspaceEdge = preferred === "right" ? "bottom" : "right";
 			for (const edge of [preferred, alternate]) {
-				if (
-					this.workspace.splitPane(
-						targetPaneId,
-						{
-							paneId: options.paneId,
-							title: options.title,
-							component,
-							renderHeader,
-							focusTarget: component,
-							scroll: "component",
-							minWidth: options.minWidth,
-							minHeight: options.minHeight,
-						},
-						edge,
-					)
-				) {
+				if (this.workspace.splitPane(targetPaneId, pane, edge)) {
 					this.#paneIdByKey.set(options.key, options.paneId);
+					if (options.focus === false) this.workspace.focusPane(previousPaneId);
 					return true;
 				}
 			}
+		}
+		if (this.workspace.reflowPane(pane)) {
+			this.#paneIdByKey.set(options.key, options.paneId);
+			if (options.focus === false) this.workspace.focusPane(previousPaneId);
+			return true;
 		}
 		component.dispose?.();
 		return false;
@@ -79,7 +85,7 @@ export class WorkspacePaneController {
 	}
 
 	dispose(): void {
-		for (const key of [...this.#paneIdByKey.keys()]) this.close(key);
+		for (const key of this.#paneIdByKey.keys()) this.close(key);
 	}
 
 	focusMain(): boolean {

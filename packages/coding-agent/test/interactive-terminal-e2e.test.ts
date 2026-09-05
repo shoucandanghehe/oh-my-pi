@@ -7,9 +7,11 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { WorkspaceLayout } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
@@ -23,6 +25,7 @@ function dump(label: string, rows: readonly string[]): void {
 }
 
 describe("libkitty end-to-end", () => {
+	let previousBackend: string | undefined;
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
@@ -34,6 +37,8 @@ describe("libkitty end-to-end", () => {
 	});
 
 	beforeEach(async () => {
+		previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		delete Bun.env.PI_TUI_RENDER_BACKEND;
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-libkitty-e2e-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -58,6 +63,8 @@ describe("libkitty end-to-end", () => {
 		authStorage?.close();
 		tempDir?.removeSync();
 		resetSettingsForTest();
+		if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+		else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
 	});
 
 	it("paints the submitted user message before any model reply", async () => {
@@ -240,5 +247,103 @@ describe("libkitty end-to-end", () => {
 		// from scrollback and viewport alike — while the live editor stays mounted.
 		expect(plainRows(term.getScrollBuffer()).some(row => row.includes(THINK))).toBe(false);
 		expect(plainRows(term.getViewport()).some(row => row.includes("LIVE_EDITOR_DRAFT"))).toBe(true);
+	});
+});
+
+describe("app-viewport subagent panes", () => {
+	let previousBackend: string | undefined;
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let session: AgentSession;
+	let mode: InteractiveMode;
+	let term: VirtualTerminal;
+
+	beforeEach(async () => {
+		previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+		AgentRegistry.resetGlobalForTests();
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-subagent-pane-e2e-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		term = new VirtualTerminal(120, 32);
+		const composer = new Composer({ terminal: term });
+		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, undefined, composer);
+		await mode.init({ suppressWelcomeIntro: true });
+		void mode.getUserInput();
+		await term.waitForRender();
+	});
+
+	afterEach(async () => {
+		mode?.stop();
+		await session?.dispose();
+		authStorage?.close();
+		tempDir?.removeSync();
+		AgentRegistry.resetGlobalForTests();
+		resetSettingsForTest();
+		if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+		else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+	});
+
+	it("opens a running subagent in the background, then petrifies and closes it", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "running",
+			session: null,
+		});
+
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("Worker")));
+		expect(mode.isMainWorkspacePaneFocused()).toBe(true);
+
+		registry.setStatus("Worker", "idle");
+		const paneClosed = () => !plainRows(term.getViewport()).some(row => row.includes("Worker"));
+		await term.waitForRender(paneClosed);
+		if (!paneClosed()) await term.waitForRender(paneClosed);
+		expect(paneClosed()).toBe(true);
+	});
+	it("reopens a revived historical subagent in the background", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Historian",
+			displayName: "Historian",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+		});
+
+		const workspace = mode.ui.children.find(child => child instanceof WorkspaceLayout);
+		if (!workspace) throw new Error("Expected app-viewport workspace");
+		expect(workspace.model.hasPane("agent:Historian")).toBe(false);
+		registry.setStatus("Historian", "running");
+
+		await term.waitForRender(() => workspace.model.hasPane("agent:Historian"));
+		expect(workspace.model.hasPane("agent:Historian")).toBe(true);
+		expect(mode.isMainWorkspacePaneFocused()).toBe(true);
+	});
+
+	it("opens a local petrification preview without registering a subagent", async () => {
+		mode.previewSubagentExitAnimation();
+
+		await term.waitForRender(() => plainRows(term.getViewport()).some(row => row.includes("Petrification Preview")));
+		expect(mode.isMainWorkspacePaneFocused()).toBe(true);
+		expect(
+			AgentRegistry.global()
+				.list()
+				.some(ref => ref.id === "Petrification Preview"),
+		).toBe(false);
 	});
 });

@@ -153,6 +153,17 @@ export class ChatTranscriptBuilder {
 		return component;
 	}
 
+	/** Set global expansion across normal blocks and synthetic replay bodies. */
+	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
+		for (const component of this.#expandables) component.setExpanded(expanded);
+		for (const component of this.#syntheticExpandables) component.setBodyExpanded(expanded);
+	}
+
+	get expanded(): boolean {
+		return this.#expanded;
+	}
+
 	/** Toggle normal expandables globally and one viewport-anchored synthetic replay dump. */
 	toggleExpanded(visibleBlocks: readonly Component[], preferLast: boolean): void {
 		const visible = new Set(visibleBlocks);

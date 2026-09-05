@@ -201,7 +201,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 			},
 			timestamp: 1_000,
 		};
-		builder.rebuild([
+		builder.rebuildEntries([
 			{ type: "message", id: "tool-entry", parentId: null, timestamp: new Date(0).toISOString(), message },
 		]);
 

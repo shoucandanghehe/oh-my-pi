@@ -358,6 +358,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#updateDisplay();
 	}
 
+	override measureRows(width: number): number {
+		return this.#toolActivityVisible ? super.measureRows(width) : 0;
+	}
+
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible) return [];
 		return super.render(width);

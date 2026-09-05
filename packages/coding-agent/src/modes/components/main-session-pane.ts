@@ -85,8 +85,9 @@ export class MainSessionPane
 
 	setTextSelectionActive(active: boolean): void {
 		if (this.#textSelectionActive === active) return;
+		if (active && this.#followBottom) this.#materializeGeometry();
 		this.#textSelectionActive = active;
-		if (active) this.#followBottom = false;
+		this.#followBottom = active ? false : this.#offset >= this.#maxOffset;
 	}
 
 	wantsAppViewportHover(): boolean {

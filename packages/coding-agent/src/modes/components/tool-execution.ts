@@ -853,6 +853,11 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
+	override measureRows(width: number): number {
+		if (!this.#toolActivityVisible || this.#allocation === 0) return 0;
+		return super.measureRows(width);
+	}
+
 	override render(width: number): readonly string[] {
 		if (!this.#toolActivityVisible || this.#allocation === 0) return [];
 		const key = `${this.#displayKey()}|${this.#allocation}`;
