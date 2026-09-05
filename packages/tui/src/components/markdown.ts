@@ -1386,6 +1386,7 @@ export function getMarkdownLinkUrls(text: string): string[] {
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
  */
+
 export interface MarkdownTheme {
 	heading: (text: string) => string;
 	link: (text: string) => string;
@@ -1405,6 +1406,11 @@ export interface MarkdownTheme {
 	underline: (text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
 	/**
+	 * Exact visible-text equivalent of `highlightCode` for layout-only row
+	 * measurement. Omit when highlighting can change visible cells or row count.
+	 */
+	highlightCodeForLayout?: (code: string, lang?: string) => string[];
+	/**
 	 * Create a stateful incremental highlighter for one streaming code fence.
 	 * `push` receives newline-terminated complete lines (only the final push
 	 * may omit the trailing newline) and must return highlighted ANSI text for
@@ -1419,6 +1425,8 @@ export interface MarkdownTheme {
 	resolveMermaidAscii?: (source: string, maxWidth?: number) => string | null;
 	symbols: SymbolTheme;
 }
+
+const identityMarkdownStyle = (text: string): string => text;
 
 interface InlineStyleContext {
 	applyText: (text: string) => string;
@@ -1797,6 +1805,8 @@ export class Markdown implements Component {
 	#activeTextSelectionRows: RenderedTextSelectionRow[] | undefined;
 	#activeTextSelectionLogicalLine = 0;
 	#transientRenderCache = false;
+	#sharedRenderCache = true;
+	#layoutOnly = false;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
 	// block tokens are frozen, plus those tokens. marked has no resumable lexer,
@@ -2131,6 +2141,46 @@ export class Markdown implements Component {
 		if (!opts.preserveExisting) this.#dropStreamPrefix();
 	}
 
+	measureRows(width: number): number {
+		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
+			return this.#cachedLines.length;
+		}
+		const highlightCodeForLayout = this.#theme.highlightCodeForLayout;
+		if (!highlightCodeForLayout) return this.render(width).length;
+		const layoutTheme: MarkdownTheme = {
+			...this.#theme,
+			heading: identityMarkdownStyle,
+			link: identityMarkdownStyle,
+			linkUrl: identityMarkdownStyle,
+			code: identityMarkdownStyle,
+			codeBlock: identityMarkdownStyle,
+			codeBlockBorder: identityMarkdownStyle,
+			quote: identityMarkdownStyle,
+			quoteBorder: identityMarkdownStyle,
+			hr: identityMarkdownStyle,
+			listBullet: identityMarkdownStyle,
+			bold: identityMarkdownStyle,
+			italic: identityMarkdownStyle,
+			strikethrough: identityMarkdownStyle,
+			underline: identityMarkdownStyle,
+			highlightCode: highlightCodeForLayout,
+		};
+		delete layoutTheme.createHighlightStream;
+		const probe = new Markdown(
+			this.#text,
+			this.#paddingX,
+			this.#paddingY,
+			layoutTheme,
+			undefined,
+			this.#codeBlockIndent,
+		);
+		probe.#ignoreTight = this.#ignoreTight;
+		probe.#sharedRenderCache = false;
+		probe.#layoutOnly = true;
+		probe.transientRenderCache = this.transientRenderCache;
+		return probe.render(width).length;
+	}
+
 	render(width: number): readonly string[] {
 		// L1: per-instance cache — fastest path for repeated renders of the same
 		// instance at the same width (e.g. resize debounce, repeated redraws).
@@ -2312,7 +2362,7 @@ export class Markdown implements Component {
 		// theme.heading is used as the representative theme probe — it's required
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
-		if (!this.transientRenderCache) {
+		if (!this.transientRenderCache && this.#sharedRenderCache) {
 			cacheKey = this.#renderCacheKey(normalizedText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
@@ -2334,7 +2384,7 @@ export class Markdown implements Component {
 		const tokens = this.#lexTokens(normalizedText);
 		let contentLines: string[];
 		const contentSelectionRows: RenderedTextSelectionRow[] = [];
-		this.#activeTextSelectionRows = contentSelectionRows;
+		this.#activeTextSelectionRows = this.#layoutOnly ? undefined : contentSelectionRows;
 		this.#activeTextSelectionLogicalLine = 0;
 		this.#activeRenderSignature = signature;
 		try {
@@ -2345,6 +2395,11 @@ export class Markdown implements Component {
 			this.#activeRenderSignature = undefined;
 			this.#activeTextSelectionRows = undefined;
 			this.#activeTextSelectionLogicalLine = 0;
+		}
+		if (this.#layoutOnly) {
+			contentLines.length = Math.max(1, contentLines.length + this.#paddingY * 2);
+			contentLines.fill("");
+			return contentLines;
 		}
 		const emptyLines = this.#renderEmptyPaddingLines(signature);
 

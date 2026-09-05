@@ -50,6 +50,7 @@ jobs:
            with:
               targets: win32-x64-baseline
               cache-scope: app-viewport-win32-x64
+              output-cache: "true"
 
          - name: Build Windows preview binary
            env:
@@ -98,6 +99,7 @@ jobs:
            with:
               targets: linux-x64-baseline linux-x64-modern
               cache-scope: app-viewport-linux-x64
+              output-cache: "true"
 
          - name: Build Linux preview binary
            env:
@@ -150,8 +152,6 @@ jobs:
       runs-on: ubuntu-22.04
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-           with:
-              fetch-depth: 0
 
          - name: Download preview assets
            uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

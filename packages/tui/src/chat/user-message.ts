@@ -369,7 +369,7 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	}
 
 	get expanded(): boolean {
-		return this.#expanded;
+		return this.#disclosure.expanded;
 	}
 
 	/** ctrl+o toggle: reveal/hide the full Markdown body. */
@@ -402,6 +402,10 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	setBodyExpanded(expanded: boolean): void {
+		this.#disclosure.setExpanded(expanded);
 	}
 
 	setIgnoreTight(ignore: boolean): this {
