@@ -1,0 +1,82 @@
+name: Rebase app viewport backend
+
+on:
+   schedule:
+      - cron: "17 * * * *"
+   workflow_dispatch:
+
+concurrency:
+   group: app-viewport-backend-rebase
+   cancel-in-progress: false
+
+permissions:
+   contents: write
+
+env:
+   TARGET_BRANCH: demo/app-viewport-backend
+   UPSTREAM_REPOSITORY: can1357/oh-my-pi
+
+jobs:
+   rebase:
+      name: Rebase onto upstream main
+      if: github.repository == 'shoucandanghehe/oh-my-pi'
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ env.TARGET_BRANCH }}
+              fetch-depth: 0
+
+         - name: Rebase onto upstream main
+           id: rebase
+           shell: bash
+           run: |
+              set -euo pipefail
+              git fetch --no-tags origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}"
+              expected_remote="$(git rev-parse "origin/${TARGET_BRANCH}")"
+              echo "expected-remote=$expected_remote" >> "$GITHUB_OUTPUT"
+
+              git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+              git fetch --no-tags upstream "+refs/heads/main:refs/remotes/upstream/main"
+              if git merge-base --is-ancestor upstream/main HEAD; then
+                echo "changed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git rebase upstream/main
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+
+
+         # app-viewport / anchored-live tests import pi-natives. Materialize the
+         # host modern addon before running the regression gate.
+         - uses: ./.github/actions/bun-install
+           if: steps.rebase.outputs.changed == 'true'
+
+         - uses: ./.github/actions/bazel-natives
+           if: steps.rebase.outputs.changed == 'true'
+           with:
+              targets: linux-x64-modern
+              cache-scope: app-viewport-rebase-linux-x64
+
+         - name: Run app viewport regression tests
+           if: steps.rebase.outputs.changed == 'true'
+           run: >-
+              bun test
+              packages/tui/test/app-viewport.test.ts
+              packages/coding-agent/test/modes/components/anchored-live-container.test.ts
+              packages/utils/test/mermaid-ascii.test.ts
+
+         - name: Run compiled-entry smoke test
+           if: steps.rebase.outputs.changed == 'true'
+           run: bun packages/coding-agent/src/cli.ts --smoke-test
+
+         - name: Push rebased branch
+           if: steps.rebase.outputs.changed == 'true'
+           shell: bash
+           run: |
+              set -euo pipefail
+              git push origin \
+                "HEAD:refs/heads/${TARGET_BRANCH}" \
+                "--force-with-lease=refs/heads/${TARGET_BRANCH}:${{ steps.rebase.outputs.expected-remote }}"
