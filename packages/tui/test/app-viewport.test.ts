@@ -830,8 +830,9 @@ describe("TUI app viewport backend", () => {
 		});
 	});
 
-	it("does not duplicate sticky chrome when transcript is shorter than the viewport", async () => {
+	it("repaints short frames after a Windows resize without duplicating sticky chrome", async () => {
 		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
 			const term = new VirtualTerminal(40, 8);
 			const transcript = new TranscriptComponent(["short"]);
 			const tui = new TUI(term);
@@ -842,6 +843,10 @@ describe("TUI app viewport backend", () => {
 				tui.start();
 				await flushRender(term);
 				expect(viewportContent(term)).toEqual(["short", "", "", "", "", "", "status", "editor"]);
+
+				term.resize(40, 5);
+				await flushRender(term);
+				expect(viewportContent(term)).toEqual(["short", "", "", "status", "editor"]);
 			} finally {
 				tui.stop();
 			}

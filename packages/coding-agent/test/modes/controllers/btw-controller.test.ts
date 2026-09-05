@@ -70,6 +70,7 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 			terminal: { rows: 30 },
 		} as unknown as TUI,
 		keybindings: KeybindingsManager.inMemory(),
+		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		btwContainer,
 		session,
 		sessionManager: {
