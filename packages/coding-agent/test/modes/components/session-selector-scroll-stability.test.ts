@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { TUI } from "@oh-my-pi/pi-tui";
+import { type OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../../../tui/test/render-stress-scheduler";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";
 
@@ -162,5 +162,69 @@ describe("issue #3283: /resume picker scrolls down after deleting a session", ()
 		// previous 12-row reserve guess.
 		selector.handleInput("\x1b[3~");
 		expect(selector.render(NARROW_WIDTH).length).toBeLessThanOrEqual(TERMINAL_ROWS);
+	});
+
+	it("clears the app viewport scrollbar after selecting a resumed session", async () => {
+		const previousRenderBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+		const term = new VirtualTerminal(80, 24, 4096);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		let overlayHandle: OverlayHandle | undefined;
+		let selectedSession: SessionInfo | undefined;
+		const selector = new SessionSelectorComponent(
+			makeSessions(50),
+			session => {
+				selectedSession = session;
+				overlayHandle?.hide();
+				tui.setFocus(null);
+				tui.requestRender();
+			},
+			() => {},
+			() => {},
+			{ getTerminalRows: () => term.rows, fillHeight: true },
+		);
+		selector.setOnRequestRender(() => tui.requestRender());
+		tui.addChild({
+			invalidate: () => {},
+			render: () => ["Resumed session"],
+		});
+
+		const hasScrollbarGlyph = (rows: readonly string[]): boolean =>
+			rows.some(row => {
+				const glyph = Bun.stripANSI(row).trimEnd().at(-1);
+				return glyph === "\u2588" || (glyph !== undefined && glyph >= "\u2800" && glyph <= "\u28ff");
+			});
+
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			overlayHandle = tui.showOverlay(selector, {
+				anchor: "top-left",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+				fullscreen: true,
+			});
+			tui.setFocus(selector);
+			tui.requestRender();
+			await scheduler.drain(term);
+
+			expect(hasScrollbarGlyph(term.getViewport())).toBe(true);
+
+			term.sendInput("\n");
+			await scheduler.drain(term);
+
+			expect(selectedSession?.id).toBe("id-0");
+			expect(hasScrollbarGlyph(term.getViewport())).toBe(false);
+		} finally {
+			tui.stop();
+			await term.flush();
+			if (previousRenderBackend === undefined) {
+				delete Bun.env.PI_TUI_RENDER_BACKEND;
+			} else {
+				Bun.env.PI_TUI_RENDER_BACKEND = previousRenderBackend;
+			}
+		}
 	});
 });

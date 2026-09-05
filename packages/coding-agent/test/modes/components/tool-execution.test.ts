@@ -142,7 +142,6 @@ describe("MCP result Markdown rendering", () => {
 		serverName: "context-mode",
 		mcpToolName: "ctx_search",
 	};
-
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true });
 		const loaded = await getThemeByName("dark");
@@ -189,5 +188,82 @@ describe("MCP result Markdown rendering", () => {
 
 		expect(rendered).toContain("status");
 		expect(rendered).toContain("**ok**");
+	});
+});
+
+describe("ToolExecutionComponent render memoization", () => {
+	beforeAll(async () => {
+		await Settings.init({ inMemory: true });
+		const loaded = await getThemeByName("dark");
+		if (!loaded) throw new Error("theme unavailable");
+		setThemeInstance(loaded);
+	});
+
+	function memoTestComponent(ui: ToolExecutionUi): ToolExecutionComponent {
+		const tool: AgentTool = {
+			name: "memo_test_tool",
+			label: "Memo Test Tool",
+			description: "renders stable output",
+			parameters: { type: "object", additionalProperties: true },
+			renderCall() {
+				return new Text(theme.fg("toolTitle", theme.bold("Memo Test Tool")), 0, 0);
+			},
+			renderResult(result) {
+				const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+				return new Text(theme.fg("toolOutput", text), 0, 0);
+			},
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const component = new ToolExecutionComponent(
+			"memo_test_tool",
+			{},
+			{ showImages: false },
+			tool,
+			ui,
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "settled output" }] }, false);
+		return component;
+	}
+
+	it("returns a stable reference across settled renders so parent composes skip the block", () => {
+		const ui: ToolExecutionUi = {
+			requestRender() {},
+			requestComponentRender(_component: Component) {},
+			resetDisplay() {},
+		};
+		const component = memoTestComponent(ui);
+		const first = component.render(80);
+
+		// Settled blocks dominate compose cost on long transcripts; the engine's
+		// reference-equality contract lets TranscriptContainer/Container reuse
+		// rows without re-walking the block's subtree.
+		expect(component.render(80)).toBe(first);
+		expect(component.render(80)).toBe(first);
+
+		// Width is part of the memo key.
+		const narrow = component.render(40);
+		expect(narrow).not.toBe(first);
+		expect(component.render(40)).toBe(narrow);
+
+		// Expanded state rebuilds the display.
+		component.setExpanded(true);
+		const expanded = component.render(80);
+		expect(expanded).not.toBe(first);
+		expect(component.render(80)).toBe(expanded);
+
+		// invalidate() must force a fresh render of identical content.
+		component.invalidate();
+		const afterInvalidate = component.render(80);
+		expect(afterInvalidate).not.toBe(expanded);
+		expect(visibleText(afterInvalidate)).toEqual(visibleText(expanded));
+
+		// A new result bumps the display key.
+		component.updateResult({ content: [{ type: "text", text: "updated output" }] }, false);
+		const afterUpdate = component.render(80);
+		expect(afterUpdate).not.toBe(afterInvalidate);
+		expect(visibleText(afterUpdate)).toContain("updated output");
 	});
 });

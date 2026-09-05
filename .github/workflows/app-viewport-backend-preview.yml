@@ -1,0 +1,272 @@
+name: App viewport backend preview
+
+on:
+   push:
+      branches:
+         - demo/app-viewport-backend
+   workflow_dispatch:
+
+concurrency:
+   group: app-viewport-backend-preview
+   cancel-in-progress: true
+
+permissions:
+   contents: read
+
+env:
+   PREVIEW_TAG: app-viewport-backend
+   WINDOWS_BINARY_PATH: packages/coding-agent/binaries/omp-windows-x64.exe
+   LINUX_BINARY_PATH: packages/coding-agent/binaries/omp-linux-x64
+   BUN_PACKAGE_PATH: packages/coding-agent/binaries/omp-app-viewport-linux-x64.tgz
+   MANIFEST_PATH: packages/coding-agent/binaries/omp-app-viewport.json
+
+jobs:
+   metadata:
+      name: Resolve preview metadata
+      runs-on: ubuntu-22.04
+      outputs:
+         preview-version: ${{ steps.metadata.outputs.preview-version }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+         - name: Resolve preview version
+           id: metadata
+           shell: bash
+           run: |
+              set -euo pipefail
+              version="$(jq -r .version packages/coding-agent/package.json)"
+              short_sha="${GITHUB_SHA::9}"
+              echo "preview-version=${version}-app-viewport-backend.sha${short_sha}" >> "$GITHUB_OUTPUT"
+
+   build_windows:
+      name: Build Windows x64 preview
+      needs: metadata
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: ./.github/actions/bun-install
+
+         - uses: ./.github/actions/bazel-natives
+           with:
+              targets: win32-x64-baseline
+              cache-scope: app-viewport-win32-x64
+
+         - name: Build Windows preview binary
+           env:
+              RELEASE_TARGETS: win32-x64
+           run: bun run ci:release:build-binaries
+
+
+         - name: Upload Windows preview binary
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: app-viewport-windows-${{ github.sha }}
+              path: ${{ env.WINDOWS_BINARY_PATH }}
+              if-no-files-found: error
+              retention-days: 1
+
+   smoke_windows:
+      name: Smoke-test Windows x64 preview
+      needs: build_windows
+      runs-on: windows-2025
+      steps:
+         - name: Download Windows preview binary
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: app-viewport-windows-${{ github.sha }}
+              path: packages/coding-agent/binaries
+
+         - name: Run compiled-entry smoke test
+           shell: pwsh
+           env:
+              PI_TUI_RENDER_BACKEND: app-viewport
+           run: |
+              & $env:WINDOWS_BINARY_PATH --smoke-test
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+
+   build_linux:
+      name: Build Linux x64 preview
+      needs: metadata
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: ./.github/actions/bun-install
+
+         - uses: ./.github/actions/bazel-natives
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+              cache-scope: app-viewport-linux-x64
+
+         - name: Build Linux preview binary
+           env:
+              RELEASE_TARGETS: linux-x64
+           run: bun run ci:release:build-binaries
+
+         - name: Smoke-test Linux binary
+           run: env PI_TUI_RENDER_BACKEND=app-viewport "$LINUX_BINARY_PATH" --smoke-test
+
+         - name: Package Linux preview for Bun
+           shell: bash
+           env:
+              PREVIEW_VERSION: ${{ needs.metadata.outputs.preview-version }}
+           run: |
+              set -euo pipefail
+              package_root="${RUNNER_TEMP}/omp-app-viewport-linux-x64"
+              rm -rf "$package_root"
+              mkdir -p "$package_root/package/bin"
+              install -m 0755 "$LINUX_BINARY_PATH" "$package_root/package/bin/omp"
+              cat > "$package_root/package/package.json" <<EOF
+              {
+                "name": "@oh-my-pi/pi-coding-agent-app-viewport",
+                "version": "$PREVIEW_VERSION",
+                "description": "Oh My Pi app viewport backend preview for Linux x64",
+                "license": "MIT",
+                "os": ["linux"],
+                "cpu": ["x64"],
+                "bin": {
+                  "omp": "bin/omp"
+                }
+              }
+              EOF
+              tar -czf "$BUN_PACKAGE_PATH" -C "$package_root" package
+
+         - name: Upload Linux preview assets
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: app-viewport-linux-${{ github.sha }}
+              path: |
+                 ${{ env.LINUX_BINARY_PATH }}
+                 ${{ env.BUN_PACKAGE_PATH }}
+              if-no-files-found: error
+              retention-days: 1
+
+   publish_preview:
+      name: Publish app viewport backend preview
+      needs: [metadata, build_windows, smoke_windows, build_linux]
+      permissions:
+         contents: write
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              fetch-depth: 0
+
+         - name: Download preview assets
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: app-viewport-*-${{ github.sha }}
+              path: packages/coding-agent/binaries
+              merge-multiple: true
+
+         - name: Render manifest and release notes
+           shell: bash
+           env:
+              PREVIEW_VERSION: ${{ needs.metadata.outputs.preview-version }}
+           run: |
+              set -euo pipefail
+              short_sha="${GITHUB_SHA::9}"
+              windows_hash="$(sha256sum "$WINDOWS_BINARY_PATH" | cut -d' ' -f1)"
+              linux_hash="$(sha256sum "$LINUX_BINARY_PATH" | cut -d' ' -f1)"
+              download_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${PREVIEW_TAG}"
+
+              cat > "$MANIFEST_PATH" <<EOF
+              {
+                "version": "$PREVIEW_VERSION",
+                "description": "Oh My Pi branch build with experimental app viewport backend",
+                "homepage": "https://omp.sh",
+                "license": "MIT",
+                "architecture": {
+                  "64bit": {
+                    "url": "$download_base/omp-windows-x64.exe",
+                    "hash": "$windows_hash"
+                  }
+                },
+                "env_set": {
+                  "PI_TUI_RENDER_BACKEND": "app-viewport"
+                },
+                "bin": [
+                  [
+                    "omp-windows-x64.exe",
+                    "omp"
+                  ]
+                ],
+                "notes": [
+                  "Branch build: demo/app-viewport-backend @ $short_sha.",
+                  "OMP on Windows requires bash.exe. Install Git for Windows, WSL, Cygwin, or MSYS2."
+                ]
+              }
+              EOF
+
+              cat > preview-release-notes.md <<EOF
+              Rolling preview release for \`demo/app-viewport-backend\`.
+
+              - Commit: \`${GITHUB_SHA}\`
+              - Windows binary: \`omp-windows-x64.exe\`
+              - Windows SHA256: \`${windows_hash}\`
+              - Linux binary: \`omp-linux-x64\`
+              - Linux SHA256: \`${linux_hash}\`
+              - Bun package: \`omp-app-viewport-linux-x64.tgz\`
+              - Scoop manifest: \`omp-app-viewport.json\`
+
+              Install on Windows with Scoop:
+
+              \`\`\`powershell
+              scoop install ${download_base}/omp-app-viewport.json
+              \`\`\`
+
+              Install on Linux x64 / WSL with Bun:
+
+              \`\`\`bash
+              mkdir -p ~/.omp/agent
+              touch ~/.omp/agent/.env
+              grep -qxF 'PI_TUI_RENDER_BACKEND=app-viewport' ~/.omp/agent/.env ||
+                printf '\\nPI_TUI_RENDER_BACKEND=app-viewport\\n' >> ~/.omp/agent/.env
+              bun install -g --no-cache ${download_base}/omp-app-viewport-linux-x64.tgz
+              \`\`\`
+
+              Update an existing preview installation:
+
+              \`\`\`bash
+              bun update -g --no-cache @oh-my-pi/pi-coding-agent-app-viewport
+              \`\`\`
+              EOF
+
+
+         - name: Create or update preview release
+           shell: bash
+           env:
+              GH_TOKEN: ${{ github.token }}
+              PREVIEW_VERSION: ${{ needs.metadata.outputs.preview-version }}
+           run: |
+              set -euo pipefail
+              title="app viewport backend $PREVIEW_VERSION"
+              if gh release view "$PREVIEW_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                gh api \
+                  --silent \
+                  --method PATCH \
+                  "repos/${GITHUB_REPOSITORY}/git/refs/tags/${PREVIEW_TAG}" \
+                  -f "sha=${GITHUB_SHA}" \
+                  -F force=true
+                gh release edit "$PREVIEW_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --title "$title" \
+                  --notes-file preview-release-notes.md \
+                  --target "$GITHUB_SHA" \
+                  --prerelease
+              else
+                gh release create "$PREVIEW_TAG" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --target "$GITHUB_SHA" \
+                  --title "$title" \
+                  --notes-file preview-release-notes.md \
+                  --prerelease
+              fi
+              gh release upload "$PREVIEW_TAG" \
+                "$WINDOWS_BINARY_PATH" \
+                "$LINUX_BINARY_PATH" \
+                "$BUN_PACKAGE_PATH" \
+                "$MANIFEST_PATH" \
+                --repo "$GITHUB_REPOSITORY" \
+                --clobber

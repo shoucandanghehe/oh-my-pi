@@ -19,11 +19,13 @@ import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
+import { parseSgrMouse } from "./mouse";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
 	encodeKittyPlacementLine,
+	getCellDimensions,
 	ImageProtocol,
 	isImageProtocolForced,
 	isInsideHerdr,
@@ -39,6 +41,8 @@ import {
 	Ellipsis,
 	extractSegments,
 	isOsc66Line,
+	getWordNavKind,
+	isWordNavJoiner,
 	normalizeTerminalOutput,
 	osc66MaxScale,
 	sliceByColumn,
@@ -87,10 +91,60 @@ const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
 // native text selection.
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
+const APP_VIEWPORT_MOUSE_TRACKING_ON = "\x1b[?1002h\x1b[?1006h";
+const APP_VIEWPORT_PIXEL_MOUSE_ON = "\x1b[?1016h";
+const APP_VIEWPORT_PIXEL_MOUSE_OFF = "\x1b[?1016l";
+const APP_VIEWPORT_MOUSE_TRACKING_OFF = `${APP_VIEWPORT_PIXEL_MOUSE_OFF}\x1b[?1006l\x1b[?1002l\x1b[?1000l`;
+// Four vertical slots; each fills both Braille dot columns for a denser thumb.
+const APP_VIEWPORT_SCROLLBAR_DOTS = [0x09, 0x12, 0x24, 0xc0] as const;
+const APP_VIEWPORT_SCROLLBAR_BLANK = " ";
+const APP_VIEWPORT_SELECTION_ON = "\x1b[48;2;80;80;80m";
+const APP_VIEWPORT_SELECTION_OFF = "\x1b[49m";
+const APP_VIEWPORT_DOUBLE_CLICK_MS = 500;
+const APP_VIEWPORT_CLIPBOARD_TARGET = "c";
+const APP_VIEWPORT_SELECTION_WORD_JOINERS: Record<string, true> = {
+	"'": true,
+	"’": true,
+	"-": true,
+	"‐": true,
+	"‑": true,
+	_: true,
+	".": true,
+	"/": true,
+	"\\": true,
+	":": true,
+	"?": true,
+	"&": true,
+	"=": true,
+	"%": true,
+	"#": true,
+	"@": true,
+	"~": true,
+	"+": true,
+};
+const APP_VIEWPORT_SELECTION_AUTOSCROLL_MS = 80;
 
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
 type StartListener = () => void;
+interface AppViewportScrollbarMetrics {
+	scrollHeight: number;
+	maxTop: number;
+	thumbTopRow: number;
+	thumbRows: number;
+	travelRows: number;
+}
+
+interface AppViewportSelectionPoint {
+	row: number;
+	col: number;
+}
+
+interface AppViewportTextSelection {
+	anchor: AppViewportSelectionPoint;
+	focus: AppViewportSelectionPoint;
+	active: boolean;
+}
 
 export interface RenderTimer {
 	cancel(): void;
@@ -236,12 +290,23 @@ export interface OverlayFocusOwner {
 	ownsOverlayFocusTarget(component: Component): boolean;
 }
 
+/**
+ * Optional experimental app-owned transcript viewport seam. Components that
+ * implement it identify the root-line range that may scroll inside the app
+ * frame; siblings below that range are rendered as sticky chrome.
+ */
+export interface AppViewportScrollRegion {
+	getAppViewportScrollRegionStart(): number | undefined;
+	getAppViewportScrollRegionEnd(): number | undefined;
+}
+
 function isOverlayFocusTarget(owner: Component, component: Component | null): boolean {
 	if (component === owner) return true;
 	if (!component) return false;
 	const candidate = owner as Component & Partial<OverlayFocusOwner>;
 	return candidate.ownsOverlayFocusTarget?.(component) === true;
 }
+
 
 /**
  * Interface for components that can receive focus and display a cursor.
@@ -265,6 +330,13 @@ export interface Focusable {
 export interface RenderRequestOptions {
 	/** Clear terminal scrollback for intentional transcript replacement. */
 	clearScrollback?: boolean;
+	/**
+	 * The requester guarantees the component tree is unchanged — only
+	 * app-viewport scroll/selection state moved, which is consumed at emit
+	 * time. The app-viewport backend may then reuse the last composed frame
+	 * instead of re-walking every component. Ignored by other backends.
+	 */
+	viewportOnly?: boolean;
 }
 /**
  * Controls how a settled terminal resize refreshes native history.
@@ -726,6 +798,10 @@ export class TUI extends Container {
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	onDebug?: () => void;
+	/** Called when app-viewport selection copy requests a host clipboard path. Falls back to OSC 52 when unset. */
+	onAppViewportSelectionCopy?: (text: string) => void | Promise<void>;
+	/** Called when right-click paste is requested in app-viewport mode with no active selection. */
+	onAppViewportPasteRequest?: () => void | Promise<void>;
 	#renderRequested = false;
 	#renderTimer: RenderTimer | undefined;
 	#renderScheduler: RenderScheduler;
@@ -804,6 +880,38 @@ export class TUI extends Container {
 	#cancelPostmortemRestore?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
+	#appViewportBackend = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
+	#appViewportActive = false;
+	#appViewportPixelMouseSupported = false;
+	#appViewportCellSizeKnown = false;
+	#appViewportPixelMouseActive = false;
+	#appViewportPreviousLines: string[] = [];
+	#appViewportPreviousScrollbarGlyphs: string[] = [];
+	#appViewportPreviousWidth = 0;
+	#appViewportScrollRegionEnd: number | undefined;
+	/** Scroll-region end from the last emitted frame; remaps sticky selections when the transcript grows/shrinks. */
+	#appViewportPreviousScrollRegionEnd: number | undefined;
+	#appViewportScrollTop = 0;
+	#appViewportFollow = true;
+	#appViewportScrollbarMetrics: AppViewportScrollbarMetrics | null = null;
+	#appViewportVisibleSourceRows: number[] = [];
+	#appViewportFrameLines: string[] = [];
+	/**
+	 * Set by any render request that may have changed component content (i.e.
+	 * every request not marked `viewportOnly`); cleared after a successful full
+	 * app-viewport compose. While false, a frame may skip composing entirely
+	 * and re-emit the cached `#appViewportFrameLines` — scroll/selection moves
+	 * are applied at emit time, so the composed rows would be identical.
+	 */
+	#appViewportComposeStale = true;
+	/** Frame-row cursor position of the last full app-viewport compose; reused by viewport-only frames. */
+	#appViewportFrameCursorPos: { row: number; col: number } | null = null;
+	#appViewportSelection: AppViewportTextSelection | null = null;
+	#appViewportSelectionDrag = false;
+	#appViewportLastClick: { atMs: number; point: AppViewportSelectionPoint; count: number } | null = null;
+	#appViewportSelectionAutoScroll: { direction: -1 | 1; col: number } | null = null;
+	#appViewportSelectionAutoScrollTimer: RenderTimer | undefined;
+	#appViewportScrollbarDrag: { grabOffsetRows: number } | null = null;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
 	// budget is genuinely starved. Armed in start(), disarmed in stop().
@@ -814,6 +922,7 @@ export class TUI extends Container {
 	// normal-screen accounting field (#previousFrameLength, #viewportTopRow, …)
 	// untouched, so exiting reconciles cleanly against the terminal-restored
 	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
+	// Disabled when the main app-viewport backend owns the alternate screen.
 	#altActive = false;
 	#altMouseTrackingActive = false;
 	#altPreviousLines: string[] = [];
@@ -827,6 +936,7 @@ export class TUI extends Container {
 	// Holds an alternate-screen exit until its replacement full paint can emit it
 	// atomically. It must survive a deferred Ghostty image frame.
 	#pendingAltExit = "";
+
 
 	// Overlay stack for modal components rendered on top of base content
 	overlayStack: {
@@ -1110,6 +1220,11 @@ export class TUI extends Container {
 		// exposing destructive full paints. An explicit user opt-out/force still
 		// wins, so skip every probe result in that case.
 		this.terminal.onPrivateModeReport?.((mode, supported, confirmed = true, status) => {
+			if (mode === 1016) {
+				this.#appViewportPixelMouseSupported = supported;
+				this.#syncAppViewportPixelMouse();
+				return;
+			}
 			if (mode !== 2026 || !confirmed) return;
 			if (synchronizedOutputUserOverride() !== null) return;
 			// Herdr's Ghostty VTE honors DEC 2026 even when DECRQM is unanswered or
@@ -1588,12 +1703,9 @@ export class TUI extends Container {
 		this.requestRender(true);
 	}
 	#queryCellSize(): void {
-		// Only query if terminal supports images (cell size is only used for image rendering)
-		if (!TERMINAL.imageProtocol) {
-			return;
-		}
-		// Query terminal for cell size in pixels: CSI 16 t
-		// Response format: CSI 6 ; height ; width t
+		// Pixel mouse coordinates need a measured cell size; image rendering uses
+		// the same CSI 16 t response.
+		if (!TERMINAL.imageProtocol && !this.#appViewportBackend) return;
 		this.terminal.write("\x1b[16t");
 	}
 
@@ -1633,6 +1745,36 @@ export class TUI extends Container {
 		}
 	}
 
+	#syncAppViewportPixelMouse(): void {
+		const enabled = this.#appViewportPixelMouseSupported && this.#appViewportCellSizeKnown;
+		if (!this.#appViewportActive || this.#appViewportPixelMouseActive === enabled) return;
+		this.terminal.write(enabled ? APP_VIEWPORT_PIXEL_MOUSE_ON : APP_VIEWPORT_PIXEL_MOUSE_OFF);
+		this.#appViewportPixelMouseActive = enabled;
+	}
+
+	#enterAppViewport(): void {
+		if (this.#appViewportActive) return;
+		const pixelMouse = this.#appViewportPixelMouseSupported && this.#appViewportCellSizeKnown;
+		this.terminal.write(
+			`\x1b[?1049h${APP_VIEWPORT_MOUSE_TRACKING_ON}${pixelMouse ? APP_VIEWPORT_PIXEL_MOUSE_ON : ""}`,
+		);
+		this.terminal.hideCursor();
+		this.#appViewportActive = true;
+		this.#appViewportPixelMouseActive = pixelMouse;
+		this.#appViewportPreviousLines = [];
+		this.#appViewportPreviousScrollbarGlyphs = [];
+		this.#appViewportPreviousWidth = 0;
+		this.#appViewportScrollbarMetrics = null;
+		this.#appViewportScrollbarDrag = null;
+		this.#appViewportVisibleSourceRows = [];
+		this.#appViewportFrameLines = [];
+		this.#appViewportComposeStale = true;
+		this.#appViewportFrameCursorPos = null;
+		this.#appViewportPreviousScrollRegionEnd = undefined;
+		this.#appViewportSelection = null;
+		this.#appViewportSelectionDrag = false;
+		this.#appViewportLastClick = null;
+	}
 	stop(): void {
 		this.#cancelPostmortemRestore?.();
 		this.#cancelPostmortemRestore = undefined;
@@ -1641,6 +1783,25 @@ export class TUI extends Container {
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
 		this.#cancelResizeProbe();
+		if (this.#appViewportActive) {
+			this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}\x1b[?1049l`);
+			this.#appViewportActive = false;
+			this.#appViewportPixelMouseActive = false;
+			this.#appViewportVisibleSourceRows = [];
+			this.#appViewportFrameLines = [];
+			this.#appViewportComposeStale = true;
+			this.#appViewportFrameCursorPos = null;
+			this.#appViewportPreviousScrollRegionEnd = undefined;
+			this.#appViewportSelection = null;
+			this.#appViewportSelectionDrag = false;
+			this.#stopAppViewportSelectionAutoScroll();
+			this.#appViewportLastClick = null;
+			this.#appViewportPreviousLines = [];
+			this.#appViewportPreviousScrollbarGlyphs = [];
+			this.#appViewportPreviousWidth = 0;
+			this.#appViewportScrollbarMetrics = null;
+			this.#appViewportScrollbarDrag = null;
+		}
 		if (this.#resizeAltActive) {
 			this.#resizeAltActive = false;
 			this.terminal.write(`${this.#keyboardEnhancementExit()}\x1b[?1049l`);
@@ -1715,12 +1876,16 @@ export class TUI extends Container {
 	resetDisplay(): void {
 		if (this.#stopped) return;
 		this.invalidate();
+		this.#appViewportComposeStale = true;
 		this.#prepareForcedRender(true);
 		this.#renderRequested = false;
 		this.#executeRender();
 	}
 
 	requestRender(force = false, options?: RenderRequestOptions): void {
+		// Content changes invalidate the cached app-viewport frame; scrolling and
+		// selection only change viewport-owned state applied during emission.
+		if (!options?.viewportOnly) this.#appViewportComposeStale = true;
 		if (force) {
 			this.#prepareForcedRender(options?.clearScrollback === true);
 			this.#renderRequested = true;
@@ -1759,6 +1924,7 @@ export class TUI extends Container {
 	 */
 	requestComponentRender(_component: Component): void {
 		if (this.#stopped) return;
+		this.#appViewportComposeStale = true;
 		this.#requestOrdinaryRender();
 	}
 
@@ -1768,6 +1934,7 @@ export class TUI extends Container {
 		this.#renderRequested = true;
 		this.#renderScheduler.scheduleImmediate(() => this.#scheduleRender());
 	}
+
 
 	#maybeDeferGhosttyInitialImagePaint(): boolean {
 		if (this.#ghosttyInitialImageDelayDone) return false;
@@ -1867,6 +2034,494 @@ export class TUI extends Container {
 		return true;
 	}
 
+	#handleAppViewportInput(data: string): boolean {
+		if (!this.#appViewportBackend || this.hasOverlay()) return false;
+		if (data.startsWith("\x1b[<")) {
+			return this.#handleAppViewportMouse(data);
+		}
+		if (matchesKey(data, "ctrl+c") && this.#copyAppViewportSelection()) return true;
+		const page = Math.max(1, this.terminal.rows - 2);
+		if (matchesKey(data, "pageUp") || matchesKey(data, "alt+pageUp")) {
+			this.#scrollAppViewport(-page);
+			return true;
+		}
+		if (matchesKey(data, "pageDown") || matchesKey(data, "alt+pageDown")) {
+			this.#scrollAppViewport(page);
+			return true;
+		}
+		// Plain Home/End are editor line navigation; keep transcript absolute jumps
+		// on Alt+Home/Alt+End for this hidden backend demo.
+		if (matchesKey(data, "alt+home")) {
+			this.#scrollAppViewportToTop();
+			return true;
+		}
+		if (matchesKey(data, "alt+end")) {
+			this.#scrollAppViewportToBottom();
+			return true;
+		}
+		return false;
+	}
+
+	#handleAppViewportMouse(data: string): boolean {
+		const event = parseSgrMouse(data);
+		if (!event) return true;
+		if (event.wheel !== null) {
+			this.#appViewportScrollbarDrag = null;
+			if (this.#appViewportSelectionDrag) {
+				// Keep the active drag alive across wheel events so the selection
+				// continues under the pointer as the viewport scrolls, matching
+				// native terminal selection-while-scrolling. Scroll first, then
+				// remap against the post-scroll source rows before paint.
+				this.#stopAppViewportSelectionAutoScroll();
+				const delta = event.wheel * 3;
+				const pointer = this.#appViewportMouseGridPosition(event.row, event.col);
+				this.#scrollAppViewportWhileSelecting(delta, pointer.row, pointer.col);
+				return true;
+			}
+			this.#stopAppViewportSelectionAutoScroll();
+			this.#scrollAppViewport(event.wheel * 3);
+			return true;
+		}
+		if (event.release) {
+			this.#appViewportScrollbarDrag = null;
+			this.#appViewportSelectionDrag = false;
+			this.#stopAppViewportSelectionAutoScroll();
+			return true;
+		}
+		const pointer = this.#appViewportMouseGridPosition(event.row, event.col);
+		if (event.leftClick) {
+			if (this.#startAppViewportScrollbarDrag(pointer.row, pointer.col)) {
+				this.#appViewportSelectionDrag = false;
+				return true;
+			}
+			this.#startAppViewportTextSelection(pointer.row, pointer.col);
+			return true;
+		}
+		if (event.rightClick) {
+			this.#appViewportScrollbarDrag = null;
+			this.#appViewportSelectionDrag = false;
+			this.#stopAppViewportSelectionAutoScroll();
+			if (this.#copyAppViewportSelection()) {
+				this.#clearAppViewportSelection();
+				this.requestRender(true, { viewportOnly: true });
+			} else {
+				this.#requestAppViewportPaste();
+			}
+			return true;
+		}
+		if (event.motion) {
+			if (this.#appViewportScrollbarDrag) {
+				this.#dragAppViewportScrollbar(pointer.row);
+			} else if (this.#appViewportSelectionDrag) {
+				this.#dragAppViewportTextSelection(pointer.row, pointer.col);
+			}
+		}
+		return true;
+	}
+
+	#appViewportMouseGridPosition(row: number, col: number): { row: number; col: number } {
+		let gridRow = row;
+		let gridCol = col;
+		if (this.#appViewportPixelMouseActive) {
+			const cell = getCellDimensions();
+			gridRow = row / cell.heightPx;
+			gridCol = col / cell.widthPx;
+		}
+		return {
+			row: Math.max(0, Math.min(gridRow, Math.max(0, this.terminal.rows - Number.EPSILON))),
+			col: Math.max(0, Math.min(Math.floor(gridCol), Math.max(0, this.terminal.columns - 1))),
+		};
+	}
+
+	#appViewportContentPoint(row: number, col: number): AppViewportSelectionPoint | null {
+		const screenRow = Math.floor(row);
+		const contentWidth = Math.max(1, this.terminal.columns - 1);
+		if (screenRow < 0 || screenRow >= this.#appViewportVisibleSourceRows.length || col >= contentWidth) return null;
+		const sourceRow = this.#appViewportVisibleSourceRows[screenRow];
+		if (sourceRow === undefined || sourceRow < 0) return null;
+		const lineWidth = Math.min(contentWidth, visibleWidth(this.#appViewportFrameLines[sourceRow] ?? ""));
+		// Empty sticky-chrome rows (blank editor padding) still need a hit so
+		// multi-line selections that end on the input can anchor/focus there.
+		if (lineWidth <= 0) return { row: sourceRow, col: 0 };
+		return {
+			row: sourceRow,
+			col: Math.max(0, Math.min(col, lineWidth)),
+		};
+	}
+
+	/** Remap a screen cell after a selection-preserving scroll without waiting for paint. */
+	#appViewportContentPointAfterScroll(scrollTop: number, row: number, col: number): AppViewportSelectionPoint | null {
+		const screenRow = Math.floor(row);
+		const contentWidth = Math.max(1, this.terminal.columns - 1);
+		const totalLines = this.#appViewportFrameLines.length;
+		if (totalLines <= 0 || screenRow < 0 || col >= contentWidth) return null;
+		const height = this.terminal.rows;
+		const scrollEnd = this.#appViewportScrollRegionEnd ?? totalLines;
+		const boundedScrollEnd = Math.max(0, Math.min(scrollEnd, totalLines));
+		const suffixCount = Math.max(0, Math.min(totalLines - boundedScrollEnd, height));
+		const scrollHeight = Math.max(0, height - suffixCount);
+		const maxTop = Math.max(0, boundedScrollEnd - scrollHeight);
+		const boundedTop = Math.max(0, Math.min(scrollTop, maxTop));
+		let sourceRow: number | undefined;
+		if (screenRow < scrollHeight) {
+			const candidate = boundedTop + screenRow;
+			if (candidate < boundedScrollEnd) sourceRow = candidate;
+		} else {
+			const suffixIndex = screenRow - (height - suffixCount);
+			if (suffixIndex >= 0 && suffixIndex < suffixCount) sourceRow = boundedScrollEnd + suffixIndex;
+		}
+		if (sourceRow === undefined || sourceRow < 0 || sourceRow >= totalLines) return null;
+		const lineWidth = Math.min(contentWidth, visibleWidth(this.#appViewportFrameLines[sourceRow] ?? ""));
+		if (lineWidth <= 0) return { row: sourceRow, col: 0 };
+		return {
+			row: sourceRow,
+			col: Math.max(0, Math.min(col, lineWidth)),
+		};
+	}
+
+	#scrollAppViewportWhileSelecting(delta: number, row: number, col: number): void {
+		const metrics = this.#appViewportScrollbarMetrics;
+		const maxTop = metrics?.maxTop ?? 0;
+		const nextTop = Math.max(0, Math.min(this.#appViewportScrollTop + delta, maxTop));
+		this.#appViewportScrollTop = nextTop;
+		this.#appViewportFollow = maxTop > 0 ? nextTop >= maxTop : false;
+		const point = this.#appViewportContentPointAfterScroll(nextTop, row, col);
+		if (point) this.#updateAppViewportSelectionFocus(point);
+		else this.requestRender(true, { viewportOnly: true });
+	}
+
+	#startAppViewportTextSelection(row: number, col: number): void {
+		this.#appViewportSelectionDrag = false;
+		const point = this.#appViewportContentPoint(row, col);
+		const previousSelectionActive = this.#appViewportSelection?.active === true;
+		if (!point) {
+			this.#appViewportSelection = null;
+			if (previousSelectionActive) this.requestRender(true, { viewportOnly: true });
+			return;
+		}
+		const now = this.#renderScheduler.now();
+		const lastClick = this.#appViewportLastClick;
+		const continuingClick =
+			lastClick !== null &&
+			now - lastClick.atMs <= APP_VIEWPORT_DOUBLE_CLICK_MS &&
+			lastClick.point.row === point.row &&
+			Math.abs(lastClick.point.col - point.col) <= 1;
+		const clickCount = continuingClick ? Math.min(lastClick.count + 1, 3) : 1;
+		this.#appViewportLastClick = { atMs: now, point, count: clickCount };
+		if (clickCount >= 3 && this.#selectAppViewportLine(point)) {
+			this.requestRender(true, { viewportOnly: true });
+			return;
+		}
+		if (clickCount === 2 && this.#selectAppViewportWord(point)) {
+			this.requestRender(true, { viewportOnly: true });
+			return;
+		}
+		this.#appViewportSelection = { anchor: point, focus: point, active: false };
+		this.#appViewportSelectionDrag = true;
+		if (previousSelectionActive) this.requestRender(true, { viewportOnly: true });
+	}
+
+	#dragAppViewportTextSelection(row: number, col: number): void {
+		const direction = this.#appViewportSelectionAutoScrollDirection(row);
+		if (direction !== 0) {
+			this.#startAppViewportSelectionAutoScroll(direction, col);
+			this.#stepAppViewportSelectionAutoScroll();
+			return;
+		}
+		this.#stopAppViewportSelectionAutoScroll();
+		const point = this.#appViewportContentPoint(row, col);
+		if (!point) return;
+		this.#updateAppViewportSelectionFocus(point);
+	}
+
+	#updateAppViewportSelectionFocus(point: AppViewportSelectionPoint): void {
+		if (!this.#appViewportSelection) {
+			this.#appViewportSelection = { anchor: point, focus: point, active: false };
+		}
+		const selection = this.#appViewportSelection;
+		if (selection.focus.row === point.row && selection.focus.col === point.col && selection.active) return;
+		selection.focus = point;
+		selection.active = selection.active || selection.anchor.row !== point.row || selection.anchor.col !== point.col;
+		this.requestRender(true, { viewportOnly: true });
+	}
+
+	#appViewportSelectionAutoScrollDirection(row: number): -1 | 0 | 1 {
+		const metrics = this.#appViewportScrollbarMetrics;
+		if (!metrics || metrics.maxTop <= 0 || !this.#appViewportSelectionDrag) return 0;
+		// Only the scrollable transcript region auto-scrolls. Sticky chrome
+		// (status/powerline/editor) sits below scrollHeight and must remain a
+		// normal selection target while dragging.
+		if (row <= 0 && this.#appViewportScrollTop > 0) return -1;
+		if (
+			row >= metrics.scrollHeight - 1 &&
+			row < metrics.scrollHeight &&
+			this.#appViewportScrollTop < metrics.maxTop
+		) {
+			return 1;
+		}
+		return 0;
+	}
+
+	#startAppViewportSelectionAutoScroll(direction: -1 | 1, col: number): void {
+		this.#appViewportSelectionAutoScroll = { direction, col };
+		if (!this.#appViewportSelectionAutoScrollTimer) this.#armAppViewportSelectionAutoScroll();
+	}
+
+	#stopAppViewportSelectionAutoScroll(): void {
+		this.#appViewportSelectionAutoScroll = null;
+		if (this.#appViewportSelectionAutoScrollTimer) {
+			this.#appViewportSelectionAutoScrollTimer.cancel();
+			this.#appViewportSelectionAutoScrollTimer = undefined;
+		}
+	}
+
+	#armAppViewportSelectionAutoScroll(): void {
+		this.#appViewportSelectionAutoScrollTimer = this.#renderScheduler.scheduleRender(() => {
+			this.#appViewportSelectionAutoScrollTimer = undefined;
+			if (this.#stopped || !this.#appViewportSelectionDrag || !this.#appViewportSelectionAutoScroll) return;
+			if (this.#stepAppViewportSelectionAutoScroll()) this.#armAppViewportSelectionAutoScroll();
+		}, APP_VIEWPORT_SELECTION_AUTOSCROLL_MS);
+	}
+
+	#stepAppViewportSelectionAutoScroll(): boolean {
+		const state = this.#appViewportSelectionAutoScroll;
+		const metrics = this.#appViewportScrollbarMetrics;
+		if (!state || !metrics || metrics.maxTop <= 0) return false;
+		const nextTop = Math.max(0, Math.min(this.#appViewportScrollTop + state.direction, metrics.maxTop));
+		if (nextTop === this.#appViewportScrollTop) return false;
+		this.#appViewportScrollTop = nextTop;
+		this.#appViewportFollow = nextTop >= metrics.maxTop;
+		this.#updateAppViewportSelectionFocus(
+			this.#appViewportSelectionPointForScrollEdge(nextTop, metrics.scrollHeight, state),
+		);
+		return true;
+	}
+
+	#appViewportSelectionPointForScrollEdge(
+		scrollTop: number,
+		scrollHeight: number,
+		state: { direction: -1 | 1; col: number },
+	): AppViewportSelectionPoint {
+		const sourceRow = Math.max(
+			0,
+			Math.min(scrollTop + (state.direction > 0 ? scrollHeight - 1 : 0), this.#appViewportFrameLines.length - 1),
+		);
+		const contentWidth = Math.max(1, this.terminal.columns - 1);
+		const lineWidth = Math.min(contentWidth, visibleWidth(this.#appViewportFrameLines[sourceRow] ?? ""));
+		return {
+			row: sourceRow,
+			col: Math.max(0, Math.min(state.col, lineWidth)),
+		};
+	}
+
+	#selectAppViewportWord(point: AppViewportSelectionPoint): boolean {
+		const line = this.#appViewportFrameLines[point.row] ?? "";
+		const lineWidth = visibleWidth(line);
+		if (lineWidth <= 0) {
+			this.#appViewportSelection = null;
+			return false;
+		}
+		const targetCol = Math.max(0, Math.min(point.col, lineWidth - 1));
+		const targetKind = this.#appViewportSelectionCellKind(line, targetCol);
+		if (targetKind === "whitespace") {
+			this.#appViewportSelection = null;
+			return false;
+		}
+		let start = targetCol;
+		while (start > 0 && this.#appViewportSelectionCellKind(line, start - 1) === targetKind) start--;
+		let end = targetCol + 1;
+		while (end < lineWidth && this.#appViewportSelectionCellKind(line, end) === targetKind) end++;
+		this.#appViewportSelection = {
+			anchor: { row: point.row, col: start },
+			focus: { row: point.row, col: end - 1 },
+			active: true,
+		};
+		this.#appViewportSelectionDrag = false;
+		return true;
+	}
+
+	#selectAppViewportLine(point: AppViewportSelectionPoint): boolean {
+		const line = this.#appViewportFrameLines[point.row] ?? "";
+		const lineWidth = visibleWidth(line);
+		if (lineWidth <= 0) {
+			this.#appViewportSelection = null;
+			return false;
+		}
+		this.#appViewportSelection = {
+			anchor: { row: point.row, col: 0 },
+			focus: { row: point.row, col: lineWidth - 1 },
+			active: true,
+		};
+		this.#appViewportSelectionDrag = false;
+		return true;
+	}
+
+	#appViewportSelectionCellKind(line: string, col: number): "word" | "delimiter" | "cjk" | "other" | "whitespace" {
+		const text = Bun.stripANSI(sliceByColumn(line, col, 1, false));
+		const grapheme = [...text][0] ?? "";
+		if (!grapheme) return "whitespace";
+		if (APP_VIEWPORT_SELECTION_WORD_JOINERS[grapheme] || isWordNavJoiner(grapheme)) return "word";
+		const kind = getWordNavKind(grapheme);
+		return kind === "delimiter" ? "delimiter" : kind;
+	}
+
+	#copyAppViewportSelection(): boolean {
+		const text = this.#appViewportSelectionText();
+		if (text === "") return false;
+		if (this.onAppViewportSelectionCopy) {
+			this.#runAppViewportClipboardCallback(() => this.onAppViewportSelectionCopy?.(text));
+		} else {
+			const encoded = Buffer.from(text).toString("base64");
+			this.terminal.write(`\x1b]52;${APP_VIEWPORT_CLIPBOARD_TARGET};${encoded}\x07`);
+		}
+		return true;
+	}
+
+	#requestAppViewportPaste(): boolean {
+		if (!this.onAppViewportPasteRequest) return false;
+		this.#runAppViewportClipboardCallback(() => this.onAppViewportPasteRequest?.());
+		return true;
+	}
+
+	#runAppViewportClipboardCallback(callback: () => void | Promise<void>): void {
+		try {
+			const result = callback();
+			if (result) void result.catch?.(() => {});
+		} catch {
+			// Host clipboard integration is best-effort; keep input handling synchronous.
+		}
+	}
+
+	/**
+	 * Sticky chrome rows live at absolute indices `[scrollEnd, frame.length)`.
+	 * When the transcript grows/shrinks while follow is pinned to the tail, those
+	 * indices shift by the scroll-region delta. Selection anchors/focuses that
+	 * sat on sticky chrome must move with them so a held drag on the status bar
+	 * or editor does not appear to jump upward as streamed rows land above.
+	 * Transcript rows keep stable absolute indices under pure appends, so only
+	 * points at or past the previous scroll end are remapped.
+	 */
+	#remapAppViewportSelectionForScrollRegionShift(previousScrollEnd: number | undefined): void {
+		if (previousScrollEnd === undefined) return;
+		const nextScrollEnd = this.#appViewportScrollRegionEnd ?? this.#appViewportFrameLines.length;
+		const delta = nextScrollEnd - previousScrollEnd;
+		if (delta === 0) return;
+
+		const remap = (point: AppViewportSelectionPoint): AppViewportSelectionPoint => {
+			if (point.row < previousScrollEnd) return point;
+			return { row: point.row + delta, col: point.col };
+		};
+
+		const selection = this.#appViewportSelection;
+		if (selection) {
+			selection.anchor = remap(selection.anchor);
+			selection.focus = remap(selection.focus);
+		}
+		const lastClick = this.#appViewportLastClick;
+		if (lastClick && lastClick.point.row >= previousScrollEnd) {
+			lastClick.point = remap(lastClick.point);
+		}
+	}
+
+	#clampAppViewportSelectionToFrame(): void {
+		const selection = this.#appViewportSelection;
+		if (!selection) return;
+		const maxRow = this.#appViewportFrameLines.length - 1;
+		if (maxRow < 0 || selection.anchor.row < 0 || selection.focus.row < 0) {
+			this.#clearAppViewportSelection();
+			return;
+		}
+		if (selection.anchor.row > maxRow || selection.focus.row > maxRow) {
+			this.#clearAppViewportSelection();
+			return;
+		}
+		selection.anchor = this.#clampAppViewportSelectionPoint(selection.anchor);
+		selection.focus = this.#clampAppViewportSelectionPoint(selection.focus);
+	}
+
+	#clampAppViewportSelectionPoint(point: AppViewportSelectionPoint): AppViewportSelectionPoint {
+		const lineWidth = visibleWidth(this.#appViewportFrameLines[point.row] ?? "");
+		return {
+			row: point.row,
+			col: Math.max(0, Math.min(point.col, Math.max(0, lineWidth - 1))),
+		};
+	}
+
+	#clearAppViewportSelection(): void {
+		this.#appViewportSelection = null;
+		this.#appViewportSelectionDrag = false;
+		this.#appViewportLastClick = null;
+		this.#stopAppViewportSelectionAutoScroll();
+	}
+
+	#appViewportSelectionText(): string {
+		const selection = this.#normalizedAppViewportSelection();
+		if (!selection) return "";
+		const chunks: string[] = [];
+		for (let sourceRow = selection.start.row; sourceRow <= selection.end.row; sourceRow++) {
+			const line = this.#appViewportFrameLines[sourceRow] ?? "";
+			const { startCol, endCol } = this.#appViewportSelectionColumns(
+				line,
+				sourceRow,
+				selection.start,
+				selection.end,
+			);
+			// Rendered rows are often right-padded to the content width. When the
+			// selection reaches the end of a line (or covers intermediate lines
+			// entirely), strip that trailing padding so multi-line copies use
+			// newlines instead of a run of spaces. Spaces interior to a partial
+			// line selection are preserved.
+			const reachesLineEnd = endCol >= visibleWidth(line);
+			const text = Bun.stripANSI(sliceByColumn(line, startCol, endCol - startCol, true));
+			chunks.push(reachesLineEnd ? text.replace(/[ \t]+$/u, "") : text);
+		}
+		return chunks.join("\n");
+	}
+
+	#startAppViewportScrollbarDrag(row: number, col: number): boolean {
+		const metrics = this.#appViewportScrollbarMetrics;
+		if (!metrics || metrics.maxTop <= 0 || col !== this.terminal.columns - 1) return false;
+		if (row < 0 || row >= metrics.scrollHeight) return false;
+		const inThumb = row >= metrics.thumbTopRow && row < metrics.thumbTopRow + metrics.thumbRows;
+		const fallbackOffset = Math.max(0, (metrics.thumbRows - 1) / 2);
+		const grabOffsetRows = inThumb ? row - metrics.thumbTopRow : fallbackOffset;
+		this.#appViewportScrollbarDrag = {
+			grabOffsetRows: Math.max(0, Math.min(grabOffsetRows, Math.max(0, metrics.thumbRows - 1))),
+		};
+		this.#dragAppViewportScrollbar(row);
+		return true;
+	}
+
+	#dragAppViewportScrollbar(row: number): void {
+		const metrics = this.#appViewportScrollbarMetrics;
+		const drag = this.#appViewportScrollbarDrag;
+		if (!metrics || !drag || metrics.maxTop <= 0) return;
+		const boundedRow = Math.max(0, Math.min(row, metrics.scrollHeight - 1));
+		const maxThumbTop = Math.max(0, metrics.travelRows);
+		const thumbTop = Math.max(0, Math.min(boundedRow - drag.grabOffsetRows, maxThumbTop));
+		const nextTop = metrics.travelRows <= 0 ? 0 : Math.round((thumbTop / metrics.travelRows) * metrics.maxTop);
+		this.#appViewportScrollTop = Math.max(0, Math.min(nextTop, metrics.maxTop));
+		this.#appViewportFollow = this.#appViewportScrollTop >= metrics.maxTop;
+		this.requestRender(true, { viewportOnly: true });
+	}
+
+	#scrollAppViewport(delta: number): void {
+		this.#appViewportScrollTop = Math.max(0, this.#appViewportScrollTop + delta);
+		this.#appViewportFollow = false;
+		this.requestRender(true, { viewportOnly: true });
+	}
+
+	#scrollAppViewportToTop(): void {
+		this.#appViewportScrollTop = 0;
+		this.#appViewportFollow = false;
+		this.requestRender(true, { viewportOnly: true });
+	}
+
+	#scrollAppViewportToBottom(): void {
+		this.#appViewportFollow = true;
+		this.requestRender(true, { viewportOnly: true });
+	}
+
 	#handleInput(data: string): void {
 		// Consume CPR replies (CSI row;col R) while an anchor probe is unanswered;
 		// they are terminal reports, never keystrokes, and must not reach the
@@ -1940,6 +2595,7 @@ export class TUI extends Container {
 			return;
 		}
 
+		if (this.#handleAppViewportInput(data)) return;
 		// If focused component is an overlay, verify it's still visible
 		// (visibility can change due to terminal resize or visible() callback)
 		const focusedOverlay = this.overlayStack.find(o => o.component === this.#focusedComponent);
@@ -1984,6 +2640,8 @@ export class TUI extends Container {
 		}
 
 		setCellDimensions({ widthPx, heightPx });
+		this.#appViewportCellSizeKnown = true;
+		this.#syncAppViewportPixelMouse();
 		// Invalidate all components so images re-render with correct dimensions.
 		this.invalidate();
 		this.requestRender();
@@ -2215,6 +2873,7 @@ export class TUI extends Container {
 		if (resultWidth <= totalWidth) {
 			return result;
 		}
+
 		// Truncate with strict=true to ensure we don't exceed totalWidth
 		return sliceByColumn(result, 0, totalWidth, true);
 	}
@@ -2586,6 +3245,19 @@ export class TUI extends Container {
 			return;
 		}
 
+		if (this.#appViewportBackend) {
+			// Viewport-only frame: every request since the last compose was a
+			// scroll/selection move, so re-walking the component tree would
+			// produce byte-identical rows. Skip the compose (O(transcript)) and
+			// re-emit the cached frame at the new viewport offset (O(viewport)).
+			if (!this.#appViewportComposeStale && this.#canReuseAppViewportFrame(width, height)) {
+				this.#emitAppViewportFrame(this.#appViewportFrameLines, width, height, this.#appViewportFrameCursorPos);
+				return;
+			}
+			this.#renderAppViewportFrame(width, height);
+			return;
+		}
+
 		// Fullscreen alt-screen short-circuit. While the topmost visible overlay
 		// requests it, borrow the terminal's alternate buffer and paint only the
 		// modal there; the normal screen and all accounting stay untouched.
@@ -2932,6 +3604,7 @@ export class TUI extends Container {
 
 	#forgetHardwareCursorState(): void {
 		this.#hardwareCursorState = null;
+
 	}
 
 	/**
@@ -2952,6 +3625,385 @@ export class TUI extends Container {
 		const exit = this.terminal.keyboardEnhancementExitSequence;
 		if (exit !== undefined) return exit ?? "";
 		return this.terminal.kittyEnableSequence ? "\x1b[<u" : "";
+	}
+
+
+	#renderAppViewportFrame(width: number, height: number): void {
+		this.#enterAppViewport();
+		const contentWidth = Math.max(1, width - 1);
+		this.#imageBudget.beginPass();
+		const viewport = { columns: contentWidth, rows: Number.MAX_SAFE_INTEGER };
+		const provided =
+			this.#frameProvider?.renderResizeFrame?.(viewport) ?? this.#frameProvider?.renderFrame(viewport).viewport;
+		const rawFrame = Array.from(provided ?? this.render(contentWidth));
+		if (this.#imageBudget.endPass()) {
+			this.#clearScrollbackOnNextRender = true;
+			this.#appViewportPreviousLines = [];
+		}
+		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
+
+		const cursorMarkers = this.#extractCursorMarkers(rawFrame);
+		const cursorPos = cursorMarkers[0] ?? null;
+		const frame = this.#prepareLinesArray(rawFrame, contentWidth);
+		const imageTransmits = this.#imageBudget.takeTransmits();
+		if (imageTransmits.length > 0) {
+			let transmitBuffer = "";
+			for (const seq of imageTransmits) transmitBuffer += seq;
+			this.terminal.write(transmitBuffer);
+		}
+		this.#emitAppViewportFrame(frame, width, height, cursorPos);
+		this.#appViewportFrameCursorPos = cursorPos;
+		this.#appViewportComposeStale = false;
+		this.#clearScrollbackOnNextRender = false;
+		this.#hasEverRendered = true;
+	}
+
+	/**
+	 * Whether a viewport-only frame may re-emit the cached composed lines.
+	 * Anything that could change the composed rows or the emit geometry —
+	 * resize, scrollback clear, live images (their budget audit needs the full
+	 * walk), or no successfully painted frame yet — forces a full compose.
+	 */
+	#canReuseAppViewportFrame(width: number, height: number): boolean {
+		return (
+			this.#hasEverRendered &&
+			this.#appViewportFrameLines.length > 0 &&
+			this.#resizeProbe === undefined &&
+			!this.#clearScrollbackOnNextRender &&
+			this.#imageBudget.quiescent &&
+			width === this.#appViewportPreviousWidth &&
+			this.#appViewportPreviousLines.length === height
+		);
+	}
+
+	#emitAppViewportFrame(
+		lines: string[],
+		width: number,
+		height: number,
+		cursorPos: { row: number; col: number } | null,
+	): void {
+		const previousScrollEnd = this.#appViewportPreviousScrollRegionEnd;
+		this.#appViewportFrameLines = lines;
+		this.#remapAppViewportSelectionForScrollRegionShift(previousScrollEnd);
+		this.#clampAppViewportSelectionToFrame();
+		this.#appViewportPreviousScrollRegionEnd = this.#appViewportScrollRegionEnd ?? lines.length;
+		let fitted = this.#applyAppViewportSelection(this.#buildAppViewportLines(lines, height));
+		let scrollbarGlyphs = this.#appViewportScrollbarGlyphs;
+		let fittedCursorPos = this.#appViewportCursorPosition(cursorPos, lines.length, height);
+		let hasVisibleOverlay = false;
+		for (const entry of this.overlayStack) {
+			if (this.#isOverlayVisible(entry)) {
+				hasVisibleOverlay = true;
+				break;
+			}
+		}
+		if (hasVisibleOverlay) {
+			fitted = this.#appendAppViewportScrollbar(fitted, scrollbarGlyphs, width);
+			scrollbarGlyphs = [];
+			fitted = this.#compositeOverlaysIntoWindow(fitted, width, height);
+			const overlayMarkers = this.#extractCursorMarkers(fitted);
+			if (overlayMarkers.length > 0) fittedCursorPos = overlayMarkers[0]!;
+			fitted = this.#prepareLinesArray(fitted, width);
+		}
+		if (
+			this.#appViewportPreviousWidth === width &&
+			this.#appViewportPreviousLines.length === height &&
+			this.#appViewportPreviousScrollbarGlyphs.length === height
+		) {
+			let same = true;
+			for (let r = 0; r < height; r++) {
+				if (
+					fitted[r] !== this.#appViewportPreviousLines[r] ||
+					(scrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK) !==
+						(this.#appViewportPreviousScrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK)
+				) {
+					same = false;
+					break;
+				}
+			}
+			if (same) {
+				this.#writeAppViewportCursor(fittedCursorPos, height);
+				return;
+			}
+		}
+		this.#fullRedrawCount += 1;
+		const cursorControl = this.#appViewportCursorControlSequence(fittedCursorPos, height);
+		let buffer = this.#paintBeginSequence;
+		const purgeIds = this.#imageBudget.takePurgeIds();
+		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			for (const id of purgeIds) buffer += encodeKittyDeleteImage(id);
+		}
+		buffer += this.#appViewportPaintRows(fitted, scrollbarGlyphs, width, height);
+		buffer += cursorControl.seq;
+		buffer += this.#paintEndSequence;
+		this.terminal.write(buffer);
+		this.#appViewportPreviousLines = fitted;
+		this.#appViewportPreviousScrollbarGlyphs = scrollbarGlyphs;
+		this.#appViewportPreviousWidth = width;
+		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
+		else this.#recordHardwareCursorHidden();
+	}
+
+	#appViewportPaintRows(lines: string[], scrollbarGlyphs: string[], width: number, height: number): string {
+		let buffer = "";
+		const contentWidth = Math.max(1, width - 1);
+		const widthChanged = this.#appViewportPreviousWidth !== width;
+		const previousLines = this.#appViewportPreviousLines;
+		const previousScrollbarGlyphs = this.#appViewportPreviousScrollbarGlyphs;
+		for (let row = 0; row < height; row++) {
+			const line = lines[row] ?? "";
+			const previousLine = previousLines[row] ?? "";
+			if (line !== previousLine || (widthChanged && line !== "")) {
+				if (line !== "" || previousLine !== "") {
+					buffer += `\x1b[${row + 1};1H${this.#appViewportContentRewriteSequence(line, contentWidth)}`;
+				}
+			}
+			const glyph = scrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
+			const previousGlyph = previousScrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
+			if (glyph !== previousGlyph || (widthChanged && glyph !== APP_VIEWPORT_SCROLLBAR_BLANK)) {
+				if (glyph !== APP_VIEWPORT_SCROLLBAR_BLANK || previousGlyph !== APP_VIEWPORT_SCROLLBAR_BLANK) {
+					buffer += `\x1b[${row + 1};${width}H${glyph}`;
+				}
+			}
+			// Fullscreen overlays may paint through the app viewport's reserved
+			// scrollbar column. That glyph belongs to the previous line rather than
+			// the scrollbar cache, so a shorter replacement must erase it explicitly.
+			if (
+				line !== previousLine &&
+				glyph === APP_VIEWPORT_SCROLLBAR_BLANK &&
+				previousGlyph === APP_VIEWPORT_SCROLLBAR_BLANK &&
+				!TERMINAL.isImageLine(previousLine) &&
+				visibleWidth(previousLine) > contentWidth &&
+				!TERMINAL.isImageLine(line) &&
+				visibleWidth(line) <= contentWidth
+			) {
+				buffer += `\x1b[${row + 1};${width}H${APP_VIEWPORT_SCROLLBAR_BLANK}`;
+			}
+			if (
+				widthChanged &&
+				this.#appViewportPreviousWidth > 0 &&
+				this.#appViewportPreviousWidth !== width &&
+				this.#appViewportPreviousWidth <= width &&
+				previousGlyph !== APP_VIEWPORT_SCROLLBAR_BLANK
+			) {
+				buffer += `\x1b[${row + 1};${this.#appViewportPreviousWidth}H${APP_VIEWPORT_SCROLLBAR_BLANK}`;
+			}
+		}
+		return buffer;
+	}
+
+	#appViewportContentRewriteSequence(line: string, width: number): string {
+		if (TERMINAL.isImageLine(line)) return ERASE_LINE + line;
+		const terminalLine = this.#terminalLine(line);
+		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
+		const lineWidth = asciiWidth ?? visibleWidth(line);
+		const clearCells = Math.max(0, width - lineWidth);
+		return clearCells > 0 ? `${terminalLine}\x1b[${clearCells}X` : terminalLine;
+	}
+
+	#appViewportCursorControlSequence(
+		cursorPos: { row: number; col: number } | null,
+		totalLines: number,
+	): CursorControlResult {
+		const target = this.#targetHardwareCursorState(cursorPos, totalLines);
+		if (!target) {
+			return { seq: "\x1b[?25l", toRow: this.#hardwareCursorRow, toCol: 0, visible: false, state: null };
+		}
+		const seq = `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
+		return { seq, toRow: target.row, toCol: target.col, visible: target.visible, state: target };
+	}
+
+	#writeAppViewportCursor(cursorPos: { row: number; col: number } | null, height: number): void {
+		const cursorControl = this.#appViewportCursorControlSequence(cursorPos, height);
+		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
+		else this.#recordHardwareCursorHidden();
+		this.terminal.write(cursorControl.seq);
+	}
+
+	#appViewportCursorPosition(
+		cursorPos: { row: number; col: number } | null,
+		totalLines: number,
+		height: number,
+	): { row: number; col: number } | null {
+		if (!cursorPos) return null;
+		const scrollEnd = this.#appViewportScrollRegionEnd ?? totalLines;
+		const boundedScrollEnd = Math.max(0, Math.min(scrollEnd, totalLines));
+		const suffixCount = Math.max(0, Math.min(totalLines - boundedScrollEnd, height));
+		const scrollHeight = Math.max(0, height - suffixCount);
+		if (cursorPos.row >= boundedScrollEnd) {
+			const suffixRow = cursorPos.row - boundedScrollEnd;
+			if (suffixRow >= suffixCount) return null;
+			return { row: height - suffixCount + suffixRow, col: cursorPos.col };
+		}
+		if (cursorPos.row < this.#appViewportScrollTop || cursorPos.row >= this.#appViewportScrollTop + scrollHeight) {
+			return null;
+		}
+		return { row: cursorPos.row - this.#appViewportScrollTop, col: cursorPos.col };
+	}
+
+	#appViewportScrollbarGlyphs: string[] = [];
+
+	#applyAppViewportSelection(lines: string[]): string[] {
+		const selection = this.#normalizedAppViewportSelection();
+		if (!selection) return lines;
+		const selected = [...lines];
+		for (let row = 0; row < selected.length; row++) {
+			const sourceRow = this.#appViewportVisibleSourceRows[row];
+			if (sourceRow === undefined || sourceRow < selection.start.row || sourceRow > selection.end.row) continue;
+			selected[row] = this.#applyAppViewportSelectionToLine(
+				selected[row] ?? "",
+				sourceRow,
+				selection.start,
+				selection.end,
+			);
+		}
+		return selected;
+	}
+
+	#normalizedAppViewportSelection(): { start: AppViewportSelectionPoint; end: AppViewportSelectionPoint } | null {
+		const selection = this.#appViewportSelection;
+		if (!selection?.active) return null;
+		const { anchor, focus } = selection;
+		if (anchor.row < focus.row || (anchor.row === focus.row && anchor.col <= focus.col)) {
+			return { start: anchor, end: focus };
+		}
+		return { start: focus, end: anchor };
+	}
+
+	#appViewportSelectionColumns(
+		line: string,
+		sourceRow: number,
+		start: AppViewportSelectionPoint,
+		end: AppViewportSelectionPoint,
+	): { startCol: number; endCol: number } {
+		const lineWidth = visibleWidth(line);
+		let startCol = 0;
+		if (sourceRow === start.row) {
+			const cell = Math.max(0, Math.min(start.col, lineWidth));
+			startCol = cell < lineWidth ? visibleWidth(sliceByColumn(line, 0, cell, true)) : lineWidth;
+		}
+
+		let endCol = lineWidth;
+		if (sourceRow === end.row && end.col < lineWidth) {
+			const cell = Math.max(0, end.col);
+			const graphemeStart = visibleWidth(sliceByColumn(line, 0, cell, true));
+			const graphemeWidth = visibleWidth(sliceByColumn(line, graphemeStart, 1, false));
+			endCol = Math.min(lineWidth, graphemeStart + Math.max(1, graphemeWidth));
+		}
+		return { startCol, endCol: Math.max(startCol, endCol) };
+	}
+
+	#applyAppViewportSelectionToLine(
+		line: string,
+		sourceRow: number,
+		start: AppViewportSelectionPoint,
+		end: AppViewportSelectionPoint,
+	): string {
+		const lineWidth = visibleWidth(line);
+		if (lineWidth <= 0) return line;
+		const { startCol, endCol } = this.#appViewportSelectionColumns(line, sourceRow, start, end);
+		if (endCol <= startCol) return line;
+		const before = sliceByColumn(line, 0, startCol, true);
+		// Powerline / editor chrome carries its own background SGR and full
+		// resets (`\x1b[0m`). Strip all styling from the selected slice and open
+		// the selection with a full reset so carried-in segment styles cannot
+		// override the selection fill after SGR coalescing. Copy still reads the
+		// original frame lines.
+		const selected = Bun.stripANSI(sliceByColumn(line, startCol, endCol - startCol, true));
+		const after = sliceByColumn(line, endCol, lineWidth - endCol, true);
+		return `${before}${SEGMENT_RESET}${APP_VIEWPORT_SELECTION_ON}${selected}${APP_VIEWPORT_SELECTION_OFF}${after}`;
+	}
+
+	#buildAppViewportLines(lines: string[], height: number): string[] {
+		const fitted: string[] = new Array(Math.max(0, height)).fill("");
+		const rowMap: number[] = new Array(Math.max(0, height)).fill(-1);
+		const scrollEnd = this.#appViewportScrollRegionEnd ?? lines.length;
+		const boundedScrollEnd = Math.max(0, Math.min(scrollEnd, lines.length));
+		const suffixCount = Math.max(0, Math.min(lines.length - boundedScrollEnd, height));
+		const scrollHeight = Math.max(0, height - suffixCount);
+		const maxTop = Math.max(0, boundedScrollEnd - scrollHeight);
+		if (this.#appViewportFollow) {
+			this.#appViewportScrollTop = maxTop;
+		} else {
+			this.#appViewportScrollTop = Math.max(0, Math.min(this.#appViewportScrollTop, maxTop));
+			if (this.#appViewportScrollTop >= maxTop) this.#appViewportFollow = true;
+		}
+		for (let row = 0; row < scrollHeight; row++) {
+			const sourceRow = this.#appViewportScrollTop + row;
+			if (sourceRow < boundedScrollEnd) {
+				fitted[row] = lines[sourceRow] ?? "";
+				rowMap[row] = sourceRow;
+			}
+		}
+		this.#appViewportScrollbarGlyphs = this.#buildAppViewportScrollbarGlyphs(
+			height,
+			scrollHeight,
+			boundedScrollEnd,
+			maxTop,
+		);
+		const suffixStart = height - suffixCount;
+		for (let i = 0; i < suffixCount; i++) {
+			const sourceRow = boundedScrollEnd + i;
+			fitted[suffixStart + i] = lines[sourceRow] ?? "";
+			rowMap[suffixStart + i] = sourceRow;
+		}
+		this.#appViewportVisibleSourceRows = rowMap;
+		return fitted;
+	}
+
+	#buildAppViewportScrollbarGlyphs(height: number, scrollHeight: number, totalRows: number, maxTop: number): string[] {
+		const glyphs: string[] = new Array(Math.max(0, height)).fill(APP_VIEWPORT_SCROLLBAR_BLANK);
+		this.#appViewportScrollbarMetrics = null;
+		if (scrollHeight <= 0 || totalRows <= scrollHeight) return glyphs;
+		const slotsPerRow = APP_VIEWPORT_SCROLLBAR_DOTS.length;
+		const totalSlots = scrollHeight * slotsPerRow;
+		const proportionalThumbSlots = Math.floor((totalSlots * scrollHeight) / totalRows);
+		const minThumbSlots = Math.min(slotsPerRow, totalSlots);
+		const thumbSlots = Math.max(minThumbSlots, Math.min(proportionalThumbSlots, totalSlots));
+		const travelSlots = totalSlots - thumbSlots;
+		const thumbStart = maxTop === 0 ? 0 : Math.round((this.#appViewportScrollTop / maxTop) * travelSlots);
+		const thumbEnd = thumbStart + thumbSlots;
+		const thumbTopRow = Math.floor(thumbStart / slotsPerRow);
+		const thumbEndRow = Math.max(thumbTopRow + 1, Math.ceil(thumbEnd / slotsPerRow));
+		const thumbRows = Math.max(1, Math.min(scrollHeight, thumbEndRow - thumbTopRow));
+		this.#appViewportScrollbarMetrics = {
+			scrollHeight,
+			maxTop,
+			thumbTopRow: Math.max(0, Math.min(thumbTopRow, scrollHeight - 1)),
+			thumbRows,
+			travelRows: Math.max(0, scrollHeight - thumbRows),
+		};
+		for (let row = 0; row < scrollHeight; row++) {
+			glyphs[row] = this.#appViewportScrollbarGlyph(row, slotsPerRow, thumbStart, thumbEnd);
+		}
+		return glyphs;
+	}
+
+	#appendAppViewportScrollbar(lines: string[], scrollbarGlyphs: string[], width: number): string[] {
+		const contentWidth = Math.max(0, width - 1);
+		const fitted = [...lines];
+		for (let row = 0; row < fitted.length; row++) {
+			const glyph = scrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
+			if (glyph === APP_VIEWPORT_SCROLLBAR_BLANK) continue;
+			const line = fitted[row] ?? "";
+			if (TERMINAL.isImageLine(line)) continue;
+			const content = sliceByColumn(line, 0, contentWidth, true);
+			const pad = " ".repeat(Math.max(0, contentWidth - visibleWidth(content)));
+			fitted[row] = `${content}${pad}${LINE_TERMINATOR}${glyph}`;
+		}
+		return fitted;
+	}
+
+	#appViewportScrollbarGlyph(row: number, slotsPerRow: number, thumbStart: number, thumbEnd: number): string {
+		let mask = 0;
+		const rowStart = row * slotsPerRow;
+		for (let slot = 0; slot < slotsPerRow; slot++) {
+			const absoluteSlot = rowStart + slot;
+			if (absoluteSlot >= thumbStart && absoluteSlot < thumbEnd) mask |= APP_VIEWPORT_SCROLLBAR_DOTS[slot] ?? 0;
+		}
+		return mask === 0
+			? APP_VIEWPORT_SCROLLBAR_BLANK
+			: `\x1b[2m${String.fromCodePoint(0x2800 | mask)}${SEGMENT_RESET}`;
 	}
 
 	/**
