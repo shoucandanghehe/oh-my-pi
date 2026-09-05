@@ -55,6 +55,7 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 	let sessionId = "session-1";
 	return {
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		btwContainer,
 		session,
 		sessionManager: {

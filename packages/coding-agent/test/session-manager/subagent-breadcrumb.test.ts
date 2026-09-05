@@ -98,6 +98,22 @@ describe("SessionManager subagent breadcrumb isolation", () => {
 		}
 	});
 
+	it("does not replace the breadcrumb when a new persistent session suppresses it", async () => {
+		const mainFile = await createParentSession();
+		writeBreadcrumb(cwd, mainFile);
+		const isolated = SessionManager.create(cwd, path.join(testAgentDir, "isolated"), undefined, {
+			suppressBreadcrumb: true,
+		});
+		try {
+			await isolated.ensureOnDisk();
+		} finally {
+			await isolated.close();
+		}
+
+		const crumb = await readTerminalBreadcrumbEntry();
+		expect(crumb?.sessionFile).toBe(mainFile);
+	});
+
 	it("recovers a stale breadcrumb that points inside a subagent artifacts dir", async () => {
 		const mainFile = await createParentSession();
 		const subFile = await writeSubagentSession(mainFile, "Worker", "subagent work");

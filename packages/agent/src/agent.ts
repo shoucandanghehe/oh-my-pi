@@ -1271,6 +1271,13 @@ export class Agent {
 					return;
 				}
 
+				// Durable pause: a turn parked on `pause_turn` is resumable, unlike
+				// a finished assistant tail.
+				if (messages[messages.length - 1].stopDetails?.type === "pause_turn") {
+					await this.#runLoop(undefined, undefined, signal, true);
+					return;
+				}
+
 				throw new Error("Cannot continue from message role: assistant");
 			}
 
@@ -1288,6 +1295,7 @@ export class Agent {
 				}
 			}
 		}
+
 	}
 
 	/**
