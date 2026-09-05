@@ -422,20 +422,16 @@ class SyntheticSummary implements Component {
 /**
  * Collapsed placeholder for a synthetic (agent-attributed) user input in the
  * file/remote-backed transcript viewer — chiefly the advisor's `Session update`
- * replay dumps, which can each be hundreds of KiB of Markdown and, on cold open,
- * blocked the TUI for tens of seconds while every historical body was laid out
- * before the viewport clip (issue #6308).
+ * replay dumps, which can each be hundreds of KiB. Cold open renders one compact
+ * summary; ctrl+o reveals one viewport-anchored body with full Markdown styling
+ * instead of synchronously laying out every historical replay dump.
  *
- * Collapsed by default: renders one dim summary row (label · size · line count ·
- * expand hint) and builds NO Markdown. The heavy {@link UserMessageComponent} is
- * constructed lazily only when expanded via `ctrl+o`, so blocks above the
- * viewport never pay layout cost until the reader asks to see them. The raw
- * observability data stays intact in `__advisor.jsonl`.
+ * The raw observability data stays intact in `__advisor.jsonl`.
  */
 export class CollapsedSyntheticMessageComponent implements Component {
 	#disclosure: Disclosure;
-	#expanded = false;
 	readonly #native = new Memo();
+	#bodyExpansionControlled = false;
 
 	readonly #text: string;
 	readonly #imageLinks?: readonly (string | undefined)[];
@@ -452,10 +448,13 @@ export class CollapsedSyntheticMessageComponent implements Component {
 		});
 	}
 
-	/** ctrl+o toggle: reveal/hide the full Markdown body. */
+	get expanded(): boolean {
+		return this.#disclosure.expanded;
+	}
+
+	/** Follow global expansion unless the viewer explicitly controls this body. */
 	setExpanded(expanded: boolean): void {
-		this.#expanded = expanded;
-		this.#disclosure.setExpanded(expanded);
+		if (!this.#bodyExpansionControlled) this.#disclosure.setExpanded(expanded);
 	}
 
 	/**
@@ -465,23 +464,32 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	 * expands it through {@link handleNativeEvent}.
 	 */
 	describe(): NativeNode {
-		return this.#native.get([this.#expanded], () =>
+		return this.#native.get([this.expanded], () =>
 			card(
 				{
 					role: "omp.user.synthetic",
 					tone: "muted",
 					head: [span(summarizeSyntheticInput(this.#text), "dim")],
 					collapsible: true,
-					collapsed: !this.#expanded,
+					collapsed: !this.expanded,
 				},
-				this.#expanded ? [md(this.#text)] : [],
+				this.expanded ? [md(this.#text)] : [],
 			),
 		);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
-		if (expanded !== undefined) this.setExpanded(expanded);
+		if (expanded !== undefined) this.setBodyExpanded(expanded);
+	}
+
+	/**
+	 * The builder owns viewport-anchored replay expansion independently of the
+	 * transcript's global setExpanded presentation state.
+	 */
+	setBodyExpanded(expanded: boolean): void {
+		this.#bodyExpansionControlled = true;
+		this.#disclosure.setExpanded(expanded);
 	}
 
 	setIgnoreTight(ignore: boolean): this {

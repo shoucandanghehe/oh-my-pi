@@ -81,7 +81,11 @@ import {
 	treeMetadataIndent,
 } from "./agent-hub-renderer";
 import { sanitizeDisplaySingleLine } from "./extensions/display-text";
-import { AgentTranscriptViewer, type AgentTranscriptSource } from "./agent-transcript-viewer";
+import {
+	AgentTranscriptViewer,
+	type AgentTranscriptSource,
+	type AgentTranscriptViewerDeps,
+} from "./agent-transcript-viewer";
 import type { AgentRoleDisplay } from "./agent-hub-renderer";
 import { fuzzyMatch } from "../fuzzy";
 import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBorderSplit } from "../chrome/overlay-box";
@@ -309,8 +313,14 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	expandThinkingBlocks?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
+	/** Creates the same StatusLineComponent used by Main for transcript chat panes. Required by openChat. */
+	createStatusLine?: AgentTranscriptViewerDeps["createStatusLine"];
+	getStatusLineTransparent?: AgentTranscriptViewerDeps["getStatusLineTransparent"];
+	getExtensionPresentation?: AgentTranscriptViewerDeps["getExtensionPresentation"];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
 	focusAgent?: (id: string) => Promise<void>;
+	/** Open this agent in an app-viewport workspace pane instead of replacing the main session view. */
+	openAgent?: (id: string) => Promise<void>;
 	/** Current main session file; used to seed parked historical subagents after restart. */
 	sessionFile?: string | null;
 	/** Initial top-level projection; slash commands deep-link into this surface. */
@@ -453,7 +463,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#proseOnlyThinking: (() => boolean) | undefined;
 	#expandThinkingBlocks: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
+	#createStatusLine: AgentTranscriptViewerDeps["createStatusLine"] | undefined;
+	#getStatusLineTransparent: AgentTranscriptViewerDeps["getStatusLineTransparent"];
+	#getExtensionPresentation: AgentTranscriptViewerDeps["getExtensionPresentation"];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
+	#openAgent: ((id: string) => Promise<void>) | undefined;
 
 	// Fullscreen transcript overlay opened by openChat(), if any.
 	#transcriptOverlay: OverlayHandle | undefined;
@@ -499,7 +513,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
 		this.#expandThinkingBlocks = deps.expandThinkingBlocks;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
+		this.#createStatusLine = deps.createStatusLine;
+		this.#getStatusLineTransparent = deps.getStatusLineTransparent;
+		this.#getExtensionPresentation = deps.getExtensionPresentation;
 		this.#focusAgent = deps.focusAgent;
+		this.#openAgent = deps.openAgent;
 
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#scheduleDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#scheduleDataChange()));
@@ -635,6 +653,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	openChat(id: string, entryId?: string): void {
 		if (this.#disposed || !this.#registry.get(id)) return;
 		if (typeof this.#ui.showOverlay !== "function") return;
+		if (!this.#createStatusLine) throw new Error("Agent Hub chat requires a status line factory");
 		this.#closeTranscriptOverlay();
 		this.#notice = undefined;
 		const viewer = new AgentTranscriptViewer({
@@ -643,7 +662,6 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			initialEntryId: entryId,
 			registry: this.#registry,
 			remote: this.#remote,
-			observers: this.#observers,
 			lifecycle: this.#remote ? undefined : this.#lifecycle,
 			ui: this.#ui,
 			getTool: this.#getTool,
@@ -654,10 +672,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			proseOnlyThinking: this.#proseOnlyThinking,
 			expandThinkingBlocks: this.#expandThinkingBlocks,
 			expandKeys: this.#expandKeys,
+			createStatusLine: this.#createStatusLine,
+			getStatusLineTransparent: this.#getStatusLineTransparent,
+			getExtensionPresentation: this.#getExtensionPresentation,
 			hubKeys: this.#hubKeys,
 			requestRender: this.#requestRender,
 			onClose: () => this.#closeTranscriptOverlay(viewer),
-			onHubClose: () => {
+			onHubToggle: () => {
 				if (this.#disposed) return;
 				this.#closeTranscriptOverlay(viewer);
 				if (!this.#disposed) this.#onDone();
@@ -2494,23 +2515,35 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	/**
-	 * Enter on a row: focus the main view on the agent's live session and close
-	 * the hub. The transcript then renders through the regular session pipeline —
-	 * exact parity by construction. Collab guests (no local sessions) keep the
-	 * in-hub chat view.
+	 * Enter on a row: prefer an external workspace-pane adapter when present.
+	 * Otherwise focus a local live session in the main view; advisors and remote
+	 * agents retain the fullscreen transcript viewer fallback.
 	 */
 	#activateAgent(ref: TRecord): void {
 		this.#notice = undefined;
+		if (this.#openAgent) {
+			this.#activateAndClose(this.#openAgent, ref.id);
+			return;
+		}
 		const focusAgent = this.#focusAgent;
 		// Advisor refs are read-only transcripts with no revivable session; open
 		// the in-hub viewer instead of failing ensureLive.
 		if (ref.kind === "advisor" || this.#remote || !focusAgent) {
-			this.openChat(ref.id);
+			try {
+				this.openChat(ref.id);
+			} catch (error) {
+				this.#notice = error instanceof Error ? error.message : String(error);
+				this.#requestRender();
+			}
 			return;
 		}
+		this.#activateAndClose(focusAgent, ref.id);
+	}
+
+	#activateAndClose(action: (id: string) => Promise<void>, id: string): void {
 		void (async () => {
 			try {
-				await focusAgent(ref.id); // ensureLive inside revives parked and killed agents
+				await action(id);
 				this.#onDone();
 			} catch (error) {
 				this.#notice = error instanceof Error ? error.message : String(error);

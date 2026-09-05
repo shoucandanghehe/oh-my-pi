@@ -15,7 +15,7 @@
  *    state — frames produced mid-stall never reach the terminal.
  * 3. Terminals that do not report `pendingOutputBytes` are never gated.
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { type RenderTimer, Text, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -67,7 +67,19 @@ function stepRender(scheduler: DeferredRenderScheduler): number | null {
 	return timer.delayMs;
 }
 
-describe("TUI output-backpressure render gate", () => {
+describe.each(["native-scrollback", "app-viewport"])("TUI output-backpressure render gate (%s)", backend => {
+	let previousBackend: string | undefined;
+
+	beforeEach(() => {
+		previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = backend;
+	});
+
+	afterEach(() => {
+		if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+		else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+	});
+
 	it("skips stale frames while the terminal backlog is deep and paints the latest state on drain", () => {
 		const term = new BackloggedTerminal(40, 6);
 		const scheduler = new DeferredRenderScheduler();

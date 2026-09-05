@@ -40,6 +40,7 @@ const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
 const STREAM_YIELD_ENTRIES = 8_192;
 const BLOB_READ_CONCURRENCY = 8;
+const STREAM_READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
 /**
  * Complete optional accounting fields from persisted/imported assistant turns.
@@ -100,7 +101,7 @@ export interface VisitEntriesFromFileStreamOptions {
 	shouldContinue?: () => boolean;
 	/** Stop after this many valid or malformed JSONL records have been consumed. */
 	maxRecords?: number;
-	/** Read at most this many bytes from the file's current prefix. */
+	/** Read at most this many bytes from the file snapshot. */
 	maxBytes?: number;
 	/** Yield to the macrotask queue after this many bytes have been consumed. */
 	yieldEveryBytes?: number;
@@ -115,6 +116,8 @@ export interface VisitEntriesFromFileStreamOptions {
 	 * callers derive the exact snapshot size without re-stating the file.
 	 */
 	onBytesConsumed?: (bytes: number) => void;
+	/** Receive an unterminated trailing record instead of parsing it as complete. */
+	onTrailingPartial?: (bytes: Uint8Array) => void;
 }
 
 /** Controls how a missing session file is handled. */
@@ -337,15 +340,12 @@ export async function visitEntriesFromFileStream(
 	};
 
 	try {
-		// Capped by hand, not with `file.slice(0, maxBytes)`: on Bun 1.3.14 a slice's
-		// stream over a file that continues past the slice either stays pending after
-		// delivering its bytes (macOS) or ignores the bound and streams the whole
-		// file (Windows).
-		let unread = maxBytes;
-		for await (const streamed of Bun.file(filePath).stream()) {
-			if (stopped) break;
-			const chunk = streamed.byteLength > unread ? streamed.subarray(0, unread) : streamed;
-			unread -= chunk.byteLength;
+		const file = Bun.file(filePath);
+		const size = Math.min((await file.stat()).size, maxBytes);
+		for (let offset = 0; offset < size && !stopped; offset += STREAM_READ_CHUNK_BYTES) {
+			const end = Math.min(size, offset + STREAM_READ_CHUNK_BYTES);
+			const chunk = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+			if (chunk.byteLength === 0) break;
 			bytesSinceYield += chunk.byteLength;
 			options.onBytesConsumed?.(chunk.byteLength);
 			// Parsing before the chunk closes a line re-scans the unfinished record
@@ -360,7 +360,6 @@ export async function visitEntriesFromFileStream(
 				}
 				sink.append(chunk);
 				await yieldToMacrotask();
-				if (unread === 0) break;
 				continue;
 			}
 			sink.append(chunk);
@@ -388,13 +387,16 @@ export async function visitEntriesFromFileStream(
 			// sink keeps that remainder for the next chunk.
 			await drain();
 			await yieldToMacrotask();
-			if (unread === 0) break;
 		}
-		// A trailing record without a final newline: terminate it so the parser
-		// can complete it (readline yielded it; parseChunk needs the delimiter).
+		// A live transcript leaves an unterminated tail for the next poll.
+		// Ordinary loaders still accept a final record without a newline.
 		if (!stopped && !sink.isEmpty) {
-			sink.append(LF);
-			await drain(true);
+			if (options.onTrailingPartial) {
+				options.onTrailingPartial(sink.flush()!);
+			} else {
+				sink.append(LF);
+				await drain(true);
+			}
 		}
 	} catch (err) {
 		if (visitorThrew) throw err;

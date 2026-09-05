@@ -19,7 +19,9 @@ import { $flag } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
+import { RowMeasurement } from "@oh-my-pi/pi-natives";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import { appendBrailleScrollbar, BRAILLE_SCROLLBAR_BLANK, layoutBrailleScrollbar } from "./components/scroll-view";
 import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
@@ -27,7 +29,7 @@ import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
-import { parseSgrMouse } from "./mouse";
+import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
@@ -43,7 +45,7 @@ import {
 	ImageProtocol,
 	isImageProtocolForced,
 	isInsideTerminalMultiplexer,
-	parseKittyDirectPlacementLine,
+	parseKittyDirectPlacementSegment,
 	setCellDimensions,
 	setTerminalImageProtocol,
 	shouldEnableSynchronizedOutputByDefault,
@@ -53,15 +55,17 @@ import {
 import { onTerminalBackgroundFallbackChange } from "./theme/theme";
 import { compositeLineAt } from "./render/composite";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
+import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "./text-selection";
 import {
+	CURSOR_MARKER,
 	Ellipsis,
 	getWidthConfigEpoch,
-	isOsc66Line,
 	getWordNavKind,
 	isWordNavJoiner,
 	normalizeTerminalOutput,
 	osc66MaxScale,
 	sliceByColumn,
+	TERMINAL_STATE_TERMINATOR,
 	truncateToWidth,
 	visibleWidth,
 } from "./utils";
@@ -75,7 +79,7 @@ export const SEGMENT_RESET = "\x1b[0m";
  * across lines in scrollback. Kept out of the diff/width cache because reset
  * bytes are deterministic write framing, not content.
  */
-const LINE_TERMINATOR = "\x1b[0m\x1b]8;;\x07";
+const LINE_TERMINATOR = TERMINAL_STATE_TERMINATOR;
 const ERASE_LINE = "\x1b[2K";
 const ERASE_TO_END_OF_LINE = "\x1b[K";
 // Keep the common short-row path out of native width/truncation. Longer rows
@@ -117,13 +121,14 @@ const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
 const CELL_SIZE_REPLY = /^\x1b\[6;(\d+);(\d+)t$/;
 const ITERM2_CELL_SIZE_REPLY =
 	/^\x1b\]1337;ReportCellSize=(\d+(?:\.\d+)?);(\d+(?:\.\d+)?)(?:;(\d+(?:\.\d+)?))?(?:\x07|\x1b\\)$/;
-const APP_VIEWPORT_MOUSE_TRACKING_ON = "\x1b[?1002h\x1b[?1006h";
+const APP_VIEWPORT_MOUSE_TRACKING_ON = "\x1b[?1003l\x1b[?1002h\x1b[?1006h";
+const APP_VIEWPORT_HOVER_TRACKING_ON = "\x1b[?1002l\x1b[?1003h\x1b[?1006h";
+const APP_VIEWPORT_ENABLE_HOVER = "\x1b[?1002l\x1b[?1003h";
+const APP_VIEWPORT_DISABLE_HOVER = "\x1b[?1003l\x1b[?1002h";
 const APP_VIEWPORT_PIXEL_MOUSE_ON = "\x1b[?1016h";
 const APP_VIEWPORT_PIXEL_MOUSE_OFF = "\x1b[?1016l";
-const APP_VIEWPORT_MOUSE_TRACKING_OFF = `${APP_VIEWPORT_PIXEL_MOUSE_OFF}\x1b[?1006l\x1b[?1002l\x1b[?1000l`;
-// Four vertical slots; each fills both Braille dot columns for a denser thumb.
-const APP_VIEWPORT_SCROLLBAR_DOTS = [0x09, 0x12, 0x24, 0xc0] as const;
-const APP_VIEWPORT_SCROLLBAR_BLANK = " ";
+const APP_VIEWPORT_MOUSE_TRACKING_OFF = `${APP_VIEWPORT_PIXEL_MOUSE_OFF}\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l`;
+const APP_VIEWPORT_SCROLLBAR_BLANK = BRAILLE_SCROLLBAR_BLANK;
 const APP_VIEWPORT_SELECTION_ON = "\x1b[48;2;80;80;80m";
 const APP_VIEWPORT_SELECTION_OFF = "\x1b[49m";
 const APP_VIEWPORT_DOUBLE_CLICK_MS = 500;
@@ -180,10 +185,27 @@ interface AppViewportSelectionPoint {
 	col: number;
 }
 
+interface AppViewportSelectionBounds {
+	startRow: number;
+	endRow: number;
+	startCol: number;
+	endCol: number;
+}
+
+interface AppViewportSelectionScrollTracking {
+	row: number;
+	col: number;
+	offset: number;
+	anchor?: VirtualRowAnchor;
+}
+
 interface AppViewportTextSelection {
 	anchor: AppViewportSelectionPoint;
 	focus: AppViewportSelectionPoint;
 	active: boolean;
+	bounds: AppViewportSelectionBounds | undefined;
+	anchorScroll?: AppViewportSelectionScrollTracking;
+	focusScroll?: AppViewportSelectionScrollTracking;
 }
 
 export interface RenderTimer {
@@ -252,6 +274,21 @@ export interface TerminalFrameProvider {
 	beginHistoryReplay?(): void;
 	/** Force every currently eligible finalized prefix to retire before stop. */
 	beginHistoryFlush?(): void;
+}
+
+/** Visible app-owned viewport plus semantic geometry for selection and scroll UI. */
+export interface AppViewportFramePlan {
+	readonly viewport: readonly string[];
+	readonly estimatedTotalRows: number;
+	readonly offset: number;
+	readonly stickyRows: number;
+	readonly cursor: { readonly row: number; readonly col: number } | null;
+	readonly rowMap: readonly number[];
+}
+
+/** Product adapter for app-owned viewport composition; never retires rows into native history. */
+export interface AppViewportFrameProvider {
+	renderAppViewportFrame(viewport: ViewportSize, targets: readonly Component[]): AppViewportFramePlan;
 }
 
 export interface TUIStartOptions {
@@ -364,6 +401,40 @@ export interface Component {
 	capturesInput?(data: string): boolean;
 
 	/**
+	 * Return the exact physical row count at `width` without producing painted
+	 * rows when the component has a cheaper layout-only path.
+	 */
+	measureRows?(width: number): number;
+	/**
+	 * Snapshot exact row counts for all widths so a versioned owner can batch
+	 * stable history in native code. Return undefined for width-dependent
+	 * component behavior that cannot be represented by text wrapping and padding.
+	 */
+	getRowMeasurement?(width: number): RowMeasurement | undefined;
+
+	/**
+	 * Optional ownership seam for composed components whose descendants are not
+	 * exposed through a public `children` array. Used to route component-scoped
+	 * renders through viewport/workspace wrappers.
+	 */
+	containsComponent?(component: Component): boolean;
+
+	/** Recover selected logical text from physical rows produced by the latest render. */
+	getTextSelection?(selection: TextSelectionRange): string | undefined;
+
+	/** Non-copyable visual cells at the left edge of every selectable row. */
+	getTextSelectionInset?(row: number): number;
+
+	/** Non-copyable visual cells at the right edge of every selectable row. */
+	getTextSelectionRightInset?(row: number): number;
+
+	/** Current virtual row offset for a selectable row, or undefined for fixed rows. */
+	getTextSelectionScrollOffset?(row: number): number | undefined;
+	/** Stable logical row for selection tracking while virtual geometry changes. */
+	getTextSelectionAnchor?(row: number): VirtualRowAnchor | undefined;
+	resolveTextSelectionAnchor?(anchor: VirtualRowAnchor): number | undefined;
+
+	/**
 	 * Optional handler for keyboard input when component has focus
 	 */
 	handleInput?(data: string): void;
@@ -403,6 +474,11 @@ export interface Component {
 	dispose?(): void;
 }
 
+/** Exact row count, using a component's layout-only path when available. */
+export function measureComponentRows(component: Component, width: number): number {
+	return component.measureRows?.(width) ?? component.render(width).length;
+}
+
 /** Lets an overlay root delegate keyboard focus to components it owns. */
 export interface OverlayFocusOwner {
 	/** Returns true when `component` is a focus target inside this overlay. */
@@ -419,6 +495,37 @@ export interface AppViewportScrollRegion {
 	getAppViewportScrollRegionEnd(): number | undefined;
 }
 
+/** Terminal-cell rectangle that bounds an app-viewport text selection. */
+export interface AppViewportTextSelectionRect {
+	row: number;
+	col: number;
+	width: number;
+	height: number;
+}
+
+/** Optional capability for app-viewport components with hover-only interactions. */
+export interface AppViewportHoverProvider {
+	wantsAppViewportHover(): boolean;
+	/** Clear transient hover state after the pointer leaves this component. */
+	clearAppViewportHover?(): void;
+}
+
+/** Optional owner for app-viewport input delegated by the shared TUI runtime. */
+export interface AppViewportInputOwner {
+	handleAppViewportInput?(data: string): boolean;
+	handleAppViewportMouse?(event: SgrMouseEvent): boolean;
+	/** True while hover-only interactions require terminal any-motion reports. */
+	wantsAppViewportHover?(): boolean;
+	/** Bounds text selection that begins at the given normalized terminal cell. */
+	getAppViewportTextSelectionRect?(row: number, col: number): AppViewportTextSelectionRect | undefined;
+	getAppViewportTextSelectionScrollOffset?(row: number, col: number): number | undefined;
+	getAppViewportTextSelection?(selection: TextSelectionRange): string | undefined;
+	/** Source-frame row anchors distinguish layout corrections from user scrolling. */
+	getAppViewportTextSelectionAnchor?(row: number, col: number): VirtualRowAnchor | undefined;
+	resolveAppViewportTextSelectionAnchor?(anchor: VirtualRowAnchor): number | undefined;
+	/** Freeze or release a scrolling text-selection surface. */
+	setAppViewportTextSelectionActive?(active: boolean, row?: number, col?: number): void;
+}
 function isOverlayFocusTarget(owner: Component, component: Component | null): boolean {
 	if (component === owner) return true;
 	if (!component) return false;
@@ -426,6 +533,73 @@ function isOverlayFocusTarget(owner: Component, component: Component | null): bo
 	return candidate.ownsOverlayFocusTarget?.(component) === true;
 }
 
+export interface VirtualViewportRequest {
+	readonly rows: number;
+	readonly offset: number;
+	readonly followBottom: boolean;
+}
+
+export interface VirtualViewportFrame {
+	readonly lines: readonly string[];
+	readonly estimatedTotalRows: number;
+	readonly offset: number;
+}
+
+/** Component identity plus a body-relative row, optionally nested through containers. */
+export interface VirtualRowAnchor {
+	readonly component: Component;
+	readonly row: number;
+	readonly width: number;
+	readonly child?: VirtualRowAnchor;
+}
+
+/** Estimated-height viewport for tall components. */
+export interface VirtualViewportProvider {
+	hasVirtualViewport(): boolean;
+	getEstimatedVirtualRows(width: number): number;
+	renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportFrame;
+	renderVirtualViewportTargeted?(
+		width: number,
+		request: VirtualViewportRequest,
+		targets: readonly Component[],
+	): VirtualViewportFrame;
+	getVirtualTextSelectionInset?(width: number, row: number): number;
+	getVirtualTextSelectionRightInset?(width: number, row: number): number;
+	getVirtualTextSelection?(width: number, selection: TextSelectionRange): string | undefined;
+	getVirtualRowAnchor?(width: number, row: number): VirtualRowAnchor | undefined;
+	resolveVirtualRowAnchor?(width: number, anchor: VirtualRowAnchor): number | undefined;
+}
+
+function asVirtualViewportProvider(component: Component): VirtualViewportProvider | undefined {
+	const candidate = component as Component & Partial<VirtualViewportProvider>;
+	return typeof candidate.hasVirtualViewport === "function" &&
+		candidate.hasVirtualViewport() &&
+		typeof candidate.renderVirtualViewport === "function" &&
+		typeof candidate.getEstimatedVirtualRows === "function"
+		? (candidate as VirtualViewportProvider)
+		: undefined;
+}
+
+export interface ViewportTailProvider {
+	renderViewportTail(width: number, maxRows: number): readonly string[];
+}
+
+function asViewportTailProvider(component: Component): ViewportTailProvider | undefined {
+	const candidate = component as Component & Partial<ViewportTailProvider>;
+	return typeof candidate.renderViewportTail === "function" ? (candidate as ViewportTailProvider) : undefined;
+}
+
+/** Optional component-scoped compose seam for wrappers with stable row ledgers. */
+export interface TargetedRender {
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[];
+}
+
+export function renderTargeted(component: Component, width: number, targets: readonly Component[]): readonly string[] {
+	const candidate = component as Component & Partial<TargetedRender>;
+	return typeof candidate.renderTargeted === "function"
+		? candidate.renderTargeted(width, targets)
+		: component.render(width);
+}
 
 /**
  * Interface for components that can receive focus and display a cursor.
@@ -453,9 +627,16 @@ export interface RenderRequestOptions {
 	 * The requester guarantees the component tree is unchanged — only
 	 * app-viewport scroll/selection state moved, which is consumed at emit
 	 * time. The app-viewport backend may then reuse the last composed frame
-	 * instead of re-walking every component. Ignored by other backends.
+	 * instead of re-walking every component; a forced request stays immediate
+	 * without turning the cached frame into a full-window repair. Ignored by
+	 * other backends.
 	 */
 	viewportOnly?: boolean;
+	/**
+	 * A forced app-viewport request should schedule immediately but retain its
+	 * normal dirty-row diff. Native-scrollback backends ignore this option.
+	 */
+	forceViewportRepaint?: boolean;
 }
 /**
  * Controls how a settled terminal resize refreshes native history.
@@ -470,15 +651,7 @@ export function isFocusable(component: Component | null): component is Component
 	return component !== null && "focused" in component;
 }
 
-/**
- * Cursor position marker - APC (Application Program Command) sequence.
- * This is a zero-width escape sequence that terminals ignore.
- * Components emit this at the cursor position when focused.
- * TUI finds and strips this marker, then positions the hardware cursor there.
- */
-export const CURSOR_MARKER = "\x1b_pi:c\x07";
-
-export { visibleWidth };
+export { CURSOR_MARKER, visibleWidth };
 
 /**
  * Anchor position for overlays
@@ -590,22 +763,36 @@ export interface OverlayHandle {
 /**
  * Container - a component that contains other components
  */
-export class Container implements Component {
+export class Container implements Component, TargetedRender, ViewportTailProvider, VirtualViewportProvider {
 	children: Component[] = [];
 
 	// Memoized concatenation of the children's latest renders. Children are
 	// still rendered every frame (renders carry side effects: image placement
-	// registration); the memo only skips rebuilding the concatenated array when
-	// every child returned the exact same array reference at the same width —
-	// which, per the Component render contract, proves the rows are
-	// byte-identical. Cleared on any child-list change and on invalidate().
-	#memoLines: string[] | undefined;
+	// registration, seam/stability reports); the memo only skips rebuilding
+	// the concatenated array when every child returned the exact same array
+	// reference at the same width — which, per the Component render contract,
+	// proves the rows are byte-identical. Cleared on any child-list change and
+	// on invalidate().
+	#memoLines: readonly string[] | undefined;
 	#memoChildLines: (readonly string[])[] = [];
 	#memoWidth = -1;
 	// Memoized native description: rebuilt only when the child list changes, so
 	// the reconciler can skip an unchanged container by reference.
 	#nativeNode: NativeNode | undefined;
 	#nativeChildren: readonly Component[] = [];
+	// Child identities and target owners back component-scoped recomposition.
+	#memoChildren: Component[] = [];
+	#targetOwnerCache = new WeakMap<Component, Component>();
+	#virtualFrameWidth = -1;
+	#virtualFrameLayouts:
+		| Array<{
+				component: Component;
+				provider: VirtualViewportProvider | undefined;
+				lines: readonly string[] | undefined;
+				startRow: number;
+				rows: number;
+		  }>
+		| undefined;
 
 	#ignoreTight = false;
 
@@ -624,6 +811,8 @@ export class Container implements Component {
 			component.setIgnoreTight?.(true);
 		}
 		this.#memoLines = undefined;
+		this.#virtualFrameLayouts = undefined;
+		this.#targetOwnerCache = new WeakMap();
 	}
 
 	removeChild(component: Component): void {
@@ -631,6 +820,8 @@ export class Container implements Component {
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.#memoLines = undefined;
+			this.#virtualFrameLayouts = undefined;
+			this.#targetOwnerCache = new WeakMap();
 		}
 	}
 
@@ -638,6 +829,8 @@ export class Container implements Component {
 		this.children = [];
 		this.#memoLines = undefined;
 		this.#memoChildLines = [];
+		this.#virtualFrameLayouts = undefined;
+		this.#targetOwnerCache = new WeakMap();
 	}
 
 	/** Dispose every child, then detach it from this container. */
@@ -651,6 +844,7 @@ export class Container implements Component {
 		// only the concatenation would keep all of them reachable.
 		this.#memoLines = undefined;
 		this.#memoChildLines = [];
+		this.#virtualFrameLayouts = undefined;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
@@ -659,6 +853,7 @@ export class Container implements Component {
 	releaseRenderCaches(): void {
 		this.#memoLines = undefined;
 		this.#memoChildLines = [];
+		this.#virtualFrameLayouts = undefined;
 		for (const child of this.children) {
 			child.releaseRenderCaches?.();
 		}
@@ -670,9 +865,378 @@ export class Container implements Component {
 	 * {@link clear} for that). Idempotent per child via each child's own dispose.
 	 */
 	dispose(): void {
+		this.#virtualFrameLayouts = undefined;
 		for (const child of this.children) {
 			child.dispose?.();
 		}
+	}
+
+	containsComponent(target: Component): boolean {
+		if (target === this) return true;
+		const cached = this.#targetOwnerCache.get(target);
+		if (cached !== undefined && this.children.includes(cached) && componentContains(cached, target)) return true;
+		for (const child of this.children) {
+			if (!componentContains(child, target)) continue;
+			this.#targetOwnerCache.set(target, child);
+			return true;
+		}
+		this.#targetOwnerCache.delete(target);
+		return false;
+	}
+
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		width = Math.max(1, width);
+		if (this.render !== Container.prototype.render) return this.render(width);
+		const children = this.children;
+		const refs = this.#memoChildLines;
+		if (
+			targets.length === 0 ||
+			targets.includes(this) ||
+			this.#memoLines === undefined ||
+			this.#memoWidth !== width ||
+			refs.length !== children.length ||
+			this.#memoChildren.length !== children.length
+		) {
+			return this.render(width);
+		}
+		for (let index = 0; index < children.length; index++) {
+			if (this.#memoChildren[index] !== children[index]) return this.render(width);
+		}
+
+		const grouped = new Map<Component, Component[]>();
+		for (const target of targets) {
+			let owner = this.#targetOwnerCache.get(target);
+			if (owner === undefined || !children.includes(owner) || !componentContains(owner, target)) {
+				owner = undefined;
+				for (const child of children) {
+					if (!componentContains(child, target)) continue;
+					owner = child;
+					this.#targetOwnerCache.set(target, child);
+					break;
+				}
+			}
+			if (!owner) return this.render(width);
+			const childTargets = grouped.get(owner);
+			if (childTargets) childTargets.push(target);
+			else grouped.set(owner, [target]);
+		}
+
+		for (let index = 0; index < children.length; index++) {
+			const child = children[index]!;
+			const childTargets = grouped.get(child);
+			if (childTargets) refs[index] = renderTargeted(child, width, childTargets);
+		}
+		this.#memoChildren = children.slice();
+		this.#memoWidth = width;
+		const lines: readonly string[] = refs.length === 1 ? refs[0]! : refs.flat();
+		this.#memoLines = lines;
+		return lines;
+	}
+
+	renderViewportTail(width: number, maxRows: number): readonly string[] {
+		width = Math.max(1, width);
+		let remaining = Math.max(0, Math.trunc(maxRows));
+		if (remaining === 0) return [];
+		const chunks: (readonly string[])[] = [];
+		for (let index = this.children.length - 1; index >= 0 && remaining > 0; index--) {
+			const child = this.children[index]!;
+			const provider = asViewportTailProvider(child);
+			const rendered = provider
+				? provider.renderViewportTail(width, remaining)
+				: child.render(width).slice(-remaining);
+			const visible = rendered.length > remaining ? rendered.slice(-remaining) : rendered;
+			chunks.push(visible);
+			remaining -= visible.length;
+		}
+		const lines: string[] = [];
+		for (let index = chunks.length - 1; index >= 0; index--) lines.push(...chunks[index]!);
+		return lines;
+	}
+
+	hasVirtualViewport(): boolean {
+		return this.children.some(child => asVirtualViewportProvider(child) !== undefined);
+	}
+
+	getEstimatedVirtualRows(width: number): number {
+		width = Math.max(1, width);
+		let rows = 0;
+		for (const child of this.children) {
+			const provider = asVirtualViewportProvider(child);
+			rows += provider ? provider.getEstimatedVirtualRows(width) : child.render(width).length;
+		}
+		return rows;
+	}
+
+	renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportFrame {
+		return this.#renderVirtualViewport(width, request);
+	}
+
+	renderVirtualViewportTargeted(
+		width: number,
+		request: VirtualViewportRequest,
+		targets: readonly Component[],
+	): VirtualViewportFrame {
+		const grouped = new Map<Component, Component[]>();
+		for (const target of targets) {
+			if (target === this) return this.#renderVirtualViewport(width, request);
+			const owner = this.children.find(child => componentContains(child, target));
+			if (!owner) return this.#renderVirtualViewport(width, request);
+			const childTargets = grouped.get(owner);
+			if (childTargets) childTargets.push(target);
+			else grouped.set(owner, [target]);
+		}
+		return this.#renderVirtualViewport(width, request, grouped);
+	}
+
+	getVirtualTextSelectionInset(width: number, row: number): number {
+		return this.#getVirtualTextSelectionInset(width, row, false);
+	}
+
+	getVirtualTextSelectionRightInset(width: number, row: number): number {
+		return this.#getVirtualTextSelectionInset(width, row, true);
+	}
+
+	getVirtualRowAnchor(width: number, row: number): VirtualRowAnchor | undefined {
+		for (const layout of this.#virtualSelectionLayouts(width)) {
+			if (row < layout.startRow || row >= layout.startRow + layout.rows) continue;
+			const localRow = row - layout.startRow;
+			return {
+				component: layout.component,
+				row: localRow,
+				width,
+				child: layout.provider?.getVirtualRowAnchor?.(width, localRow),
+			};
+		}
+		return undefined;
+	}
+
+	resolveVirtualRowAnchor(width: number, anchor: VirtualRowAnchor): number | undefined {
+		const layout = this.#virtualSelectionLayouts(width).find(value => value.component === anchor.component);
+		if (!layout) return undefined;
+		const row = anchor.child ? layout.provider?.resolveVirtualRowAnchor?.(width, anchor.child) : anchor.row;
+		return row === undefined ? undefined : layout.startRow + row;
+	}
+
+	getVirtualTextSelection(width: number, selection: TextSelectionRange): string | undefined {
+		const layouts = this.#virtualSelectionLayouts(width);
+		const normalized = normalizeTextSelection(selection);
+		const totalRows = layouts.reduce((total, layout) => total + layout.rows, 0);
+		if (normalized.start.row < 0 || normalized.end.row >= totalRows) return undefined;
+		let text = "";
+		let selected = false;
+		for (const layout of layouts) {
+			const endRow = layout.startRow + layout.rows - 1;
+			if (endRow < normalized.start.row || layout.startRow > normalized.end.row) continue;
+			const overlapStart = Math.max(normalized.start.row, layout.startRow);
+			const overlapEnd = Math.min(normalized.end.row, endRow);
+			const localSelection = {
+				start: {
+					row: overlapStart - layout.startRow,
+					col: overlapStart === normalized.start.row ? normalized.start.col : 0,
+				},
+				end: {
+					row: overlapEnd - layout.startRow,
+					col: overlapEnd === normalized.end.row ? normalized.end.col : Number.MAX_SAFE_INTEGER,
+				},
+			};
+			const part = layout.provider
+				? layout.provider.getVirtualTextSelection?.(width, localSelection)
+				: extractComponentTextSelection(layout.component, layout.lines ?? [], localSelection);
+			if (part === undefined) return undefined;
+			if (selected) text += "\n";
+			text += part;
+			selected = true;
+		}
+		return selected ? text : undefined;
+	}
+
+	#getVirtualTextSelectionInset(width: number, row: number, right: boolean): number {
+		const targetRow = Math.trunc(row);
+		if (targetRow < 0) return 0;
+		for (const layout of this.#virtualSelectionLayouts(width)) {
+			if (targetRow < layout.startRow || targetRow >= layout.startRow + layout.rows) continue;
+			const localRow = targetRow - layout.startRow;
+			if (layout.provider) {
+				return right
+					? (layout.provider.getVirtualTextSelectionRightInset?.(width, localRow) ?? 0)
+					: (layout.provider.getVirtualTextSelectionInset?.(width, localRow) ?? 0);
+			}
+			return right
+				? (layout.component.getTextSelectionRightInset?.(localRow) ?? 0)
+				: (layout.component.getTextSelectionInset?.(localRow) ?? 0);
+		}
+		return 0;
+	}
+
+	#virtualSelectionLayouts(width: number): Array<{
+		component: Component;
+		provider: VirtualViewportProvider | undefined;
+		lines: readonly string[] | undefined;
+		startRow: number;
+		rows: number;
+	}> {
+		width = Math.max(1, width);
+		if (
+			this.#virtualFrameWidth === width &&
+			this.#virtualFrameLayouts?.length === this.children.length &&
+			this.#virtualFrameLayouts.every((layout, index) => layout.component === this.children[index])
+		)
+			return this.#virtualFrameLayouts;
+		let startRow = 0;
+		return this.children.map(component => {
+			const provider = asVirtualViewportProvider(component);
+			const lines = provider ? undefined : component.render(width);
+			const rows = provider ? provider.getEstimatedVirtualRows(width) : (lines?.length ?? 0);
+			const layout = { component, provider, lines, startRow, rows };
+			startRow += rows;
+			return layout;
+		});
+	}
+
+	#renderVirtualViewport(
+		width: number,
+		request: VirtualViewportRequest,
+		targeted?: ReadonlyMap<Component, readonly Component[]>,
+	): VirtualViewportFrame {
+		width = Math.max(1, width);
+		const viewportRows = Math.max(0, Math.trunc(request.rows));
+		const anchor =
+			!request.followBottom && this.#virtualFrameLayouts
+				? this.getVirtualRowAnchor(this.#virtualFrameWidth, request.offset)
+				: undefined;
+		const layouts: Array<{
+			component: Component;
+			provider: VirtualViewportProvider | undefined;
+			lines: readonly string[] | undefined;
+			frame: VirtualViewportFrame | undefined;
+			startRow: number;
+			rows: number;
+		}> = this.children.map(component => {
+			const provider = asVirtualViewportProvider(component);
+			const lines = provider ? undefined : component.render(width);
+			return {
+				component,
+				provider,
+				lines,
+				frame: undefined,
+				startRow: 0,
+				rows: provider ? provider.getEstimatedVirtualRows(width) : (lines?.length ?? 0),
+			};
+		});
+		const renderProvider = (
+			provider: VirtualViewportProvider,
+			component: Component,
+			providerRequest: VirtualViewportRequest,
+		): VirtualViewportFrame =>
+			targeted && provider.renderVirtualViewportTargeted
+				? provider.renderVirtualViewportTargeted(width, providerRequest, targeted.get(component) ?? [])
+				: provider.renderVirtualViewport(width, providerRequest);
+		const rebuild = (): number => {
+			let total = 0;
+			for (const layout of layouts) {
+				layout.startRow = total;
+				total += layout.rows;
+			}
+			return total;
+		};
+		let totalRows = rebuild();
+		let offset = request.followBottom
+			? Math.max(0, totalRows - viewportRows)
+			: Math.max(0, Math.min(Math.trunc(request.offset), Math.max(0, totalRows - viewportRows)));
+		if (anchor) {
+			const layout = layouts.find(value => value.component === anchor.component);
+			if (layout) {
+				const row = anchor.child ? layout.provider?.resolveVirtualRowAnchor?.(width, anchor.child) : anchor.row;
+				if (row !== undefined)
+					offset = Math.max(0, Math.min(layout.startRow + row, Math.max(0, totalRows - viewportRows)));
+			}
+		}
+
+		for (let pass = 0; pass < 3 && viewportRows > 0; pass++) {
+			let geometryChanged = false;
+			let anchorAdjusted = false;
+			const viewportEnd = offset + viewportRows;
+			for (const layout of layouts) {
+				const provider = layout.provider;
+				if (!provider) continue;
+				const layoutEnd = layout.startRow + layout.rows;
+				if (layoutEnd <= offset || layout.startRow >= viewportEnd) continue;
+				const startsInside = offset >= layout.startRow && offset < layoutEnd;
+				const localOffset = Math.max(0, offset - layout.startRow);
+				const providerRows = Math.max(0, Math.min(viewportEnd, layoutEnd) - Math.max(offset, layout.startRow));
+				const frame = renderProvider(provider, layout.component, {
+					rows: providerRows,
+					offset: localOffset,
+					followBottom: request.followBottom && viewportEnd >= layoutEnd,
+				});
+				layout.frame = frame;
+				if (layout.rows !== frame.estimatedTotalRows) {
+					layout.rows = frame.estimatedTotalRows;
+					geometryChanged = true;
+				}
+				if (!request.followBottom && startsInside) {
+					const adjusted = layout.startRow + frame.offset;
+					if (adjusted !== offset) {
+						offset = adjusted;
+						anchorAdjusted = true;
+					}
+				}
+			}
+			if (!geometryChanged && !anchorAdjusted) break;
+			totalRows = rebuild();
+			offset = request.followBottom
+				? Math.max(0, totalRows - viewportRows)
+				: Math.max(0, Math.min(offset, Math.max(0, totalRows - viewportRows)));
+		}
+
+		totalRows = rebuild();
+		offset = request.followBottom
+			? Math.max(0, totalRows - viewportRows)
+			: Math.max(0, Math.min(offset, Math.max(0, totalRows - viewportRows)));
+		const end = Math.min(totalRows, offset + viewportRows);
+		const lines: string[] = [];
+		for (const layout of layouts) {
+			const layoutEnd = layout.startRow + layout.rows;
+			if (layoutEnd <= offset || layout.startRow >= end) continue;
+			const from = Math.max(offset, layout.startRow) - layout.startRow;
+			const to = Math.min(end, layoutEnd) - layout.startRow;
+			if (!layout.provider) {
+				lines.push(...(layout.lines?.slice(from, to) ?? []));
+				continue;
+			}
+			let frame = layout.frame;
+			if (!frame || frame.offset > from || frame.offset + frame.lines.length < to) {
+				frame = renderProvider(layout.provider, layout.component, {
+					rows: to - from,
+					offset: from,
+					followBottom: request.followBottom && end >= layoutEnd,
+				});
+				layout.frame = frame;
+			}
+			const frameFrom = Math.max(0, from - frame.offset);
+			const frameTo = Math.max(frameFrom, to - frame.offset);
+			lines.push(...frame.lines.slice(frameFrom, frameTo));
+		}
+		this.#virtualFrameWidth = width;
+		this.#virtualFrameLayouts = layouts;
+		return { lines, estimatedTotalRows: totalRows, offset };
+	}
+	measureRows(width: number): number {
+		width = Math.max(1, width);
+		let rows = 0;
+		for (const child of this.children) rows += measureComponentRows(child, width);
+		return rows;
+	}
+
+	getRowMeasurement(width: number): RowMeasurement | undefined {
+		if (this.measureRows !== Container.prototype.measureRows) return undefined;
+		const children: RowMeasurement[] = [];
+		for (const child of this.children) {
+			const measurement = child.getRowMeasurement?.(Math.max(1, width));
+			if (!measurement) return undefined;
+			children.push(measurement);
+		}
+		return new RowMeasurement([], children, 0, 0);
 	}
 
 	render(width: number): readonly string[] {
@@ -680,13 +1244,18 @@ export class Container implements Component {
 		const children = this.children;
 		const count = children.length;
 		let refs = this.#memoChildLines;
-		let unchanged = this.#memoLines !== undefined && this.#memoWidth === width && refs.length === count;
+		let unchanged =
+			this.#memoLines !== undefined &&
+			this.#memoWidth === width &&
+			refs.length === count &&
+			this.#memoChildren.length === count;
 		if (refs.length !== count) {
 			// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 			refs = new Array(count);
 			this.#memoChildLines = refs;
 		}
 		for (let i = 0; i < count; i++) {
+			if (this.#memoChildren[i] !== children[i]) unchanged = false;
 			const childLines = children[i]!.render(width);
 			if (refs[i] !== childLines) {
 				unchanged = false;
@@ -694,12 +1263,9 @@ export class Container implements Component {
 			}
 		}
 		this.#memoWidth = width;
+		this.#memoChildren = children.slice();
 		if (unchanged) return this.#memoLines!;
-		const lines: string[] = [];
-		for (let i = 0; i < count; i++) {
-			const childLines = refs[i]!;
-			for (let j = 0; j < childLines.length; j++) lines.push(childLines[j]!);
-		}
+		const lines: readonly string[] = refs.length === 1 ? refs[0]!.slice() : refs.flat();
 		this.#memoLines = lines;
 		return lines;
 	}
@@ -714,6 +1280,75 @@ export class Container implements Component {
 		this.#nativeNode = col(this.#nativeChildren);
 		return this.#nativeNode;
 	}
+
+	getTextSelectionInset(row: number): number {
+		if (!this.#memoLines) return 0;
+		const targetRow = Math.trunc(row);
+		if (targetRow < 0 || targetRow >= this.#memoLines.length) return 0;
+		let rowOffset = 0;
+		for (let index = 0; index < this.children.length; index++) {
+			const childLines = this.#memoChildLines[index];
+			if (!childLines || childLines.length === 0) continue;
+			const childEnd = rowOffset + childLines.length;
+			if (targetRow < childEnd) {
+				return this.children[index]!.getTextSelectionInset?.(targetRow - rowOffset) ?? 0;
+			}
+			rowOffset = childEnd;
+		}
+		return 0;
+	}
+
+	getTextSelectionRightInset(row: number): number {
+		if (!this.#memoLines) return 0;
+		const targetRow = Math.trunc(row);
+		if (targetRow < 0 || targetRow >= this.#memoLines.length) return 0;
+		let rowOffset = 0;
+		for (let index = 0; index < this.children.length; index++) {
+			const childLines = this.#memoChildLines[index];
+			if (!childLines || childLines.length === 0) continue;
+			const childEnd = rowOffset + childLines.length;
+			if (targetRow < childEnd) {
+				return this.children[index]!.getTextSelectionRightInset?.(targetRow - rowOffset) ?? 0;
+			}
+			rowOffset = childEnd;
+		}
+		return 0;
+	}
+
+	getTextSelection(selection: TextSelectionRange): string | undefined {
+		if (!this.#memoLines) return undefined;
+		const normalized = normalizeTextSelection(selection);
+		if (normalized.start.row < 0 || normalized.end.row >= this.#memoLines.length) return undefined;
+		let rowOffset = 0;
+		let text = "";
+		let selected = false;
+		for (let index = 0; index < this.children.length; index++) {
+			const childLines = this.#memoChildLines[index];
+			if (!childLines || childLines.length === 0) continue;
+			const childEnd = rowOffset + childLines.length - 1;
+			const overlapStart = Math.max(normalized.start.row, rowOffset);
+			const overlapEnd = Math.min(normalized.end.row, childEnd);
+			if (overlapStart <= overlapEnd) {
+				const part = extractComponentTextSelection(this.children[index]!, childLines, {
+					start: {
+						row: overlapStart - rowOffset,
+						col: overlapStart === normalized.start.row ? normalized.start.col : 0,
+					},
+					end: {
+						row: overlapEnd - rowOffset,
+						col: overlapEnd === normalized.end.row ? normalized.end.col : Number.MAX_SAFE_INTEGER,
+					},
+				});
+				if (part === undefined) return undefined;
+				if (selected) text += "\n";
+				text += part;
+				selected = true;
+			}
+			rowOffset = childEnd + 1;
+			if (rowOffset > normalized.end.row) break;
+		}
+		return selected ? text : undefined;
+	}
 }
 
 interface HardwareCursorState {
@@ -724,11 +1359,33 @@ interface HardwareCursorState {
 
 /** A cursor-positioned image owned by a mutable viewport, never by history. */
 interface LiveImagePlacement {
-	imageId: number;
-	placementId: number;
+	images: { imageId: number; placementId: number }[];
 	line: string;
 }
 
+interface HardwareCursorUpdate {
+	toRow: number;
+	state: HardwareCursorState | null;
+	visible?: boolean;
+}
+
+interface CursorControlResult extends HardwareCursorUpdate {
+	seq: string;
+	toCol: number;
+	visible: boolean;
+}
+
+/** Depth-first identity search through public children or an ownership seam. */
+export function componentContains(root: Component, target: Component): boolean {
+	if (root === target) return true;
+	if (root.containsComponent?.(target) === true) return true;
+	const children = (root as Partial<Container>).children;
+	if (!Array.isArray(children)) return false;
+	for (const child of children) {
+		if (componentContains(child, target)) return true;
+	}
+	return false;
+}
 interface PreparedLine {
 	raw: string;
 	width: number;
@@ -890,6 +1547,7 @@ export function coalesceAdjacentSgr(line: string): string {
 export class TUI extends Container {
 	terminal: Terminal;
 	#frameProvider: TerminalFrameProvider | undefined;
+	#appViewportFrameProvider: AppViewportFrameProvider | undefined;
 	#acceptedHistoryBatchId = 0;
 	// Screen row where the provider's mutable viewport begins (0-based); rows
 	// above it hold history still visible on the physical screen.
@@ -991,6 +1649,7 @@ export class TUI extends Container {
 		  }
 		| undefined;
 	#debugNextWindowTop = 0;
+	#scopedInputRenderComponents = new WeakSet<Component>();
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
 	/** True from the end of start() until stop(): the terminal modes start listeners enable are live. */
@@ -1109,11 +1768,19 @@ export class TUI extends Container {
 	 */
 	#heldFocus: Component | null = null;
 	#appViewportBackend = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
+	#appViewportComponentTargets = new Set<Component>();
+	/** A pending full compose dominates later component-scoped requests until that frame starts. */
+	#appViewportFullComposePending = true;
+	#appViewportRootLines = new Map<Component, readonly string[]>();
+	#appViewportRootWidth = -1;
 	#appViewportActive = false;
 	#appViewportPixelMouseSupported = false;
 	#appViewportCellSizeKnown = false;
 	#appViewportPixelMouseActive = false;
+	#appViewportHoverMouseActive = false;
 	#appViewportPreviousLines: string[] = [];
+	#appViewportPreparedRows: PreparedLine[] = [];
+	#appViewportPreviousSixelRows: boolean[] = [];
 	#appViewportPreviousScrollbarGlyphs: string[] = [];
 	#appViewportPreviousWidth = 0;
 	#appViewportScrollRegionEnd: number | undefined;
@@ -1124,6 +1791,7 @@ export class TUI extends Container {
 	#appViewportScrollbarMetrics: AppViewportScrollbarMetrics | null = null;
 	#appViewportVisibleSourceRows: number[] = [];
 	#appViewportFrameLines: string[] = [];
+	#appViewportFramePreparedRows: PreparedLine[] = [];
 	/**
 	 * Set by any render request that may have changed component content (i.e.
 	 * every request not marked `viewportOnly`); cleared after a successful full
@@ -1258,6 +1926,72 @@ export class TUI extends Container {
 		this.requestRender(true);
 	}
 
+	setAppViewportFrameProvider(provider: AppViewportFrameProvider | undefined): void {
+		this.#appViewportFrameProvider = provider;
+		this.#appViewportComponentTargets.clear();
+		this.#appViewportComposeStale = true;
+		this.requestRender(true);
+	}
+
+	override render(width: number): readonly string[] {
+		return this.#renderRootChildren(width);
+	}
+
+	override renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		return this.#renderRootChildren(width, targets);
+	}
+
+	#renderRootChildren(width: number, targets?: readonly Component[]): readonly string[] {
+		width = Math.max(1, width);
+		let grouped: Map<Component, Component[]> | undefined;
+		if (targets && targets.length > 0) {
+			grouped = new Map();
+			for (const target of targets) {
+				const owner = this.children.find(child => componentContains(child, target));
+				if (!owner) {
+					grouped = undefined;
+					break;
+				}
+				const childTargets = grouped.get(owner);
+				if (childTargets) childTargets.push(target);
+				else grouped.set(owner, [target]);
+			}
+		}
+		const targeted =
+			grouped !== undefined &&
+			targets !== undefined &&
+			targets.length > 0 &&
+			this.#appViewportRootWidth === width &&
+			this.#appViewportRootLines.size === this.children.length &&
+			this.children.every(child => this.#appViewportRootLines.has(child));
+		if (!targeted) this.#appViewportRootLines.clear();
+		this.#appViewportScrollRegionEnd = undefined;
+		const lines: string[] = [];
+		for (const child of this.children) {
+			const childTargets = targeted ? grouped?.get(child) : undefined;
+			const rendered = childTargets
+				? renderTargeted(child, width, childTargets)
+				: targeted
+					? this.#appViewportRootLines.get(child)!
+					: child.render(width);
+			this.#appViewportRootLines.set(child, rendered);
+			const region = child as Component & Partial<AppViewportScrollRegion>;
+			const start = region.getAppViewportScrollRegionStart?.();
+			if (start !== undefined) {
+				const boundedStart = Number.isFinite(start) ? Math.max(0, Math.min(rendered.length, Math.trunc(start))) : 0;
+				const end = region.getAppViewportScrollRegionEnd?.();
+				const boundedEnd =
+					end !== undefined && Number.isFinite(end)
+						? Math.max(boundedStart, Math.min(rendered.length, Math.trunc(end)))
+						: rendered.length;
+				this.#appViewportScrollRegionEnd = lines.length + boundedEnd;
+			}
+			lines.push(...rendered);
+		}
+		this.#appViewportRootWidth = width;
+		return lines;
+	}
+
 	#syncTerminalCursorMode(component: Component | null): void {
 		if (isFocusable(component)) {
 			component.setUseTerminalCursor?.(this.#showHardwareCursor);
@@ -1355,6 +2089,7 @@ export class TUI extends Container {
 		for (const entry of this.overlayStack) {
 			if (entry.released && isOverlayFocusTarget(entry.component, component)) entry.released = false;
 		}
+		if (component === this.#focusedComponent) return;
 
 		const previousFocusedComponent = this.#focusedComponent;
 		// Clear focused flag on old component
@@ -1396,6 +2131,15 @@ export class TUI extends Container {
 	/** Feed debug and test input through the same pipeline as terminal stdin. */
 	injectDebugInput(data: string): void {
 		this.#handleInput(data);
+	}
+
+	/**
+	 * Mark a focused component whose input handler mutates only its own subtree.
+	 * Other components retain full-frame rendering because input callbacks may
+	 * change siblings or focus.
+	 */
+	enableScopedInputRender(component: Component): void {
+		this.#scopedInputRenderComponents.add(component);
 	}
 
 	/**
@@ -2127,6 +2871,12 @@ export class TUI extends Container {
 	 * to keep the good stash.
 	 */
 	#beginResizeAltPaint(restartingProbe = false): void {
+		if (this.#appViewportBackend) {
+			this.#appViewportComposeStale = true;
+			this.#forceViewportRepaintOnNextRender = true;
+			this.requestRender(true);
+			return;
+		}
 		if (this.#altActive) {
 			this.requestRender(true);
 			return;
@@ -2742,22 +3492,32 @@ export class TUI extends Container {
 		this.#appViewportPixelMouseActive = enabled;
 	}
 
-	#enterAppViewport(): void {
+	#syncAppViewportHoverMouse(enabled: boolean): void {
+		if (!this.#appViewportActive || this.#appViewportHoverMouseActive === enabled) return;
+		this.terminal.write(enabled ? APP_VIEWPORT_ENABLE_HOVER : APP_VIEWPORT_DISABLE_HOVER);
+		this.#appViewportHoverMouseActive = enabled;
+	}
+
+	#enterAppViewport(hoverMouse: boolean): void {
 		if (this.#appViewportActive) return;
 		const pixelMouse = this.#appViewportPixelMouseSupported && this.#appViewportCellSizeKnown;
 		this.terminal.write(
-			`\x1b[?1049h${APP_VIEWPORT_MOUSE_TRACKING_ON}${pixelMouse ? APP_VIEWPORT_PIXEL_MOUSE_ON : ""}`,
+			`\x1b[?1049h${hoverMouse ? APP_VIEWPORT_HOVER_TRACKING_ON : APP_VIEWPORT_MOUSE_TRACKING_ON}${pixelMouse ? APP_VIEWPORT_PIXEL_MOUSE_ON : ""}`,
 		);
 		this.terminal.hideCursor();
 		this.#appViewportActive = true;
 		this.#appViewportPixelMouseActive = pixelMouse;
+		this.#appViewportHoverMouseActive = hoverMouse;
 		this.#appViewportPreviousLines = [];
+		this.#appViewportPreparedRows = [];
+		this.#appViewportPreviousSixelRows = [];
 		this.#appViewportPreviousScrollbarGlyphs = [];
 		this.#appViewportPreviousWidth = 0;
 		this.#appViewportScrollbarMetrics = null;
 		this.#appViewportScrollbarDrag = null;
 		this.#appViewportVisibleSourceRows = [];
 		this.#appViewportFrameLines = [];
+		this.#appViewportFramePreparedRows = [];
 		this.#appViewportComposeStale = true;
 		this.#appViewportFrameCursorPos = null;
 		this.#appViewportPreviousScrollRegionEnd = undefined;
@@ -2797,16 +3557,20 @@ export class TUI extends Container {
 			this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}\x1b[?1049l`);
 			this.#appViewportActive = false;
 			this.#appViewportPixelMouseActive = false;
+			this.#appViewportHoverMouseActive = false;
 			this.#appViewportVisibleSourceRows = [];
 			this.#appViewportFrameLines = [];
+			this.#appViewportFramePreparedRows = [];
 			this.#appViewportComposeStale = true;
 			this.#appViewportFrameCursorPos = null;
 			this.#appViewportPreviousScrollRegionEnd = undefined;
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			this.#appViewportSelectionDrag = false;
 			this.#stopAppViewportSelectionAutoScroll();
 			this.#appViewportLastClick = null;
 			this.#appViewportPreviousLines = [];
+			this.#appViewportPreparedRows = [];
+			this.#appViewportPreviousSixelRows = [];
 			this.#appViewportPreviousScrollbarGlyphs = [];
 			this.#appViewportPreviousWidth = 0;
 			this.#appViewportScrollbarMetrics = null;
@@ -2904,17 +3668,40 @@ export class TUI extends Container {
 		if (this.#stopped) return;
 		this.invalidate();
 		this.#appViewportComposeStale = true;
+		this.#appViewportFullComposePending = true;
 		this.#prepareForcedRender(true);
 		this.#renderRequested = false;
 		this.#executeRender();
 	}
 
+	/**
+	 * Reconcile a component row-topology change that may invalidate immutable
+	 * native scrollback. App-viewport frames keep every row mutable, so their
+	 * normal differential render is sufficient and must not inherit the
+	 * native backend's destructive full-history reset.
+	 */
+	reconcileRenderTopology(): void {
+		if (this.#stopped) return;
+		if (this.#appViewportBackend) {
+			this.requestRender(true, { forceViewportRepaint: false });
+			return;
+		}
+		this.resetDisplay();
+	}
+
 	requestRender(force = false, options?: RenderRequestOptions): void {
 		// Content changes invalidate the cached app-viewport frame; scrolling and
 		// selection only change viewport-owned state applied during emission.
-		if (!options?.viewportOnly) this.#appViewportComposeStale = true;
+		if (!options?.viewportOnly) {
+			this.#appViewportComposeStale = true;
+			this.#appViewportComponentTargets.clear();
+			this.#appViewportFullComposePending = true;
+		}
 		if (force) {
-			this.#prepareForcedRender(options?.clearScrollback === true);
+			this.#prepareForcedRender(
+				options?.clearScrollback === true,
+				!this.#appViewportBackend || (options?.viewportOnly !== true && options?.forceViewportRepaint !== false),
+			);
 			this.#renderRequested = true;
 			this.#renderScheduler.scheduleImmediate(() => {
 				if (this.#stopped || !this.#renderRequested) {
@@ -2942,6 +3729,9 @@ export class TUI extends Container {
 	 */
 	renderNow(options?: RenderRequestOptions): void {
 		if (this.#stopped) return;
+		this.#appViewportComponentTargets.clear();
+		this.#appViewportFullComposePending = true;
+		this.#appViewportComposeStale = true;
 		this.#prepareForcedRender(options?.clearScrollback === true);
 		this.#renderRequested = false;
 		const start = this.#renderScheduler.now();
@@ -2956,9 +3746,10 @@ export class TUI extends Container {
 	 * scratch — retired blocks no longer render — so a scoped request is simply
 	 * an ordinary render.
 	 */
-	requestComponentRender(_component: Component): void {
+	requestComponentRender(component: Component): void {
 		if (this.#stopped) return;
 		this.#appViewportComposeStale = true;
+		if (!this.#appViewportFullComposePending) this.#appViewportComponentTargets.add(component);
 		this.#requestOrdinaryRender();
 	}
 
@@ -2968,7 +3759,6 @@ export class TUI extends Container {
 		this.#renderRequested = true;
 		this.#renderScheduler.scheduleImmediate(() => this.#scheduleRender());
 	}
-
 
 	#maybeDeferGhosttyInitialImagePaint(): boolean {
 		if (this.#ghosttyInitialImageDelayDone) return false;
@@ -2994,12 +3784,12 @@ export class TUI extends Container {
 		}, delayMs);
 		return true;
 	}
-	#prepareForcedRender(clearScrollback: boolean): void {
+	#prepareForcedRender(clearScrollback: boolean, forceViewportRepaint = true): void {
 		if (clearScrollback && !this.#clearScrollbackOnNextRender) {
 			this.#frameProvider?.beginHistoryReplay?.();
 		}
 		this.#clearScrollbackOnNextRender ||= clearScrollback;
-		this.#forceViewportRepaintOnNextRender = true;
+		this.#forceViewportRepaintOnNextRender ||= forceViewportRepaint;
 		if (this.#renderTimer) {
 			this.#renderTimer.cancel();
 			this.#renderTimer = undefined;
@@ -3031,7 +3821,8 @@ export class TUI extends Container {
 		}
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
-		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		// App frames are demand-driven; measured cost and output backlog provide backpressure.
+		const cadenceDelay = this.#appViewportBackend ? 0 : Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
 		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
 		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
@@ -3076,10 +3867,31 @@ export class TUI extends Container {
 		return true;
 	}
 
+	#findAppViewportInputOwner(): AppViewportInputOwner | undefined {
+		for (const child of this.children) {
+			const candidate = child as Component & Partial<AppViewportInputOwner>;
+			if (
+				candidate.handleAppViewportInput ||
+				candidate.handleAppViewportMouse ||
+				candidate.wantsAppViewportHover ||
+				candidate.getAppViewportTextSelectionRect ||
+				candidate.getAppViewportTextSelectionScrollOffset
+			) {
+				return candidate;
+			}
+		}
+		return undefined;
+	}
+
 	#handleAppViewportInput(data: string): boolean {
 		if (!this.#appViewportBackend || this.hasOverlay()) return false;
+		const inputOwner = this.#findAppViewportInputOwner();
 		if (data.startsWith("\x1b[<")) {
-			return this.#handleAppViewportMouse(data);
+			return this.#handleAppViewportMouse(data, inputOwner);
+		}
+		if (inputOwner?.handleAppViewportInput?.(data)) {
+			this.#syncAppViewportSelectionScroll(inputOwner);
+			return true;
 		}
 		if (matchesKey(data, "ctrl+c") && this.#copyAppViewportSelection()) return true;
 		const page = Math.max(1, this.terminal.rows - 2);
@@ -3104,9 +3916,24 @@ export class TUI extends Container {
 		return false;
 	}
 
-	#handleAppViewportMouse(data: string): boolean {
+	#handleAppViewportMouse(data: string, inputOwner: AppViewportInputOwner | undefined): boolean {
 		const event = parseSgrMouse(data);
 		if (!event) return true;
+		const pointer = this.#appViewportMouseGridPosition(event.row, event.col);
+		const normalizedEvent = { ...event, row: pointer.row, col: pointer.col };
+		if (inputOwner?.handleAppViewportMouse?.(normalizedEvent)) {
+			if (event.leftClick || event.release) {
+				this.#appViewportScrollbarDrag = null;
+				this.#appViewportSelectionDrag = false;
+				this.#stopAppViewportSelectionAutoScroll();
+				this.#clearAppViewportSelection();
+			} else if (event.wheel !== null && this.#appViewportSelectionDrag) {
+				this.#refreshAppViewportSelectionAfterOwnedScroll(inputOwner, pointer.row, pointer.col);
+			} else {
+				this.#syncAppViewportSelectionScroll(inputOwner);
+			}
+			return true;
+		}
 		if (event.wheel !== null) {
 			this.#appViewportScrollbarDrag = null;
 			if (this.#appViewportSelectionDrag) {
@@ -3116,7 +3943,6 @@ export class TUI extends Container {
 				// remap against the post-scroll source rows before paint.
 				this.#stopAppViewportSelectionAutoScroll();
 				const delta = event.wheel * 3;
-				const pointer = this.#appViewportMouseGridPosition(event.row, event.col);
 				this.#scrollAppViewportWhileSelecting(delta, pointer.row, pointer.col);
 				return true;
 			}
@@ -3128,15 +3954,15 @@ export class TUI extends Container {
 			this.#appViewportScrollbarDrag = null;
 			this.#appViewportSelectionDrag = false;
 			this.#stopAppViewportSelectionAutoScroll();
+			this.#syncAppViewportTextSelectionOwner(inputOwner);
 			return true;
 		}
-		const pointer = this.#appViewportMouseGridPosition(event.row, event.col);
 		if (event.leftClick) {
 			if (this.#startAppViewportScrollbarDrag(pointer.row, pointer.col)) {
 				this.#appViewportSelectionDrag = false;
 				return true;
 			}
-			this.#startAppViewportTextSelection(pointer.row, pointer.col);
+			this.#startAppViewportTextSelection(pointer.row, pointer.col, inputOwner);
 			return true;
 		}
 		if (event.rightClick) {
@@ -3155,7 +3981,7 @@ export class TUI extends Container {
 			if (this.#appViewportScrollbarDrag) {
 				this.#dragAppViewportScrollbar(pointer.row);
 			} else if (this.#appViewportSelectionDrag) {
-				this.#dragAppViewportTextSelection(pointer.row, pointer.col);
+				this.#dragAppViewportTextSelection(pointer.row, pointer.col, inputOwner);
 			}
 		}
 		return true;
@@ -3189,6 +4015,35 @@ export class TUI extends Container {
 			row: sourceRow,
 			col: Math.max(0, Math.min(col, lineWidth)),
 		};
+	}
+
+	#appViewportSelectionBoundsForPoint(
+		inputOwner: AppViewportInputOwner | undefined,
+		row: number,
+		col: number,
+	): AppViewportSelectionBounds | undefined {
+		const rect = inputOwner?.getAppViewportTextSelectionRect?.(row, col);
+		if (!rect || rect.width <= 0 || rect.height <= 0) return undefined;
+		const firstScreenRow = Math.max(0, Math.floor(rect.row));
+		const lastScreenRow = Math.min(
+			this.#appViewportVisibleSourceRows.length - 1,
+			Math.ceil(rect.row + rect.height) - 1,
+		);
+		const contentWidth = Math.max(1, this.terminal.columns - 1);
+		const startCol = Math.max(0, Math.floor(rect.col));
+		const endCol = Math.min(contentWidth - 1, Math.ceil(rect.col + rect.width) - 1);
+		if (lastScreenRow < firstScreenRow || endCol < startCol) return undefined;
+
+		let startRow: number | undefined;
+		let endRow: number | undefined;
+		for (let screenRow = firstScreenRow; screenRow <= lastScreenRow; screenRow++) {
+			const sourceRow = this.#appViewportVisibleSourceRows[screenRow];
+			if (sourceRow === undefined || sourceRow < 0) continue;
+			startRow = startRow === undefined ? sourceRow : Math.min(startRow, sourceRow);
+			endRow = endRow === undefined ? sourceRow : Math.max(endRow, sourceRow);
+		}
+		if (startRow === undefined || endRow === undefined) return undefined;
+		return { startRow, endRow, startCol, endCol };
 	}
 
 	/** Remap a screen cell after a selection-preserving scroll without waiting for paint. */
@@ -3232,15 +4087,17 @@ export class TUI extends Container {
 		else this.requestRender(true, { viewportOnly: true });
 	}
 
-	#startAppViewportTextSelection(row: number, col: number): void {
+	#startAppViewportTextSelection(row: number, col: number, inputOwner: AppViewportInputOwner | undefined): void {
 		this.#appViewportSelectionDrag = false;
-		const point = this.#appViewportContentPoint(row, col);
+		let point = this.#appViewportContentPoint(row, col);
 		const previousSelectionActive = this.#appViewportSelection?.active === true;
 		if (!point) {
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			if (previousSelectionActive) this.requestRender(true, { viewportOnly: true });
 			return;
 		}
+		const bounds = this.#appViewportSelectionBoundsForPoint(inputOwner, row, col);
+		point = this.#constrainAppViewportSelectionPoint(point, bounds);
 		const now = this.#renderScheduler.now();
 		const lastClick = this.#appViewportLastClick;
 		const continuingClick =
@@ -3250,20 +4107,23 @@ export class TUI extends Container {
 			Math.abs(lastClick.point.col - point.col) <= 1;
 		const clickCount = continuingClick ? Math.min(lastClick.count + 1, 3) : 1;
 		this.#appViewportLastClick = { atMs: now, point, count: clickCount };
-		if (clickCount >= 3 && this.#selectAppViewportLine(point)) {
+		if (clickCount >= 3 && this.#selectAppViewportLine(point, bounds)) {
+			this.#captureAppViewportSelectionScroll(inputOwner, row, col, "both");
 			this.requestRender(true, { viewportOnly: true });
 			return;
 		}
-		if (clickCount === 2 && this.#selectAppViewportWord(point)) {
+		if (clickCount === 2 && this.#selectAppViewportWord(point, bounds)) {
+			this.#captureAppViewportSelectionScroll(inputOwner, row, col, "both");
 			this.requestRender(true, { viewportOnly: true });
 			return;
 		}
-		this.#appViewportSelection = { anchor: point, focus: point, active: false };
+		this.#appViewportSelection = { anchor: point, focus: point, active: false, bounds };
 		this.#appViewportSelectionDrag = true;
+		this.#captureAppViewportSelectionScroll(inputOwner, row, col, "both");
 		if (previousSelectionActive) this.requestRender(true, { viewportOnly: true });
 	}
 
-	#dragAppViewportTextSelection(row: number, col: number): void {
+	#dragAppViewportTextSelection(row: number, col: number, inputOwner: AppViewportInputOwner | undefined): void {
 		const direction = this.#appViewportSelectionAutoScrollDirection(row);
 		if (direction !== 0) {
 			this.#startAppViewportSelectionAutoScroll(direction, col);
@@ -3274,16 +4134,140 @@ export class TUI extends Container {
 		const point = this.#appViewportContentPoint(row, col);
 		if (!point) return;
 		this.#updateAppViewportSelectionFocus(point);
+		this.#captureAppViewportSelectionScroll(inputOwner, row, col, "focus");
+	}
+
+	#captureAppViewportSelectionScroll(
+		inputOwner: AppViewportInputOwner | undefined,
+		row: number,
+		col: number,
+		target: "both" | "focus",
+	): void {
+		const selection = this.#appViewportSelection;
+		if (!selection) return;
+		const offset = inputOwner?.getAppViewportTextSelectionScrollOffset?.(row, col);
+		const tracking: AppViewportSelectionScrollTracking | undefined =
+			offset === undefined
+				? undefined
+				: {
+						row,
+						col,
+						offset,
+						anchor: inputOwner?.resolveAppViewportTextSelectionAnchor
+							? inputOwner.getAppViewportTextSelectionAnchor?.(selection.focus.row, selection.focus.col)
+							: undefined,
+					};
+		if (target === "both") {
+			selection.anchorScroll = tracking
+				? {
+						...tracking,
+						anchor: inputOwner?.resolveAppViewportTextSelectionAnchor
+							? inputOwner.getAppViewportTextSelectionAnchor?.(selection.anchor.row, selection.anchor.col)
+							: undefined,
+					}
+				: undefined;
+			selection.focusScroll = tracking;
+		} else if (tracking?.anchor || !selection.anchorScroll) {
+			selection.focusScroll = tracking;
+		}
+		this.#syncAppViewportTextSelectionOwner(inputOwner);
+	}
+
+	#syncAppViewportSelectionScrollPoint(
+		point: AppViewportSelectionPoint,
+		tracking: AppViewportSelectionScrollTracking | undefined,
+		inputOwner: AppViewportInputOwner | undefined,
+	): AppViewportSelectionPoint | undefined {
+		if (!tracking) return point;
+		if (tracking.anchor) {
+			const row = inputOwner?.resolveAppViewportTextSelectionAnchor?.(tracking.anchor);
+			return row === undefined ? undefined : { row, col: point.col };
+		}
+		const offset = inputOwner?.getAppViewportTextSelectionScrollOffset?.(tracking.row, tracking.col);
+		if (offset === undefined || offset === tracking.offset) return point;
+		const row = point.row - (offset - tracking.offset);
+		tracking.offset = offset;
+		return { row, col: point.col };
+	}
+
+	#syncAppViewportSelectionScroll(inputOwner: AppViewportInputOwner | undefined): void {
+		const selection = this.#appViewportSelection;
+		if (!selection) return;
+		if (!this.#appViewportSelectionDrag && !selection.focusScroll && selection.anchorScroll?.anchor) {
+			const { row, col } = selection.focus;
+			const offset = inputOwner?.getAppViewportTextSelectionScrollOffset?.(row, col);
+			if (offset !== undefined) {
+				selection.focusScroll = {
+					row,
+					col,
+					offset,
+					anchor: inputOwner?.getAppViewportTextSelectionAnchor?.(row, col),
+				};
+			}
+		}
+		const anchor = this.#syncAppViewportSelectionScrollPoint(selection.anchor, selection.anchorScroll, inputOwner);
+		const focus = this.#syncAppViewportSelectionScrollPoint(selection.focus, selection.focusScroll, inputOwner);
+		if (!anchor || !focus) {
+			this.#clearAppViewportSelection();
+			return;
+		}
+		if (anchor.row === selection.anchor.row && focus.row === selection.focus.row) return;
+		selection.anchor = anchor;
+		selection.focus = focus;
+		this.#appViewportLastClick = null;
+	}
+
+	#refreshAppViewportSelectionAfterOwnedScroll(inputOwner: AppViewportInputOwner, row: number, col: number): void {
+		const selection = this.#appViewportSelection;
+		const offset = inputOwner.getAppViewportTextSelectionScrollOffset?.(row, col);
+		const mappedFocus = this.#appViewportContentPoint(row, col);
+		if (!selection?.anchorScroll || offset === undefined || !mappedFocus) {
+			this.#syncAppViewportSelectionScroll(inputOwner);
+			return;
+		}
+
+		const focus = this.#constrainAppViewportSelectionPoint(
+			{ row: mappedFocus.row, col: Math.floor(col) },
+			selection.bounds,
+		);
+		if (focus.row !== mappedFocus.row || focus.col !== Math.floor(col)) {
+			this.#syncAppViewportSelectionScroll(inputOwner);
+			return;
+		}
+
+		// During a held drag, the anchor follows its original content while the
+		// focus follows the pointer cell. The input owner has already scrolled.
+		const anchor = this.#syncAppViewportSelectionScrollPoint(selection.anchor, selection.anchorScroll, inputOwner);
+		if (!anchor) {
+			this.#clearAppViewportSelection();
+			return;
+		}
+		selection.anchor = anchor;
+		selection.focus = focus;
+		selection.focusScroll = selection.anchorScroll.anchor ? undefined : { row, col, offset };
+		selection.active = selection.active || selection.anchor.row !== focus.row || selection.anchor.col !== focus.col;
+		this.#appViewportLastClick = null;
+	}
+
+	#constrainAppViewportSelectionPoint(
+		point: AppViewportSelectionPoint,
+		bounds: AppViewportSelectionBounds | undefined,
+	): AppViewportSelectionPoint {
+		if (!bounds) return point;
+		const row = Math.max(bounds.startRow, Math.min(point.row, bounds.endRow));
+		const col = Math.max(bounds.startCol, Math.min(point.col, bounds.endCol));
+		return row === point.row && col === point.col ? point : { row, col };
 	}
 
 	#updateAppViewportSelectionFocus(point: AppViewportSelectionPoint): void {
 		if (!this.#appViewportSelection) {
-			this.#appViewportSelection = { anchor: point, focus: point, active: false };
+			this.#appViewportSelection = { anchor: point, focus: point, active: false, bounds: undefined };
 		}
 		const selection = this.#appViewportSelection;
-		if (selection.focus.row === point.row && selection.focus.col === point.col && selection.active) return;
-		selection.focus = point;
-		selection.active = selection.active || selection.anchor.row !== point.row || selection.anchor.col !== point.col;
+		const focus = this.#constrainAppViewportSelectionPoint(point, selection.bounds);
+		if (selection.focus.row === focus.row && selection.focus.col === focus.col && selection.active) return;
+		selection.focus = focus;
+		selection.active = selection.active || selection.anchor.row !== focus.row || selection.anchor.col !== focus.col;
 		this.requestRender(true, { viewportOnly: true });
 	}
 
@@ -3356,43 +4340,49 @@ export class TUI extends Container {
 		};
 	}
 
-	#selectAppViewportWord(point: AppViewportSelectionPoint): boolean {
+	#selectAppViewportWord(point: AppViewportSelectionPoint, bounds: AppViewportSelectionBounds | undefined): boolean {
 		const line = this.#appViewportFrameLines[point.row] ?? "";
 		const lineWidth = visibleWidth(line);
-		if (lineWidth <= 0) {
-			this.#appViewportSelection = null;
+		const rangeStart = Math.min(bounds?.startCol ?? 0, lineWidth);
+		const rangeEnd = Math.min((bounds?.endCol ?? lineWidth - 1) + 1, lineWidth);
+		if (rangeEnd <= rangeStart) {
+			this.#clearAppViewportSelection();
 			return false;
 		}
-		const targetCol = Math.max(0, Math.min(point.col, lineWidth - 1));
+		const targetCol = Math.max(rangeStart, Math.min(point.col, rangeEnd - 1));
 		const targetKind = this.#appViewportSelectionCellKind(line, targetCol);
 		if (targetKind === "whitespace") {
-			this.#appViewportSelection = null;
+			this.#clearAppViewportSelection();
 			return false;
 		}
 		let start = targetCol;
-		while (start > 0 && this.#appViewportSelectionCellKind(line, start - 1) === targetKind) start--;
+		while (start > rangeStart && this.#appViewportSelectionCellKind(line, start - 1) === targetKind) start--;
 		let end = targetCol + 1;
-		while (end < lineWidth && this.#appViewportSelectionCellKind(line, end) === targetKind) end++;
+		while (end < rangeEnd && this.#appViewportSelectionCellKind(line, end) === targetKind) end++;
 		this.#appViewportSelection = {
 			anchor: { row: point.row, col: start },
 			focus: { row: point.row, col: end - 1 },
 			active: true,
+			bounds,
 		};
 		this.#appViewportSelectionDrag = false;
 		return true;
 	}
 
-	#selectAppViewportLine(point: AppViewportSelectionPoint): boolean {
+	#selectAppViewportLine(point: AppViewportSelectionPoint, bounds: AppViewportSelectionBounds | undefined): boolean {
 		const line = this.#appViewportFrameLines[point.row] ?? "";
 		const lineWidth = visibleWidth(line);
-		if (lineWidth <= 0) {
-			this.#appViewportSelection = null;
+		const startCol = Math.min(bounds?.startCol ?? 0, lineWidth);
+		const endCol = Math.min(bounds?.endCol ?? lineWidth - 1, lineWidth - 1);
+		if (endCol < startCol) {
+			this.#clearAppViewportSelection();
 			return false;
 		}
 		this.#appViewportSelection = {
-			anchor: { row: point.row, col: 0 },
-			focus: { row: point.row, col: lineWidth - 1 },
+			anchor: { row: point.row, col: startCol },
+			focus: { row: point.row, col: endCol },
 			active: true,
+			bounds,
 		};
 		this.#appViewportSelectionDrag = false;
 		return true;
@@ -3458,6 +4448,10 @@ export class TUI extends Container {
 		if (selection) {
 			selection.anchor = remap(selection.anchor);
 			selection.focus = remap(selection.focus);
+			if (selection.bounds) {
+				if (selection.bounds.startRow >= previousScrollEnd) selection.bounds.startRow += delta;
+				if (selection.bounds.endRow >= previousScrollEnd) selection.bounds.endRow += delta;
+			}
 		}
 		const lastClick = this.#appViewportLastClick;
 		if (lastClick && lastClick.point.row >= previousScrollEnd) {
@@ -3469,16 +4463,54 @@ export class TUI extends Container {
 		const selection = this.#appViewportSelection;
 		if (!selection) return;
 		const maxRow = this.#appViewportFrameLines.length - 1;
-		if (maxRow < 0 || selection.anchor.row < 0 || selection.focus.row < 0) {
+		if (maxRow < 0) {
 			this.#clearAppViewportSelection();
 			return;
 		}
-		if (selection.anchor.row > maxRow || selection.focus.row > maxRow) {
+		const anchorTracked = selection.anchorScroll !== undefined;
+		const focusTracked = selection.focusScroll !== undefined;
+		if (
+			(!anchorTracked && (selection.anchor.row < 0 || selection.anchor.row > maxRow)) ||
+			(!focusTracked && (selection.focus.row < 0 || selection.focus.row > maxRow))
+		) {
 			this.#clearAppViewportSelection();
 			return;
 		}
-		selection.anchor = this.#clampAppViewportSelectionPoint(selection.anchor);
-		selection.focus = this.#clampAppViewportSelectionPoint(selection.focus);
+		if (selection.bounds) {
+			selection.bounds.startRow = Math.max(0, Math.min(selection.bounds.startRow, maxRow));
+			selection.bounds.endRow = Math.max(0, Math.min(selection.bounds.endRow, maxRow));
+			if (selection.bounds.endRow < selection.bounds.startRow) {
+				this.#clearAppViewportSelection();
+				return;
+			}
+		}
+		selection.anchor = selection.anchorScroll?.anchor
+			? selection.anchor
+			: anchorTracked
+				? this.#clampTrackedAppViewportSelectionPoint(selection.anchor, selection.bounds, maxRow)
+				: this.#constrainAppViewportSelectionPoint(
+						this.#clampAppViewportSelectionPoint(selection.anchor),
+						selection.bounds,
+					);
+		selection.focus = selection.focusScroll?.anchor
+			? selection.focus
+			: focusTracked
+				? this.#clampTrackedAppViewportSelectionPoint(selection.focus, selection.bounds, maxRow)
+				: this.#constrainAppViewportSelectionPoint(
+						this.#clampAppViewportSelectionPoint(selection.focus),
+						selection.bounds,
+					);
+	}
+
+	#clampTrackedAppViewportSelectionPoint(
+		point: AppViewportSelectionPoint,
+		bounds: AppViewportSelectionBounds | undefined,
+		maxRow: number,
+	): AppViewportSelectionPoint {
+		const framePoint = point.row >= 0 && point.row <= maxRow ? this.#clampAppViewportSelectionPoint(point) : point;
+		if (!bounds) return framePoint;
+		const col = Math.max(bounds.startCol, Math.min(framePoint.col, bounds.endCol));
+		return col === framePoint.col ? framePoint : { row: framePoint.row, col };
 	}
 
 	#clampAppViewportSelectionPoint(point: AppViewportSelectionPoint): AppViewportSelectionPoint {
@@ -3489,16 +4521,33 @@ export class TUI extends Container {
 		};
 	}
 
+	#syncAppViewportTextSelectionOwner(inputOwner: AppViewportInputOwner | undefined): void {
+		const selection = this.#appViewportSelection;
+		const tracking =
+			selection && (selection.active || this.#appViewportSelectionDrag)
+				? (selection.anchorScroll ?? selection.focusScroll)
+				: undefined;
+		inputOwner?.setAppViewportTextSelectionActive?.(tracking !== undefined, tracking?.row, tracking?.col);
+	}
+
 	#clearAppViewportSelection(): void {
 		this.#appViewportSelection = null;
 		this.#appViewportSelectionDrag = false;
 		this.#appViewportLastClick = null;
 		this.#stopAppViewportSelectionAutoScroll();
+		this.#syncAppViewportTextSelectionOwner(this.#findAppViewportInputOwner());
 	}
 
 	#appViewportSelectionText(): string {
+		const inputOwner = this.#findAppViewportInputOwner();
+		this.#syncAppViewportSelectionScroll(inputOwner);
 		const selection = this.#normalizedAppViewportSelection();
 		if (!selection) return "";
+		const sourceText = inputOwner?.getAppViewportTextSelection?.({
+			start: selection.start,
+			end: selection.end,
+		});
+		if (sourceText !== undefined) return sourceText;
 		const chunks: string[] = [];
 		for (let sourceRow = selection.start.row; sourceRow <= selection.end.row; sourceRow++) {
 			const line = this.#appViewportFrameLines[sourceRow] ?? "";
@@ -3507,13 +4556,17 @@ export class TUI extends Container {
 				sourceRow,
 				selection.start,
 				selection.end,
+				selection.bounds,
 			);
 			// Rendered rows are often right-padded to the content width. When the
 			// selection reaches the end of a line (or covers intermediate lines
 			// entirely), strip that trailing padding so multi-line copies use
 			// newlines instead of a run of spaces. Spaces interior to a partial
 			// line selection are preserved.
-			const reachesLineEnd = endCol >= visibleWidth(line);
+			const selectionLineEnd = selection.bounds
+				? Math.min(visibleWidth(line), selection.bounds.endCol + 1)
+				: visibleWidth(line);
+			const reachesLineEnd = endCol >= selectionLineEnd;
 			const text = Bun.stripANSI(sliceByColumn(line, startCol, endCol - startCol, true));
 			chunks.push(reachesLineEnd ? text.replace(/[ \t]+$/u, "") : text);
 		}
@@ -3689,7 +4742,11 @@ export class TUI extends Container {
 				return;
 			}
 			target.handleInput(data);
-			this.requestRender();
+			if (target === this.#inputTarget() && this.#scopedInputRenderComponents.has(target)) {
+				this.requestComponentRender(target);
+			} else {
+				this.requestRender();
+			}
 		}
 	}
 
@@ -3940,7 +4997,9 @@ export class TUI extends Container {
 		let output = "";
 		for (const [row, placement] of placements) {
 			if (!repaint && lines[row - top] === placement.line) continue;
-			output += encodeKittyDeletePlacement(placement.imageId, placement.placementId);
+			for (const image of placement.images) {
+				output += encodeKittyDeletePlacement(image.imageId, image.placementId);
+			}
 			placements.delete(row);
 		}
 		return output;
@@ -3960,8 +5019,7 @@ export class TUI extends Container {
 		placementRow: number,
 	): string {
 		if (screenRow < 0) return line;
-		const parsed = parseKittyDirectPlacementLine(line);
-		if (!parsed) {
+		if (!parseKittyDirectPlacementSegment(line)) {
 			const requestedLift = directPlacementLift(line);
 			const lift = Math.min(requestedLift, screenRow);
 			if (requestedLift > lift) {
@@ -3975,20 +5033,32 @@ export class TUI extends Container {
 			return lift > 0 ? `\x1b[${lift}A${`${ERASE_LINE}\x1b[B`.repeat(lift)}${line}` : line;
 		}
 		const previous = placements?.get(placementRow);
-		const placementId = previous?.placementId ?? this.#nextImagePlacementId++;
-		const erase = previous ? encodeKittyDeletePlacement(previous.imageId, previous.placementId) : "";
-		placements?.set(placementRow, { imageId: parsed.imageId, placementId, line });
-		return (
-			erase +
-			encodeKittyPlacementLine({
+		let remaining = line;
+		let rewritten = "";
+		const images: { imageId: number; placementId: number }[] = [];
+		for (const image of previous?.images ?? []) {
+			rewritten += encodeKittyDeletePlacement(image.imageId, image.placementId);
+		}
+		for (;;) {
+			const parsed = parseKittyDirectPlacementSegment(remaining);
+			if (!parsed) {
+				if (images.length > 0) placements?.set(placementRow, { images, line });
+				return rewritten + remaining;
+			}
+			const placementId = previous?.images[images.length]?.placementId ?? this.#nextImagePlacementId++;
+			images.push({ imageId: parsed.imageId, placementId });
+			rewritten += parsed.prefix + encodeKittyPlacementLine({
 				imageId: parsed.imageId,
 				placementId,
 				columns: parsed.columns,
 				rows: parsed.rows,
 				screenRow,
 				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
-			})
-		);
+				tmuxPassthrough: parsed.tmuxPassthrough,
+				maxRowsAbove: parsed.maxRowsAbove,
+			});
+			remaining = parsed.suffix;
+		}
 	}
 
 	/**
@@ -4502,7 +5572,12 @@ export class TUI extends Container {
 			// produce byte-identical rows. Skip the compose (O(transcript)) and
 			// re-emit the cached frame at the new viewport offset (O(viewport)).
 			if (!this.#appViewportComposeStale && this.#canReuseAppViewportFrame(width, height)) {
-				this.#emitAppViewportFrame(this.#appViewportFrameLines, width, height, this.#appViewportFrameCursorPos);
+				this.#emitAppViewportFrame(
+					{ lines: this.#appViewportFrameLines, rows: this.#appViewportFramePreparedRows },
+					width,
+					height,
+					this.#appViewportFrameCursorPos,
+				);
 				return;
 			}
 			this.#renderAppViewportFrame(width, height);
@@ -5088,7 +6163,6 @@ export class TUI extends Container {
 
 	#forgetHardwareCursorState(): void {
 		this.#hardwareCursorState = null;
-
 	}
 
 	/**
@@ -5112,30 +6186,53 @@ export class TUI extends Container {
 		return `${keyboardExit}\x1b[?1049l${this.terminal.keyboardEnhancementRestoreSequence ?? ""}`;
 	}
 
-
 	#renderAppViewportFrame(width: number, height: number): void {
-		this.#enterAppViewport();
+		const inputOwner = this.#findAppViewportInputOwner();
+		const hoverMouse = inputOwner?.wantsAppViewportHover?.() ?? false;
+		this.#enterAppViewport(hoverMouse);
+		this.#syncAppViewportHoverMouse(hoverMouse);
 		const contentWidth = Math.max(1, width - 1);
-		this.#imageBudget.beginPass();
-		const viewport = { columns: contentWidth, rows: Number.MAX_SAFE_INTEGER };
-		const provided =
-			this.#frameProvider?.renderResizeFrame?.(viewport) ?? this.#frameProvider?.renderFrame(viewport).viewport;
-		const rawFrame = Array.from(provided ?? this.render(contentWidth));
-		if (this.#imageBudget.endPass()) {
-			this.#clearScrollbackOnNextRender = true;
+		const viewport = { columns: contentWidth, rows: Math.max(0, height) };
+		const fullCompose = this.#appViewportFullComposePending;
+		this.#appViewportFullComposePending = false;
+		const targets = fullCompose ? [] : [...this.#appViewportComponentTargets];
+		this.#appViewportComponentTargets.clear();
+		const provider = this.#appViewportFrameProvider;
+		let plan: AppViewportFramePlan | undefined;
+		let fallbackFrame: readonly string[] | undefined;
+		let imageBudgetChanged = false;
+		if (targets.length > 0) {
+			this.#imageBudget.beginPass(true);
+			if (provider) plan = provider.renderAppViewportFrame(viewport, targets);
+			else fallbackFrame = this.renderTargeted(contentWidth, targets);
+		}
+		if (targets.length === 0 || this.#imageBudget.stablePassObservedImages || !this.#imageBudget.quiescent) {
+			let retry: boolean;
+			do {
+				this.#imageBudget.beginPass();
+				if (provider) plan = provider.renderAppViewportFrame(viewport, []);
+				else fallbackFrame = this.render(contentWidth);
+				retry = this.#imageBudget.endPass();
+				imageBudgetChanged ||= retry;
+			} while (retry);
+		}
+		const rawFrame = Array.from(plan?.viewport ?? fallbackFrame ?? []);
+		if (plan) {
+			// Provider rows are already the complete visible app frame; pane-local
+			// scrollbars and sticky chrome were composed before this shared paint.
+			this.#appViewportScrollRegionEnd = Math.max(0, rawFrame.length - plan.stickyRows);
+			this.#appViewportScrollTop = 0;
+			this.#appViewportFollow = true;
+		}
+		if (imageBudgetChanged) {
+			this.#forceViewportRepaintOnNextRender = true;
 			this.#appViewportPreviousLines = [];
 		}
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 
 		const cursorMarkers = this.#extractCursorMarkers(rawFrame);
-		const cursorPos = cursorMarkers[0] ?? null;
-		const frame = this.#prepareLinesArray(rawFrame, contentWidth);
-		const imageTransmits = this.#imageBudget.takeTransmits();
-		if (imageTransmits.length > 0) {
-			let transmitBuffer = "";
-			for (const seq of imageTransmits) transmitBuffer += seq;
-			this.terminal.write(transmitBuffer);
-		}
+		const cursorPos = cursorMarkers[0] ?? plan?.cursor ?? null;
+		const frame = this.#prepareLinesArray(rawFrame, contentWidth, this.#appViewportFramePreparedRows);
 		this.#emitAppViewportFrame(frame, width, height, cursorPos);
 		this.#appViewportFrameCursorPos = cursorPos;
 		this.#appViewportComposeStale = false;
@@ -5157,24 +6254,28 @@ export class TUI extends Container {
 			!this.#clearScrollbackOnNextRender &&
 			this.#imageBudget.quiescent &&
 			width === this.#appViewportPreviousWidth &&
-			this.#appViewportPreviousLines.length === height
+			this.#appViewportPreviousLines.length === height &&
+			this.#appViewportFramePreparedRows[0]?.widthEpoch === getWidthConfigEpoch() &&
+			this.#appViewportFramePreparedRows[0]?.imageProtocol === TERMINAL.imageProtocol
 		);
 	}
 
 	#emitAppViewportFrame(
-		lines: string[],
+		frame: PreparedLines,
 		width: number,
 		height: number,
 		cursorPos: { row: number; col: number } | null,
 	): void {
-		const forceFullRepaint =
+		const lines = frame.lines;
+		const geometryForcesFullRepaint =
 			this.#forceViewportRepaintOnNextRender ||
 			this.#clearScrollbackOnNextRender ||
 			(this.#appViewportPreviousWidth > 0 && this.#appViewportPreviousWidth !== width) ||
 			(this.#appViewportPreviousLines.length > 0 && this.#appViewportPreviousLines.length !== height);
-		if (forceFullRepaint) this.#forgetHardwareCursorState();
 		const previousScrollEnd = this.#appViewportPreviousScrollRegionEnd;
 		this.#appViewportFrameLines = lines;
+		this.#appViewportFramePreparedRows = frame.rows;
+		this.#syncAppViewportSelectionScroll(this.#findAppViewportInputOwner());
 		this.#remapAppViewportSelectionForScrollRegionShift(previousScrollEnd);
 		this.#clampAppViewportSelectionToFrame();
 		this.#appViewportPreviousScrollRegionEnd = this.#appViewportScrollRegionEnd ?? lines.length;
@@ -5189,15 +6290,57 @@ export class TUI extends Container {
 			}
 		}
 		if (hasVisibleOverlay) {
-			fitted = this.#appendAppViewportScrollbar(fitted, scrollbarGlyphs, width);
+			fitted = appendBrailleScrollbar(fitted, scrollbarGlyphs, width);
 			scrollbarGlyphs = [];
 			fitted = this.#compositeOverlaysIntoWindow(fitted, width, height);
 			const overlayMarkers = this.#extractCursorMarkers(fitted);
 			if (overlayMarkers.length > 0) fittedCursorPos = overlayMarkers[0]!;
-			fitted = this.#prepareLinesArray(fitted, width);
 		}
+		// Reuse prepared source rows through scrolling and selection-only paints.
+		// Only transformed rows need preparation again; overlays own the full width.
+		const preparedWidth = hasVisibleOverlay ? width : Math.max(1, width - 1);
+		const widthEpoch = getWidthConfigEpoch();
+		const imageProtocol = TERMINAL.imageProtocol;
+		// oxlint-disable-next-line unicorn/no-new-array -- render-frame sidecar preallocation
+		const preparedRows: PreparedLine[] = new Array(height);
+		for (let row = 0; row < height; row++) {
+			const raw = fitted[row] ?? "";
+			const source = frame.rows[this.#appViewportVisibleSourceRows[row] ?? -1];
+			const previous = this.#appViewportPreparedRows[row];
+			const cached =
+				source?.line === raw && source.width === preparedWidth
+					? source
+					: previous?.raw === raw
+						? previous
+						: undefined;
+			const prepared =
+				cached !== undefined &&
+				cached.width === preparedWidth &&
+				cached.widthEpoch === widthEpoch &&
+				cached.imageProtocol === imageProtocol
+					? cached
+					: this.#prepareLine(raw, preparedWidth, widthEpoch, imageProtocol);
+			fitted[row] = prepared.line;
+			preparedRows[row] = prepared;
+		}
+		const currentSixelRows =
+			TERMINAL.imageProtocol === ImageProtocol.Sixel
+				? preparedRows.map(line => line.isImage)
+				: // oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+					new Array<boolean>(height).fill(false);
+		let kittyCleanup = "";
+		if (this.#clearScrollbackOnNextRender && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			kittyCleanup += encodeKittyDeleteAllImages();
+			this.#imageBudget.resetPlacementEpochs();
+			this.#imageBudget.takePurgeIds();
+			this.#imageBudget.takeRetiredIds();
+		} else {
+			for (const id of this.#imageBudget.takePurgeIds()) kittyCleanup += encodeKittyDeleteImage(id);
+			for (const id of this.#imageBudget.takeRetiredIds()) kittyCleanup += encodeKittyDeleteImage(id);
+		}
+		for (const sequence of this.#imageBudget.takeTransmits()) kittyCleanup += sequence;
 		if (
-			!forceFullRepaint &&
+			!geometryForcesFullRepaint &&
 			this.#appViewportPreviousWidth === width &&
 			this.#appViewportPreviousLines.length === height &&
 			this.#appViewportPreviousScrollbarGlyphs.length === height
@@ -5206,6 +6349,10 @@ export class TUI extends Container {
 			for (let r = 0; r < height; r++) {
 				if (
 					fitted[r] !== this.#appViewportPreviousLines[r] ||
+					preparedRows[r]!.width !== this.#appViewportPreparedRows[r]?.width ||
+					preparedRows[r]!.widthEpoch !== this.#appViewportPreparedRows[r]?.widthEpoch ||
+					preparedRows[r]!.imageProtocol !== this.#appViewportPreparedRows[r]?.imageProtocol ||
+					currentSixelRows[r] !== (this.#appViewportPreviousSixelRows[r] ?? false) ||
 					(scrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK) !==
 						(this.#appViewportPreviousScrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK)
 				) {
@@ -5214,23 +6361,54 @@ export class TUI extends Container {
 				}
 			}
 			if (same) {
+				this.#appViewportPreparedRows = preparedRows;
+				if (kittyCleanup) this.terminal.write(this.#paintBeginSequence + kittyCleanup + this.#paintEndSequence);
 				this.#writeAppViewportCursor(fittedCursorPos, height);
 				return;
 			}
 		}
+		// SIXEL is a pixel overlay rather than a replaceable cell placement.
+		// Repainting a resized/moved image cannot delete the old, wider footprint,
+		// and row-local erases leave the stale pixels split into horizontal bands.
+		// When a visible SIXEL anchor changes or disappears, clear every viewport
+		// row and replay the remaining image blocks atomically.
+		const hasVisibleSixel = currentSixelRows.some(Boolean) || this.#appViewportPreviousSixelRows.some(Boolean);
+		let sixelNeedsFullRepaint = geometryForcesFullRepaint && hasVisibleSixel;
+		const sixelRows = Math.max(height, this.#appViewportPreviousSixelRows.length);
+		for (let row = 0; row < sixelRows && !sixelNeedsFullRepaint; row++) {
+			const currentIsSixel = currentSixelRows[row] ?? false;
+			const previousIsSixel = this.#appViewportPreviousSixelRows[row] ?? false;
+			if (!currentIsSixel && !previousIsSixel) continue;
+			if (
+				currentIsSixel !== previousIsSixel ||
+				(fitted[row] ?? "") !== (this.#appViewportPreviousLines[row] ?? "")
+			) {
+				sixelNeedsFullRepaint = true;
+			}
+		}
+		const forceFullRepaint = geometryForcesFullRepaint || sixelNeedsFullRepaint;
+		if (forceFullRepaint) this.#forgetHardwareCursorState();
 		this.#fullRedrawCount += 1;
 		const cursorControl = this.#appViewportCursorControlSequence(fittedCursorPos, height);
-		let buffer = this.#paintBeginSequence;
-		const purgeIds = this.#imageBudget.takePurgeIds();
-		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			for (const id of purgeIds) buffer += encodeKittyDeleteImage(id);
-		}
-		buffer += this.#appViewportPaintRows(fitted, scrollbarGlyphs, width, height, forceFullRepaint);
+		let buffer = this.#paintBeginSequence + kittyCleanup;
+		// Windows Terminal's ED2 clears the page's SIXEL ImageSlice cells;
+		// DECSED covers terminals that expose selective image erasure. Use both
+		// before replay so pixels outside a narrowed footprint cannot survive.
+		if (sixelNeedsFullRepaint) buffer += "\x1b[2J\x1b[?2J\x1b[H";
+		buffer += this.#appViewportPaintRows(
+			{ lines: fitted, rows: preparedRows },
+			scrollbarGlyphs,
+			width,
+			height,
+			forceFullRepaint,
+		);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#appViewportPreviousLines = fitted;
+		this.#appViewportPreparedRows = preparedRows;
+		this.#appViewportPreviousSixelRows = currentSixelRows;
 		this.#appViewportPreviousScrollbarGlyphs = scrollbarGlyphs;
 		this.#appViewportPreviousWidth = width;
 		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
@@ -5238,23 +6416,39 @@ export class TUI extends Container {
 	}
 
 	#appViewportPaintRows(
-		lines: string[],
+		prepared: PreparedLines,
 		scrollbarGlyphs: string[],
 		width: number,
 		height: number,
 		forceFullRepaint: boolean,
 	): string {
+		const lines = prepared.lines;
 		let buffer = "";
 		const contentWidth = Math.max(1, width - 1);
 		const widthChanged = this.#appViewportPreviousWidth !== width;
 		const previousLines = this.#appViewportPreviousLines;
 		const previousScrollbarGlyphs = this.#appViewportPreviousScrollbarGlyphs;
 		for (let row = 0; row < height; row++) {
-			const line = lines[row] ?? "";
+			const current = prepared.rows[row]!;
+			const line = current.line;
 			const previousLine = previousLines[row] ?? "";
-			if (forceFullRepaint || line !== previousLine || (widthChanged && line !== "")) {
-				if (forceFullRepaint || line !== "" || previousLine !== "") {
-					buffer += `\x1b[${row + 1};1H${this.#appViewportContentRewriteSequence(line, contentWidth)}`;
+			const previous = this.#appViewportPreparedRows[row];
+			const preparationChanged =
+				previous === undefined ||
+				previous.width !== current.width ||
+				previous.widthEpoch !== current.widthEpoch ||
+				previous.imageProtocol !== current.imageProtocol;
+			const spacerGlyphWidth = this.#osc66SpacerGlyphWidth(lines, row);
+			const spacerChanged = spacerGlyphWidth !== this.#osc66SpacerGlyphWidth(previousLines, row);
+			if (forceFullRepaint || line !== previousLine || preparationChanged || spacerChanged) {
+				if (forceFullRepaint || line !== "" || previousLine !== "" || spacerChanged) {
+					buffer += `\x1b[${row + 1};1H${this.#appViewportContentRewriteSequence(
+						current,
+						contentWidth,
+						row,
+						this.#appViewportVisibleSourceRows[row] ?? -1,
+						spacerGlyphWidth,
+					)}`;
 				}
 			}
 			const glyph = scrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
@@ -5275,10 +6469,10 @@ export class TUI extends Container {
 				line !== previousLine &&
 				glyph === APP_VIEWPORT_SCROLLBAR_BLANK &&
 				previousGlyph === APP_VIEWPORT_SCROLLBAR_BLANK &&
-				!TERMINAL.isImageLine(previousLine) &&
-				visibleWidth(previousLine) > contentWidth &&
-				!TERMINAL.isImageLine(line) &&
-				visibleWidth(line) <= contentWidth
+				!previous?.isImage &&
+				(previous?.asciiWidth ?? visibleWidth(previousLine)) > contentWidth &&
+				!current.isImage &&
+				(current.asciiWidth ?? visibleWidth(line)) <= contentWidth
 			) {
 				buffer += `\x1b[${row + 1};${width}H${APP_VIEWPORT_SCROLLBAR_BLANK}`;
 			}
@@ -5295,13 +6489,33 @@ export class TUI extends Container {
 		return buffer;
 	}
 
-	#appViewportContentRewriteSequence(line: string, width: number): string {
-		if (TERMINAL.isImageLine(line)) return ERASE_LINE + line;
-		const terminalLine = this.#terminalLine(line);
-		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
-		const lineWidth = asciiWidth ?? visibleWidth(line);
-		const clearCells = Math.max(0, width - lineWidth);
-		return clearCells > 0 ? `${terminalLine}\x1b[${clearCells}X` : terminalLine;
+	#appViewportContentRewriteSequence(
+		line: PreparedLine,
+		width: number,
+		screenRow: number,
+		frameRow: number,
+		spacerGlyphWidth: number,
+	): string {
+		let rewrite: string;
+		if (spacerGlyphWidth >= 0) {
+			rewrite =
+				spacerGlyphWidth >= width
+					? ""
+					: `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C\x1b[${width - spacerGlyphWidth}X`;
+		} else if (line.isImage) {
+			rewrite = ERASE_LINE + this.#imageLineSequence(line.line, screenRow, frameRow, -1);
+		} else {
+			const terminalLine = this.#terminalLine(line);
+			if (line.asciiWidth === undefined) {
+				// A measured-full combining row can paint short. Erase first,
+				// bounded to the content area so the scrollbar stays untouched.
+				rewrite = `${SEGMENT_RESET}\x1b[${width}X${terminalLine}`;
+			} else {
+				const clearCells = Math.max(0, width - line.asciiWidth);
+				rewrite = clearCells > 0 ? `${terminalLine}\x1b[${clearCells}X` : terminalLine;
+			}
+		}
+		return `${rewrite}\r`;
 	}
 
 	#appViewportCursorControlSequence(
@@ -5358,19 +6572,24 @@ export class TUI extends Container {
 				sourceRow,
 				selection.start,
 				selection.end,
+				selection.bounds,
 			);
 		}
 		return selected;
 	}
 
-	#normalizedAppViewportSelection(): { start: AppViewportSelectionPoint; end: AppViewportSelectionPoint } | null {
+	#normalizedAppViewportSelection(): {
+		start: AppViewportSelectionPoint;
+		end: AppViewportSelectionPoint;
+		bounds: AppViewportSelectionBounds | undefined;
+	} | null {
 		const selection = this.#appViewportSelection;
 		if (!selection?.active) return null;
-		const { anchor, focus } = selection;
+		const { anchor, focus, bounds } = selection;
 		if (anchor.row < focus.row || (anchor.row === focus.row && anchor.col <= focus.col)) {
-			return { start: anchor, end: focus };
+			return { start: anchor, end: focus, bounds };
 		}
-		return { start: focus, end: anchor };
+		return { start: focus, end: anchor, bounds };
 	}
 
 	#appViewportSelectionColumns(
@@ -5378,8 +6597,12 @@ export class TUI extends Container {
 		sourceRow: number,
 		start: AppViewportSelectionPoint,
 		end: AppViewportSelectionPoint,
+		bounds: AppViewportSelectionBounds | undefined,
 	): { startCol: number; endCol: number } {
 		const lineWidth = visibleWidth(line);
+		if (bounds && (sourceRow < bounds.startRow || sourceRow > bounds.endRow)) {
+			return { startCol: 0, endCol: 0 };
+		}
 		let startCol = 0;
 		if (sourceRow === start.row) {
 			const cell = Math.max(0, Math.min(start.col, lineWidth));
@@ -5393,6 +6616,10 @@ export class TUI extends Container {
 			const graphemeWidth = visibleWidth(sliceByColumn(line, graphemeStart, 1, false));
 			endCol = Math.min(lineWidth, graphemeStart + Math.max(1, graphemeWidth));
 		}
+		if (bounds) {
+			startCol = Math.max(startCol, Math.min(lineWidth, bounds.startCol));
+			endCol = Math.min(endCol, Math.min(lineWidth, bounds.endCol + 1));
+		}
 		return { startCol, endCol: Math.max(startCol, endCol) };
 	}
 
@@ -5401,10 +6628,12 @@ export class TUI extends Container {
 		sourceRow: number,
 		start: AppViewportSelectionPoint,
 		end: AppViewportSelectionPoint,
+		bounds: AppViewportSelectionBounds | undefined,
 	): string {
+		if (TERMINAL.isImageLine(line)) return line;
 		const lineWidth = visibleWidth(line);
 		if (lineWidth <= 0) return line;
-		const { startCol, endCol } = this.#appViewportSelectionColumns(line, sourceRow, start, end);
+		const { startCol, endCol } = this.#appViewportSelectionColumns(line, sourceRow, start, end, bounds);
 		if (endCol <= startCol) return line;
 		const before = sliceByColumn(line, 0, startCol, true);
 		// Powerline / editor chrome carries its own background SGR and full
@@ -5418,7 +6647,9 @@ export class TUI extends Container {
 	}
 
 	#buildAppViewportLines(lines: string[], height: number): string[] {
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const fitted: string[] = new Array(Math.max(0, height)).fill("");
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const rowMap: number[] = new Array(Math.max(0, height)).fill(-1);
 		const scrollEnd = this.#appViewportScrollRegionEnd ?? lines.length;
 		const boundedScrollEnd = Math.max(0, Math.min(scrollEnd, lines.length));
@@ -5438,12 +6669,7 @@ export class TUI extends Container {
 				rowMap[row] = sourceRow;
 			}
 		}
-		this.#appViewportScrollbarGlyphs = this.#buildAppViewportScrollbarGlyphs(
-			height,
-			scrollHeight,
-			boundedScrollEnd,
-			maxTop,
-		);
+		this.#appViewportScrollbarGlyphs = this.#buildAppViewportScrollbarGlyphs(height, scrollHeight, boundedScrollEnd);
 		const suffixStart = height - suffixCount;
 		for (let i = 0; i < suffixCount; i++) {
 			const sourceRow = boundedScrollEnd + i;
@@ -5454,59 +6680,22 @@ export class TUI extends Container {
 		return fitted;
 	}
 
-	#buildAppViewportScrollbarGlyphs(height: number, scrollHeight: number, totalRows: number, maxTop: number): string[] {
+	#buildAppViewportScrollbarGlyphs(height: number, scrollHeight: number, totalRows: number): string[] {
+		const layout = layoutBrailleScrollbar(scrollHeight, totalRows, this.#appViewportScrollTop);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const glyphs: string[] = new Array(Math.max(0, height)).fill(APP_VIEWPORT_SCROLLBAR_BLANK);
-		this.#appViewportScrollbarMetrics = null;
-		if (scrollHeight <= 0 || totalRows <= scrollHeight) return glyphs;
-		const slotsPerRow = APP_VIEWPORT_SCROLLBAR_DOTS.length;
-		const totalSlots = scrollHeight * slotsPerRow;
-		const proportionalThumbSlots = Math.floor((totalSlots * scrollHeight) / totalRows);
-		const minThumbSlots = Math.min(slotsPerRow, totalSlots);
-		const thumbSlots = Math.max(minThumbSlots, Math.min(proportionalThumbSlots, totalSlots));
-		const travelSlots = totalSlots - thumbSlots;
-		const thumbStart = maxTop === 0 ? 0 : Math.round((this.#appViewportScrollTop / maxTop) * travelSlots);
-		const thumbEnd = thumbStart + thumbSlots;
-		const thumbTopRow = Math.floor(thumbStart / slotsPerRow);
-		const thumbEndRow = Math.max(thumbTopRow + 1, Math.ceil(thumbEnd / slotsPerRow));
-		const thumbRows = Math.max(1, Math.min(scrollHeight, thumbEndRow - thumbTopRow));
-		this.#appViewportScrollbarMetrics = {
-			scrollHeight,
-			maxTop,
-			thumbTopRow: Math.max(0, Math.min(thumbTopRow, scrollHeight - 1)),
-			thumbRows,
-			travelRows: Math.max(0, scrollHeight - thumbRows),
-		};
-		for (let row = 0; row < scrollHeight; row++) {
-			glyphs[row] = this.#appViewportScrollbarGlyph(row, slotsPerRow, thumbStart, thumbEnd);
-		}
+		for (let row = 0; row < layout.glyphs.length; row++) glyphs[row] = layout.glyphs[row]!;
+		const metrics = layout.metrics;
+		this.#appViewportScrollbarMetrics = metrics
+			? {
+					scrollHeight,
+					maxTop: metrics.maxOffset,
+					thumbTopRow: metrics.thumbTopRow,
+					thumbRows: metrics.thumbRows,
+					travelRows: metrics.travelRows,
+				}
+			: null;
 		return glyphs;
-	}
-
-	#appendAppViewportScrollbar(lines: string[], scrollbarGlyphs: string[], width: number): string[] {
-		const contentWidth = Math.max(0, width - 1);
-		const fitted = [...lines];
-		for (let row = 0; row < fitted.length; row++) {
-			const glyph = scrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
-			if (glyph === APP_VIEWPORT_SCROLLBAR_BLANK) continue;
-			const line = fitted[row] ?? "";
-			if (TERMINAL.isImageLine(line)) continue;
-			const content = sliceByColumn(line, 0, contentWidth, true);
-			const pad = " ".repeat(Math.max(0, contentWidth - visibleWidth(content)));
-			fitted[row] = `${content}${pad}${LINE_TERMINATOR}${glyph}`;
-		}
-		return fitted;
-	}
-
-	#appViewportScrollbarGlyph(row: number, slotsPerRow: number, thumbStart: number, thumbEnd: number): string {
-		let mask = 0;
-		const rowStart = row * slotsPerRow;
-		for (let slot = 0; slot < slotsPerRow; slot++) {
-			const absoluteSlot = rowStart + slot;
-			if (absoluteSlot >= thumbStart && absoluteSlot < thumbEnd) mask |= APP_VIEWPORT_SCROLLBAR_DOTS[slot] ?? 0;
-		}
-		return mask === 0
-			? APP_VIEWPORT_SCROLLBAR_BLANK
-			: `\x1b[2m${String.fromCodePoint(0x2800 | mask)}${SEGMENT_RESET}`;
 	}
 
 	/**

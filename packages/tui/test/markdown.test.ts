@@ -77,6 +77,21 @@ describe("extractMarkdownLinks", () => {
 });
 
 describe("Markdown component", () => {
+	it("recovers logical text across visual wraps without its horizontal padding", () => {
+		const markdown = new Markdown("alpha beta gamma", 1, 0, defaultMarkdownTheme);
+		const lines = markdown.render(9);
+		const selectable = markdown as Component;
+
+		expect(lines.length).toBeGreaterThan(1);
+		expect(
+			selectable.getTextSelection?.({
+				start: { row: 0, col: 0 },
+				end: { row: lines.length - 1, col: 8 },
+			}),
+		).toBe("alpha beta gamma");
+		expect(selectable.getTextSelectionInset?.(0)).toBe(1);
+	});
+
 	describe("Nested lists", () => {
 		it("should render simple nested list", () => {
 			const markdown = new Markdown(
@@ -2160,6 +2175,75 @@ describe("themes without symbols (upstream pi-tui MarkdownTheme shape)", () => {
 		const after = new Markdown(text, 0, 0, upstreamTheme).render(40);
 		expect(after).not.toEqual(before);
 		expect(after).toEqual(new Markdown(text, 0, 0, { ...upstreamTheme, symbols: getSymbolTheme() }).render(40));
+	});
+});
+
+describe("Layout-only row measurement", () => {
+	it("keeps fenced-code height exact without invoking syntax highlighting", () => {
+		let highlightCallCount = 0;
+		const themeWithLayout = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string): string[] => {
+				highlightCallCount++;
+				return code.split("\n").map(line => chalk.cyan(line));
+			},
+			highlightCodeForLayout: (code: string): string[] => code.split("\n"),
+		};
+		const markdown = new Markdown("```ts\nconst x = 1;\nconst y = 2;\n```", 1, 0, themeWithLayout);
+
+		const measuredRows = markdown.measureRows(24);
+		expect(highlightCallCount).toBe(0);
+		expect(markdown.render(24)).toHaveLength(measuredRows);
+		expect(highlightCallCount).toBe(1);
+	});
+
+	it("skips ANSI style callbacks during layout-only measurement", () => {
+		let styleCallCount = 0;
+		const style = (text: string): string => {
+			styleCallCount++;
+			return chalk.cyan(text);
+		};
+		const themeWithLayout = {
+			...defaultMarkdownTheme,
+			heading: style,
+			code: style,
+			bold: style,
+			quote: style,
+			highlightCodeForLayout: (code: string): string[] => code.split("\n"),
+		};
+		const markdown = new Markdown("# Heading with **bold** and `code`\n\n> quoted text", 1, 0, themeWithLayout);
+
+		const measuredRows = markdown.measureRows(24);
+		expect(styleCallCount).toBe(0);
+		expect(markdown.render(24)).toHaveLength(measuredRows);
+		expect(styleCallCount).toBeGreaterThan(0);
+	});
+
+	it("keeps measured and painted rows exact across resize, source replacement, and finalization", () => {
+		const layoutTheme = {
+			...defaultMarkdownTheme,
+			highlightCodeForLayout: (code: string): string[] => code.split("\n"),
+		};
+		const markdown = new Markdown("", 1, 0, layoutTheme);
+		for (const [text, transient] of [
+			["A **styled paragraph** that wraps differently when the pane changes width.", true],
+			["[reference][target]\n\n[target]: https://example.com/long-destination", true],
+			["```ts\nconst value = 1;\n```", true],
+			["```ts\nconst value = 1;\n```", false],
+			["", true],
+		] as const) {
+			markdown.transientRenderCache = transient;
+			markdown.setText(text);
+			for (const width of [24, 60, 24]) {
+				clearRenderCache();
+				const expected = new Markdown(text, 1, 0, layoutTheme);
+				expected.transientRenderCache = transient;
+				const rows = expected.render(width);
+				clearRenderCache();
+				expect(markdown.measureRows(width)).toBe(rows.length);
+				expect(markdown.render(width)).toEqual(rows);
+			}
+		}
 	});
 });
 

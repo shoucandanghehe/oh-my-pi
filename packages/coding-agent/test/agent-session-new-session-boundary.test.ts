@@ -201,7 +201,18 @@ describe("AgentSession.newSession boundary", () => {
 						? session.fork()
 						: transition === "branch"
 							? session.branch(entryId)
-							: session.branchFromBtw("side question", assistantMsg("side answer"), entryId, previousId);
+							: session.branchFromBtw({
+									anchorLeafId: entryId,
+									sessionId: previousId,
+									turns: [
+										{
+											input: "side question",
+											assistantMessage: assistantMsg("side answer"),
+											replyText: "side answer",
+											timestamp: Date.now(),
+										},
+									],
+								});
 			try {
 				await beforeReached.promise;
 				expect(session.isSessionTransitioning).toBe(true);

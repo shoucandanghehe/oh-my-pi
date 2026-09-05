@@ -1,6 +1,7 @@
 import type { TabBarTheme } from "../components/tab-bar";
 import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { theme } from "../theme/index";
+import { truncateToWidth } from "../render/render-utils";
 // ═══════════════════════════════════════════════════════════════════════════
 // Text Sanitization
 // ═══════════════════════════════════════════════════════════════════════════
@@ -61,6 +62,13 @@ export function sanitizeHookStatusText(input: string): string {
 	if (!hasVisible) return "";
 	// Trailing whitespace trims; trailing SGR codes stay (they never contain whitespace).
 	return out + pending.replace(/\s+/g, "") + SGR_RESET;
+}
+
+/** Shared focus marker and title treatment for app-viewport workspace panes. */
+export function renderWorkspacePaneHeader(title: string, width: number, focused: boolean, suffix = ""): string {
+	const indicator = focused ? theme.fg("accent", "●") : theme.fg("muted", "○");
+	const styledTitle = focused ? theme.fg("accent", theme.bold(title)) : theme.fg("muted", title);
+	return truncateToWidth(`${indicator} ${styledTitle}${suffix}`, Math.max(1, width));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

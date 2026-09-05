@@ -26,7 +26,7 @@ const SYNC_OVERRIDE_KEYS = [
 class ReportingTerminal extends VirtualTerminal {
 	#callbacks: PrivateModeReportHandler[] = [];
 
-	onPrivateModeReport(callback: PrivateModeReportHandler): void {
+	override onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.#callbacks.push(callback);
 	}
 

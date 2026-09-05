@@ -882,7 +882,7 @@ before and performs no extra syscalls.
 
 Supported:
 
-- dialogs: `select`, `confirm`, `input`, `editor`, optional `askDialog`
+- dialogs: `select`, `confirm`, `input`, `editor`, optional `askDialog` and `localAskDialog`
 - input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`; `supportsEditor` indicates whether paste updates a local or remote composer (absent means unsupported)
 - autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
 - terminal title and working message (`setTitle`, `setWorkingMessage`)
@@ -1054,6 +1054,22 @@ environment propagation rules; the dispatcher does not synthesize uniform variab
 inheritance. Request argv stays separate for direct backends; only shell-input
 backends turn argv into shell text, under the required POSIX grammar assertion.
 
+Local agent panes render that session's `setWidget` declarations and `setStatus` values, not Main's. Widget factories receive the live TUI, and `requestComponentRender()` updates the owning pane. Closing a pane disposes its widget instances; reopening replays the current declarations and creates fresh instances. A revived session binds to its new runner, without retaining the previous runner's widgets.
+
+`askDialog` races the host TUI against a connected collaboration guest. Use
+`localAskDialog` for approvals or other decisions that must be answered on the
+host terminal: it has the same questions, result, timeout, and abort contract as
+`askDialog`, but never sends a guest UI request.
+
+`ExtensionAskDialogQuestion.allowCustomInput` defaults to `true`. Set it to
+`false` to remove `Other (type your own)` from both the host dialog and
+collaboration guest prompts.
+
+Check `ctx.ui.askDialogCapabilities?.allowCustomInput === true` before relying
+on that field. An absent capability means the runtime may ignore
+`allowCustomInput`, including older hosts that already expose `askDialog` or
+`localAskDialog`.
+
 ### RPC mode (`rpc-mode.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
@@ -1068,13 +1084,15 @@ Unsupported/no-op in RPC implementation:
 - `custom`; optional `askDialog` is absent
 - `getEditorText` returns `""`; `getEditorComponent` returns `undefined`
 - `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
+- `localAskDialog` (host-TUI-only)
 - `setWorkingMessage`
 - theme switching/loading (`setTheme` returns failure)
 - tool expansion controls are inert
 
 ### Print/headless/subagent paths
 
-When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning. Both `--mode rpc --no-ui` and `--mode rpc-ui --no-ui` take this path for extensions; `rpc-ui` tool dialogs remain enabled.
+When no UI context is supplied to runner init, `ctx.hasUI` remains `false`: a transcript pane does not grant an interactive dialog host. Both `--mode rpc --no-ui` and `--mode rpc-ui --no-ui` take this path for extensions; `rpc-ui` tool dialogs remain enabled. `setWidget` and `setStatus` retain session-local presentation for an attached local pane, even when called before that pane opens. Other methods remain no-op/default-returning. Presentation is not persisted across process restarts or transported to remote panes.
+`localAskDialog` is unavailable, so extensions that require a host-local answer must fail closed.
 
 ### ACP mode
 
@@ -1084,6 +1102,7 @@ ACP installs an elicitation-bridged UI context (`createAcpExtensionUiContext` in
 elicitations; defaults are returned when the client lacks `elicitation.form`.
 The non-elicitation surface (widgets, editor control, theming, terminal input,
 autocomplete stacking) is inert; `notify` logs a debug notification.
+`localAskDialog` remains unavailable because ACP elicitations are remote rather than host-local.
 
 ## Session and state patterns
 

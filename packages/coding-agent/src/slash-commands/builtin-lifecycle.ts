@@ -450,8 +450,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "btw",
 		icon: "question",
-		description: "Ask a side question, or browse this session's BTW history",
-		inlineHint: "[question]",
+		description: "Ask in a durable side thread, or reopen the BTW workspace",
+		inlineHint: "[question|--clear]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
@@ -533,10 +533,21 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "debug",
 		icon: "bug",
-		description: "Open debug tools selector",
-		handleTui: async (_command, runtime) => {
-			await runtime.ctx.showDebugSelector();
+		description: "Open debug tools or preview TUI effects",
+		allowArgs: true,
+		subcommands: [{ name: "petrify", description: "Preview subagent pane petrification" }],
+		handleTui: async (command, runtime) => {
 			clearSubmittedText(runtime);
+			const action = command.args.trim().toLowerCase();
+			if (!action) {
+				await runtime.ctx.showDebugSelector();
+				return;
+			}
+			if (action === "petrify") {
+				runtime.ctx.previewSubagentExitAnimation();
+				return;
+			}
+			runtime.ctx.showWarning("Usage: /debug [petrify]");
 		},
 	},
 	{
