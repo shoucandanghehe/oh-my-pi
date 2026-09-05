@@ -207,8 +207,8 @@ import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import { WorkspacePaneController } from "./controllers/workspace-pane-controller";
+import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -1082,6 +1082,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				scrollRoot: this.#mainScrollRoot,
 				stickyRoot: this.#mainStickyRoot,
 				requestRender: () => this.ui.requestRender(),
+				requestComponentRender: component => this.ui.requestComponentRender(component),
 			});
 			this.#workspaceLayout = new WorkspaceLayout({
 				model: WorkspaceModel.single("main"),
@@ -1100,6 +1101,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					},
 				],
 				height: () => this.ui.terminal.rows,
+				requestComponentRender: component => this.ui.requestComponentRender(component),
 				requestRender: () => this.ui.requestRender(),
 				renderHeader: (pane, width, focused) => renderWorkspacePaneHeader(replaceTabs(pane.title), width, focused),
 				renderSash: (text, axis) => {
@@ -1173,6 +1175,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	focusMainWorkspacePane(): void {
 		if (!this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
+	}
+
+	isMainWorkspacePaneFocused(): boolean {
+		return !this.#workspaceLayout || this.#workspaceLayout.focusedPaneId === "main";
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -1372,7 +1378,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			stickyRoot.addChild(this.editorContainer);
 			stickyRoot.addChild(this.hookWidgetContainerBelow);
 			this.composer.setHeaderExtras([], []);
-			this.composer.setRuntimeChildren([workspaceLayout]);
+			this.composer.setRuntimeChildren([workspaceLayout], { chrome: "omit" });
 			if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
 		} else {
 			this.#workspaceWelcome = undefined;
@@ -2195,13 +2201,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.composer.started) this.ui.renderNow();
 		else this.ui.requestRender(true);
 		return submission;
-	}
-
-	submitMainMessage(text: string, streamingBehavior: "steer" | "followUp"): boolean {
-		const trimmed = text.trim();
-		if (!trimmed || !this.onInputCallback) return false;
-		this.onInputCallback(this.startPendingSubmission({ text: trimmed, streamingBehavior }));
-		return true;
 	}
 
 	cancelPendingSubmission(): boolean {
@@ -6062,8 +6061,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleEscape();
 	}
 
-	canContinueBtw(): boolean {
-		return this.#btwController.canContinue();
+	/** Reserves plain `Enter` only while the inline QuickAsk continue action is visible. */
+	handlesBtwContinueKey(): boolean {
+		return this.#btwController.handlesContinueKey();
 	}
 
 	handleBtwContinueKey(): Promise<boolean> {
@@ -6083,8 +6083,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleBranch();
 	}
 
-	canCopyBtw(): boolean {
-		return this.#btwController.canCopy();
+	/** Reserves plain `c` only while the inline QuickAsk copy action is visible. */
+	handlesBtwCopyKey(): boolean {
+		return this.#btwController.handlesCopyKey();
 	}
 
 	handleBtwCopyKey(): Promise<boolean> {

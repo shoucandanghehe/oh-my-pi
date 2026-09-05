@@ -354,6 +354,15 @@ export interface AgentChildOptions {
 	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
 	transformAssistantMessage?: AgentLoopConfig["transformAssistantMessage"];
+	/**
+	 * Optionally rewrites the inherited per-call tool context for this child.
+	 * Useful when a child renders tools on a surface with different execution
+	 * semantics from its parent while retaining the parent's late-bound state.
+	 */
+	transformToolContext?: (
+		context: AgentToolContext | undefined,
+		toolCall?: ToolCallContext,
+	) => AgentToolContext | undefined;
 }
 
 export interface AgentPromptOptions {
@@ -542,6 +551,10 @@ export class Agent {
 	 * inherited because they belong to the parent session.
 	 */
 	createChild(options: AgentChildOptions): Agent {
+		const transformToolContext = options.transformToolContext;
+		const getToolContext = transformToolContext
+			? (toolCall?: ToolCallContext) => transformToolContext(this.#getToolContext?.(toolCall), toolCall)
+			: this.#getToolContext;
 		const child = new Agent({
 			initialState: {
 				...this.#state,
@@ -581,7 +594,7 @@ export class Agent {
 			serviceTierResolver: this.#serviceTierResolver,
 			hideThinkingSummary: this.#hideThinkingSummary,
 			maxRetryDelayMs: this.#maxRetryDelayMs,
-			getToolContext: this.#getToolContext,
+			getToolContext,
 			transformToolCallArguments: this.#transformToolCallArguments,
 			resolveFallbackTool: this.#resolveFallbackTool,
 			intentTracing: this.#intentTracing,

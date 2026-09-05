@@ -98,6 +98,61 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.premiumRequests).toBe(3);
 	});
 
+	it("tracks primary assistant usage separately from task usage", () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "gpt-4o",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 3,
+				cacheWrite: 2,
+				totalTokens: 20,
+				premiumRequests: 0.5,
+				cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		});
+		session.appendMessage({
+			role: "toolResult",
+			toolCallId: "task_1",
+			toolName: "task",
+			content: [{ type: "text", text: "task output" }],
+			details: {
+				usage: {
+					input: 100,
+					output: 50,
+					cacheRead: 30,
+					cacheWrite: 20,
+					totalTokens: 200,
+					premiumRequests: 2,
+					cost: { input: 10, output: 20, cacheRead: 30, cacheWrite: 40, total: 100 },
+				},
+			},
+			isError: false,
+			timestamp: 3,
+		});
+
+		const usage = session.getAssistantUsageStatistics();
+		expect(usage).toMatchObject({
+			input: 10,
+			output: 5,
+			cacheRead: 3,
+			cacheWrite: 2,
+			totalTokens: 20,
+			premiumRequests: 0.5,
+			cost: 10,
+		});
+		usage.output = 999;
+		expect(session.getAssistantUsageStatistics().output).toBe(5);
+	});
+
 	it("keeps orchestration usage out of ordinary input while preserving total tokens", () => {
 		const session = SessionManager.inMemory();
 

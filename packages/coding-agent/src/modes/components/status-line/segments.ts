@@ -197,22 +197,26 @@ const statusSegment: StatusLineSegment = {
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
-		const state = ctx.session.state;
 		const opts = ctx.options.model ?? {};
+		const runtime = ctx.runtimeStatus;
+		const state = ctx.session.state;
+		const model = runtime?.model ?? state.model;
 
-		let modelName = state.model?.name || state.model?.id || "no-model";
+		let modelName = model?.name || model?.id || "no-model";
 		if (modelName.startsWith("Claude ")) {
 			modelName = modelName.slice(7);
 		}
 		modelName = statusValue(ctx, modelName);
 
-		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
-		// when the model supports thinking and the segment isn't hiding it.
 		let thinkingDisplay = "";
-		if (opts.showThinkingLevel !== false && state.model?.thinking) {
-			if (ctx.session.isAutoThinking) {
-				// Pending (no turn classified yet / classifying) shows a symbol-theme
-				// question-box marker; once resolved it shows `<level>`.
+		if (opts.showThinkingLevel !== false && model?.thinking) {
+			if (runtime) {
+				const level = runtime.thinkingLevel;
+				thinkingDisplay =
+					level === undefined
+						? `${theme.thinking.autoPending} auto`
+						: (theme.thinking[level as keyof typeof theme.thinking] ?? level);
+			} else if (ctx.session.isAutoThinking) {
 				const resolved = ctx.session.autoResolvedThinkingLevel();
 				thinkingDisplay = resolved
 					? (theme.thinking[resolved as keyof typeof theme.thinking] ?? resolved)
@@ -230,10 +234,14 @@ const modelSegment: StatusLineSegment = {
 			thinkingDisplay = withIcon(thinkingGlyph(thinkingDisplay), STARTUP_PLACEHOLDER);
 		}
 
-		// Compact mode swaps the model icon for the thinking-level glyph and drops
-		// the " · <level>" tail, keeping the level visible as a single icon.
-		const compact = ctx.compactThinkingLevel && thinkingDisplay !== "";
-		const modelIcon = compact ? thinkingGlyph(thinkingDisplay) : theme.icon.model;
+		// A focused side thread uses the agents icon. Otherwise compact mode
+		// swaps the model icon for the thinking-level glyph and drops the level tail.
+		const compact = !ctx.focusedAgentId && ctx.compactThinkingLevel && thinkingDisplay !== "";
+		const modelIcon = ctx.focusedAgentId
+			? (theme.icon.agents ?? theme.icon.model)
+			: compact
+				? thinkingGlyph(thinkingDisplay)
+				: theme.icon.model;
 
 		// Fast-mode icon and thinking-level suffix trail the model name and are
 		// colored together with it as `statusLineModel`. The advisor symbol sits
@@ -241,7 +249,7 @@ const modelSegment: StatusLineSegment = {
 		// theme.fg resets only the fg, so the spans are concatenated (not
 		// nested) to keep each color intact.
 		let tail = "";
-		if (ctx.session.isFastModeActive() && theme.icon.fast) {
+		if (!runtime && ctx.session.isFastModeActive?.() && theme.icon.fast) {
 			tail += ` ${theme.icon.fast}`;
 		}
 		if (!compact && thinkingDisplay) {
@@ -254,24 +262,26 @@ const modelSegment: StatusLineSegment = {
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in
-		// `/advisor status`.
+		// `/advisor status`. Side runtimes never inherit Main's advisor state.
 		// Optional chaining: lightweight session doubles (test mocks) that don't
 		// implement getAdvisorStatusOverview skip the badge instead of crashing.
-		const advisorStats = ctx.session.getAdvisorStatusOverview?.();
-		if (advisorStats?.configured && advisorStats.advisors.length > 0) {
-			const statuses = advisorStats.advisors.map(a => a.status);
-			const badgeColor = statuses.includes("error")
-				? "error"
-				: statuses.includes("quota_exhausted")
-					? "warning"
-					: statuses.includes("running")
-						? "success"
-						: "dim";
-			// Closed eye once every advisor has finished reviewing the yielded
-			// turn — no more comments until a new primary turn starts.
-			const allYielded = advisorStats.advisors.every(a => a.yielded);
-			const advisorIcon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
-			if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
+		if (!runtime) {
+			const advisorStats = ctx.session.getAdvisorStatusOverview?.();
+			if (advisorStats?.configured && advisorStats.advisors.length > 0) {
+				const statuses = advisorStats.advisors.map(advisor => advisor.status);
+				const badgeColor: ThemeColor = statuses.includes("error")
+					? "error"
+					: statuses.includes("quota_exhausted")
+						? "warning"
+						: statuses.includes("running")
+							? "success"
+							: "dim";
+				// Closed eye once every advisor has finished reviewing the yielded
+				// turn — no more comments until a new primary turn starts.
+				const allYielded = advisorStats.advisors.every(advisor => advisor.yielded);
+				const advisorIcon = allYielded ? theme.icon.advisorClosed || theme.icon.advisor : theme.icon.advisor;
+				if (advisorIcon) content += theme.fg(badgeColor, ` ${advisorIcon}`);
+			}
 		}
 		if (tail) {
 			content += accentFg(ctx, "statusLineModel", tail);
@@ -555,10 +565,10 @@ const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
 		const { cost, premiumRequests } = ctx.usageStats;
-		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
+		const advisorCost = ctx.runtimeStatus ? 0 : (ctx.session.getAdvisorCost?.() ?? 0);
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
-		const state = ctx.session.state;
-		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
+		const model = ctx.runtimeStatus?.model ?? ctx.session.state.model;
+		const usingSubscription = model ? (ctx.session.modelRegistry?.isUsingOAuth(model) ?? false) : false;
 
 		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
@@ -685,9 +695,9 @@ const timeSegment: StatusLineSegment = {
 const sessionSegment: StatusLineSegment = {
 	id: "session",
 	render(ctx) {
-		const sessionManager = ctx.session.sessionManager;
-		const sessionId = sessionManager?.getSessionId?.();
-		const display = statusValue(ctx, sessionId?.slice(0, 8) || "new");
+		const sessionId = ctx.runtimeStatus?.sessionId ?? ctx.session.sessionManager?.getSessionId?.();
+		const runtimeId = ctx.runtimeStatus ? sessionId?.split(":side:").at(-1) : sessionId;
+		const display = statusValue(ctx, runtimeId?.slice(0, 8) || "new");
 
 		return { content: withIcon(theme.icon.session, display), visible: true };
 	},
@@ -752,8 +762,7 @@ const cacheHitSegment: StatusLineSegment = {
 const sessionNameSegment: StatusLineSegment = {
 	id: "session_name",
 	render(ctx) {
-		const sessionManager = ctx.session.sessionManager;
-		const name = sessionManager?.getSessionName() || ctx.previewTitle;
+		const name = ctx.runtimeSessionName || ctx.session.sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
 		const content = ctx.startupPlaceholder ? STARTUP_PLACEHOLDER : sanitizeStatusText(name);

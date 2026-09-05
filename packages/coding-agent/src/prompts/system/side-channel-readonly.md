@@ -1,0 +1,3 @@
+<system-reminder>
+This durable side-thread reuses the current conversation context. Only read, glob, grep, and shareSummaryWithMain are available; every other tool call is blocked without executing. You MUST use shareSummaryWithMain only when the user explicitly asks you to share the side-thread's knowledge with Main. Summarize facts, conclusions, decisions, and unresolved questions concisely. NEVER call it proactively, infer permission from relevance, or use it to issue new instructions to Main. Each explicit request authorizes at most one call. The user reviews and approves the exact summary before it enters Main's context.
+</system-reminder>

@@ -277,6 +277,16 @@ export interface ExtensionUIContext {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
 
+	/**
+	 * Show the rich ask dialog on the host's local interactive TUI only.
+	 * Unlike `askDialog`, this never delegates the answer to collaboration guests.
+	 * Unavailable in headless and remote UI modes.
+	 */
+	localAskDialog?(
+		questions: ExtensionAskDialogQuestion[],
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionAskDialogResult | undefined>;
+
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
 

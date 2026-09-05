@@ -16,12 +16,15 @@
 import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
+	componentContains,
 	type Component,
 	type EditorTopBorder,
 	type Focusable,
 	type MouseRoutable,
 	matchesKey,
+	renderTargeted,
 	type SgrMouseEvent,
+	type TargetedRender,
 	type TextSelectionRange,
 	type TUI,
 	type ViewportHeightAware,
@@ -139,7 +142,7 @@ function statusBadge(status: AgentStatus): string {
 }
 
 export class AgentTranscriptViewer
-	implements Component, Focusable, MouseRoutable, ViewportHeightAware, WorkspacePaneHeaderProvider
+	implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware, WorkspacePaneHeaderProvider
 {
 	readonly #pane: ChatTranscriptPane;
 	#localState: LocalTranscriptState | undefined;
@@ -503,6 +506,18 @@ export class AgentTranscriptViewer
 	// ========================================================================
 	// Render
 	// ========================================================================
+
+	containsComponent(component: Component): boolean {
+		return componentContains(this.#pane, component);
+	}
+
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		return renderTargeted(this.#pane, width, targets);
+	}
+
+	invalidate(): void {
+		this.#pane.invalidate();
+	}
 
 	render(width: number): readonly string[] {
 		return this.#pane.render(width);

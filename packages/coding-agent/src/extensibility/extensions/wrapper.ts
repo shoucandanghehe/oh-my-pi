@@ -271,6 +271,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
 			if (
+				context?.toolApprovalPreview !== "never" &&
 				scheduledCall?.id === toolCallId &&
 				(scheduledCall.name === this.tool.name || scheduledCall.name === this.tool.customWireName)
 			) {
@@ -330,7 +331,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					: basePrompt;
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				choice = signal
+					? await uiContext.select(safetyPrompt, ["Approve", "Deny"], { signal })
+					: await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				signal?.throwIfAborted();
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;

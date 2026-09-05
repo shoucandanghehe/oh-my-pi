@@ -10,8 +10,8 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
 	type ComposerStyle,
-	type EditorTopBorder,
 	claudeComposerStyle,
+	type EditorTopBorder,
 	padding,
 	truncateToWidth,
 	visibleWidth,
@@ -20,6 +20,7 @@ import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-
 import { isSettingsInitialized, settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
+import type { EphemeralConversationStatus } from "../../../session/ephemeral-conversation";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import { withTimeoutSignal } from "../../../utils/fetch-timeout";
@@ -446,6 +447,8 @@ export class StatusLineComponent implements Component {
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
+	#runtimeStatus: EphemeralConversationStatus | undefined;
+	#runtimeSessionName: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
 	// Git status caching (1s TTL)
@@ -607,6 +610,14 @@ export class StatusLineComponent implements Component {
 			this.#invalidateSessionCaches();
 			this.#closeStaleActiveWindow();
 		}
+		this.invalidate();
+	}
+	setRuntimeStatus(status: EphemeralConversationStatus | undefined, sessionName?: string): void {
+		if (this.#runtimeStatus === status && this.#runtimeSessionName === sessionName) return;
+		this.#runtimeStatus = status;
+		this.#runtimeSessionName = sessionName;
+		this.#lastTokensPerSecond = null;
+		this.#lastTokensPerSecondTimestamp = null;
 		this.invalidate();
 	}
 
@@ -900,7 +911,9 @@ export class StatusLineComponent implements Component {
 	 * (the usual repaint driver) has stopped.
 	 */
 	#brandFgAnsi(working: boolean, sessionAccentEnabled: boolean): string {
-		const sessionName = sessionAccentEnabled ? this.session.sessionManager?.getSessionName() : undefined;
+		const sessionName = sessionAccentEnabled
+			? (this.#runtimeSessionName ?? this.session.sessionManager?.getSessionName())
+			: undefined;
 		const idleHex = theme.getColorHex("dim");
 		const workingHex =
 			(sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined) ??
@@ -1342,6 +1355,10 @@ export class StatusLineComponent implements Component {
 	}
 
 	#getTokensPerSecond(): number | null {
+		if (this.#runtimeStatus) {
+			const message = this.#runtimeStatus.latestAssistantMessage;
+			return message ? calculateTokensPerSecond([message], this.#runtimeStatus.isStreaming) : null;
+		}
 		// Aggregate tok/s across the main session AND every live vibe worker.
 		// In vibe mode the director is often idle while workers stream, so the
 		// main session's own rate alone would show a stale/zero value while
@@ -1846,36 +1863,56 @@ export class StatusLineComponent implements Component {
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
+		const runtimeStatus = this.#runtimeStatus;
 
 		// Trigger background fetch (5-min TTL); render uses cached value
-		this.refreshUsageInBackground();
+		if (!runtimeStatus) this.refreshUsageInBackground();
 
 		// Get usage statistics
-		const aggregateUsageStats = this.session.sessionManager?.getUsageStatistics() ?? {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			orchestrationInput: 0,
-			orchestrationOutput: 0,
-			orchestrationCacheRead: 0,
-			premiumRequests: 0,
-			cost: 0,
-		};
+		const aggregateUsageStats = runtimeStatus
+			? {
+					input: runtimeStatus.stats.tokens.input,
+					output: runtimeStatus.stats.tokens.output,
+					cacheRead: runtimeStatus.stats.tokens.cacheRead,
+					cacheWrite: runtimeStatus.stats.tokens.cacheWrite,
+					totalTokens: runtimeStatus.stats.tokens.total,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: runtimeStatus.stats.premiumRequests,
+					cost: runtimeStatus.stats.cost,
+				}
+			: (this.session.sessionManager?.getUsageStatistics() ?? {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				});
 		const usageStats = {
 			...aggregateUsageStats,
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
 
-		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
-		const breakdown = this.getCachedContextBreakdown();
+		let contextWindow =
+			runtimeStatus?.model.contextWindow ?? state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
+		const breakdown = runtimeStatus
+			? {
+					usedTokens: runtimeStatus.stats.contextUsage?.tokens ?? 0,
+					contextWindow: runtimeStatus.stats.contextUsage?.contextWindow ?? runtimeStatus.model.contextWindow ?? 0,
+				}
+			: this.getCachedContextBreakdown();
 		let contextTokens = breakdown.usedTokens;
 		contextWindow = breakdown.contextWindow || contextWindow;
 		let contextPercent: number | null = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
-		const collabState = this.#collabStatus?.stateOverride;
+		const collabState = runtimeStatus ? undefined : this.#collabStatus?.stateOverride;
 		if (collabState?.contextUsage) {
 			contextWindow = collabState.contextUsage.contextWindow || contextWindow;
 			contextTokens = collabState.contextUsage.tokens ?? contextTokens;
@@ -1903,6 +1940,8 @@ export class StatusLineComponent implements Component {
 		const turnElapsedMs = this.getTurnElapsedMs();
 		return {
 			session: this.session,
+			runtimeStatus,
+			runtimeSessionName: this.#runtimeSessionName,
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
@@ -1911,26 +1950,26 @@ export class StatusLineComponent implements Component {
 			options: segmentOptions ?? {},
 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
 			hookStatuses: this.#sortedHookStatuses,
-			planMode: this.#planModeStatus,
-			loopMode: this.#loopModeStatus,
+			planMode: runtimeStatus ? null : this.#planModeStatus,
+			loopMode: runtimeStatus ? null : this.#loopModeStatus,
 			prewalk:
-				typeof this.session.getPrewalkState === "function" && this.session.getPrewalkState()
+				!runtimeStatus && typeof this.session.getPrewalkState === "function" && this.session.getPrewalkState()
 					? { enabled: true }
 					: null,
-			goalMode: this.#goalModeStatus,
-			vibeMode: this.#vibeModeStatus,
-			collab: this.#collabStatus,
+			goalMode: runtimeStatus ? null : this.#goalModeStatus,
+			vibeMode: runtimeStatus ? null : this.#vibeModeStatus,
+			collab: runtimeStatus ? null : this.#collabStatus,
 			usageStats,
 			contextPercent,
 			contextTokens,
 			contextWindow,
-			autoCompactEnabled: this.#autoCompactEnabled,
-			compactionSpeculation,
-			speculationBlinkOn: this.#speculationBlinkOn,
-			subagentCount: this.#subagentCount,
-			activeMs: this.getActiveMs(),
-			turnElapsedMs,
-			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled),
+			autoCompactEnabled: runtimeStatus ? false : this.#autoCompactEnabled,
+			compactionSpeculation: runtimeStatus ? "idle" : compactionSpeculation,
+			speculationBlinkOn: runtimeStatus ? false : this.#speculationBlinkOn,
+			subagentCount: runtimeStatus ? 0 : this.#subagentCount,
+			activeMs: runtimeStatus ? 0 : this.getActiveMs(),
+			turnElapsedMs: runtimeStatus ? null : turnElapsedMs,
+			brandFgAnsi: this.#brandFgAnsi(runtimeStatus ? runtimeStatus.isStreaming : turnElapsedMs !== null, sessionAccentEnabled),
 			git: {
 				branch: gitBranch,
 				status: gitStatus,
@@ -2047,7 +2086,7 @@ export class StatusLineComponent implements Component {
 		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
-		const subagentBadge = this.#subagentBadgeText();
+		const subagentBadge = this.#runtimeStatus ? undefined : this.#subagentBadgeText();
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
@@ -2094,12 +2133,13 @@ export class StatusLineComponent implements Component {
 			// Count task jobs only until their AgentRegistry ref appears. Once it is
 			// running, the subagent badge represents that same agent; bash and eval
 			// jobs always remain independent background work.
-			const runningBackgroundJobs =
-				this.session
-					.getAsyncJobSnapshot()
-					?.running.filter(
-						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
-					).length ?? 0;
+			const runningBackgroundJobs = this.#runtimeStatus
+				? 0
+				: (this.session
+						.getAsyncJobSnapshot()
+						?.running.filter(
+							job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
+						).length ?? 0);
 			if (runningBackgroundJobs > 0) {
 				const count = placeholders ? "…" : `${runningBackgroundJobs}`;
 				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${count}`));
@@ -2289,7 +2329,9 @@ export class StatusLineComponent implements Component {
 		embedContext: boolean,
 	): string {
 		const sessionName =
-			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+			effectiveSettings.sessionAccent !== false
+				? (this.#runtimeSessionName ?? this.session.sessionManager?.getSessionName())
+				: undefined;
 		const accentHex = sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined;
 		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
 		const horizontal = theme.boxRound.horizontal;

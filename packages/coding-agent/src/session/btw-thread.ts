@@ -38,12 +38,6 @@ export type BtwThreadEvent =
 			turns: readonly EphemeralConversationTurn[];
 	  })
 	| (BtwThreadEventBase & { op: "turn"; turn: EphemeralConversationTurn })
-	| (BtwThreadEventBase & {
-			op: "refresh";
-			sideSessionId: string;
-			anchorLeafId: string;
-			baseMessages: readonly AgentMessage[];
-	  })
 	| (BtwThreadEventBase & { op: "draft"; text: string })
 	| (BtwThreadEventBase & { op: "read"; through: number })
 	| (BtwThreadEventBase & { op: "request" })
@@ -125,22 +119,6 @@ function parseEvent(value: unknown): BtwThreadEvent | undefined {
 			turns: data.turns as EphemeralConversationTurn[],
 		};
 	}
-	if (
-		data.op === "refresh" &&
-		typeof data.sideSessionId === "string" &&
-		data.sideSessionId &&
-		typeof data.anchorLeafId === "string" &&
-		data.anchorLeafId &&
-		Array.isArray(data.baseMessages)
-	) {
-		return {
-			...base,
-			op: "refresh",
-			sideSessionId: data.sideSessionId,
-			anchorLeafId: data.anchorLeafId,
-			baseMessages: data.baseMessages as AgentMessage[],
-		};
-	}
 	if (data.op === "turn" && objectRecord(data.turn)) {
 		return { ...base, op: "turn", turn: data.turn as unknown as EphemeralConversationTurn };
 	}
@@ -185,13 +163,6 @@ export function restoreBtwThreads(entries: Iterable<SessionEntry>): RestoredBtwT
 		const thread = threads.get(event.key);
 		if (!thread) continue;
 		switch (event.op) {
-			case "refresh":
-				thread.sideSessionId = event.sideSessionId;
-				thread.anchorLeafId = event.anchorLeafId;
-				thread.baseMessages = event.baseMessages;
-				thread.phase = "ready";
-				thread.error = undefined;
-				break;
 			case "turn":
 				thread.turns.push(event.turn);
 				thread.phase = "ready";

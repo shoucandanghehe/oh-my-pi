@@ -6,6 +6,7 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
+import type { EphemeralConversationStatus } from "../../../session/ephemeral-conversation";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
@@ -63,6 +64,9 @@ export interface SegmentContext {
 	now?: Date;
 	/** Deterministic host label for previews/tests; production omits it. */
 	hostname?: string;
+	/** Side-thread runtime shown in this pane instead of the attached Main session. */
+	runtimeStatus?: EphemeralConversationStatus;
+	runtimeSessionName?: string;
 	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
 	focusedAgentId?: string | undefined;
 	/** Effective `statusLine.sessionAccent`; `false` disables hash-derived accent colors, while `true` or omission enables them. */

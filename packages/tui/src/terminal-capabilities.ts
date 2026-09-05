@@ -78,7 +78,10 @@ function hasNeedleBefore(line: string, needle: string, limit: number): boolean {
 }
 
 function hasSixelDcsStart(line: string): boolean {
-	const limit = Math.min(line.length, 128);
+	// Workspace composition may place a SIXEL pane after an arbitrarily long
+	// ANSI/OSC prefix. `indexOf` already stops at the DCS introducer, before the
+	// multi-megabyte payload, so an offset cap only creates false negatives.
+	const limit = line.length;
 	let from = 0;
 	for (;;) {
 		const start = line.indexOf("\x1bP", from);
@@ -132,13 +135,13 @@ export class TerminalInfo {
 		if (this.imageProtocol === ImageProtocol.Sixel) {
 			return hasSixelDcsStart(line);
 		}
-		// 512-unit window: placeholder cells can sit deep in a composed row —
-		// the composer attachment band prefixes each thumbnail row with border
-		// SGRs and stacks cards side by side, so the first placeholder of a
-		// later card starts hundreds of units in. Rows past the window would
-		// silently lose the verbatim image-line path (no truncation, no SGR
-		// coalescing) that placeholder grids and placement APCs rely on.
-		return hasNeedleBefore(line, this.imageProtocol, 512) || hasNeedleBefore(line, KITTY_PLACEHOLDER, 512);
+		// Placeholder cells can sit deep in composed rows when attachment cards are
+		// stacked side by side. Kitty control data is sparse enough to scan in full;
+		// bound other protocol scans while preserving the attachment-band window.
+		if (this.imageProtocol === ImageProtocol.Kitty) {
+			return line.includes(ImageProtocol.Kitty) || line.includes(KITTY_PLACEHOLDER);
+		}
+		return hasNeedleBefore(line, this.imageProtocol, 512);
 	}
 
 	formatNotification(message: string | TerminalNotification): string {
@@ -812,19 +815,69 @@ export function encodeKittyPlacement(options: {
 }
 
 /**
- * Exact shape of the direct-placement line {@link Image} emits as its block's
- * last row: optional `ESC 7` + `CUU(rows-1)` prefix, the {@link encodeKittyPlacement}
- * APC, optional `ESC 8` suffix. tmux-passthrough-wrapped lines deliberately do
- * not match (passthrough placements stay untouched).
+ * Direct-placement block tail, either emitted directly or with only the Kitty
+ * APC wrapped in tmux's DCS passthrough envelope.
  */
-const KITTY_DIRECT_PLACEMENT_LINE =
-	/^(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?$/;
+const KITTY_DIRECT_PLACEMENT =
+	/(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\\(?:\x1b8)?/;
+const KITTY_TMUX_DIRECT_PLACEMENT =
+	/(?:\x1b7(?:\x1b\[(\d+)A)?)?\x1bPtmux;\x1b\x1b_Ga=p,q=2,C=1,i=(\d+)(?:,p=(\d+))?(?:,c=(\d+))?(?:,r=(\d+))?\x1b\x1b\\\x1b\\(?:\x1b8)?/;
+const KITTY_PLACEMENT_CLIP_MARKER = /\x1b_pi:kp:(\d+)\x07$/;
 
 export interface ParsedKittyPlacementLine {
 	imageId: number;
 	placementId: number | undefined;
 	columns: number;
 	rows: number;
+}
+
+export interface ParsedKittyPlacementSegment extends ParsedKittyPlacementLine {
+	prefix: string;
+	suffix: string;
+	maxRowsAbove: number | undefined;
+	raw: string;
+	tmuxPassthrough: boolean;
+}
+
+/** Tag every embedded workspace placement with its pane-body row clamp. */
+export function markKittyPlacementClipRows(line: string, maxRowsAbove: number): string {
+	const marker = `\x1b_pi:kp:${Math.max(0, Math.trunc(maxRowsAbove))}\x07`;
+	let remaining = line;
+	let marked = "";
+	for (;;) {
+		const parsed = parseKittyDirectPlacementSegment(remaining);
+		if (!parsed) return marked + remaining;
+		marked += parsed.prefix + marker + parsed.raw;
+		remaining = parsed.suffix;
+	}
+}
+
+/**
+ * Find the first direct-placement segment embedded in a composed row. The
+ * private workspace marker is consumed rather than reaching the terminal.
+ */
+export function parseKittyDirectPlacementSegment(line: string): ParsedKittyPlacementSegment | null {
+	const tmuxPassthrough = line.includes("\x1bPtmux;");
+	const m = (tmuxPassthrough ? KITTY_TMUX_DIRECT_PLACEMENT : KITTY_DIRECT_PLACEMENT).exec(line);
+	if (!m || m.index === undefined) return null;
+	const columns = m[4] !== undefined ? Number(m[4]) : 0;
+	const rows = m[5] !== undefined ? Number(m[5]) : 0;
+	if (columns <= 0 || rows <= 0) return null;
+	let prefix = line.slice(0, m.index);
+	const marker = KITTY_PLACEMENT_CLIP_MARKER.exec(prefix);
+	const maxRowsAbove = marker ? Number(marker[1]) : undefined;
+	if (marker) prefix = prefix.slice(0, marker.index);
+	return {
+		imageId: Number(m[2]),
+		placementId: m[3] !== undefined ? Number(m[3]) : undefined,
+		columns,
+		rows,
+		prefix,
+		raw: m[0],
+		suffix: line.slice(m.index + m[0].length),
+		maxRowsAbove,
+		tmuxPassthrough,
+	};
 }
 
 /**
@@ -834,16 +887,21 @@ export interface ParsedKittyPlacementLine {
  * callers fall back to writing the line verbatim.
  */
 export function parseKittyDirectPlacementLine(line: string): ParsedKittyPlacementLine | null {
-	const m = KITTY_DIRECT_PLACEMENT_LINE.exec(line);
-	if (!m) return null;
-	const columns = m[4] !== undefined ? Number(m[4]) : 0;
-	const rows = m[5] !== undefined ? Number(m[5]) : 0;
-	if (columns <= 0 || rows <= 0) return null;
+	const parsed = parseKittyDirectPlacementSegment(line);
+	if (
+		!parsed ||
+		parsed.tmuxPassthrough ||
+		parsed.prefix !== "" ||
+		parsed.suffix !== "" ||
+		parsed.maxRowsAbove !== undefined
+	) {
+		return null;
+	}
 	return {
-		imageId: Number(m[2]),
-		placementId: m[3] !== undefined ? Number(m[3]) : undefined,
-		columns,
-		rows,
+		imageId: parsed.imageId,
+		placementId: parsed.placementId,
+		columns: parsed.columns,
+		rows: parsed.rows,
 	};
 }
 
@@ -865,12 +923,17 @@ export function encodeKittyPlacementLine(options: {
 	screenRow: number;
 	/** Source image height in pixels, for the clipped source rectangle. */
 	imageHeightPx: number;
+	/** Optional pane-body clamp supplied by workspace composition. */
+	maxRowsAbove?: number;
+	/** Preserve a tmux passthrough envelope parsed from the source line. */
+	tmuxPassthrough?: boolean;
 }): string {
 	// Without a source pixel height the slice cannot be expressed — emit the
 	// component's own full form (status quo) rather than squashing the whole
 	// image into the reduced row count.
 	const clippable = options.imageHeightPx > 0;
-	const hiddenRows = clippable ? Math.max(0, options.rows - 1 - options.screenRow) : 0;
+	const availableRowsAbove = Math.min(options.screenRow, options.maxRowsAbove ?? options.screenRow);
+	const hiddenRows = clippable ? Math.max(0, options.rows - 1 - availableRowsAbove) : 0;
 	const visibleRows = options.rows - hiddenRows;
 	const params: string[] = ["a=p", "q=2", "C=1", `i=${options.imageId}`, `p=${options.placementId}`];
 	params.push(`c=${options.columns}`, `r=${visibleRows}`);
@@ -878,11 +941,10 @@ export function encodeKittyPlacementLine(options: {
 		const srcY = Math.floor((options.imageHeightPx * hiddenRows) / options.rows);
 		params.push(`y=${srcY}`, `h=${Math.max(1, options.imageHeightPx - srcY)}`);
 	}
-	// No tmux passthrough: inside tmux the component's own line arrives
-	// wrapped, never parses, and never reaches this rewrite.
 	const apc = `\x1b_G${params.join(",")}\x1b\\`;
+	const placement = options.tmuxPassthrough ? wrapTmuxPassthrough(apc) : apc;
 	const cuu = visibleRows - 1;
-	return cuu > 0 ? `\x1b7\x1b[${cuu}A${apc}\x1b8` : apc;
+	return cuu > 0 ? `\x1b7\x1b[${cuu}A${placement}\x1b8` : placement;
 }
 
 /**

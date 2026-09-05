@@ -31,7 +31,7 @@ import {
 	isImageProtocolForced,
 	isInsideHerdr,
 	isInsideTerminalMultiplexer,
-	parseKittyDirectPlacementLine,
+	parseKittyDirectPlacementSegment,
 	setCellDimensions,
 	setTerminalImageProtocol,
 	shouldEnableSynchronizedOutputByDefault,
@@ -43,8 +43,8 @@ import {
 	CURSOR_MARKER,
 	Ellipsis,
 	extractSegments,
-	isOsc66Line,
 	getWordNavKind,
+	isOsc66Line,
 	isWordNavJoiner,
 	normalizeTerminalOutput,
 	osc66MaxScale,
@@ -275,6 +275,13 @@ export interface Component {
 	 */
 	render(width: number): readonly string[];
 
+	/**
+	 * Optional ownership seam for composed components whose descendants are not
+	 * exposed through a public `children` array. Used to route component-scoped
+	 * renders through viewport/workspace wrappers.
+	 */
+	containsComponent?(component: Component): boolean;
+
 	/** Recover selected logical text from physical rows produced by the latest render. */
 	getTextSelection?(selection: TextSelectionRange): string | undefined;
 
@@ -366,6 +373,17 @@ function isOverlayFocusTarget(owner: Component, component: Component | null): bo
 	return candidate.ownsOverlayFocusTarget?.(component) === true;
 }
 
+/** Optional component-scoped compose seam for wrappers with stable row ledgers. */
+export interface TargetedRender {
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[];
+}
+
+export function renderTargeted(component: Component, width: number, targets: readonly Component[]): readonly string[] {
+	const candidate = component as Component & Partial<TargetedRender>;
+	return typeof candidate.renderTargeted === "function"
+		? candidate.renderTargeted(width, targets)
+		: component.render(width);
+}
 
 /**
  * Interface for components that can receive focus and display a cursor.
@@ -393,9 +411,16 @@ export interface RenderRequestOptions {
 	 * The requester guarantees the component tree is unchanged — only
 	 * app-viewport scroll/selection state moved, which is consumed at emit
 	 * time. The app-viewport backend may then reuse the last composed frame
-	 * instead of re-walking every component. Ignored by other backends.
+	 * instead of re-walking every component; a forced request stays immediate
+	 * without turning the cached frame into a full-window repair. Ignored by
+	 * other backends.
 	 */
 	viewportOnly?: boolean;
+	/**
+	 * A forced app-viewport request should schedule immediately but retain its
+	 * normal dirty-row diff. Native-scrollback backends ignore this option.
+	 */
+	forceViewportRepaint?: boolean;
 }
 /**
  * Controls how a settled terminal resize refreshes native history.
@@ -522,18 +547,22 @@ export interface OverlayHandle {
 /**
  * Container - a component that contains other components
  */
-export class Container implements Component {
+export class Container implements Component, TargetedRender {
 	children: Component[] = [];
 
 	// Memoized concatenation of the children's latest renders. Children are
 	// still rendered every frame (renders carry side effects: image placement
-	// registration); the memo only skips rebuilding the concatenated array when
-	// every child returned the exact same array reference at the same width —
-	// which, per the Component render contract, proves the rows are
-	// byte-identical. Cleared on any child-list change and on invalidate().
-	#memoLines: string[] | undefined;
+	// registration, seam/stability reports); the memo only skips rebuilding
+	// the concatenated array when every child returned the exact same array
+	// reference at the same width — which, per the Component render contract,
+	// proves the rows are byte-identical. Cleared on any child-list change and
+	// on invalidate().
+	#memoLines: readonly string[] | undefined;
 	#memoChildLines: (readonly string[])[] = [];
 	#memoWidth = -1;
+	// Child identities and target owners back component-scoped recomposition.
+	#memoChildren: Component[] = [];
+	#targetOwnerCache = new WeakMap<Component, Component>();
 
 	#ignoreTight = false;
 
@@ -552,6 +581,7 @@ export class Container implements Component {
 			component.setIgnoreTight?.(true);
 		}
 		this.#memoLines = undefined;
+		this.#targetOwnerCache = new WeakMap();
 	}
 
 	removeChild(component: Component): void {
@@ -559,12 +589,14 @@ export class Container implements Component {
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.#memoLines = undefined;
+			this.#targetOwnerCache = new WeakMap();
 		}
 	}
 
 	clear(): void {
 		this.children = [];
 		this.#memoLines = undefined;
+		this.#targetOwnerCache = new WeakMap();
 	}
 
 	/** Dispose every child, then detach it from this container. */
@@ -591,19 +623,85 @@ export class Container implements Component {
 		}
 	}
 
+	containsComponent(target: Component): boolean {
+		if (target === this) return true;
+		const cached = this.#targetOwnerCache.get(target);
+		if (cached !== undefined && this.children.includes(cached) && componentContains(cached, target)) return true;
+		for (const child of this.children) {
+			if (!componentContains(child, target)) continue;
+			this.#targetOwnerCache.set(target, child);
+			return true;
+		}
+		this.#targetOwnerCache.delete(target);
+		return false;
+	}
+
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		width = Math.max(1, width);
+		if (this.render !== Container.prototype.render) return this.render(width);
+		const children = this.children;
+		const refs = this.#memoChildLines;
+		if (
+			targets.length === 0 ||
+			targets.includes(this) ||
+			this.#memoLines === undefined ||
+			this.#memoWidth !== width ||
+			refs.length !== children.length ||
+			this.#memoChildren.length !== children.length
+		) {
+			return this.render(width);
+		}
+		for (let index = 0; index < children.length; index++) {
+			if (this.#memoChildren[index] !== children[index]) return this.render(width);
+		}
+
+		const grouped = new Map<Component, Component[]>();
+		for (const target of targets) {
+			let owner = this.#targetOwnerCache.get(target);
+			if (owner === undefined || !children.includes(owner) || !componentContains(owner, target)) {
+				owner = undefined;
+				for (const child of children) {
+					if (!componentContains(child, target)) continue;
+					owner = child;
+					this.#targetOwnerCache.set(target, child);
+					break;
+				}
+			}
+			if (!owner) return this.render(width);
+			const childTargets = grouped.get(owner);
+			if (childTargets) childTargets.push(target);
+			else grouped.set(owner, [target]);
+		}
+
+		for (let index = 0; index < children.length; index++) {
+			const child = children[index]!;
+			const childTargets = grouped.get(child);
+			if (childTargets) refs[index] = renderTargeted(child, width, childTargets);
+		}
+		this.#memoChildren = children.slice();
+		this.#memoWidth = width;
+		const lines: readonly string[] = refs.length === 1 ? refs[0]! : refs.flat();
+		this.#memoLines = lines;
+		return lines;
+	}
 
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		const children = this.children;
 		const count = children.length;
 		let refs = this.#memoChildLines;
-		let unchanged = this.#memoLines !== undefined && this.#memoWidth === width && refs.length === count;
+		let unchanged =
+			this.#memoLines !== undefined &&
+			this.#memoWidth === width &&
+			refs.length === count &&
+			this.#memoChildren.length === count;
 		if (refs.length !== count) {
 			// oxlint-disable-next-line unicorn/no-new-array -- render-frame length preallocation
 			refs = new Array(count);
 			this.#memoChildLines = refs;
 		}
 		for (let i = 0; i < count; i++) {
+			if (this.#memoChildren[i] !== children[i]) unchanged = false;
 			const childLines = children[i]!.render(width);
 			if (refs[i] !== childLines) {
 				unchanged = false;
@@ -611,12 +709,9 @@ export class Container implements Component {
 			}
 		}
 		this.#memoWidth = width;
+		this.#memoChildren = children.slice();
 		if (unchanged) return this.#memoLines!;
-		const lines: string[] = [];
-		for (let i = 0; i < count; i++) {
-			const childLines = refs[i]!;
-			for (let j = 0; j < childLines.length; j++) lines.push(childLines[j]!);
-		}
+		const lines: readonly string[] = refs.length === 1 ? refs[0]!.slice() : refs.flat();
 		this.#memoLines = lines;
 		return lines;
 	}
@@ -696,6 +791,29 @@ interface HardwareCursorState {
 	visible: boolean;
 }
 
+interface HardwareCursorUpdate {
+	toRow: number;
+	state: HardwareCursorState | null;
+	visible?: boolean;
+}
+
+interface CursorControlResult extends HardwareCursorUpdate {
+	seq: string;
+	toCol: number;
+	visible: boolean;
+}
+
+/** Depth-first identity search through public children or an ownership seam. */
+export function componentContains(root: Component, target: Component): boolean {
+	if (root === target) return true;
+	if (root.containsComponent?.(target) === true) return true;
+	const children = (root as Partial<Container>).children;
+	if (!Array.isArray(children)) return false;
+	for (const child of children) {
+		if (componentContains(child, target)) return true;
+	}
+	return false;
+}
 interface PreparedLine {
 	raw: string;
 	width: number;
@@ -1007,6 +1125,7 @@ export class TUI extends Container {
 	#appViewportPixelMouseActive = false;
 	#appViewportHoverMouseActive = false;
 	#appViewportPreviousLines: string[] = [];
+	#appViewportPreviousSixelRows: boolean[] = [];
 	#appViewportPreviousScrollbarGlyphs: string[] = [];
 	#appViewportPreviousWidth = 0;
 	#appViewportScrollRegionEnd: number | undefined;
@@ -1891,6 +2010,7 @@ export class TUI extends Container {
 		this.#appViewportPixelMouseActive = pixelMouse;
 		this.#appViewportHoverMouseActive = hoverMouse;
 		this.#appViewportPreviousLines = [];
+		this.#appViewportPreviousSixelRows = [];
 		this.#appViewportPreviousScrollbarGlyphs = [];
 		this.#appViewportPreviousWidth = 0;
 		this.#appViewportScrollbarMetrics = null;
@@ -1927,6 +2047,7 @@ export class TUI extends Container {
 			this.#stopAppViewportSelectionAutoScroll();
 			this.#appViewportLastClick = null;
 			this.#appViewportPreviousLines = [];
+			this.#appViewportPreviousSixelRows = [];
 			this.#appViewportPreviousScrollbarGlyphs = [];
 			this.#appViewportPreviousWidth = 0;
 			this.#appViewportScrollbarMetrics = null;
@@ -2012,12 +2133,30 @@ export class TUI extends Container {
 		this.#executeRender();
 	}
 
+	/**
+	 * Reconcile a component row-topology change that may invalidate immutable
+	 * native scrollback. App-viewport frames keep every row mutable, so their
+	 * normal differential render is sufficient and must not inherit the
+	 * native backend's destructive full-history reset.
+	 */
+	reconcileRenderTopology(): void {
+		if (this.#stopped) return;
+		if (this.#appViewportBackend) {
+			this.requestRender(true, { forceViewportRepaint: false });
+			return;
+		}
+		this.resetDisplay();
+	}
+
 	requestRender(force = false, options?: RenderRequestOptions): void {
 		// Content changes invalidate the cached app-viewport frame; scrolling and
 		// selection only change viewport-owned state applied during emission.
 		if (!options?.viewportOnly) this.#appViewportComposeStale = true;
 		if (force) {
-			this.#prepareForcedRender(options?.clearScrollback === true);
+			this.#prepareForcedRender(
+				options?.clearScrollback === true,
+				!this.#appViewportBackend || (options?.viewportOnly !== true && options?.forceViewportRepaint !== false),
+			);
 			this.#renderRequested = true;
 			this.#renderScheduler.scheduleImmediate(() => {
 				if (this.#stopped || !this.#renderRequested) {
@@ -2066,6 +2205,7 @@ export class TUI extends Container {
 	}
 
 
+
 	#maybeDeferGhosttyInitialImagePaint(): boolean {
 		if (this.#ghosttyInitialImageDelayDone) return false;
 		if (TERMINAL.id !== "ghostty" || TERMINAL.imageProtocol !== ImageProtocol.Kitty) {
@@ -2090,13 +2230,13 @@ export class TUI extends Container {
 		}, delayMs);
 		return true;
 	}
-	#prepareForcedRender(clearScrollback: boolean): void {
+	#prepareForcedRender(clearScrollback: boolean, forceViewportRepaint = true): void {
 		if (clearScrollback && !this.#clearScrollbackOnNextRender) {
 			this.#frameProvider?.beginHistoryReplay?.();
 			if (TERMINAL.imageProtocol === ImageProtocol.Kitty) this.#imageBudget.forgetTransmitted();
 		}
 		this.#clearScrollbackOnNextRender ||= clearScrollback;
-		this.#forceViewportRepaintOnNextRender = true;
+		this.#forceViewportRepaintOnNextRender ||= forceViewportRepaint;
 		if (this.#renderTimer) {
 			this.#renderTimer.cancel();
 			this.#renderTimer = undefined;
@@ -3250,25 +3390,35 @@ export class TUI extends Container {
 	 */
 	#imageLineSequence(line: string, screenRow: number, frameRow: number, committedTo: number): string {
 		if (screenRow < 0) return line;
-		const parsed = parseKittyDirectPlacementLine(line);
-		if (!parsed) return line;
-		// The emitted placement attaches from the block's first *visible* row
-		// (the clip drops the rows above the viewport), so epoch tracking keys
-		// on that row — not the block origin, which may be long committed.
-		const placement = this.#imageBudget.resolvePlacementEmit(
-			parsed.imageId,
-			frameRow >= 0 ? frameRow - Math.min(parsed.rows - 1, screenRow) : -1,
-			committedTo,
-		);
-		if (!placement) return line;
-		return encodeKittyPlacementLine({
-			imageId: parsed.imageId,
-			placementId: placement.placementId,
-			columns: parsed.columns,
-			rows: parsed.rows,
-			screenRow,
-			imageHeightPx: placement.heightPx,
-		});
+		let remaining = line;
+		let rewritten = "";
+		for (;;) {
+			const parsed = parseKittyDirectPlacementSegment(remaining);
+			if (!parsed) return rewritten + remaining;
+			rewritten += parsed.prefix;
+			const availableRowsAbove = Math.min(screenRow, parsed.maxRowsAbove ?? screenRow);
+			// The emitted placement attaches from the block's first visible pane
+			// row, so epoch tracking keys on that row rather than a clipped-away
+			// block origin.
+			const placement = this.#imageBudget.resolvePlacementEmit(
+				parsed.imageId,
+				frameRow >= 0 ? frameRow - Math.min(parsed.rows - 1, availableRowsAbove) : -1,
+				committedTo,
+			);
+			rewritten += placement
+				? encodeKittyPlacementLine({
+						imageId: parsed.imageId,
+						placementId: placement.placementId,
+						columns: parsed.columns,
+						rows: parsed.rows,
+						screenRow,
+						imageHeightPx: placement.heightPx,
+						tmuxPassthrough: parsed.tmuxPassthrough,
+						maxRowsAbove: parsed.maxRowsAbove,
+					})
+				: parsed.raw;
+			remaining = parsed.suffix;
+		}
 	}
 
 	#terminalLine(line: string, screenRow = -1, frameRow = -1, committedTo = -1): string {
@@ -4023,12 +4173,11 @@ export class TUI extends Container {
 		height: number,
 		cursorPos: { row: number; col: number } | null,
 	): void {
-		const forceFullRepaint =
+		const geometryForcesFullRepaint =
 			this.#forceViewportRepaintOnNextRender ||
 			this.#clearScrollbackOnNextRender ||
 			(this.#appViewportPreviousWidth > 0 && this.#appViewportPreviousWidth !== width) ||
 			(this.#appViewportPreviousLines.length > 0 && this.#appViewportPreviousLines.length !== height);
-		if (forceFullRepaint) this.#forgetHardwareCursorState();
 		const previousScrollEnd = this.#appViewportPreviousScrollRegionEnd;
 		this.#appViewportFrameLines = lines;
 		this.#syncAppViewportSelectionScroll(this.#findAppViewportInputOwner());
@@ -4053,8 +4202,15 @@ export class TUI extends Container {
 			if (overlayMarkers.length > 0) fittedCursorPos = overlayMarkers[0]!;
 			fitted = this.#prepareLinesArray(fitted, width);
 		}
+		const currentSixelRows =
+			TERMINAL.imageProtocol === ImageProtocol.Sixel
+				? fitted.map(line => TERMINAL.isImageLine(line))
+				: new Array<boolean>(height).fill(false);
+		let kittyCleanup = "";
+		for (const id of this.#imageBudget.takePurgeIds()) kittyCleanup += encodeKittyDeleteImage(id);
+		for (const id of this.#imageBudget.takeRetiredIds()) kittyCleanup += encodeKittyDeleteImage(id);
 		if (
-			!forceFullRepaint &&
+			!geometryForcesFullRepaint &&
 			this.#appViewportPreviousWidth === width &&
 			this.#appViewportPreviousLines.length === height &&
 			this.#appViewportPreviousScrollbarGlyphs.length === height
@@ -4063,6 +4219,7 @@ export class TUI extends Container {
 			for (let r = 0; r < height; r++) {
 				if (
 					fitted[r] !== this.#appViewportPreviousLines[r] ||
+					currentSixelRows[r] !== (this.#appViewportPreviousSixelRows[r] ?? false) ||
 					(scrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK) !==
 						(this.#appViewportPreviousScrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK)
 				) {
@@ -4071,23 +4228,46 @@ export class TUI extends Container {
 				}
 			}
 			if (same) {
+				if (kittyCleanup) this.terminal.write(this.#paintBeginSequence + kittyCleanup + this.#paintEndSequence);
 				this.#writeAppViewportCursor(fittedCursorPos, height);
 				return;
 			}
 		}
+		// SIXEL is a pixel overlay rather than a replaceable cell placement.
+		// Repainting a resized/moved image cannot delete the old, wider footprint,
+		// and row-local erases leave the stale pixels split into horizontal bands.
+		// When a visible SIXEL anchor changes or disappears, clear every viewport
+		// row and replay the remaining image blocks atomically.
+		const hasVisibleSixel = currentSixelRows.some(Boolean) || this.#appViewportPreviousSixelRows.some(Boolean);
+		let sixelNeedsFullRepaint = geometryForcesFullRepaint && hasVisibleSixel;
+		const sixelRows = Math.max(height, this.#appViewportPreviousSixelRows.length);
+		for (let row = 0; row < sixelRows && !sixelNeedsFullRepaint; row++) {
+			const currentIsSixel = currentSixelRows[row] ?? false;
+			const previousIsSixel = this.#appViewportPreviousSixelRows[row] ?? false;
+			if (!currentIsSixel && !previousIsSixel) continue;
+			if (
+				currentIsSixel !== previousIsSixel ||
+				(fitted[row] ?? "") !== (this.#appViewportPreviousLines[row] ?? "")
+			) {
+				sixelNeedsFullRepaint = true;
+			}
+		}
+		const forceFullRepaint = geometryForcesFullRepaint || sixelNeedsFullRepaint;
+		if (forceFullRepaint) this.#forgetHardwareCursorState();
 		this.#fullRedrawCount += 1;
 		const cursorControl = this.#appViewportCursorControlSequence(fittedCursorPos, height);
-		let buffer = this.#paintBeginSequence;
-		const purgeIds = this.#imageBudget.takePurgeIds();
-		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			for (const id of purgeIds) buffer += encodeKittyDeleteImage(id);
-		}
+		let buffer = this.#paintBeginSequence + kittyCleanup;
+		// Windows Terminal's ED2 clears the page's SIXEL ImageSlice cells;
+		// DECSED covers terminals that expose selective image erasure. Use both
+		// before replay so pixels outside a narrowed footprint cannot survive.
+		if (sixelNeedsFullRepaint) buffer += "\x1b[2J\x1b[?2J\x1b[H";
 		buffer += this.#appViewportPaintRows(fitted, scrollbarGlyphs, width, height, forceFullRepaint);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#appViewportPreviousLines = fitted;
+		this.#appViewportPreviousSixelRows = currentSixelRows;
 		this.#appViewportPreviousScrollbarGlyphs = scrollbarGlyphs;
 		this.#appViewportPreviousWidth = width;
 		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
@@ -4111,7 +4291,12 @@ export class TUI extends Container {
 			const previousLine = previousLines[row] ?? "";
 			if (forceFullRepaint || line !== previousLine || (widthChanged && line !== "")) {
 				if (forceFullRepaint || line !== "" || previousLine !== "") {
-					buffer += `\x1b[${row + 1};1H${this.#appViewportContentRewriteSequence(line, contentWidth)}`;
+					buffer += `\x1b[${row + 1};1H${this.#appViewportContentRewriteSequence(
+						line,
+						contentWidth,
+						row,
+						this.#appViewportVisibleSourceRows[row] ?? -1,
+					)}`;
 				}
 			}
 			const glyph = scrollbarGlyphs[row] ?? APP_VIEWPORT_SCROLLBAR_BLANK;
@@ -4152,8 +4337,8 @@ export class TUI extends Container {
 		return buffer;
 	}
 
-	#appViewportContentRewriteSequence(line: string, width: number): string {
-		if (TERMINAL.isImageLine(line)) return ERASE_LINE + line;
+	#appViewportContentRewriteSequence(line: string, width: number, screenRow: number, frameRow: number): string {
+		if (TERMINAL.isImageLine(line)) return ERASE_LINE + this.#terminalLine(line, screenRow, frameRow);
 		const terminalLine = this.#terminalLine(line);
 		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
 		const lineWidth = asciiWidth ?? visibleWidth(line);
@@ -4273,6 +4458,7 @@ export class TUI extends Container {
 		end: AppViewportSelectionPoint,
 		bounds: AppViewportSelectionBounds | undefined,
 	): string {
+		if (TERMINAL.isImageLine(line)) return line;
 		const lineWidth = visibleWidth(line);
 		if (lineWidth <= 0) return line;
 		const { startCol, endCol } = this.#appViewportSelectionColumns(line, sourceRow, start, end, bounds);
