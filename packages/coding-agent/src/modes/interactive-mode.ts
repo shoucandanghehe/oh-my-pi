@@ -41,6 +41,8 @@ import {
 	type TUI,
 	visibleWidth,
 	wrapTextWithAnsi,
+	WorkspaceLayout,
+	WorkspaceModel,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
@@ -117,6 +119,7 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentMetrics } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
@@ -128,6 +131,7 @@ import {
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
+import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
@@ -255,6 +259,8 @@ import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { AnchoredLiveContainer } from "./components/anchored-live-container";
+import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import { MainSessionPane } from "./components/main-session-pane";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -272,6 +278,8 @@ import { TerminalActivityController } from "./controllers/terminal-activity-cont
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
+import { WorkspacePaneController } from "./controllers/workspace-pane-controller";
+import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -296,7 +304,8 @@ import {
 	SessionObserverRegistry,
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
-import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
+import { renderWorkspacePaneHeader, sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
+import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
@@ -490,6 +499,12 @@ function renderWorkingMessage(message: string, accent?: WorkingMessageAccent): s
 const EDITOR_MAX_HEIGHT_MIN = 6;
 const EDITOR_MAX_HEIGHT_MAX = 18;
 const EDITOR_RESERVED_ROWS = 12;
+const MAIN_WORKSPACE_MIN_WIDTH = 40;
+const MAIN_WORKSPACE_MIN_HEIGHT = 8;
+const AGENT_WORKSPACE_MIN_WIDTH = 24;
+const AGENT_WORKSPACE_MIN_HEIGHT = 6;
+const BTW_WORKSPACE_MIN_WIDTH = 28;
+const BTW_WORKSPACE_MIN_HEIGHT = 8;
 const EDITOR_FALLBACK_ROWS = 24;
 const EDITOR_MIN_CHROME_ROWS = 4; // rows reserved for transcript + status on small terms
 const EDITOR_MIN_RENDERED_ROWS = 3; // bordered editor floor: top+bottom border + 1 content row
@@ -1218,6 +1233,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	readonly terminalActivity: TerminalActivityController;
+	readonly workspaceEnabled: boolean;
+	#workspaceLayout: WorkspaceLayout | undefined;
+	#mainScrollRoot: Container | undefined;
+	#mainStickyRoot: Container | undefined;
+	#workspacePanes: WorkspacePaneController | undefined;
+	#workspaceWelcome: WelcomeComponent | undefined;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -1943,6 +1964,107 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.workspaceEnabled = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
+		if (this.workspaceEnabled) {
+			this.#mainScrollRoot = new Container();
+			this.#mainStickyRoot = new Container();
+			const mainPane = new MainSessionPane({
+				scrollRoot: this.#mainScrollRoot,
+				stickyRoot: this.#mainStickyRoot,
+				requestRender: () => this.ui.requestRender(),
+				requestComponentRender: component => this.ui.requestComponentRender(component),
+			});
+			this.#workspaceLayout = new WorkspaceLayout({
+				model: WorkspaceModel.single("main"),
+				panes: [
+					{
+						paneId: "main",
+						title: "Main",
+						component: mainPane,
+						// The editor slot swaps in dialogs (ask, hook selector/editor)
+						// and the editor itself is replaced on session switch, so the
+						// focus target must resolve to the slot's current occupant.
+						focusTarget: () => this.editorContainer.children[0] ?? this.editor,
+						scroll: "component",
+						minWidth: MAIN_WORKSPACE_MIN_WIDTH,
+						minHeight: MAIN_WORKSPACE_MIN_HEIGHT,
+					},
+				],
+				height: () => this.ui.terminal.rows,
+				requestComponentRender: component => this.ui.requestComponentRender(component),
+				requestRender: () => this.ui.requestRender(),
+				renderHeader: (pane, width, focused) => renderWorkspacePaneHeader(replaceTabs(pane.title), width, focused),
+				renderSash: (text, axis) => {
+					const glyph = axis === "x" ? "┃" : "━";
+					return theme.fg("borderAccent", glyph.repeat(visibleWidth(text)));
+				},
+				renderDropPreview: text => theme.fg("accent", text),
+				renderDropPreviewGhost: text => theme.fg("muted", text),
+				focus: component => this.ui.setFocus(component),
+			});
+			this.#workspacePanes = new WorkspacePaneController(this.#workspaceLayout);
+		}
+	}
+
+	#createAgentWorkspaceViewer(agentId: string, close: () => void): AgentTranscriptViewer {
+		const remote = this.collabGuest?.hubRemote;
+		return new AgentTranscriptViewer({
+			agentId,
+			registry: this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+			remote,
+			lifecycle: remote ? undefined : () => AgentLifecycleManager.global(),
+			ui: this.ui,
+			getTool: name => this.session.getToolByName(name),
+			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
+			cwd: this.sessionManager.getCwd(),
+			hideThinkingBlock: () => this.effectiveHideThinkingBlock,
+			proseOnlyThinking: () => this.proseOnlyThinking,
+			expandKeys: this.keybindings.getKeys("app.tools.expand"),
+			hubKeys: [...this.keybindings.getKeys("app.agents.hub"), ...this.keybindings.getKeys("app.session.observe")],
+			createStatusLine: session => this.statusLine.createPeer(session),
+			requestRender: () => this.ui.requestRender(),
+			onClose: close,
+			onHubToggle: () => this.showAgentHub(),
+		});
+	}
+
+	async openAgentWorkspacePane(id: string): Promise<void> {
+		if (!this.#workspacePanes) {
+			throw new Error("Agent workspace panes require the app-viewport render backend");
+		}
+		if (
+			!this.#workspacePanes.open({
+				key: `agent:${id}`,
+				paneId: `agent:${id}`,
+				title: id,
+				minWidth: AGENT_WORKSPACE_MIN_WIDTH,
+				minHeight: AGENT_WORKSPACE_MIN_HEIGHT,
+				createPane: close => this.#createAgentWorkspaceViewer(id, close),
+			})
+		) {
+			throw new Error("The terminal is too small to open another agent pane");
+		}
+	}
+
+	openBtwWorkspacePane(component: Component): boolean {
+		return (
+			this.#workspacePanes?.open({
+				key: "btw",
+				paneId: "btw",
+				title: "BTW",
+				minWidth: BTW_WORKSPACE_MIN_WIDTH,
+				minHeight: BTW_WORKSPACE_MIN_HEIGHT,
+				createPane: () => component,
+			}) ?? false
+		);
+	}
+
+	closeBtwWorkspacePane(): boolean {
+		return this.#workspacePanes?.close("btw") ?? false;
+	}
+
+	focusMainWorkspacePane(): void {
+		if (!this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
 	}
 
 	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
@@ -1970,6 +2092,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#judgmentBatchProgressClearTimers.clear();
 		this.#judgmentBatchProgressHud.clear();
 		if (requestRender) this.ui.requestRender();
+	}
+
+	isMainWorkspacePaneFocused(): boolean {
+		return !this.#workspaceLayout || this.#workspaceLayout.focusedPaneId === "main";
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -2029,6 +2155,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	playWelcomeIntro(): void {
+		const welcome = this.#workspaceWelcome;
+		if (welcome) {
+			welcome.playIntro(() => this.ui.requestComponentRender(welcome));
+			return;
+		}
 		this.composer.playWelcomeIntro();
 	}
 
@@ -2097,7 +2228,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 
 		const startupQuiet = cfgStartupQuiet.get(settings);
-		this.composer.setPreferences({ quiet: startupQuiet });
+		this.composer.setPreferences({ quiet: this.workspaceEnabled || startupQuiet });
 		this.composer.updateWelcome({ version: this.#version });
 		const headerBefore = this.#buildConfigWarningComponents();
 		const headerAfter: Component[] = [];
@@ -2119,12 +2250,53 @@ export class InteractiveMode implements InteractiveModeContext {
 			headerAfter.push(new Spacer(1), new DynamicBorder());
 		}
 		this.#headerAfter = headerAfter;
-		this.composer.setHeaderExtras(headerBefore, headerAfter);
-		this.statusLine.watchBranch(() => this.ui.requestRender());
-		this.composer.setStatusComponent(this.statusLine);
+		this.statusLine.watchBranch(() => {
+			this.#persistComposerStatus();
+			this.ui.requestRender();
+		});
 
-		this.composer.setRuntimeChildren(
-			[
+		if (this.workspaceEnabled) {
+			const scrollRoot = this.#mainScrollRoot;
+			const stickyRoot = this.#mainStickyRoot;
+			const workspaceLayout = this.#workspaceLayout;
+			if (!scrollRoot || !stickyRoot || !workspaceLayout) {
+				throw new Error("App viewport workspace was not initialized");
+			}
+			for (const component of headerBefore) scrollRoot.addChild(component);
+			this.#workspaceWelcome = startupQuiet ? undefined : new WelcomeComponent(this.#version);
+			if (this.#workspaceWelcome) {
+				scrollRoot.addChild(new Spacer(1));
+				scrollRoot.addChild(this.#workspaceWelcome);
+				scrollRoot.addChild(new Spacer(1));
+			}
+			for (const component of headerAfter) scrollRoot.addChild(component);
+			scrollRoot.addChild(this.chatContainer);
+			scrollRoot.addChild(this.pendingMessagesContainer);
+			scrollRoot.addChild(this.todoContainer);
+			scrollRoot.addChild(this.subagentContainer);
+			scrollRoot.addChild(this.btwContainer);
+			scrollRoot.addChild(this.omfgContainer);
+			scrollRoot.addChild(this.cleanseContainer);
+			scrollRoot.addChild(this.errorBannerContainer);
+			scrollRoot.addChild(this.modelCycleContainer);
+			scrollRoot.addChild(this.deferredCommandContainer);
+			scrollRoot.addChild(this.statusContainer);
+			// Judge batches stay editor-anchored and update independently of eval
+			// transcript output, directly above the working/throughput/title row.
+			stickyRoot.addChild(this.judgmentBatchProgressContainer);
+			stickyRoot.addChild(this.statusLine);
+			stickyRoot.addChild(this.attachmentChipsContainer);
+			stickyRoot.addChild(this.hookWidgetContainerAbove);
+			stickyRoot.addChild(this.editorContainer);
+			stickyRoot.addChild(this.hookWidgetContainerBelow);
+			this.composer.setHeaderExtras([], []);
+			this.composer.setRuntimeChildren([workspaceLayout], { chrome: "omit" });
+			if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
+		} else {
+			this.#workspaceWelcome = undefined;
+			this.composer.setHeaderExtras(headerBefore, headerAfter);
+			this.composer.setStatusComponent(this.statusLine);
+			this.composer.setRuntimeChildren([
 				this.chatContainer,
 				this.pendingMessagesContainer,
 				this.todoContainer,
@@ -2176,6 +2348,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				],
 			},
 		);
+		}
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 
@@ -6728,6 +6901,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			unsubscribe();
 		}
 		this.#eventBusUnsubscribers = [];
+		this.#workspacePanes?.dispose();
 		this.#observerRegistry.dispose();
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;
@@ -7995,6 +8169,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleEscape();
 	}
 
+	/** Reserves plain `Enter` only while the inline QuickAsk continue action is visible. */
+	handlesBtwContinueKey(): boolean {
+		return this.#btwController.handlesContinueKey();
+	}
+
+	handleBtwContinueKey(): Promise<boolean> {
+		return this.#btwController.handleContinue();
+	}
+
 	canBranchBtw(): boolean {
 		return this.#btwController.canBranch();
 	}
@@ -8008,8 +8191,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleBranch();
 	}
 
-	canCopyBtw(): boolean {
-		return this.#btwController.canCopy();
+	/** Reserves plain `c` only while the inline QuickAsk copy action is visible. */
+	handlesBtwCopyKey(): boolean {
+		return this.#btwController.handlesCopyKey();
 	}
 
 	isGuidedGoalInterviewActive(): boolean {
@@ -8020,36 +8204,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleCopy();
 	}
 
-	canFollowUpBtw(): boolean {
-		return this.#btwController.canFollowUp();
-	}
-
-	handleBtwFollowUpKey(): boolean {
-		return this.#btwController.handleFollowUp();
-	}
-
-	async handleBtwBranch(
-		question: string,
-		assistantMessage: AssistantMessage,
-		leafId: string,
-		sessionId: string,
-	): Promise<void> {
+	async handleBtwBranch(request: BtwPromotionRequest, lifecycle?: BtwPromotionLifecycle): Promise<boolean> {
 		try {
-			const result = await this.session.branchFromBtw(question, assistantMessage, leafId, sessionId);
+			const result = await this.session.branchFromBtw(request, lifecycle);
 			if (result.cancelled) {
-				this.showStatus("/btw branch cancelled", { dim: true });
-				return;
+				this.showStatus("BTW promotion cancelled", { dim: true });
+				return false;
 			}
-			await this.#btwController.dispose();
 			this.#omfgController.dispose();
 			this.#cleanseController.dispose();
 			await this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
 			this.showStatus(
-				result.sessionFile ? `Branched /btw to ${path.basename(result.sessionFile)}` : "Branched /btw",
+				result.sessionFile ? `Promoted BTW to ${path.basename(result.sessionFile)}` : "Promoted BTW to Main",
 			);
+			return true;
 		} catch (error) {
-			this.showError(`Cannot branch /btw: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(error instanceof Error ? error.message : String(error));
+			return false;
 		}
 	}
 

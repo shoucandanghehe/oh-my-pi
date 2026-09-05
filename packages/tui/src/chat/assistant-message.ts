@@ -232,6 +232,8 @@ function isStructuredThinkingResult(
 	return candidate.type === "append" || candidate.type === "replace";
 }
 
+let nextAssistantImageNamespace = 0;
+
 /**
  * Renders an assistant message; streaming content remains mutable until the
  * provider finalizes it because later deltas can revise earlier Markdown.
@@ -262,6 +264,7 @@ export class AssistantMessageComponent extends Container {
 	 * invalidation) still finds them after the bounded shared cache evicts them.
 	 */
 	#kittyConverted = new Map<string, ImageContent>();
+	readonly #nativeImageNamespace = `assistant-${nextAssistantImageNamespace++}`;
 	#showImages = true;
 	#showToolResultImages = true;
 	#transcriptBlockFinalized: boolean;
@@ -1437,7 +1440,7 @@ export class AssistantMessageComponent extends Container {
 				} else {
 					super.invalidate();
 				}
-				this.onImageUpdate?.();
+				this.#onImageUpdate?.();
 			} catch (error) {
 				logger.warn("Assistant thinking renderer refresh failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1457,7 +1460,7 @@ export class AssistantMessageComponent extends Container {
 	): ThinkingExtensionComponents {
 		const append: Component[] = [];
 		let replacement: Component | undefined;
-		for (const renderer of this.thinkingRenderers) {
+		for (const renderer of this.#thinkingRenderers) {
 			let rerunRenderersOnRequest = true;
 			try {
 				const result: AssistantThinkingRenderResult = renderer(
@@ -1721,7 +1724,7 @@ export class AssistantMessageComponent extends Container {
 							(c.type === "thinking" && resolveThinkingDisplay(c, this.#proseOnlyThinking).visible),
 					);
 
-				if (this.thinkingRenderers.length > 0) {
+				if (this.#thinkingRenderers.length > 0) {
 					this.#visibleThinkingUsesRenderers = true;
 				}
 				const thinkingComponents = this.#renderThinkingExtensions(message, content, i, thinkingIndex, thinkingText);
@@ -1745,7 +1748,8 @@ export class AssistantMessageComponent extends Container {
 					this.#contentContainer.addChild(new Spacer(1));
 				}
 			} else if (content.type === "image" && content.data && content.mimeType) {
-				this.#renderImageEntries([{ image: content, key: `native:${i}` }], hasRenderedContent);
+				const imageKey = `${this.#nativeImageNamespace}:${i}:${content.mimeType}:${String(Bun.hash(content.data))}`;
+				this.#renderImageEntries([{ image: content, key: imageKey }], hasRenderedContent);
 				hasRenderedContent ||= this.#showImages;
 			}
 		}
