@@ -67,6 +67,7 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 			setFocus: vi.fn(),
 			terminal: { rows: 30 },
 		} as unknown as TUI,
+		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		btwContainer,
 		session,
 		sessionManager: {

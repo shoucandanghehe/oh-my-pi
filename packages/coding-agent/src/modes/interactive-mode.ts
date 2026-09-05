@@ -44,6 +44,7 @@ import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
+	APP_NAME,
 	adjustHsv,
 	formatDuration,
 	formatNumber,
@@ -188,6 +189,7 @@ import {
 	pushTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalTitleSpinnerStyle,
+	setTerminalTitleState,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -244,6 +246,7 @@ import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
+import { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
@@ -969,6 +972,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	readonly terminalActivity: TerminalActivityController;
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -1527,6 +1531,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session, statusLineHost);
+		this.terminalActivity = new TerminalActivityController({
+			isProgressEnabled: () => this.settings.get("terminal.showProgress"),
+			setProgress: active => this.ui.terminal.setProgress(active),
+			setTitleState: setTerminalTitleState,
+		});
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.#codexResetFireworksController = new CodexResetFireworksController(this);
 		this.statusLine.setCodexResetFireworksHandler(event => {
@@ -6101,7 +6110,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.isInitialized = false;
 	}
 
-	async shutdown(): Promise<void> {
+	async #finishShutdown(options: {
+		status: string;
+		disposeSession?: () => Promise<void>;
+		resumeHint: (sessionId: string) => string;
+	}): Promise<void> {
 		if (this.#isShuttingDown) return;
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
@@ -6121,7 +6134,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#isShuttingDown = true;
 		try {
-			await this.#teardown();
+			await this.#teardown(options);
 		} catch (error) {
 			this.#handleTeardownError("close", error);
 			return;
@@ -6132,7 +6145,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// #resumableSessionId).
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${resumeCommand(sessionId)}`)}\n`);
+			process.stderr.write(`\n${chalk.dim(options.resumeHint(sessionId))}\n`);
 		}
 
 		await postmortem.quit(0);
@@ -6211,7 +6224,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
-	async #teardown(): Promise<void> {
+	async #teardown(options?: { status: string; disposeSession?: () => Promise<void> }): Promise<void> {
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -6221,7 +6234,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Surface progress before any asynchronous cleanup, including live commands
 		// and BTW history writes, so the user sees a reason for the pause.
-		this.showStatus("Closing session…");
+		this.showStatus(options?.status ?? "Closing session…");
 
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
@@ -6246,7 +6259,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// first runs the work, the other awaits the same settled promise.
 			// The teardown is registered lazily in `init()` — a `/exit` reached
 			// before `init()` completed falls back to a direct dispose.
-			if (this.#signalTeardown) {
+			if (options) {
+				await options.disposeSession?.();
+			} else if (this.#signalTeardown) {
 				await this.#signalTeardown();
 			} else {
 				await this.session.dispose({
@@ -6270,6 +6285,36 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeTerminalTitleState();
 		popTerminalTitle();
 		this.stop();
+
+	}
+
+	async shutdown(): Promise<void> {
+		await this.#finishShutdown({
+			status: "Closing session…",
+			disposeSession: async () => {
+				// Persist the draft and dispose the session through the shared teardown
+				// so a signal that arrives mid-shutdown cannot fire a second dispose.
+				// The teardown is registered lazily in `init()` — a `/exit` reached
+				// before `init()` completed falls back to a direct dispose.
+				if (this.#signalTeardown) {
+					await this.#signalTeardown();
+				} else {
+					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+				}
+			},
+			resumeHint: sessionId => `Resume this session with ${APP_NAME} --resume ${sessionId}`,
+		});
+	}
+
+	/**
+	 * Finish TUI teardown after a barrier pause already disposed the session
+	 * with `pausedExit`. Does not dispose again.
+	 */
+	async shutdownAfterPausedExit(): Promise<void> {
+		await this.#finishShutdown({
+			status: "Exiting paused — resume with --resume, then /continue",
+			resumeHint: sessionId => `Paused session. Resume with ${APP_NAME} --resume ${sessionId}, then /continue`,
+		});
 	}
 
 	requestShutdown(): void {
