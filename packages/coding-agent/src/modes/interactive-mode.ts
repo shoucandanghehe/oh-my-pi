@@ -262,6 +262,7 @@ import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { AnchoredLiveContainer } from "./components/anchored-live-container";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { MainSessionPane } from "./components/main-session-pane";
+import { AutoAgentWorkspaceController } from "./controllers/auto-agent-workspace-controller";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -506,6 +507,8 @@ const AGENT_WORKSPACE_MIN_WIDTH = 24;
 const AGENT_WORKSPACE_MIN_HEIGHT = 6;
 const BTW_WORKSPACE_MIN_WIDTH = 28;
 const BTW_WORKSPACE_MIN_HEIGHT = 8;
+const DEBUG_PETRIFICATION_PANE_KEY = "debug:petrification-preview";
+const DEBUG_PETRIFICATION_AGENT_ID = "Petrification Preview";
 const EDITOR_FALLBACK_ROWS = 24;
 const EDITOR_MIN_CHROME_ROWS = 4; // rows reserved for transcript + status on small terms
 const EDITOR_MIN_RENDERED_ROWS = 3; // bordered editor floor: top+bottom border + 1 content row
@@ -637,7 +640,6 @@ export interface InteractiveModeOptions {
 }
 
 export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
-
 
 /** An empty HUD slot: the terminal owns spacing, so nothing is described. */
 const EMPTY_HUD: NativeNode = col([]);
@@ -1237,6 +1239,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mainScrollRoot: Container | undefined;
 	#mainStickyRoot: Container | undefined;
 	#workspacePanes: WorkspacePaneController | undefined;
+	#autoAgentWorkspace: AutoAgentWorkspaceController | undefined;
+	#autoAgentWorkspaceSessionId: string | undefined;
 	#workspaceWelcome: WelcomeComponent | undefined;
 
 	isInitialized = false;
@@ -2003,16 +2007,28 @@ export class InteractiveMode implements InteractiveModeContext {
 				focus: component => this.ui.setFocus(component),
 			});
 			this.#workspacePanes = new WorkspacePaneController(this.#workspaceLayout);
+			this.#autoAgentWorkspace = new AutoAgentWorkspaceController({
+				workspace: this.#workspaceLayout,
+				panes: this.#workspacePanes,
+				createViewer: (id, close) => this.#createAgentWorkspaceViewer(id, close),
+				requestRender: () => this.ui.requestRender(),
+				onDetachError: () => this.showWarning("The terminal is too small to detach this agent pane"),
+			});
 		}
 	}
 
-	#createAgentWorkspaceViewer(agentId: string, close: () => void): AgentTranscriptViewer {
-		const remote = this.collabGuest?.hubRemote;
+	#createAgentWorkspaceViewer(
+		agentId: string,
+		close: () => void,
+		registryOverride?: AgentRegistry,
+	): AgentTranscriptViewer {
+		const remote = registryOverride ? undefined : this.collabGuest?.hubRemote;
+		const lifecycle = registryOverride || remote ? undefined : () => AgentLifecycleManager.global();
 		return new AgentTranscriptViewer({
 			agentId,
-			registry: this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+			registry: registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
 			remote,
-			lifecycle: remote ? undefined : () => AgentLifecycleManager.global(),
+			lifecycle,
 			ui: this.ui,
 			getTool: name => this.session.getToolByName(name),
 			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
@@ -2029,21 +2045,50 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async openAgentWorkspacePane(id: string): Promise<void> {
-		if (!this.#workspacePanes) {
+		if (!this.#autoAgentWorkspace) {
 			throw new Error("Agent workspace panes require the app-viewport render backend");
 		}
-		if (
-			!this.#workspacePanes.open({
-				key: `agent:${id}`,
-				paneId: `agent:${id}`,
-				title: id,
-				minWidth: AGENT_WORKSPACE_MIN_WIDTH,
-				minHeight: AGENT_WORKSPACE_MIN_HEIGHT,
-				createPane: close => this.#createAgentWorkspaceViewer(id, close),
-			})
-		) {
+		if (!this.#autoAgentWorkspace.openManual(id)) {
 			throw new Error("The terminal is too small to open another agent pane");
 		}
+	}
+
+	previewSubagentExitAnimation(): void {
+		const workspacePanes = this.#workspacePanes;
+		if (!workspacePanes) {
+			this.showWarning("Petrification preview requires the app-viewport render backend");
+			return;
+		}
+		workspacePanes.close(DEBUG_PETRIFICATION_PANE_KEY);
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: DEBUG_PETRIFICATION_AGENT_ID,
+			displayName: DEBUG_PETRIFICATION_AGENT_ID,
+			kind: "advisor",
+			parentId: MAIN_AGENT_ID,
+			status: "idle",
+			session: null,
+			sessionFile: this.sessionManager.getSessionFile(),
+		});
+		let viewer: AgentTranscriptViewer | undefined;
+		const opened = workspacePanes.open({
+			key: DEBUG_PETRIFICATION_PANE_KEY,
+			paneId: DEBUG_PETRIFICATION_PANE_KEY,
+			title: DEBUG_PETRIFICATION_AGENT_ID,
+			minWidth: AGENT_WORKSPACE_MIN_WIDTH,
+			minHeight: AGENT_WORKSPACE_MIN_HEIGHT,
+			focus: false,
+			createPane: close => {
+				viewer = this.#createAgentWorkspaceViewer(DEBUG_PETRIFICATION_AGENT_ID, close, registry);
+				return viewer;
+			},
+		});
+		if (!opened || !viewer) {
+			this.showWarning("The terminal is too small to open the petrification preview");
+			return;
+		}
+		viewer.startAutoClose(() => workspacePanes.close(DEBUG_PETRIFICATION_PANE_KEY));
 	}
 
 	openBtwWorkspacePane(component: Component): boolean {
@@ -3882,11 +3927,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
-		if (this.#agentRegistrySubscriptionTarget !== registry) {
+		const sessionId = this.sessionManager.getSessionId();
+		if (this.#agentRegistrySubscriptionTarget !== registry || this.#autoAgentWorkspaceSessionId !== sessionId) {
 			this.#agentRegistryUnsubscribe?.();
+			this.#autoAgentWorkspace?.reset();
+			this.#autoAgentWorkspaceSessionId = sessionId;
 			this.#agentRegistrySubscriptionTarget = registry;
-			this.#agentRegistryUnsubscribe = registry.onChange(() => {
+			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				this.syncRunningSubagentBadge();
+				this.#autoAgentWorkspace?.handleEvent(event);
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
@@ -6919,6 +6968,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#eventBusUnsubscribers = [];
 		this.#workspacePanes?.dispose();
+		this.#autoAgentWorkspace?.reset();
 		this.#observerRegistry.dispose();
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;
@@ -6950,7 +7000,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #finishShutdown(options: {
 		status: string;
-		disposeSession?: () => Promise<void>;
+		disposeSession: boolean;
 		resumeHint: (sessionId: string) => string;
 	}): Promise<void> {
 		if (this.#isShuttingDown) return;
@@ -6972,7 +7022,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#isShuttingDown = true;
 		try {
-			await this.#teardown(options);
+			await this.#teardown(options.status, options.disposeSession);
 		} catch (error) {
 			this.#handleTeardownError("close", error);
 			return;
@@ -7019,7 +7069,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
 		try {
-			await this.#teardown();
+			await this.#teardown("Closing session…", true);
 		} catch (error) {
 			this.#handleTeardownError("restart", error);
 			return;
@@ -7061,8 +7111,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
 	}
 
-	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
-	async #teardown(options?: { status: string; disposeSession?: () => Promise<void> }): Promise<void> {
+	/** Shared shutdown/restart teardown: optionally dispose the session, then hand the terminal back. */
+	async #teardown(status: string, disposeSession: boolean): Promise<void> {
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -7072,7 +7122,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Surface progress before any asynchronous cleanup, including live commands
 		// and BTW history writes, so the user sees a reason for the pause.
-		this.showStatus(options?.status ?? "Closing session…");
+		this.showStatus(status);
 
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
@@ -7097,14 +7147,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			// first runs the work, the other awaits the same settled promise.
 			// The teardown is registered lazily in `init()` — a `/exit` reached
 			// before `init()` completed falls back to a direct dispose.
-			if (options) {
-				await options.disposeSession?.();
-			} else if (this.#signalTeardown) {
-				await this.#signalTeardown();
-			} else {
-				await this.session.dispose({
-					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
-				});
+			if (disposeSession) {
+				if (this.#signalTeardown) {
+					await this.#signalTeardown();
+				} else {
+					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+				}
 			}
 		} finally {
 			clearTimeout(stillClosingTimer);
@@ -7126,23 +7174,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		disposeTerminalTitleState();
 		popTerminalTitle();
 		this.stop();
-
 	}
 
 	async shutdown(): Promise<void> {
 		await this.#finishShutdown({
 			status: "Closing session…",
-			disposeSession: async () => {
-				// Persist the draft and dispose the session through the shared teardown
-				// so a signal that arrives mid-shutdown cannot fire a second dispose.
-				// The teardown is registered lazily in `init()` — a `/exit` reached
-				// before `init()` completed falls back to a direct dispose.
-				if (this.#signalTeardown) {
-					await this.#signalTeardown();
-				} else {
-					await this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
-				}
-			},
+			disposeSession: true,
 			resumeHint: sessionId => `Resume this session with\n${resumeCommand(sessionId)}`,
 		});
 	}
@@ -7154,6 +7191,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async shutdownAfterPausedExit(): Promise<void> {
 		await this.#finishShutdown({
 			status: "Exiting paused — resume with --resume, then /continue",
+			disposeSession: false,
 			resumeHint: sessionId => `Paused session. Resume with\n${resumeCommand(sessionId)}\nthen /continue`,
 		});
 	}
@@ -7213,6 +7251,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const nextEditor = factory
 			? factory(this.ui, getEditorTheme(), this.keybindings)
 			: new CustomEditor(getEditorTheme());
+		if (!factory) this.ui.enableScopedInputRender(nextEditor);
 		nextEditor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		nextEditor.setImeSafeCursorLayout(cfgTuiImeSafeCursor.get(this.settings));
 		this.#applyVimMode(nextEditor);
@@ -7601,6 +7640,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// status rows so the interrupt glyph reads as indented.
 				[` ${appKey(this.keybindings, "app.interrupt")}`],
 			);
+			this.loadingAnimation.setAdditionalRepaintTarget(this.#mainStickyRoot ?? this.statusLine);
 			this.loadingAnimation.setTrailer(() => this.#workingRowTrailer());
 			this.loadingAnimation.setWorkingRow(
 				() => this.#workingRowSpec(),
@@ -8200,6 +8240,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwCommand(question: string): Promise<void> {
 		return this.#btwController.start(question);
+	}
+
+	getPausedExitParticipants(): readonly BtwController[] {
+		return [this.#btwController];
 	}
 
 	handleTanCommand(work: string): Promise<void> {

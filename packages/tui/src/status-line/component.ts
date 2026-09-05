@@ -1254,7 +1254,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#resetJjRequests();
 		if (this.#owner) this.#owner.#peers.delete(this);
 		this.#owner = undefined;
-		for (const peer of [...this.#peers]) peer.dispose();
+		for (const peer of this.#peers) peer.dispose();
 		this.#peers.clear();
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();

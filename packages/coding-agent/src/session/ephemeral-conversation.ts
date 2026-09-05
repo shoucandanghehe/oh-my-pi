@@ -1,9 +1,10 @@
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { calculateContextTokens, hasContextTokenUsage } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Effort, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Effort, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 
 export interface EphemeralTurnOptions {
 	promptText: string;
+	images?: ImageContent[];
 	onTextDelta?: (delta: string) => void;
 	onThinkingDelta?: (delta: string) => void;
 	/** Mirrors the side agent's transcript message lifecycle for alternate render surfaces. */
@@ -28,6 +29,7 @@ export interface EphemeralTurnResult {
 
 export interface EphemeralConversationTurn {
 	input: string;
+	images?: ImageContent[];
 	assistantMessage: AssistantMessage;
 	intermediateMessages?: readonly AgentMessage[];
 	prefixMessages?: readonly AgentMessage[];
@@ -216,9 +218,11 @@ export class EphemeralConversation {
 	#appendTurns(messages: AgentMessage[]): void {
 		for (const turn of this.#turns) {
 			if (turn.prefixMessages) messages.push(...turn.prefixMessages);
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text: turn.input }];
+			if (turn.images?.length) content.push(...turn.images);
 			messages.push({
 				role: "user",
-				content: [{ type: "text", text: turn.input }],
+				content,
 				attribution: "agent",
 				timestamp: turn.timestamp,
 			});
@@ -229,6 +233,7 @@ export class EphemeralConversation {
 
 	async prompt(input: string, options: Omit<EphemeralTurnOptions, "promptText"> = {}): Promise<EphemeralTurnResult> {
 		if (this.#running) throw new Error("Ephemeral conversation already has a turn in progress");
+		const images = options.images?.length ? [...options.images] : undefined;
 		const timestamp = Date.now();
 		const baseMessages = this.#baseMessages ?? this.#snapshotBaseMessages();
 		this.#baseMessages = baseMessages;
@@ -236,9 +241,11 @@ export class EphemeralConversation {
 		const prefixMessages = this.#turnPrefixMessages?.() ?? [];
 		this.#appendTurns(messages);
 		messages.push(...prefixMessages);
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text: input }];
+		if (images) content.push(...images);
 		messages.push({
 			role: "user",
-			content: [{ type: "text", text: input }],
+			content,
 			attribution: "agent",
 			timestamp,
 		});
@@ -248,6 +255,7 @@ export class EphemeralConversation {
 			const result = await this.#runTurn(messages, options);
 			const turn: EphemeralConversationTurn = {
 				input,
+				images,
 				prefixMessages: prefixMessages.length > 0 ? prefixMessages : undefined,
 				assistantMessage: result.assistantMessage,
 				intermediateMessages: result.intermediateMessages,

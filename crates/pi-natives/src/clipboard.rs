@@ -1,18 +1,16 @@
 //! Clipboard utilities backed by arboard.
 //!
 //! Provides text copy, text read, and image read support across Linux, macOS,
-//! and Windows. Performs text copy synchronously so macOS writes run on the
-//! caller thread.
-//! This avoids worker-thread `AppKit` pasteboard warnings in CLI contexts.
+//! and Windows. Clipboard I/O runs off the JavaScript thread.
 
 use std::io::Cursor;
 
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
 use image::{DynamicImage, ImageFormat, RgbaImage};
-use napi::{JsString, bindgen_prelude::*};
+use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::{js, task};
+use crate::task;
 
 /// Clipboard image payload encoded as PNG bytes.
 #[napi(object)]
@@ -149,8 +147,8 @@ fn clipboard_has_bitmap() -> bool {
 /// # Errors
 /// Returns an error if clipboard access fails.
 #[napi]
-pub fn copy_to_clipboard(text: JsString) -> Result<()> {
-	set_clipboard_text(&js::utf8(text)?)
+pub fn copy_to_clipboard(text: String) -> task::Promise<()> {
+	task::blocking("clipboard.copy_text", (), move |_| set_clipboard_text(&text))
 }
 
 /// Linux: keep a single `arboard::Clipboard` alive for the whole process.
@@ -190,9 +188,7 @@ fn set_clipboard_text(text: &str) -> Result<()> {
 }
 
 /// macOS / Windows: the OS retains clipboard contents after the writing process
-/// exits, so a transient `Clipboard` is sufficient. Keeping the write on the
-/// calling thread also avoids worker-thread `AppKit` pasteboard warnings on
-/// macOS.
+/// exits, so a transient `Clipboard` is sufficient.
 #[cfg(not(target_os = "linux"))]
 fn set_clipboard_text(text: &str) -> Result<()> {
 	let mut clipboard = Clipboard::new()
