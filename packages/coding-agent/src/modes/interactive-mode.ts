@@ -230,6 +230,7 @@ import {
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { writeComposerStatusCache, writeComposerWelcomeCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import { AnchoredLiveContainer } from "./components/anchored-live-container";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -584,8 +585,6 @@ export interface InteractiveModeOptions {
 
 export const TODO_COMPACT_TERMINAL_ROWS_THRESHOLD = 18;
 
-/** Holds mutable HUD and editor-adjacent chrome outside transcript history. */
-class AnchoredLiveContainer extends Container {}
 
 class TodoHudContainer extends AnchoredLiveContainer {
 	constructor(private readonly mode: InteractiveMode) {
@@ -736,7 +735,6 @@ class DeferredCommandPreview implements Component {
 const DEFERRED_PREVIEW_MIN_ROWS = 6;
 /** Ceiling for the preview as a share of the viewport, so the prompt stays visible. */
 const DEFERRED_PREVIEW_VIEWPORT_FRACTION = 0.4;
-
 /** How long the ctrl+p model-role cycle chip track lingers above the editor
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;

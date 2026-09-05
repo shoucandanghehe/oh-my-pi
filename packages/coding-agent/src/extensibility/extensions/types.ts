@@ -39,6 +39,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -52,6 +53,7 @@ import type {
 	SimpleStreamOptions,
 	Static,
 	TextContent,
+	ThinkingContent,
 	TSchema,
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
@@ -1220,6 +1222,7 @@ export type {
 // Message Rendering
 // ============================================================================
 
+
 // ============================================================================
 // Command Registration
 // ============================================================================
@@ -1449,7 +1452,7 @@ export interface ExtensionAPI {
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
 
-	/** Register a renderer for assistant thinking blocks. Rendered after the original thinking text. */
+	/** Register a renderer for assistant thinking blocks. Legacy Component returns append after the original thinking text. */
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void;
 
 	/**
