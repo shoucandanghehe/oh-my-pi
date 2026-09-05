@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 
 function createRuntimeHarness(options?: {
 	handleSessionCommand?: InteractiveModeContext["handleSessionCommand"];
@@ -132,5 +133,33 @@ describe("/session slash command", () => {
 		await expect(executeBuiltinSlashCommand("/session delete", harness.runtime)).rejects.toBe(deleteError);
 		expect(handleSessionDeleteCommand).toHaveBeenCalledTimes(1);
 		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+});
+
+describe("/continue slash command", () => {
+	it("renders incomplete resume errors as one bounded status line", async () => {
+		const setText = vi.fn();
+		const statuses: string[] = [];
+		const rawError = `Sub:\tbroken\n${"x".repeat(200)}`;
+		const ctx = {
+			editor: { setText },
+			session: {
+				hasPausedAgents: () => true,
+				continuePausedAgents: async () => ({
+					continued: 0,
+					skipped: [rawError],
+					complete: false,
+				}),
+			},
+			showStatus: (message: string) => statuses.push(message),
+		} as unknown as InteractiveModeContext;
+
+		expect(await executeBuiltinSlashCommand("/continue", { ctx })).toBe(true);
+
+		expect(statuses).toHaveLength(1);
+		expect(statuses[0]).toContain("Continue incomplete");
+		expect(statuses[0]).not.toContain("\n");
+		expect(statuses[0]).not.toContain("\t");
+		expect(Bun.stringWidth(statuses[0])).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LONG);
 	});
 });

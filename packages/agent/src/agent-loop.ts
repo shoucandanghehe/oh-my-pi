@@ -56,7 +56,7 @@ import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi
 import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { LiveSteeringChannel } from "./live-steering";
-import { agentPauseGate } from "./pause";
+import { agentPauseGate, PAUSE_SHUTDOWN_ABORT_REASON } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import { SpeculativeOperationCoordinator } from "./speculative-execution";
 import {
@@ -110,11 +110,11 @@ import {
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
 
-async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
+async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal, loopId?: symbol): Promise<void> {
 	try {
 		while (agentPauseGate.paused && !signal?.aborted) {
 			config.onPauseChange?.(true);
-			await agentPauseGate.waitUntilResumed(signal);
+			await agentPauseGate.waitUntilResumed(signal, loopId);
 		}
 	} finally {
 		config.onPauseChange?.(false);
@@ -690,10 +690,11 @@ export function unpairedToolCallTail(messages: readonly AgentMessage[]): Assista
  * Used for retries - context already has user message or tool results.
  *
  * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm` — except for an assistant tail with unpaired runnable
- * tool calls (see {@link unpairedToolCallTail}), which resumes by executing
- * those calls first. Any other assistant tail is rejected here; other invalid
- * tails cannot be validated since `convertToLlm` is only called once per turn.
+ * via `convertToLlm` — except for an assistant tail that either carries unpaired runnable
+ * tool calls (see {@link unpairedToolCallTail}) or has `pause_turn` stop details. Unpaired
+ * calls resume by executing those calls first; `pause_turn` requests another model sample.
+ * Any other assistant tail is rejected here; other invalid tails cannot be validated since
+ * `convertToLlm` is only called once per turn.
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -705,7 +706,12 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant" && !unpairedToolCallTail(context.messages)) {
+	const lastMessage = context.messages[context.messages.length - 1];
+	if (
+		lastMessage.role === "assistant" &&
+		lastMessage.stopDetails?.type !== "pause_turn" &&
+		!unpairedToolCallTail(context.messages)
+	) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -1223,6 +1229,39 @@ async function runLoopBody(
 	initialMessages: AgentMessage[],
 	streamFn?: StreamFn,
 ): Promise<void> {
+	const loopId = agentPauseGate.registerLoop();
+	try {
+		await runLoopBodyInner(
+			currentContext,
+			newMessages,
+			config,
+			signal,
+			stream,
+			telemetry,
+			invokeAgentSpan,
+			stepCounter,
+			initialMessages,
+			streamFn,
+			loopId,
+		);
+	} finally {
+		agentPauseGate.unregisterLoop(loopId);
+	}
+}
+
+async function runLoopBodyInner(
+	currentContext: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	telemetry: AgentTelemetry | undefined,
+	invokeAgentSpan: Span | undefined,
+	stepCounter: StepCounter,
+	initialMessages: AgentMessage[],
+	streamFn: StreamFn | undefined,
+	loopId: symbol,
+): Promise<void> {
 	let deadlineTimer: Timer | undefined;
 	if (config.deadline !== undefined) {
 		const deadline = config.deadline;
@@ -1356,10 +1395,16 @@ async function runLoopBody(
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
-				// Park at the turn boundary while the process-wide pause gate is
-				// engaged (host /pause). An external abort releases the park so a
+				// Park at the model-call boundary while the process-wide pause gate is
+				// engaged (host /pause). Tools already in flight finish first; only the
+				// next provider request waits. An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await waitForProcessPause(config, signal);
+				if (agentPauseGate.paused) await waitForProcessPause(config, signal, loopId);
+				// A durable pause exit must not synthesize an aborted assistant turn.
+				if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
+				}
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1483,11 +1528,12 @@ async function runLoopBody(
 				let message: AssistantMessage;
 				let inputsEmitted = false;
 				try {
-					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
+					if (agentPauseGate.paused) await waitForProcessPause(config, signal, loopId);
 					message = await streamAssistantResponse(
 						currentContext,
 						config,
 						signal,
+						loopId,
 						stream,
 						telemetry,
 						invokeAgentSpan,
@@ -1528,6 +1574,10 @@ async function runLoopBody(
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 				} catch (err) {
+					if (err === PAUSE_SHUTDOWN_ABORT_REASON) {
+						endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+						return;
+					}
 					if (!inputsEmitted) {
 						if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 						emitTurnInputs();
@@ -2053,6 +2103,7 @@ async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
+	loopId: symbol,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
@@ -2120,6 +2171,14 @@ async function streamAssistantResponse(
 	// `getCwd` is read once per LLM call so a mid-run session move (`/move`) reaches
 	// workspace-scoped provider discovery; falls back to the static `cwd` when unset.
 	const effectiveCwd = config.getCwd?.() ?? config.cwd;
+
+	// Context shaping and credential resolution above may yield after the loop's
+	// initial gate check. Re-check immediately before the provider call; there is
+	// no async gap after this point where a newly engaged pause could slip through.
+	if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal, loopId);
+	if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
+		throw PAUSE_SHUTDOWN_ABORT_REASON;
+	}
 
 	const chatStepNumber = stepCounter.count;
 	stepCounter.count += 1;
@@ -3408,17 +3467,6 @@ async function executeToolCalls(
 		};
 	});
 
-	// Derive batch readiness from existing dispatch records, not extra participants.
-	const refreshPauseState = (): void => {
-		config.onPauseChange?.(
-			agentPauseGate.paused &&
-				!signal?.aborted &&
-				!speculationCoordinator?.isRunning &&
-				records.some(record => !record.started && !record.skipped && !record.toolResultMessage) &&
-				!records.some(record => record.started && !record.toolResultMessage),
-		);
-	};
-	if (speculationCoordinator) speculationCoordinator.onIdle = refreshPauseState;
 
 	const isToolAborted = (record: (typeof records)[number]): boolean =>
 		signal?.aborted === true ||
@@ -3571,15 +3619,8 @@ async function executeToolCalls(
 			record.skipped = true;
 			return;
 		}
-		// Park before starting this tool while the process-wide pause gate is
-		// engaged. Tools already executing are unaffected (pausing never aborts);
-		// a batch interrupted mid-pause unwinds via the signal checks below.
-		while (agentPauseGate.paused && !record.signal.aborted) {
-			refreshPauseState();
-			await agentPauseGate.waitUntilResumed(record.signal);
-		}
-		config.onPauseChange?.(false);
-
+		// Finish committed tool calls before parking at the next model boundary,
+		// so a durable pause exit never leaves tool calls without results.
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a
 		// failure recorded there surfaces here at the record's scheduled slot so
@@ -3921,13 +3962,7 @@ async function executeToolCalls(
 			concurrency = concurrencyMode ?? "shared";
 		}
 		const start = concurrency === "exclusive" ? Promise.all([lastExclusive, ...sharedTasks]) : lastExclusive;
-		const task = start.then(async () => {
-			try {
-				await runTool(record, index);
-			} finally {
-				refreshPauseState();
-			}
-		});
+		const task = start.then(() => runTool(record, index));
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -3939,8 +3974,6 @@ async function executeToolCalls(
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
-		if (speculationCoordinator) speculationCoordinator.onIdle = undefined;
-		config.onPauseChange?.(false);
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);
