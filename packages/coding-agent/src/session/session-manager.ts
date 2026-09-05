@@ -497,6 +497,7 @@ class SessionEntryIndex {
 	// change or rebuild starts a fresh array (the old one is never mutated).
 	#generation = 0;
 	#branchCache: { leaf: string | null | undefined; generation: number; branch: SessionEntry[] } | undefined;
+	#assistantUsage = emptyUsageStatistics();
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -506,6 +507,7 @@ class SessionEntryIndex {
 		this.#usage = emptyUsageStatistics();
 		this.#generation++;
 		this.#branchCache = undefined;
+		this.#assistantUsage = emptyUsageStatistics();
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -551,6 +553,7 @@ class SessionEntryIndex {
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
 		}
+		if (isAssistantEntry(entry)) addUsage(this.#assistantUsage, usage);
 	}
 
 	has(id: string): boolean {
@@ -607,6 +610,10 @@ class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	assistantUsageSnapshot(): UsageStatistics {
+		return { ...this.#assistantUsage };
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -3065,6 +3072,11 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+
+	/** Cumulative usage from primary assistant messages only. */
+	getAssistantUsageStatistics(): UsageStatistics {
+		return this.#index.assistantUsageSnapshot();
 	}
 
 	/**

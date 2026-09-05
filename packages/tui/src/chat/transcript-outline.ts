@@ -107,7 +107,7 @@ export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: Tr
 	for (const entry of entries) {
 		const children = builder.container.children;
 		const before = children.length;
-		builder.append([entry]);
+		builder.appendEntries([entry]);
 		const after = children.length;
 		let start = before;
 		while (start < after && isUsageRowBlock(children[start]!)) {

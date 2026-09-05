@@ -316,6 +316,15 @@
 ### Fixed
 
 - Fixed `/shake elide` handling of mixed tool results so images are preserved and token savings are reported accurately.
+### Added
+
+- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
+- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
+- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
+
+### Changed
+
+- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
 
 ## [18.0.7] - 2026-08-26
 

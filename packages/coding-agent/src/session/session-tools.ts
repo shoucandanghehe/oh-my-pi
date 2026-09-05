@@ -795,7 +795,8 @@ export class SessionTools {
 		});
 	}
 
-	#wrapRuntimeTool(tool: AgentTool): AgentTool {
+	/** Apply the ordinary output, extension, and approval wrappers to a transient tool. */
+	wrapRuntimeTool(tool: AgentTool): AgentTool {
 		const wrapped = wrapToolWithMetaNotice(tool);
 		const extensionRunner = this.#host.extensionRunner();
 		return extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped;
@@ -817,7 +818,7 @@ export class SessionTools {
 
 			for (const tool of tools) {
 				if (this.#toolRegistry.has(tool.name)) continue;
-				this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));
+				this.#toolRegistry.set(tool.name, this.wrapRuntimeTool(tool));
 				this.#builtInToolNames.add(tool.name);
 				this.#installedVibeToolNames.add(tool.name);
 			}
@@ -2018,7 +2019,7 @@ export class SessionTools {
 				if (!MEMORY_BACKEND_TOOL_NAMES.some(name => name === tool.name) || this.#toolRegistry.has(tool.name)) {
 					continue;
 				}
-				const wrapped = this.#wrapRuntimeTool(tool);
+				const wrapped = this.wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 				nextActive.push(wrapped.name);
@@ -2052,7 +2053,7 @@ export class SessionTools {
 			if (!this.#toolRegistry.has("think")) {
 				const tool = await this.#createThinkTool?.();
 				if (tool?.name !== "think") return false;
-				const wrapped = this.#wrapRuntimeTool(tool);
+				const wrapped = this.wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 			}

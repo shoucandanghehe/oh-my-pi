@@ -8,6 +8,7 @@ import { Text } from "../components/text";
 import { getImageDimensions, ImageProtocol, imageFallback, TERMINAL } from "../terminal-capabilities";
 import { type Component, Container, type TUI } from "../tui";
 import { truncateToWidth } from "../utils";
+import { measureComponentRows } from "../tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../theme/theme";
 import { ensureThemeSync, getThemeEpoch, theme } from "../theme/theme";
@@ -149,15 +150,28 @@ class SafeToolRendererComponent implements Component {
 		}
 	}
 
+	#fallbackAfterError(err: unknown): Component | undefined {
+		if (!this.#warned) {
+			this.#warned = true;
+			logger.warn("Tool renderer failed", { tool: this.#toolName, stage: this.#stage, error: String(err) });
+		}
+		return this.#fallback();
+	}
+
+	measureRows(width: number): number {
+		try {
+			return measureComponentRows(this.#component, width);
+		} catch (err) {
+			const fallback = this.#fallbackAfterError(err);
+			return fallback ? measureComponentRows(fallback, width) : 0;
+		}
+	}
+
 	render(width: number): readonly string[] {
 		try {
 			return this.#component.render(width);
 		} catch (err) {
-			if (!this.#warned) {
-				this.#warned = true;
-				logger.warn("Tool renderer failed", { tool: this.#toolName, stage: this.#stage, error: String(err) });
-			}
-			return this.#fallback()?.render(width) ?? [];
+			return this.#fallbackAfterError(err)?.render(width) ?? [];
 		}
 	}
 
@@ -209,6 +223,8 @@ export interface ToolExecutionUi {
 	requestRender(): void;
 	requestComponentRender(component: Component): void;
 	resetDisplay(): void;
+	/** Backend-aware replacement for a native-scrollback display reset. */
+	reconcileRenderTopology?(): void;
 	imageBudget?: TUI["imageBudget"];
 }
 
@@ -1288,8 +1304,14 @@ export class ToolExecutionComponent extends Container {
 		const provisionalResultSettled =
 			partialResultPaintedBeforeSettle && !isPartial && this.#rendererFlag("forceResultViewportRepaintOnSettle");
 		if (firstResultAfterRepaintShapePaint || provisionalResultSettled) {
-			this.#ui.requestRender();
+			if (this.#ui.reconcileRenderTopology) this.#ui.reconcileRenderTopology();
+			else this.#ui.requestRender();
 		}
+	}
+
+	override measureRows(width: number): number {
+		if (!this.#toolActivityVisible || this.#allocation === 0) return 0;
+		return super.measureRows(width);
 	}
 
 	override render(width: number): readonly string[] {
@@ -1705,7 +1727,7 @@ export class ToolExecutionComponent extends Container {
 						{
 							...resolveImageOptions(),
 							budget: this.#ui.imageBudget,
-							imageKey: `te${this.#instanceId}:${i}`,
+							imageKey: `te${this.#instanceId}:${i}:${imageMimeType}:${String(Bun.hash(imageData))}`,
 							requestRender: () => this.#ui.requestRender(),
 						},
 					);

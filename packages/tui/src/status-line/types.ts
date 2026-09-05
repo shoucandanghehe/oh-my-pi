@@ -1,4 +1,4 @@
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Effort, Model } from "@oh-my-pi/pi-ai";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
@@ -15,6 +15,27 @@ export interface ContextUsage {
 	/** Context usage as percentage of context window. */
 	percent: number;
 }
+/** Host-supplied side-thread snapshot; publish a new snapshot whenever runtime state changes. */
+export interface StatusLineRuntimeStatus {
+	sessionId: string;
+	model: Model;
+	thinkingLevel: Effort | undefined;
+	isStreaming: boolean;
+	latestAssistantMessage: AssistantMessage | undefined;
+	stats: {
+		tokens: {
+			input: number;
+			output: number;
+			cacheRead: number;
+			cacheWrite: number;
+			total: number;
+		};
+		premiumRequests: number;
+		cost: number;
+		contextUsage: ContextUsage | undefined;
+	};
+}
+
 
 /** Debounced footer snapshot a collab host broadcasts to guests. */
 export type CollabSessionState = SessionState & {
@@ -79,6 +100,9 @@ export interface SegmentContext {
 	now?: Date;
 	/** Deterministic host label for previews/tests; production omits it. */
 	hostname?: string;
+	/** Side-thread runtime shown in this pane instead of the attached Main session. */
+	runtimeStatus?: StatusLineRuntimeStatus;
+	runtimeSessionName?: string;
 	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
 	focusedAgentId?: string | undefined;
 	/** Effective `statusLine.sessionAccent`; `false` disables hash-derived accent colors, while `true` or omission enables them. */

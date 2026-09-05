@@ -71,7 +71,7 @@ function toneOf(color: ThemeColor): TspTone | undefined {
  */
 function sessionAccentAnsi(ctx: SegmentContext): string | undefined {
 	if (ctx.sessionAccent === false) return undefined;
-	const name = ctx.session?.sessionManager?.getSessionName() || ctx.previewTitle;
+	const name = ctx.runtimeSessionName || ctx.session?.sessionManager?.getSessionName() || ctx.previewTitle;
 	if (!name) return undefined;
 	return getSessionAccentAnsi(getSessionAccentHex(name, theme.sessionAccentInputs));
 }
@@ -274,8 +274,8 @@ const statusSegment: StatusLineSegment = {
 
 /** Display name of the active model (`Claude ` prefix dropped). */
 function modelDisplayName(ctx: SegmentContext): string {
-	const state = ctx.session.state;
-	const modelName = state.model?.name || state.model?.id || "no-model";
+	const model = ctx.runtimeStatus?.model ?? ctx.session.state.model;
+	const modelName = model?.name || model?.id || "no-model";
 	return modelName.startsWith("Claude ") ? modelName.slice(7) : modelName;
 }
 
@@ -297,7 +297,14 @@ export function thinkingLevelWord(
 function modelThinkingDisplay(ctx: SegmentContext): string {
 	const state = ctx.session.state;
 	const opts = ctx.options.model ?? {};
-	if (opts.showThinkingLevel === false || !state.model?.thinking) return "";
+	const model = ctx.runtimeStatus?.model ?? state.model;
+	if (opts.showThinkingLevel === false || !model?.thinking) return "";
+	if (ctx.runtimeStatus) {
+		const level = ctx.runtimeStatus.thinkingLevel;
+		return level === undefined
+			? `${theme.thinking.autoPending} auto`
+			: (theme.thinking[level as keyof Theme["thinking"]] ?? level);
+	}
 	if (ctx.session.isAutoThinking) {
 		// Pending (no turn classified yet / classifying) shows a symbol-theme
 		// question-box marker; once resolved it shows `<level>`.
@@ -318,6 +325,7 @@ function modelThinkingDisplay(ctx: SegmentContext): string {
  * paused/no-model. Undefined when no advisor is configured.
  */
 function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeColor } | undefined {
+	if (ctx.runtimeStatus) return undefined;
 	// Optional chaining: lightweight session doubles (test mocks) that don't
 	// implement getAdvisorStatusOverview skip the badge instead of crashing.
 	const advisorStats = ctx.session.getAdvisorStatusOverview?.();
@@ -340,13 +348,22 @@ function modelAdvisorBadge(ctx: SegmentContext): { icon: string; color: ThemeCol
 const modelSegment: StatusLineSegment = {
 	id: "model",
 	render(ctx) {
+		const runtime = ctx.runtimeStatus;
 		const modelName = modelDisplayName(ctx);
-		const thinkingDisplay = modelThinkingDisplay(ctx);
+		let thinkingDisplay = modelThinkingDisplay(ctx);
 
-		// Compact mode swaps the model icon for the thinking-level glyph and drops
-		// the " · <level>" tail, keeping the level visible as a single icon.
-		const compact = ctx.compactThinkingLevel && thinkingDisplay !== "";
-		const modelIcon = compact ? leadingGlyph(thinkingDisplay) : theme.icon.model;
+		if (ctx.startupPlaceholder && thinkingDisplay) {
+			thinkingDisplay = withIcon(leadingGlyph(thinkingDisplay), STARTUP_PLACEHOLDER);
+		}
+
+		// A focused side thread uses the agents icon. Otherwise compact mode
+		// swaps the model icon for the thinking-level glyph and drops the level tail.
+		const compact = !ctx.focusedAgentId && ctx.compactThinkingLevel && thinkingDisplay !== "";
+		const modelIcon = ctx.focusedAgentId
+			? (theme.icon.agents ?? theme.icon.model)
+			: compact
+				? leadingGlyph(thinkingDisplay)
+				: theme.icon.model;
 
 		// Fast-mode icon and thinking-level suffix trail the model name and are
 		// colored together with it as `statusLineModel`. The advisor symbol sits
@@ -354,7 +371,7 @@ const modelSegment: StatusLineSegment = {
 		// theme.fg resets only the fg, so the spans are concatenated (not
 		// nested) to keep each color intact.
 		let tail = "";
-		if (ctx.session.isFastModeActive() && theme.icon.fast) {
+		if (!runtime && ctx.session.isFastModeActive?.() && theme.icon.fast) {
 			tail += ` ${theme.icon.fast}`;
 		}
 		if (!compact && thinkingDisplay) {
@@ -787,12 +804,10 @@ function costSummary(ctx: SegmentContext): string | undefined {
 	const taskResultCost = ctx.usageStats.subagentCost ?? 0;
 	const ownCost = Math.max(0, cost - taskResultCost);
 	const subagentCost = Math.max(ctx.subagentTreeCost ?? 0, taskResultCost);
-	const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
-	const state = ctx.session.state;
-	const pricingPeriod = state.model?.cost
-		? getTimeBasedPricingPeriod(state.model.cost, ctx.now?.getTime())
-		: undefined;
-	const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
+	const advisorCost = ctx.runtimeStatus ? 0 : (ctx.session.getAdvisorCost?.() ?? 0);
+	const model = ctx.runtimeStatus?.model ?? ctx.session.state.model;
+	const pricingPeriod = model?.cost ? getTimeBasedPricingPeriod(model.cost, ctx.now?.getTime()) : undefined;
+	const usingSubscription = model ? (ctx.session.modelRegistry?.isUsingOAuth(model) ?? false) : false;
 	// Resolve the advisor subscription flag lazily: with no active advisor
 	// it walks the whole model catalog (getAvailable → hasAuth per provider
 	// → credential-file reads), and the status line re-renders at the
@@ -953,9 +968,9 @@ const timeSegment: StatusLineSegment = {
 const sessionSegment: StatusLineSegment = {
 	id: "session",
 	render(ctx) {
-		const sessionManager = ctx.session.sessionManager;
-		const sessionId = sessionManager?.getSessionId?.();
-		const display = sessionId?.slice(0, 8) || "new";
+		const sessionId = ctx.runtimeStatus?.sessionId ?? ctx.session.sessionManager?.getSessionId?.();
+		const runtimeId = ctx.runtimeStatus ? sessionId?.split(":side:").at(-1) : sessionId;
+		const display = statusValue(ctx, runtimeId?.slice(0, 8) || "new");
 
 		return { content: withIcon(theme.icon.session, display), visible: true };
 	},
@@ -1022,8 +1037,7 @@ const cacheHitSegment: StatusLineSegment = {
 const sessionNameSegment: StatusLineSegment = {
 	id: "session_name",
 	render(ctx) {
-		const sessionManager = ctx.session.sessionManager;
-		const name = sessionManager?.getSessionName() || ctx.previewTitle;
+		const name = ctx.runtimeSessionName || ctx.session.sessionManager?.getSessionName() || ctx.previewTitle;
 		if (!name) return { content: "", visible: false };
 
 		const content = sanitizeStatusText(name);

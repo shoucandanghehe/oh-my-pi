@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
@@ -452,11 +452,13 @@ export class UiHelpers {
 			) {
 				continue;
 			}
+			this.ctx.chatContainer.prepareVirtualStructure();
 			renderChunk?.();
 			await waitForImmediate();
 			messagesSinceYield = 0;
 			chunkStartedAt = performance.now();
 		}
+		this.ctx.chatContainer.prepareVirtualStructure();
 	}
 
 	*#renderSessionContextSteps(
@@ -679,20 +681,7 @@ export class UiHelpers {
 
 					readGroup?.seal();
 					readGroup = null;
-					const partialJson = getStreamingPartialJson(content);
-					// Mid-stream rebuild (theme change, settings, focus replay): decode
-					// display args from the raw stream exactly like the live reveal path.
-					// The provider-parsed `arguments` lag the stream by up to a throttled
-					// parse window, so spreading them alone would freeze a long write/edit
-					// preview at its last full parse.
-					const rawInput = content.customWireName !== undefined;
-					const renderArgs = partialJson
-						? decodeStreamedToolArgs(partialJson, {
-								rawInput,
-								fullArgs: content.arguments,
-								streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
-							})
-						: content.arguments;
+					const renderArgs = displayArgsForToolCall(content, renderToolName);
 					const component = new ToolExecutionComponent(
 						renderToolName,
 						renderArgs,
@@ -1057,6 +1046,7 @@ export class UiHelpers {
 				} else {
 					await this.ctx.renderSessionContextIncrementally(context, renderOptions);
 				}
+				stagedChatContainer.prepareVirtualStructure();
 				if (this.ctx.viewSession.sessionManager.getEntries().length === replayEntryCount) {
 					break;
 				}
@@ -1092,17 +1082,13 @@ export class UiHelpers {
 				this.ctx.pendingPythonComponents = [];
 			}
 
-			const replayedChatChildren = [...stagedChatContainer.children];
-			stagedChatContainer.clear();
 			this.ctx.chatContainer = visibleChatContainer;
 			if (preservedChatChildren) {
 				visibleChatContainer.clear();
 			} else {
 				visibleChatContainer.disposeChildren();
 			}
-			for (const child of replayedChatChildren) {
-				visibleChatContainer.addChild(child);
-			}
+			visibleChatContainer.adoptContentsFrom(stagedChatContainer);
 			if (preservedChatChildren) {
 				for (const child of preservedChatChildren) {
 					visibleChatContainer.addChild(child);

@@ -15,6 +15,7 @@
 			"@babel/traverse": "^7.29.7",
 			"@babel/types": "^7.29.7",
 			"@huggingface/transformers": "^4.2.0",
+			"@napi-rs/canvas": "^1.0.8",
 			"@napi-rs/cli": "3.7.2",
 			"@oh-my-pi/omp-stats": "18.8.9",
 			"@oh-my-pi/omptype": "18.8.9",
@@ -73,6 +74,7 @@
 		"setup": "bun scripts/setup.ts",
 		"dev": "bun --cwd=packages/coding-agent src/cli.ts",
 		"dev:timing": "PI_TIMING=x bun --cwd=packages/coding-agent --preload ../utils/src/module-timer.ts src/cli.ts",
+		"prototype:conversation-panes": "bun packages/coding-agent/src/modes/prototypes/conversation-pane-prototype.ts",
 		"stats": "bun --cwd=packages/coding-agent src/cli.ts stats",
 		"collab:web:dev": "bun --cwd=packages/collab-web run dev",
 		"collab:relay": "bun --cwd=packages/collab-web run relay",
@@ -172,8 +174,10 @@
 		"sherpa-onnx-node": "1.13.2"
 	},
 	"devDependencies": {
+		"@napi-rs/canvas": "catalog:",
 		"@types/bun": "catalog:",
 		"@typescript/native-preview": "catalog:",
+		"kitty-vt-wasm": "catalog:",
 		"lint-staged": "catalog:",
 		"oxfmt": "catalog:",
 		"oxlint": "catalog:",

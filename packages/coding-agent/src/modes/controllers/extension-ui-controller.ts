@@ -56,6 +56,9 @@ function guestAskHelpText(enterAction: string, extra = ""): string {
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+const ASK_DIALOG_CAPABILITIES = Object.freeze({
+	allowCustomInput: true,
+}) satisfies NonNullable<ExtensionUIContext["askDialogCapabilities"]>;
 
 function withTerminalLauncher(uiContext: ExtensionUIContext, hasUI: boolean): ExtensionUIContext {
 	if (!hasUI || uiContext.openTerminal) return uiContext;
@@ -141,7 +144,9 @@ export class ExtensionUiController {
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
+			askDialogCapabilities: ASK_DIALOG_CAPABILITIES,
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
+			localAskDialog: (questions, dialogOptions) => this.#showLocalAskDialog(questions, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
@@ -873,6 +878,7 @@ export class ExtensionUiController {
 				? { label: displayLabels[index]!, description: sanitizeCarriageReturns(option.description.trim()) }
 				: displayLabels[index]!,
 		);
+		const allowCustomInput = question.allowCustomInput !== false;
 		if (question.multi) {
 			while (true) {
 				const checkedIndices = question.options
@@ -884,7 +890,8 @@ export class ExtensionUiController {
 				// (PRRT_kwDOQxs0bc6OFbDW). The remote select has no "disabled" row
 				// concept, so we omit rather than dim it.
 				const hasAnswer = selected.size > 0 || customInput !== undefined;
-				const options = [...baseOptions, ASK_OTHER_OPTION];
+				const options = [...baseOptions];
+				if (allowCustomInput) options.push(ASK_OTHER_OPTION);
 				if (hasAnswer) options.push(ASK_NEXT_OPTION);
 				options.push(ASK_CHAT_OPTION);
 				const choice = await this.#requestGuestUiString(
@@ -904,7 +911,7 @@ export class ExtensionUiController {
 				if (choice.kind === "cancelled") return undefined;
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_NEXT_OPTION) break;
-				if (choice.value === ASK_OTHER_OPTION) {
+				if (allowCustomInput && choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
 						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
@@ -927,13 +934,16 @@ export class ExtensionUiController {
 					? question.recommended
 					: 0;
 			const initialIndex = Math.max(0, Math.min(recommended, Math.max(0, question.options.length - 1)));
+			const options = allowCustomInput
+				? [...baseOptions, ASK_OTHER_OPTION, ASK_CHAT_OPTION]
+				: [...baseOptions, ASK_CHAT_OPTION];
 			while (true) {
 				const choice = await this.#requestGuestUiString(
 					host,
 					{
 						kind: "select",
 						title: displayQuestion,
-						options: [...baseOptions, ASK_OTHER_OPTION, ASK_CHAT_OPTION],
+						options,
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
@@ -944,7 +954,7 @@ export class ExtensionUiController {
 				if (choice.kind === "unavailable") return "unavailable";
 				if (choice.kind === "cancelled") return undefined;
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
-				if (choice.value === ASK_OTHER_OPTION) {
+				if (allowCustomInput && choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
 						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },

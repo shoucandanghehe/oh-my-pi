@@ -19,6 +19,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { visitEntriesFromFileStream } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import type { OverlayOptions } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const AGENT_ID = "Worker";
@@ -39,7 +40,7 @@ function persistedChildJsonl(id: string): string {
 	].join("\n");
 }
 
-function makeHub(focusAgent: (id: string) => Promise<void>) {
+function makeHub(focusAgent: (id: string) => Promise<void>, openAgent?: (id: string) => Promise<void>) {
 	const agents = new AgentRegistry();
 	agents.register({
 		id: AGENT_ID,
@@ -65,6 +66,7 @@ function makeHub(focusAgent: (id: string) => Promise<void>) {
 		registry: agents,
 		irc: new IrcBus(agents),
 		focusAgent,
+		openAgent,
 	});
 	return { hub, doneCalls: () => doneCalls, done: done.promise, renderRequested: renderRequested.promise };
 }
@@ -135,6 +137,26 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("opens the selected agent in a workspace pane when that adapter is available", async () => {
+		const focusedIds: string[] = [];
+		const openedIds: string[] = [];
+		const { hub, done } = makeHub(
+			async id => {
+				focusedIds.push(id);
+			},
+			async id => {
+				openedIds.push(id);
+			},
+		);
+
+		hub.handleInput("\r");
+		await done;
+
+		expect(openedIds).toEqual([AGENT_ID]);
+		expect(focusedIds).toEqual([]);
+		hub.dispose();
+	});
+
 	it("a focus failure keeps the hub open and shows the error as a notice", async () => {
 		const message = 'Agent "X" is aborted and cannot be revived';
 		const { hub, doneCalls, renderRequested } = makeHub(() => Promise.reject(new Error(message)));
@@ -172,6 +194,10 @@ describe("Agent hub Enter activation", () => {
 			registry: agents,
 			irc: new IrcBus(agents),
 			focusAgent,
+			createStatusLine: () => ({
+				getTopBorder: () => ({ content: "", width: 0, revision: 0 }),
+				dispose: () => {},
+			}),
 			ui: {
 				requestRender: () => {},
 				requestComponentRender: () => {},
@@ -575,6 +601,11 @@ describe("Agent hub Enter activation", () => {
 			editor,
 			editorContainer,
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			workspaceEnabled: false,
+			focusMainWorkspacePane: () => {
+				focusTargets.push(editor);
+				editorFocused.resolve();
+			},
 			focusAgentSession: async (id: string) => {
 				focusedIds.push(id);
 				focusResolved.resolve();
@@ -596,6 +627,65 @@ describe("Agent hub Enter activation", () => {
 		expect(focusedIds).toEqual([AGENT_ID]);
 		expect(focusTargets.at(-1)).toBe(editor);
 		capturedHub!.dispose();
+	});
+
+	it("mounts the hub fullscreen and opens an agent pane in app-viewport workspaces", async () => {
+		const agents = new AgentRegistry();
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Main",
+			session: { subscribe: () => () => {} } as unknown as AgentSession,
+			sessionFile: null,
+			status: "running",
+		});
+		let hub: AgentHubOverlayComponent | undefined;
+		let overlayOptions: OverlayOptions | undefined;
+		let overlayHidden = false;
+		const openedIds: string[] = [];
+		const done = Promise.withResolvers<void>();
+		const ctx = {
+			keybindings: { getKeys: () => [] },
+			ui: {
+				showOverlay: (component: AgentHubOverlayComponent, options: OverlayOptions) => {
+					hub = component;
+					overlayOptions = options;
+					return { hide: () => (overlayHidden = true) };
+				},
+				setFocus: () => {},
+				requestRender: () => {},
+			},
+			editor: {},
+			editorContainer: { clear: () => {}, addChild: () => {} },
+			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			workspaceEnabled: true,
+			openAgentWorkspacePane: async (id: string) => {
+				openedIds.push(id);
+			},
+			focusMainWorkspacePane: () => done.resolve(),
+			focusAgentSession: async () => {},
+			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null },
+			hideThinkingBlock: false,
+		};
+		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
+
+		controller.showAgentHub(new SessionObserverRegistry());
+		expect(overlayOptions).toEqual({
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+
+		hub!.handleInput("\r");
+		await done.promise;
+
+		expect(openedIds).toEqual([AGENT_ID]);
+		expect(overlayHidden).toBe(true);
+		hub!.dispose();
 	});
 });
 
@@ -635,6 +725,10 @@ describe("Agent hub double-← gating", () => {
 				addChild: () => {},
 			},
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
+			workspaceEnabled: false,
+			focusMainWorkspacePane: () => {
+				focusTargets.push(editor);
+			},
 			focusAgentSession: async () => {},
 			session: { getToolByName: () => undefined, extensionRunner: undefined },
 			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },

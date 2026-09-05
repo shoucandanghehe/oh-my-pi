@@ -13,6 +13,7 @@ import {
 	type Component,
 	type ComposerStyle,
 	claudeComposerStyle,
+	type EditorTopBorder,
 	padding,
 	SPINNER_ADVANCE_MS,
 	truncateToWidth,
@@ -52,6 +53,7 @@ import type {
 	EffectiveStatusLineSettings,
 	SegmentView,
 	SeparatorDef,
+	StatusLineRuntimeStatus,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSeparatorStyle,
@@ -435,6 +437,8 @@ class StatusLineExternalInputs {
 	skillsLength = 0;
 	sessionName: string | undefined = undefined;
 	sessionId: string | undefined = undefined;
+	activeMs = 0;
+	activeStartedAt: number | null = null;
 	isStreaming: boolean | undefined = undefined;
 	isAutoThinking: boolean | undefined = undefined;
 	isFastModeActive = false;
@@ -688,6 +692,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#gitWatcherUnavailable = false;
 	#onBranchChange: (() => void) | null = null;
 	#disposed = false;
+	#owner: StatusLineComponent<TSession> | undefined;
+	readonly #peers = new Set<StatusLineComponent<TSession>>();
 	#autoCompactEnabled: boolean = true;
 	/** Pulse timer for the running-speculation indicator; live only while speculation runs. */
 	#speculationBlinkTimer: NodeJS.Timeout | undefined;
@@ -742,6 +748,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#streamStatus: { viewers: number } | null = null;
 	#recording = false;
 	#focusedAgentId: string | undefined;
+	#runtimeStatus: StatusLineRuntimeStatus | undefined;
+	#runtimeSessionName: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
 	// Git status caching (1s TTL)
@@ -818,6 +826,45 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#settings = host.getSettings();
 	}
 
+	static getErrorTopBorder(message: string, availableWidth: number, transparent = false): EditorTopBorder {
+		const width = Math.max(0, Math.trunc(availableWidth));
+		if (width === 0) return { content: "", width: 0 };
+		const content = truncateToWidth(theme.fg("error", ` ${sanitizeStatusText(message)} `), width);
+		const styled = transparent ? content : theme.bg("statusLineBg", content);
+		return { content: styled, width: visibleWidth(styled) };
+	}
+
+	/**
+	 * Create an independently cached status line for another pane while keeping
+	 * every visual/runtime setting synchronized with this instance.
+	 */
+	createPeer(session: TSession, focusedAgentId?: string): StatusLineComponent<TSession> {
+		if (this.#disposed) throw new Error("Cannot create a peer from a disposed status line");
+		const peer = new StatusLineComponent(session, this.host);
+		peer.#settings = this.#settings;
+		peer.#effectiveSettings = undefined;
+		peer.#standalone = this.#standalone;
+		peer.#topAttachment = this.#topAttachment;
+		peer.#standaloneGap = this.#standaloneGap;
+		peer.#autoCompactEnabled = this.#autoCompactEnabled;
+		peer.#hookStatuses = new Map(this.#hookStatuses);
+		peer.#sortedHookStatuses = this.#sortedHookStatuses;
+		peer.#subagentCount = this.#subagentCount;
+		peer.#runningSubagentIds = new Set(this.#runningSubagentIds);
+		peer.#activeMeters = this.#activeMeters;
+		peer.#planModeStatus = this.#planModeStatus;
+		peer.#loopModeStatus = this.#loopModeStatus;
+		peer.#goalModeStatus = this.#goalModeStatus;
+		peer.#vibeModeStatus = this.#vibeModeStatus;
+		peer.#vimStatus = this.#vimStatus;
+		peer.#vibeWorkerTokenRate = this.#vibeWorkerTokenRate;
+		peer.#collabStatus = this.#collabStatus;
+		peer.#streamStatus = this.#streamStatus;
+		peer.#owner = this;
+		this.#peers.add(peer);
+		if (focusedAgentId) peer.setSession(session, focusedAgentId);
+		return peer;
+	}
 	#gitEnabled(): boolean {
 		return this.host.gitEnabled();
 	}
@@ -924,6 +971,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.invalidate();
 	}
+	setRuntimeStatus(status: StatusLineRuntimeStatus | undefined, sessionName?: string): void {
+		if (this.#runtimeStatus === status && this.#runtimeSessionName === sessionName) return;
+		this.#runtimeStatus = status;
+		this.#runtimeSessionName = sessionName;
+		this.#lastTokensPerSecond = null;
+		this.#lastTokensPerSecondTimestamp = null;
+		this.invalidate();
+	}
 
 	/**
 	 * Drop a meter's in-flight window when the newly-attached session is no
@@ -948,6 +1003,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 		if (this.#onBranchChange) this.#setupGitWatcher();
 		this.#syncPricingTimer();
+		for (const peer of this.#peers) peer.updateSettings(settings);
 	}
 
 	getEffectiveSettingsForTest(): EffectiveStatusLineSettings {
@@ -958,6 +1014,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (this.#autoCompactEnabled === enabled) return;
 		this.#autoCompactEnabled = enabled;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setAutoCompactEnabled(enabled);
 	}
 
 	setRunningSubagents(agentIds: readonly string[]): void {
@@ -970,6 +1027,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#subagentCount = agentIds.length;
 		this.#runningSubagentIds = new Set(agentIds);
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setRunningSubagents(agentIds);
 	}
 
 	/** Host-computed spend of the main session's whole subagent tree (Agent Hub projection). */
@@ -1108,6 +1166,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#planModeStatus = next;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setPlanModeStatus(status);
 	}
 
 	setLoopModeStatus(status: NonNullable<SegmentContext["loopMode"]> | undefined): void {
@@ -1122,6 +1181,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#loopModeStatus = next;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setLoopModeStatus(status);
 	}
 
 	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
@@ -1134,6 +1194,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#goalModeStatus = next;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setGoalModeStatus(status);
 	}
 
 	setVibeModeStatus(status: { enabled: boolean } | undefined): void {
@@ -1141,6 +1202,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (this.#vibeModeStatus === next || this.#vibeModeStatus?.enabled === next?.enabled) return;
 		this.#vibeModeStatus = next;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setVibeModeStatus(status);
 	}
 
 	/** Mirror of the editor's modal state; `undefined` clears it (Vim mode off). */
@@ -1157,6 +1219,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#vimStatus = next;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setVimStatus(status);
 	}
 
 	/**
@@ -1169,6 +1232,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	setVibeWorkerTokenRateProvider(provider: (() => number | null) | undefined): void {
 		this.#vibeWorkerTokenRate = provider ?? null;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setVibeWorkerTokenRateProvider(provider);
 	}
 
 	setCollabStatus(status: CollabStatus | null): void {
@@ -1182,12 +1246,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		this.#collabStatus = status;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setCollabStatus(status);
 	}
 
 	setStreamStatus(status: { viewers: number } | null): void {
 		if (this.#streamStatus?.viewers === status?.viewers) return;
 		this.#streamStatus = status;
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setStreamStatus(status);
 	}
 
 	/** Toggle the `● REC` badge shown while `/record` captures the screen. */
@@ -1213,6 +1279,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([, status]) => status);
 		this.#invalidateStatusLineRenderCache();
+		for (const peer of this.#peers) peer.setHookStatus(key, text);
 	}
 
 	watchBranch(onBranchChange: () => void): void {
@@ -1261,10 +1328,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	dispose(): void {
+		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#branchResolveActive?.controller.abort();
 		this.#branchResolveActive = undefined;
 		this.#resetJjRequests();
+		if (this.#owner) this.#owner.#peers.delete(this);
+		this.#owner = undefined;
+		for (const peer of this.#peers) peer.dispose();
+		this.#peers.clear();
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#stopBrandFadeTimer();
@@ -1310,7 +1382,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * (the usual repaint driver) has stopped.
 	 */
 	#brandFgAnsi(working: boolean, sessionAccentEnabled: boolean, brandVisible: boolean): string {
-		const sessionName = sessionAccentEnabled ? this.session.sessionManager?.getSessionName() : undefined;
+		const sessionName = sessionAccentEnabled
+			? (this.#runtimeSessionName ?? this.session.sessionManager?.getSessionName())
+			: undefined;
 		const idleHex = theme.getColorHex("dim");
 		const workingHex =
 			(sessionName && getSessionAccentHex(sessionName, theme.sessionAccentInputs)) || theme.getColorHex("accent");
@@ -1380,7 +1454,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#syncPricingTimer(): void {
-		const cost = this.session.state.model?.cost;
+		const cost = (this.#runtimeStatus?.model ?? this.session.state.model)?.cost;
 		const effectiveSettings = this.#resolveSettings();
 		const costVisible =
 			(effectiveSettings.leftSegments.includes("cost") &&
@@ -1436,6 +1510,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// A tool may open, close, or merge a PR without moving HEAD. Expire the
 		// settled PR context on ordinary activity while leaving HEAD work intact.
 		this.#cachedPrContext = undefined;
+		for (const peer of this.#peers) peer.invalidate();
 	}
 	#invalidateSessionCaches(): void {
 		this.#clearUsageStartTimer();
@@ -1481,6 +1556,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#cachedJjStatus = null;
 		this.#jjStatusLastFetch = 0;
 		this.#jjCacheGeneration++;
+		for (const peer of this.#peers) peer.invalidateGitCaches();
 	}
 
 	/**
@@ -1860,6 +1936,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#getTokensPerSecond(): number | null {
+		if (this.#runtimeStatus) {
+			const message = this.#runtimeStatus.latestAssistantMessage;
+			return message ? this.host.calculateTokensPerSecond([message], this.#runtimeStatus.isStreaming) : null;
+		}
 		// Aggregate tok/s across the main session AND every live vibe worker.
 		// In vibe mode the director is often idle while workers stream, so the
 		// main session's own rate alone would show a stale/zero value while
@@ -2409,30 +2489,50 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
+		const runtimeStatus = this.#runtimeStatus;
 
 		// Trigger background fetch (5-min TTL); render uses cached value
-		this.refreshUsageInBackground();
+		if (!runtimeStatus) this.refreshUsageInBackground();
 
 		// Get usage statistics
-		const aggregateUsageStats = this.session.sessionManager?.getUsageStatistics() ?? {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			orchestrationInput: 0,
-			orchestrationOutput: 0,
-			orchestrationCacheRead: 0,
-			premiumRequests: 0,
-			cost: 0,
-		};
+		const aggregateUsageStats = runtimeStatus
+			? {
+					input: runtimeStatus.stats.tokens.input,
+					output: runtimeStatus.stats.tokens.output,
+					cacheRead: runtimeStatus.stats.tokens.cacheRead,
+					cacheWrite: runtimeStatus.stats.tokens.cacheWrite,
+					totalTokens: runtimeStatus.stats.tokens.total,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: runtimeStatus.stats.premiumRequests,
+					cost: runtimeStatus.stats.cost,
+				}
+			: (this.session.sessionManager?.getUsageStatistics() ?? {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				});
 		const usageStats = {
 			...aggregateUsageStats,
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
 
-		let contextWindow = state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
-		const breakdown = this.getCachedContextBreakdown();
+		let contextWindow =
+			runtimeStatus?.model.contextWindow ?? state.model?.contextWindow ?? this.session.model?.contextWindow ?? 0;
+		const breakdown = runtimeStatus
+			? {
+					usedTokens: runtimeStatus.stats.contextUsage?.tokens ?? 0,
+					contextWindow: runtimeStatus.stats.contextUsage?.contextWindow ?? runtimeStatus.model.contextWindow ?? 0,
+				}
+			: this.getCachedContextBreakdown();
 		let contextTokens = breakdown.usedTokens;
 		contextWindow = breakdown.contextWindow || contextWindow;
 		let contextPercent: number | null =
@@ -2441,7 +2541,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				: null;
 		// Collab guest: context comes from the host's state frames — the local
 		// replica does no accounting of its own.
-		const collabState = this.#collabStatus?.stateOverride;
+		const collabState = runtimeStatus ? undefined : this.#collabStatus?.stateOverride;
 		if (collabState?.contextUsage) {
 			contextWindow = collabState.contextUsage.contextWindow || contextWindow;
 			contextTokens = collabState.contextUsage.tokens ?? contextTokens;
@@ -2465,7 +2565,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache) : null;
 		const gitStatus = includeGit ? this.#getStatus(activeRepoCache) : null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache) : null;
-		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
+		const compactionSpeculation = runtimeStatus ? "idle" : (this.session.compactionSpeculation ?? "idle");
 		this.#syncSpeculationBlink(compactionSpeculation);
 		const settings = this.#resolveSettings();
 		const sessionAccentEnabled = settings.sessionAccent !== false;
@@ -2473,6 +2573,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const turnElapsedMs = this.getTurnElapsedMs();
 		return {
 			session: this.session,
+			runtimeStatus,
+			runtimeSessionName: this.#runtimeSessionName,
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
@@ -2481,41 +2583,45 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			options: segmentOptions ?? {},
 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
 			hookStatuses: this.#sortedHookStatuses,
-			planMode: this.#planModeStatus,
-			loopMode: this.#loopModeStatus,
+			planMode: runtimeStatus ? null : this.#planModeStatus,
+			loopMode: runtimeStatus ? null : this.#loopModeStatus,
 			prewalk:
-				typeof this.session.getPrewalkState === "function" && this.session.getPrewalkState()
+				!runtimeStatus && typeof this.session.getPrewalkState === "function" && this.session.getPrewalkState()
 					? { enabled: true }
 					: null,
-			goalMode: this.#goalModeStatus,
-			goalStatusInFooter: this.#goalModeStatus ? this.host.goalStatusInFooter(this.session) : false,
-			vibeMode: this.#vibeModeStatus,
+			goalMode: runtimeStatus ? null : this.#goalModeStatus,
+			goalStatusInFooter:
+				!runtimeStatus && this.#goalModeStatus ? this.host.goalStatusInFooter(this.session) : false,
+			vibeMode: runtimeStatus ? null : this.#vibeModeStatus,
 			vim: this.#vimStatus,
-			collab: this.#collabStatus,
+			collab: runtimeStatus ? null : this.#collabStatus,
 			stream: this.#streamStatus,
 			recording: this.#recording,
 			usageStats,
 			contextPercent,
 			contextTokens,
 			contextWindow,
-			autoCompactEnabled: this.#autoCompactEnabled,
+			autoCompactEnabled: runtimeStatus ? false : this.#autoCompactEnabled,
 			compactionSpeculation,
-			speculationBlinkOn: this.#speculationBlinkOn,
-			subagentCount: this.#subagentCount,
-			// The tree total describes the main session; a focused subagent's
-			// view falls back to its own completed task results.
-			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
-			activeMs: this.getActiveMs(),
-			turnElapsedMs,
+			speculationBlinkOn: runtimeStatus ? false : this.#speculationBlinkOn,
+			subagentCount: runtimeStatus ? 0 : this.#subagentCount,
+			// The tree total describes the main session, not a side thread or focused subagent.
+			subagentTreeCost: runtimeStatus || this.#focusedAgentId ? 0 : this.#subagentTreeCost,
+			activeMs: runtimeStatus ? 0 : this.getActiveMs(),
+			turnElapsedMs: runtimeStatus ? null : turnElapsedMs,
 			now: new Date(nowMs),
-			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled, brandVisible),
+			brandFgAnsi: this.#brandFgAnsi(
+				runtimeStatus ? runtimeStatus.isStreaming : turnElapsedMs !== null,
+				sessionAccentEnabled,
+				brandVisible,
+			),
 			git: {
 				branch: gitBranch,
 				status: gitStatus,
 				pr: gitPr,
 			},
 			worktree: activeRepoCache.worktree,
-			usage: this.#cachedUsage,
+			usage: runtimeStatus ? null : this.#cachedUsage,
 		};
 	}
 
@@ -2669,6 +2775,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		target.skillsLength = skills?.length ?? 0;
 		target.sessionName = this.session.sessionManager?.getSessionName?.();
 		target.sessionId = this.session.sessionManager?.getSessionId?.();
+		const meter = this.#meter();
+		target.activeMs = meter.activeMs;
+		target.activeStartedAt = meter.activeStartedAt;
 		target.isStreaming = this.session.isStreaming;
 		target.isAutoThinking = this.session.isAutoThinking;
 		target.isFastModeActive =
@@ -2727,6 +2836,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.skillsLength === right.skillsLength &&
 			left.sessionName === right.sessionName &&
 			left.sessionId === right.sessionId &&
+			left.activeMs === right.activeMs &&
+			left.activeStartedAt === right.activeStartedAt &&
 			left.isStreaming === right.isStreaming &&
 			left.isAutoThinking === right.isAutoThinking &&
 			left.isFastModeActive === right.isFastModeActive &&
@@ -2744,7 +2855,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#statusLineClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
 		const leftSegments = effectiveSettings.leftSegments;
 		const rightSegments = effectiveSettings.rightSegments;
-		const turnActive = this.#meter().activeStartedAt !== null;
+		const turnActive = this.#runtimeStatus ? this.#runtimeStatus.isStreaming : this.#meter().activeStartedAt !== null;
 		// The `pi` brand is the only spinner-rate animation: its braille spinner
 		// while a turn runs and its color fade across turn edges. While
 		// focus-proxied it shows the viewed agent's id instead.
@@ -2896,7 +3007,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const transparentBg = bgAnsi === TRANSPARENT_BG_ANSI;
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
-		const subagentBadge = this.#subagentBadgeText();
+		const subagentBadge = this.#runtimeStatus ? undefined : this.#subagentBadgeText();
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
@@ -3135,7 +3246,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		embedContext: boolean,
 	): string {
 		const sessionName =
-			effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+			effectiveSettings.sessionAccent !== false
+				? (this.#runtimeSessionName ?? this.session.sessionManager?.getSessionName())
+				: undefined;
 		const accentHex = sessionName ? getSessionAccentHex(sessionName, theme.sessionAccentInputs) : undefined;
 		const usedColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("borderAccent");
 		const horizontal = theme.boxRound.horizontal;
@@ -3385,6 +3498,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#topAttachment = style.statusAttachment;
 		this.#standaloneGap = style.bottomBarGap;
 		this.#syncPricingTimer();
+		for (const peer of this.#peers) peer.setComposerStyle(style);
 	}
 
 	/** While true, the standalone bar yields its row to the editor's autocomplete menu. */

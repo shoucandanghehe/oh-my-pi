@@ -6,9 +6,13 @@ import { createStartupStatusLine, type StatusLineStartupData } from "../status-l
 import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
+	type AppViewportFramePlan,
+	type AppViewportFrameProvider,
 	type Component,
 	Container,
 	type ResizeScrollbackMode,
+	componentContains,
+	renderTargeted,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
 	TUI,
@@ -105,6 +109,8 @@ export interface RuntimeChildrenOptions {
 	 * to the roots below the transcript in render order.
 	 */
 	readonly nativeDock?: readonly Component[];
+	/** Preserve bootstrap/classic root chrome, or let a full-height runtime own the terminal. */
+	readonly chrome?: "preserve" | "omit";
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -199,7 +205,8 @@ function rowTargetCandidates(target: Component): ((local: number) => string[]) |
  * It owns the terminal, welcome header, and editor; InteractiveMode later supplies authoritative
  * data and mounts the session-aware runtime children without replacing the visible header.
  */
-export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
+export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, AppViewportFrameProvider {
+	/** Terminal renderer shared with InteractiveMode after adoption. */
 	readonly ui: TUI;
 	#editor: CustomEditor;
 	readonly #header = new Container();
@@ -272,6 +279,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#anchorAfterInlineRetirement = false;
 	/** Rows the chrome below each below-transcript root took in the last frame (see {@link rowsBelow}). */
 	#rowsBelow = new Map<Component, number>();
+	#runtimeChrome: "preserve" | "omit" = "preserve";
 	#lastInterruptAt = 0;
 	/** Last described surface; its arrays are reused while their children are unchanged. */
 	#nativeSurface: NativeSurface = { main: [], dock: [] };
@@ -295,10 +303,12 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			options.tuiOptions,
 		);
 		this.ui.setFrameProvider(this);
+		this.ui.setAppViewportFrameProvider(this);
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
 		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
 		this.#editor = new CustomEditor(getEditorTheme());
+		this.ui.enableScopedInputRender(this.#editor);
 		this.editor.disableSubmit = true;
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
@@ -596,7 +606,71 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#hoveredClickId = id;
 	}
 
-	/** Acknowledges one accepted header, replay, or transcript batch. */
+	renderAppViewportFrame(viewport: ViewportSize, targets: readonly Component[]): AppViewportFramePlan {
+		if (!this.#started || this.#stopped) {
+			return {
+				viewport: [],
+				estimatedTotalRows: 0,
+				offset: 0,
+				stickyRows: 0,
+				cursor: null,
+				rowMap: [],
+			};
+		}
+		const width = Math.max(1, viewport.columns);
+		const rows = Math.max(0, viewport.rows);
+		if (!this.#runtimeMounted) {
+			const scroll = this.#header.render(width);
+			const sticky = this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
+			const stickyRows = Math.min(rows, sticky.length);
+			const scrollHeight = Math.max(0, rows - stickyRows);
+			const offset = Math.max(0, scroll.length - scrollHeight);
+			const visibleScroll = scroll.slice(offset, offset + scrollHeight);
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+			const padding = new Array<string>(Math.max(0, scrollHeight - visibleScroll.length)).fill("");
+			const visibleSticky = sticky.slice(sticky.length - stickyRows);
+			const frame = [...visibleScroll, ...padding, ...visibleSticky];
+			return {
+				viewport: frame,
+				estimatedTotalRows: scroll.length,
+				offset,
+				stickyRows,
+				cursor: null,
+				rowMap: frame.map((_line, index) => (index < visibleScroll.length ? offset + index : -1)),
+			};
+		}
+		const roots = this.#runtimeChildren;
+		let rendered: string[];
+		if (targets.length === 0) {
+			rendered = this.#renderRoots(roots, width);
+		} else {
+			const grouped = roots.map(root => ({
+				root,
+				targets: targets.filter(target => componentContains(root, target)),
+			}));
+			const matched = grouped.reduce((total, group) => total + group.targets.length, 0);
+			rendered =
+				matched === targets.length
+					? grouped.flatMap(group =>
+							group.targets.length > 0
+								? renderTargeted(group.root, width, group.targets)
+								: group.root.render(width),
+						)
+					: this.#renderRoots(roots, width);
+		}
+		const offset = Math.max(0, rendered.length - rows);
+		const visible = rendered.slice(offset, offset + rows);
+		return {
+			viewport: visible,
+			estimatedTotalRows: rendered.length,
+			offset,
+			stickyRows: 0,
+			cursor: null,
+			rowMap: visible.map((_line, index) => offset + index),
+		};
+	}
+
+	/** Retire an accepted terminal history batch (header, then transcript prefixes). */
 	acknowledgeHistory(id: number): void {
 		const offered = this.#offeredHistory;
 		if (offered === undefined || offered.id !== id) return;
@@ -921,14 +995,16 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#startupStatus = undefined;
 	}
 
-	/** Mount or replace session-aware root children while preserving the header and status hosts. */
+	/** Mount or replace session-aware root children. */
 	setRuntimeChildren(children: readonly Component[], options: RuntimeChildrenOptions = {}): void {
 		if (this.#stopped) return;
 		this.#transientChrome = new Set(options.transient);
 		this.#transientChromeFloor = undefined;
 		this.#anchorAfterInlineRetirement = false;
 		this.#nativeDock = options.nativeDock;
+		const chrome = options.chrome ?? "preserve";
 		this.ui.removeChild(this.#statusHost);
+		if (chrome === "omit") this.ui.removeChild(this.#header);
 		if (this.#runtimeMounted) {
 			for (const child of this.#runtimeChildren) this.ui.removeChild(child);
 		} else {
@@ -937,8 +1013,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#runtimeMounted = true;
 		}
 		this.#runtimeChildren = children;
+		if (chrome === "preserve" && this.#runtimeChrome === "omit") this.ui.addChild(this.#header);
 		for (const child of children) this.ui.addChild(child);
-		this.ui.addChild(this.#statusHost);
+		if (chrome === "preserve") this.ui.addChild(this.#statusHost);
+		this.#runtimeChrome = chrome;
 		this.ui.requestRender();
 	}
 

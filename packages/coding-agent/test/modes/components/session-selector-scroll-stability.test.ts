@@ -191,10 +191,7 @@ describe("issue #3283: /resume picker scrolls down after deleting a session", ()
 		});
 
 		const hasScrollbarGlyph = (rows: readonly string[]): boolean =>
-			rows.some(row => {
-				const glyph = Bun.stripANSI(row).trimEnd().at(-1);
-				return glyph === "\u2588" || (glyph !== undefined && glyph >= "\u2800" && glyph <= "\u28ff");
-			});
+			rows.some(row => /[\u2588\u2800-\u28ff]/u.test(Bun.stripANSI(row)));
 
 		try {
 			tui.start();

@@ -16,33 +16,37 @@
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
-import type { Component, TUI } from "../tui";
-import { Editor } from "../components/editor";
-import { matchesKey } from "../keys";
-import { routeSgrMouseInput } from "../mouse";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
-import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
 import { editorKey } from "../chrome/keybinding-hints";
+import { componentContains, renderTargeted, type TargetedRender } from "../tui";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
-import type { AgentLifecycleLike } from "./agent-hub-types";
-import type { AgentHubRegistry, AgentStatus } from "./agent-hub-types";
 import type { SessionMessageEntryLike } from "../chat/transcript-entry";
-import type { ObservableSession, SessionObserverRegistry } from "./session-observer-registry";
-import { getEditorTheme, theme } from "../theme/theme";
-import { matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import { renderWorkspacePaneHeader } from "../chrome/shared";
+import type { EditorTopBorder } from "../components/composer";
+import { matchesKey } from "../keys";
+import type { MouseRoutable, SgrMouseEvent } from "../mouse";
+import type { TextSelectionRange } from "../text-selection";
+import type { Component, Focusable, TUI } from "../tui";
+import { replaceTabs } from "../utils";
+import type { ViewportHeightAware, WorkspacePaneHeaderProvider } from "../workspace-layout";
+import type { AgentHubRegistry, AgentHubSession, AgentLifecycleLike, AgentStatus } from "./agent-hub-types";
+import { theme } from "../theme/theme";
+import type { AppViewportHoverProvider } from "../tui";
+import { fgAnsi } from "../theme/color";
 import type { AgentHubRemote } from "./agent-hub";
-import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
-import {
-	TranscriptBrowser,
-	type TranscriptBrowserFrame,
-	type TranscriptBrowserRenderContext,
-} from "../chat/transcript-browser";
 import { sanitizeErrorLine } from "../chrome/error-block";
-import type { ScrollRangeAnchor } from "../components/scroll-view";
 import { formatContextUsage } from "../chrome/context-thresholds";
 import { node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionHint, escCloseButton, hintsRow, overlayCard } from "../native/overlay";
+import { ChatTranscriptPane } from "../chat/chat-transcript-pane";
+import { StatusLineComponent } from "../status-line/component";
+import type { CustomEditor } from "../prompt/custom-editor";
+import { sanitizeErrorLine } from "../chrome/error-block";
+
+type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose">;
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
 export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
@@ -58,6 +62,19 @@ export interface AgentTranscriptSource {
 		promises?: Pick<typeof fs.promises, "readFile">;
 	};
 	parseEntries(text: string): AgentTranscriptEntry[];
+	/** Stream message/model entries from a bounded snapshot without completing its partial tail. */
+	visitEntries(
+		filePath: string,
+		visit: (entry: AgentTranscriptEntry) => void | boolean,
+		options: {
+			maxBytes?: number;
+			yieldEveryEntries?: number;
+			shouldContinue?: () => boolean;
+			onTrailingPartial?: (bytes: Uint8Array) => void;
+			onBytesConsumed?: (bytes: number) => void;
+			throwIfMissing?: boolean;
+		},
+	): Promise<unknown>;
 }
 
 export interface AgentTranscriptViewerDeps {
@@ -68,8 +85,6 @@ export interface AgentTranscriptViewerDeps {
 	registry: AgentHubRegistry;
 	/** Collab guest: read transcript from the host instead of a local file. */
 	remote?: AgentHubRemote;
-	/** Progress/cost snapshot source for the stats line. */
-	observers?: SessionObserverRegistry;
 	/** Revive+prompt path for messageable local agents. Lazy to avoid touching the global. */
 	lifecycle?: () => AgentLifecycleLike;
 	ui: TUI;
@@ -82,21 +97,28 @@ export interface AgentTranscriptViewerDeps {
 	proseOnlyThinking?: () => boolean;
 	expandThinkingBlocks?: () => boolean;
 	expandKeys: KeyId[];
-	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
+	/** Build a status line for the current live session resolved by the host. */
+	createStatusLine: (agentId: string) => PaneStatusLine;
+	getStatusLineTransparent?: () => boolean;
+	/** Keys that toggle the Agent Hub (app.agents.hub + app.session.observe). */
 	hubKeys: KeyId[];
 	requestRender: () => void;
-	/** Close just this viewer (Esc), returning to the hub table. */
+	/** Close just this viewer (Esc), returning to its owner. */
 	onClose: () => void;
-	/** Close this viewer AND the hub (hub-toggle keys). */
-	onHubClose: () => void;
+	/** Handle a Hub toggle key according to the viewer's host context. */
+	onHubToggle: () => void;
 }
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
 /** Every Nth idle poll re-verifies sentinels, catching same-size/mtime rewrites. */
 const IDLE_SENTINEL_CHECK_EVERY = 5;
+const AUTO_CLOSE_FRAME_MS = 16;
+const AUTO_CLOSE_DURATION_MS = 3_000;
+const AUTO_CLOSE_FRAMES = Math.ceil(AUTO_CLOSE_DURATION_MS / AUTO_CLOSE_FRAME_MS);
 
 const SENTINEL_BYTES = 4096;
+const ASYNC_LOCAL_LOAD_THRESHOLD_BYTES = 2 * 1024 * 1024;
 
 interface LocalTranscriptSentinel {
 	offset: number;
@@ -172,15 +194,181 @@ function statusBadge(status: AgentStatus): string {
 	}
 }
 
-export class AgentTranscriptViewer implements Component {
-	#builder: ChatTranscriptBuilder;
-	#browser: TranscriptBrowser;
-	#editor: Editor | undefined;
-	#notice: string | undefined;
-	#expanded = false;
+function stoneNoise(row: number, col: number): number {
+	const mixed = Math.imul(row + 0x9e3779b9, 0x85ebca6b) ^ Math.imul(col + 0xc2b2ae35, 0x27d4eb2f);
+	const hashed = (mixed ^ (mixed >>> 16)) >>> 0;
+	return hashed / 4294967296;
+}
 
+const STONE_GRADIENT_STEPS = 6;
+const STONE_GRADIENT_SETTLE_PROGRESS = 0.24;
+let stoneGradientCache: { key: string; ansi: readonly string[] } | undefined;
+
+function hexRgb(hex: string): readonly [number, number, number] {
+	const value = Number.parseInt(hex.slice(1), 16);
+	return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+}
+
+function stoneGradientAnsi(): readonly string[] {
+	const lightHex = theme.getColorHex("muted");
+	const darkHex = theme.getColorHex("dim");
+	const mode = theme.getColorMode();
+	const key = `${mode}:${lightHex}:${darkHex}`;
+	if (stoneGradientCache?.key === key) return stoneGradientCache.ansi;
+
+	const light = hexRgb(lightHex);
+	const dark = hexRgb(darkHex);
+	const ansi = Array.from({ length: STONE_GRADIENT_STEPS }, (_value, index) => {
+		const ratio = index / (STONE_GRADIENT_STEPS - 1);
+		const channels = light.map((channel, channelIndex) =>
+			Math.round(channel + ((dark[channelIndex] ?? channel) - channel) * ratio),
+		);
+		const hex = `#${channels.map(channel => channel.toString(16).padStart(2, "0")).join("")}`;
+		return fgAnsi(hex, mode);
+	});
+	stoneGradientCache = { key, ansi };
+	return ansi;
+}
+
+function ansiSequenceEnd(text: string, start: number): number {
+	const kind = text.charCodeAt(start + 1);
+	if (kind === 0x5b) {
+		for (let index = start + 2; index < text.length; index++) {
+			const code = text.charCodeAt(index);
+			if (code >= 0x40 && code <= 0x7e) return index + 1;
+		}
+		return text.length;
+	}
+	if (kind === 0x5d) {
+		for (let index = start + 2; index < text.length; index++) {
+			if (text.charCodeAt(index) === 0x07) return index + 1;
+			if (text.charCodeAt(index) === 0x1b && text.charCodeAt(index + 1) === 0x5c) return index + 2;
+		}
+		return text.length;
+	}
+	if (kind === 0x50 || kind === 0x58 || kind === 0x5e || kind === 0x5f) {
+		for (let index = start + 2; index < text.length; index++) {
+			if (text.charCodeAt(index) === 0x1b && text.charCodeAt(index + 1) === 0x5c) return index + 2;
+		}
+		return text.length;
+	}
+	return Math.min(text.length, start + 2);
+}
+
+function foregroundAnsiAfterSgr(sequence: string, current: string): string {
+	if (!sequence.startsWith("\x1b[") || !sequence.endsWith("m")) return current;
+	const params = sequence.slice(2, -1);
+	if (params === "") return "\x1b[39m";
+	const tokens = params.split(";");
+	let foreground = current;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index] ?? "";
+		if (token.startsWith("38:")) {
+			foreground = `\x1b[${token}m`;
+			continue;
+		}
+		const value = Number(token || "0");
+		if (value === 0 || value === 39) {
+			foreground = "\x1b[39m";
+			continue;
+		}
+		if ((value >= 30 && value <= 37) || (value >= 90 && value <= 97)) {
+			foreground = `\x1b[${value}m`;
+			continue;
+		}
+		if (value !== 38) continue;
+		const mode = tokens[index + 1];
+		const last = mode === "2" ? index + 4 : mode === "5" ? index + 2 : index;
+		if (last === index || last >= tokens.length) continue;
+		foreground = `\x1b[${tokens.slice(index, last + 1).join(";")}m`;
+		index = last;
+	}
+	return foreground;
+}
+
+function renderPetrificationFrame(
+	lines: readonly string[],
+	frame: number,
+	rowOffset: number,
+	totalRows: number,
+): string[] {
+	const progress = Math.min(1, (frame + 1) / AUTO_CLOSE_FRAMES);
+	const height = Math.max(1, totalRows);
+	const totalCols = Math.max(1, ...lines.map(line => Bun.stringWidth(Bun.stripANSI(line))));
+	const gradient = stoneGradientAnsi();
+
+	return lines.map((line, row) => {
+		const absoluteRow = Math.max(0, rowOffset + row);
+		const rowRatio = absoluteRow / Math.max(1, height - 1);
+		if (progress < rowRatio * 0.58 * 0.85 - 0.02) return line;
+
+		let index = 0;
+		let col = 0;
+		let changed = false;
+		let rendered = "";
+		let originalForeground = "\x1b[39m";
+		while (index < line.length) {
+			if (line.charCodeAt(index) === 0x1b) {
+				const end = ansiSequenceEnd(line, index);
+				const sequence = line.slice(index, end);
+				rendered += sequence;
+				originalForeground = foregroundAnsiAfterSgr(sequence, originalForeground);
+				index = end;
+				continue;
+			}
+
+			const codePoint = line.codePointAt(index);
+			if (codePoint === undefined) break;
+			const glyph = String.fromCodePoint(codePoint);
+			index += glyph.length;
+			const glyphWidth = Bun.stringWidth(glyph);
+			if (glyphWidth <= 0 || glyph === " ") {
+				rendered += glyph;
+				if (glyphWidth > 0) col += glyphWidth;
+				continue;
+			}
+
+			const colRatio = col / Math.max(1, totalCols - 1);
+			const noise = stoneNoise(absoluteRow, col);
+			const threshold = Math.max(
+				0,
+				Math.min(0.85, (rowRatio * 0.58 + colRatio * 0.42) * 0.85 + (noise - 0.5) * 0.04),
+			);
+			if (progress < threshold) {
+				rendered += glyph;
+			} else {
+				changed = true;
+				const age = progress - threshold;
+				const step = Math.min(
+					gradient.length - 1,
+					Math.floor((age / STONE_GRADIENT_SETTLE_PROGRESS) * gradient.length),
+				);
+				const stoneForeground = gradient[Math.max(0, step)] ?? gradient.at(-1) ?? theme.getFgAnsi("dim");
+				rendered += `${stoneForeground}${glyph}${originalForeground}`;
+			}
+			col += glyphWidth;
+		}
+		return changed ? rendered : line;
+	});
+}
+
+export class AgentTranscriptViewer
+	implements
+		Component,
+		Focusable,
+		MouseRoutable,
+		TargetedRender,
+		ViewportHeightAware,
+		WorkspacePaneHeaderProvider,
+		AppViewportHoverProvider
+{
+	readonly #pane: ChatTranscriptPane;
+	readonly #deps: AgentTranscriptViewerDeps;
+	#model: string | undefined;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
+	#localLoadToken = 0;
+	#localLoading: { path: string; dev: number; ino: number } | undefined;
 	// Remote transcript state (incremental; the host caps each read).
 	#remoteBytes = 0;
 	#remoteFetchInFlight = false;
@@ -189,45 +377,70 @@ export class AgentTranscriptViewer implements Component {
 	#remoteError = "";
 	#hasRemoteData = false;
 
-	#model: string | undefined;
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
-	/** Async full reload in flight; polls are skipped until it lands. */
-	#localLoadInFlight = false;
 	/** Idle polls since the sentinels were last verified. */
 	#idlePolls = 0;
-	#initialEntryId: string | undefined;
 	/** Last described node and the visible inputs it was built from. */
 	#nativeCache: { signature: string; node: NativeNode } | undefined;
 
-	readonly #deps: AgentTranscriptViewerDeps;
+	#statusLine: PaneStatusLine | undefined;
+	#statusLineSession: AgentHubSession | null;
+	#autoClose: { frame: number; onComplete: () => void } | undefined;
+	#autoCloseTimer: NodeJS.Timeout | undefined;
+	#autoCloseAbandoned = false;
+	#lastRenderedBodyRows = 1;
 
 	constructor(deps: AgentTranscriptViewerDeps) {
 		this.#deps = deps;
-		this.#initialEntryId = deps.initialEntryId;
-		this.#builder = new ChatTranscriptBuilder({
-			ui: deps.ui,
-			getTool: deps.getTool,
-			isBuiltInTool: deps.isBuiltInTool,
-			getMessageRenderer: deps.getMessageRenderer,
-			cwd: deps.cwd,
-			hideThinkingBlock: deps.hideThinkingBlock,
-			proseOnlyThinking: deps.proseOnlyThinking,
-			expandThinkingBlocks: deps.expandThinkingBlocks,
-			// Charts are for the main session's answers, not parked subagent, advisor, or guest transcripts.
-			tableCharts: false,
-			requestRender: deps.requestRender,
+		const displayId = replaceTabs(deps.agentId);
+		this.#statusLineSession = deps.registry.get(deps.agentId)?.session ?? null;
+		this.#statusLine = this.#statusLineSession ? deps.createStatusLine(deps.agentId) : undefined;
+		this.#pane = new ChatTranscriptPane({
+			builder: {
+				ui: deps.ui,
+				getTool: deps.getTool,
+				isBuiltInTool: deps.isBuiltInTool,
+				getMessageRenderer: deps.getMessageRenderer,
+				cwd: deps.cwd,
+				hideThinkingBlock: deps.hideThinkingBlock,
+				proseOnlyThinking: deps.proseOnlyThinking,
+				expandThinkingBlocks: deps.expandThinkingBlocks,
+				// Charts are for the main session's answers, not parked subagent, advisor, or guest transcripts.
+				tableCharts: false,
+				requestRender: deps.requestRender,
+			},
+			initialEntryId: deps.initialEntryId,
+			editor: this.#sendable
+				? {
+						label: `Message ${displayId}`,
+						placeholder: `Message ${displayId}…`,
+						images: !deps.remote,
+						onSubmit: (text, images) => {
+							this.#submit(text, images);
+							return true;
+						},
+					}
+				: {
+						label: "read-only · advisor",
+						placeholder: "read-only · advisor",
+						readOnly: true,
+					},
+			expandKeys: deps.expandKeys,
+			renderWorkspaceHeader: (width, focused) => this.renderWorkspaceHeader(width, focused),
+			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
+			getPlaceholder: () => this.#placeholder(),
+			getNotice: () => (this.#remoteError && !this.#pane.isEmpty ? this.#remoteError : undefined),
+			onInput: data => {
+				for (const key of deps.hubKeys) {
+					if (!matchesKey(data, key)) continue;
+					deps.onHubToggle();
+					return true;
+				}
+				return false;
+			},
+			onClose: deps.onClose,
 		});
-		this.#browser = new TranscriptBrowser({
-			getHeight: () => this.#deps.ui.terminal?.rows || process.stdout.rows || 40,
-			frame: context => this.#frame(context),
-			followBottom: true,
-		});
-		if (this.#sendable) {
-			this.#editor = new Editor(getEditorTheme());
-			this.#editor.setMaxHeight(4);
-			this.#editor.onSubmit = text => this.#submit(text);
-		}
 		// First paint loads synchronously so the initial entry can be revealed
 		// immediately; later full reloads from the poll may go async.
 		this.#refresh(false);
@@ -242,11 +455,96 @@ export class AgentTranscriptViewer implements Component {
 		return Boolean(this.#deps.remote || this.#deps.lifecycle);
 	}
 
+	get focused(): boolean {
+		return this.#pane.focused;
+	}
+
+	set focused(focused: boolean) {
+		if (focused) this.#abandonAutoClose();
+		this.#pane.focused = focused;
+		if (!focused) this.#pane.clearAppViewportHover();
+	}
+
+	getPasteTarget(): CustomEditor | undefined {
+		return this.#sendable ? this.#pane.getPasteTarget() : undefined;
+	}
+
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#pane.setUseTerminalCursor(useTerminalCursor);
+	}
+
+	setViewportHeight(height: number): void {
+		this.#pane.setViewportHeight(height);
+	}
+
+	setTextSelectionActive(active: boolean): void {
+		this.#pane.setTextSelectionActive(active);
+	}
+
+	wantsAppViewportHover(): boolean {
+		return this.#pane.wantsAppViewportHover();
+	}
+
+	clearAppViewportHover(): void {
+		this.#pane.clearAppViewportHover();
+	}
+
+	getTextSelection(selection: TextSelectionRange): string | undefined {
+		return this.#pane.getTextSelection(selection);
+	}
+
+	getTextSelectionInset(row: number): number {
+		return this.#pane.getTextSelectionInset(row);
+	}
+
+	getTextSelectionRightInset(row: number): number {
+		return this.#pane.getTextSelectionRightInset(row);
+	}
+
+	getTextSelectionScrollOffset(row: number): number | undefined {
+		return this.#pane.getTextSelectionScrollOffset(row);
+	}
+
+	get autoCloseProtected(): boolean {
+		return this.focused || this.#autoCloseAbandoned;
+	}
+
+	startAutoClose(onComplete: () => void): void {
+		if (this.#disposed || this.autoCloseProtected || this.#autoClose) return;
+		this.#autoClose = { frame: 0, onComplete };
+		this.#autoCloseTimer = setInterval(() => {
+			const animation = this.#autoClose;
+			if (!animation || this.#disposed) return;
+			animation.frame++;
+			if (animation.frame >= AUTO_CLOSE_FRAMES) {
+				this.#clearAutoCloseTimer();
+				this.#autoClose = undefined;
+				animation.onComplete();
+				return;
+			}
+			this.deps.ui.requestComponentRender(this);
+		}, AUTO_CLOSE_FRAME_MS);
+		this.#autoCloseTimer.unref();
+		this.deps.ui.requestComponentRender(this);
+	}
+
+	cancelAutoClose(): void {
+		if (!this.#autoClose) return;
+		this.#clearAutoCloseTimer();
+		this.#autoClose = undefined;
+		this.deps.ui.requestComponentRender(this);
+	}
+
 	dispose(): void {
 		this.#disposed = true;
+		this.#clearAutoCloseTimer();
+		this.#autoClose = undefined;
 		this.#stopPolling();
+		this.#localLoadToken++;
+		this.#localLoading = undefined;
 		this.#remoteToken++;
-		this.#builder.dispose();
+		this.#statusLine?.dispose();
+		this.#pane.dispose();
 	}
 
 	#stopPolling(): void {
@@ -266,7 +564,6 @@ export class AgentTranscriptViewer implements Component {
 			this.#fetchRemote();
 			return;
 		}
-		if (this.#localLoadInFlight) return;
 		const sessionFile = this.#deps.registry.get(this.#deps.agentId)?.sessionFile;
 		if (!sessionFile) {
 			this.#clearLocal("none");
@@ -279,6 +576,8 @@ export class AgentTranscriptViewer implements Component {
 			this.#clearLocal("missing");
 			return;
 		}
+		const loading = this.#localLoading;
+		if (loading && loading.path === sessionFile && loading.dev === stat.dev && loading.ino === stat.ino) return;
 		const state = this.#localState;
 		if (state) {
 			// Idle fast path: an unchanged identity/size/mtime costs one stat;
@@ -306,7 +605,9 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	#clearLocal(reason: string): void {
-		if (!this.#localState && this.#localUnavailable === reason) return;
+		if (!this.#localState && !this.#localLoading && this.#localUnavailable === reason) return;
+		this.#localLoadToken++;
+		this.#localLoading = undefined;
 		this.#localState = undefined;
 		this.#localUnavailable = reason;
 		this.#model = undefined;
@@ -337,34 +638,29 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	#loadLocalFull(sessionFile: string, stat: fs.Stats, allowAsync: boolean): void {
-		const promises = allowAsync ? this.#deps.transcript.fs.promises : undefined;
-		if (promises) {
-			this.#localLoadInFlight = true;
-			void promises
-				.readFile(sessionFile)
-				.then(data => {
-					this.#localLoadInFlight = false;
-					if (!this.#disposed) this.#applyLocalFull(sessionFile, stat, data);
-				})
-				.catch((err: unknown) => {
-					// Leave #localState unchanged so a transient read error retries next poll.
-					this.#localLoadInFlight = false;
-					logger.debug("transcript viewer: read failed", { err: String(err) });
-				});
+		if (stat.size < ASYNC_LOCAL_LOAD_THRESHOLD_BYTES && !allowAsync) {
+			this.#localLoadToken++;
+			this.#localLoading = undefined;
+			this.#loadLocalFullSync(sessionFile, stat);
 			return;
 		}
+		const token = ++this.#localLoadToken;
+		this.#localLoading = { path: sessionFile, dev: stat.dev, ino: stat.ino };
+		this.#localState = undefined;
+		this.#localUnavailable = "";
+		this.#model = undefined;
+		this.#rebuild([]);
+		void this.#loadLocalFullAsync(sessionFile, stat, token);
+	}
+
+	#loadLocalFullSync(sessionFile: string, stat: fs.Stats): void {
 		let data: Buffer;
 		try {
 			data = this.#deps.transcript.fs.readFileSync(sessionFile);
 		} catch (err) {
-			// Leave #localState unchanged so a transient read error retries next poll.
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
-		this.#applyLocalFull(sessionFile, stat, data);
-	}
-
-	#applyLocalFull(sessionFile: string, stat: fs.Stats, data: Buffer): void {
 		// The file may have grown between the earlier `statSync` and this read.
 		// Anchor the tail cursor to what we actually consumed so the next poll's
 		// `#appendLocal` never re-renders bytes already in the rebuilt transcript;
@@ -375,10 +671,6 @@ export class AgentTranscriptViewer implements Component {
 		} catch {
 			post = stat;
 		}
-		// A reader that opens the file mid-append sees a trailing partial line
-		// (no terminating newline). Carry those bytes as `pending` so the next
-		// poll's `#appendLocal` joins them with the completion bytes instead of
-		// parsing a headless line fragment and dropping the entry.
 		const text = data.toString("utf-8");
 		const lastNewline = text.lastIndexOf("\n");
 		const complete = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
@@ -396,6 +688,64 @@ export class AgentTranscriptViewer implements Component {
 		};
 		this.#model = undefined;
 		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete)));
+	}
+
+	async #loadLocalFullAsync(sessionFile: string, stat: fs.Stats, token: number): Promise<void> {
+		const batch: AgentTranscriptEntry[] = [];
+		const decoder = new TextDecoder();
+		let pending = "";
+		let bytesConsumed = 0;
+		try {
+			await this.#deps.transcript.visitEntries(
+				sessionFile,
+				entry => {
+					batch.push(entry);
+					if (batch.length < 128) return;
+					this.#append(this.#extractMessages(batch));
+					batch.length = 0;
+				},
+				{
+					maxBytes: stat.size,
+					yieldEveryEntries: 128,
+					throwIfMissing: true,
+					onBytesConsumed: bytes => {
+						bytesConsumed += bytes;
+					},
+					shouldContinue: () => token === this.#localLoadToken && !this.#disposed,
+					onTrailingPartial: bytes => {
+						pending = decoder.decode(bytes);
+					},
+				},
+			);
+		} catch (err) {
+			if (token === this.#localLoadToken) {
+				this.#localLoading = undefined;
+				logger.debug("transcript viewer: incremental load failed", { err: String(err) });
+			}
+			return;
+		}
+		if (token !== this.#localLoadToken || this.#disposed) return;
+		if (batch.length > 0) this.#append(this.#extractMessages(batch));
+		let sentinels: LocalTranscriptSentinel[];
+		try {
+			sentinels = sentinelsFromFile(this.#deps.transcript.fs, sessionFile, bytesConsumed);
+		} catch (err) {
+			this.#localLoading = undefined;
+			logger.debug("transcript viewer: sentinel load failed", { err: String(err) });
+			return;
+		}
+		this.#localState = {
+			path: sessionFile,
+			dev: stat.dev,
+			ino: stat.ino,
+			size: bytesConsumed,
+			mtimeMs: stat.mtimeMs,
+			offset: bytesConsumed,
+			pending,
+			sentinels,
+		};
+		this.#localLoading = undefined;
+		this.#deps.requestRender();
 	}
 
 	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState, allowAsync: boolean): void {
@@ -524,90 +874,25 @@ export class AgentTranscriptViewer implements Component {
 	}
 
 	#rebuild(entries: SessionMessageEntryLike[]): void {
-		this.#builder.rebuild(entries);
-		this.#deps.requestRender();
+		this.#pane.rebuildEntries(entries);
 	}
 
 	#append(entries: SessionMessageEntryLike[]): void {
-		this.#builder.append(entries);
-		this.#deps.requestRender();
+		this.#pane.appendEntries(entries);
 	}
 
-	// ========================================================================
-	// Input
-	// ========================================================================
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
+		this.#abandonAutoClose();
+		return this.#pane.routeMouse(event, line, col);
+	}
 
 	handleInput(data: string): void {
-		if (data.startsWith("\x1b[<")) {
-			routeSgrMouseInput(data, event => {
-				if (event.wheel !== null) {
-					this.#browser.scroll(event.wheel * 3);
-					this.#deps.requestRender();
-				}
-				return true;
-			});
-			return;
-		}
-
-		// The hub/observe toggle keys close the whole hub (matches the table view's
-		// toggle semantics), not just this viewer.
-		for (const key of this.#deps.hubKeys) {
-			if (matchesKey(data, key)) {
-				this.#deps.onHubClose();
-				return;
-			}
-		}
-
-		if (matchesKey(data, "escape")) {
-			this.#escape();
-			return;
-		}
-
-		for (const key of this.#deps.expandKeys) {
-			if (matchesKey(data, key)) {
-				this.#expanded = !this.#expanded;
-				this.#builder.setExpanded(this.#expanded);
-				this.#deps.requestRender();
-				return;
-			}
-		}
-
-		// Once the reader starts typing a message, the editor owns every key.
-		const editorEmpty = !this.#editor || this.#editor.getText().trim() === "";
-		if (editorEmpty && this.#handleScroll(data)) return;
-
-		if (this.#editor) {
-			this.#editor.handleInput(data);
-			this.#deps.requestRender();
-		}
+		this.#abandonAutoClose();
+		this.#pane.handleInput(data);
 	}
 
-	/** Returns true when the key was a scroll command. The browser owns the offset. */
-	#handleScroll(data: string): boolean {
-		if (this.#browser.handleScrollKey(data)) {
-			this.#deps.requestRender();
-			return true;
-		}
-		if (matchesKey(data, "j") || matchesSelectDown(data)) {
-			this.#browser.scroll(1);
-		} else if (matchesKey(data, "k") || matchesSelectUp(data)) {
-			this.#browser.scroll(-1);
-		} else if (data === "g") {
-			this.#browser.scrollToTop();
-		} else if (data === "G") {
-			this.#browser.scrollToBottom();
-		} else {
-			return false;
-		}
-		this.#deps.requestRender();
-		return true;
-	}
-
-	#submit(text: string): void {
-		const trimmed = text.trim();
-		this.#editor?.setText("");
-		if (!trimmed) return;
-		this.#notice = undefined;
+	#submit(trimmed: string, images?: ImageContent[]): void {
+		this.#pane.setNotice(undefined);
 		const id = this.#deps.agentId;
 		if (this.#deps.remote) {
 			this.#deps.remote.chat(id, trimmed);
@@ -621,9 +906,9 @@ export class AgentTranscriptViewer implements Component {
 				// Revives a parked agent; returns the live session for running/idle.
 				const session = await lifecycle().ensureLive(id);
 				// Steers a mid-turn agent; sends a normal prompt to an idle one.
-				await session.prompt(trimmed, { streamingBehavior: "steer" });
+				await session.prompt(trimmed, { streamingBehavior: "steer", images });
 			} catch (error) {
-				this.#notice = error instanceof Error ? error.message : String(error);
+				this.#pane.setNotice(error instanceof Error ? error.message : String(error));
 			}
 			this.#deps.requestRender();
 		})();
@@ -634,28 +919,35 @@ export class AgentTranscriptViewer implements Component {
 	// Render
 	// ========================================================================
 
+	containsComponent(component: Component): boolean {
+		return componentContains(this.#pane, component);
+	}
+
+	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
+		const lines = renderTargeted(this.#pane, width, targets);
+		this.#lastRenderedBodyRows = lines.length;
+		return this.#autoClose
+			? renderPetrificationFrame(lines, this.#autoClose.frame, 1, this.#lastRenderedBodyRows + 1)
+			: lines;
+	}
+
+	invalidate(): void {
+		this.#pane.invalidate();
+	}
+
 	render(width: number): readonly string[] {
-		const lines = this.#browser.render(width);
-		if (this.#initialEntryId && this.#browser.hasAnchored(this.#initialEntryId)) {
-			this.#initialEntryId = undefined;
-		}
-		return lines;
+		const lines = this.#pane.render(width);
+		this.#lastRenderedBodyRows = lines.length;
+		return this.#autoClose
+			? renderPetrificationFrame(lines, this.#autoClose.frame, 1, this.#lastRenderedBodyRows + 1)
+			: lines;
 	}
 
 	/** The top-right `esc` runs Esc. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "close") this.#escape();
+		if (event.type === "action" && event.act === "close") this.#pane.handleInput("\x1b");
 	}
 
-	/** Esc: clear a non-empty draft first, else close the viewer. */
-	#escape(): void {
-		if (this.#editor && this.#editor.getText().trim() !== "") {
-			this.#editor.setText("");
-			this.#deps.requestRender();
-			return;
-		}
-		this.#deps.onClose();
-	}
 
 	/**
 	 * Header, transcript body (the builder's container, which describes its own
@@ -772,98 +1064,58 @@ export class AgentTranscriptViewer implements Component {
 		return described;
 	}
 
-	#frame(context: TranscriptBrowserRenderContext): TranscriptBrowserFrame {
-		// The transcript components carry their own 1-col left gutter, so body
-		// rows are emitted WITHOUT an extra outer space; header/footer rows are
-		// returned raw and the browser adds the one-column inset.
-		const { contentWidth, chromeWidth } = context;
+	renderWorkspaceHeader(width: number, focused: boolean): string {
 		const ref = this.#deps.registry.get(this.#deps.agentId);
-
-		const headerLines = this.#headerLines(ref?.status, ref?.kind, ref?.parentId);
-		const footerLines = this.#footerLines();
-		const noticeLine = this.#notice
-			? theme.fg("error", sanitizeErrorLine(this.#notice, chromeWidth))
-			: this.#remoteError && !this.#builder.isEmpty
-				? theme.fg("error", sanitizeErrorLine(this.#remoteError, chromeWidth))
-				: undefined;
-		// The editor carries no outer gutter; it renders at chrome width and the
-		// browser insets each row.
-		const editorLines = this.#editor ? this.#editor.render(chromeWidth) : [];
-
-		const contentLines = this.#builder.isEmpty
-			? [` ${theme.fg("dim", this.#placeholder(Math.max(10, contentWidth - 1)))}`]
-			: this.#builder.container.render(contentWidth);
-		let anchor: ScrollRangeAnchor | undefined;
-		if (this.#initialEntryId) {
-			const targetRow = this.#builder.rowForEntry(this.#initialEntryId);
-			if (targetRow !== undefined) {
-				anchor = {
-					id: this.#initialEntryId,
-					start: targetRow,
-					end: targetRow + 1,
-					mode: "once",
-					alignment: "start",
-				};
-			}
-		}
-		return {
-			header: headerLines,
-			body: { lines: contentLines, anchor },
-			footer: [...(noticeLine ? [noticeLine] : []), ...editorLines, ...footerLines],
-		};
+		const name = replaceTabs(this.#deps.agentId);
+		const status = ref?.status ? ` ${statusBadge(ref.status)}` : "";
+		const model = this.#model ? theme.fg("muted", ` ${theme.sep.dot} ${replaceTabs(this.#model)}`) : "";
+		const action = focused
+			? width >= 48
+				? theme.fg("dim", this.#sendable ? " · Enter send · Hub · Esc" : " · Hub · Esc")
+				: width >= 34
+					? theme.fg("dim", " · Esc")
+					: ""
+			: "";
+		const header = renderWorkspacePaneHeader(name, width, focused, `${status}${model}${action}`);
+		return this.#autoClose
+			? (renderPetrificationFrame([header], this.#autoClose.frame, 0, this.#lastRenderedBodyRows + 1)[0] ?? "")
+			: header;
 	}
 
-	#headerLines(status: AgentStatus | undefined, kind: string | undefined, parentId: string | undefined): string[] {
-		const lines = [theme.fg("accent", `Agent Hub ${theme.sep.dot} ${this.#deps.agentId}`)];
-		if (status && kind) {
-			const kindTag = theme.fg("dim", ` ${parentId ? `${kind} ${theme.sep.dot} of ${parentId}` : kind}`);
-			const modelLabel = this.#model ? theme.fg("muted", `${theme.sep.dot}${this.#model}`) : "";
-			lines.push(`${theme.bold(this.#deps.agentId)} ${statusBadge(status)}${kindTag}${modelLabel}`);
-		}
-		return lines;
+	#abandonAutoClose(): void {
+		if (!this.#autoClose) return;
+		this.#autoCloseAbandoned = true;
+		this.cancelAutoClose();
 	}
 
-	#footerLines(): string[] {
-		const lines: string[] = [];
-		const statsLine = this.#statsLine();
-		if (statsLine) lines.push(statsLine);
-		const keys =
-			`${formatKeyHint("escape")}:close  ${formatKeyHint(this.#deps.expandKeys[0] ?? "ctrl+o")}:expand  ` +
-			`${this.#editor ? "empty input → " : ""}${formatKeyHints(["j", "k"])}:scroll  ${formatKeyHints(["g", "shift+g"])}:top/bottom`;
-		const hint = this.#editor ? `${editorKey("tui.input.submit")}:send  ${keys}` : keys;
-		lines.push(theme.fg("dim", hint));
-		return lines;
+	#clearAutoCloseTimer(): void {
+		if (!this.#autoCloseTimer) return;
+		clearInterval(this.#autoCloseTimer);
+		this.#autoCloseTimer = undefined;
+	}
+	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
+		const ref = this.#deps.registry.get(this.#deps.agentId);
+		const session = ref?.session ?? null;
+		if (session !== this.#statusLineSession) {
+			this.#statusLine?.dispose();
+			this.#statusLine = session ? this.#deps.createStatusLine(this.#deps.agentId) : undefined;
+			this.#statusLineSession = session;
+		}
+		if (this.#statusLine) return this.#statusLine.getTopBorder(availableWidth);
+		return StatusLineComponent.getErrorTopBorder(
+			`Status unavailable (${ref?.status ?? "missing"}) · ${this.#deps.agentId} · live session missing`,
+			availableWidth,
+			this.#deps.getStatusLineTransparent?.(),
+		);
 	}
 
-	#statsLine(): string {
-		const observed: ObservableSession | undefined = this.#deps.observers?.getSession(this.#deps.agentId);
-		const progress = observed?.progress;
-		if (!progress) return "";
-		const stats: string[] = [];
-		if (progress.contextTokens && progress.contextTokens > 0) {
-			stats.push(
-				progress.contextWindow && progress.contextWindow > 0
-					? formatContextUsage((progress.contextTokens / progress.contextWindow) * 100, progress.contextWindow)
-					: formatNumber(progress.contextTokens),
-			);
-		}
-		if (progress.durationMs > 0) stats.push(formatDuration(progress.durationMs));
-		const parts: string[] = [];
-		if (stats.length > 0 || progress.toolCount > 0) {
-			const toolStat =
-				progress.toolCount > 0 ? `${formatNumber(progress.toolCount)} ${theme.icon.extensionTool}` : "";
-			parts.push(theme.fg("dim", [toolStat, ...stats].filter(Boolean).join(theme.sep.dot)));
-		}
-		if (progress.cost > 0) parts.push(theme.fg("statusLineCost", `$${progress.cost.toFixed(2)}`));
-		return parts.join(theme.sep.dot);
-	}
-
-	#placeholder(maxWidth: number): string {
+	#placeholder(): string {
 		if (this.#deps.remote) {
-			if (this.#remoteError) return sanitizeErrorLine(this.#remoteError, maxWidth);
+			if (this.#remoteError) return this.#remoteError;
 			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
+		if (this.#localLoading) return "Loading transcript…";
 		if (!this.#deps.registry.get(this.#deps.agentId)?.sessionFile) return "No session file available yet.";
 		return "No messages yet.";
 	}

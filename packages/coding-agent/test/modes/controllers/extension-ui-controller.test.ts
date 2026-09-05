@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import { type Component, Container, isFocusable, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { CollabUiRequestDraft } from "@oh-my-pi/pi-wire";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -19,6 +20,11 @@ beforeAll(async () => {
 	if (!dark) throw new Error("Failed to load dark theme");
 	setThemeInstance(dark);
 });
+
+function guestOptionLabels(request: CollabUiRequestDraft): string[] {
+	if (request.kind !== "select") throw new Error(`Expected select request, got ${request.kind}`);
+	return request.options.map(option => (typeof option === "string" ? option : option.label));
+}
 
 function makeHarness() {
 	const editor = new CustomEditor(getEditorTheme());
@@ -75,6 +81,7 @@ function makeHarness() {
 		setFocus,
 		showOverlay,
 		fakeHandle,
+		ctx,
 		controller,
 		inputController: (readText: () => Promise<string>) =>
 			new InputController(ctx, { readImage: async () => null, readText }),
@@ -415,6 +422,161 @@ describe("ExtensionUiController editor UI", () => {
 		expect(harness.editorContainer.children).toEqual([ask, harness.editor]);
 		ask?.handleInput?.("!");
 		expect(harness.editor.getText()).toBe("half typed prompt!");
+	});
+
+	it("keeps localAskDialog on the host while preserving long-preview paging and submit", async () => {
+		const harness = makeHarness();
+		const requestGuestUi = vi.fn();
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+		if (!ui.localAskDialog) throw new Error("localAskDialog was not registered");
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
+		try {
+			const preview = `\`\`\`\n${Array.from({ length: 80 }, (_, index) => `PREVIEW-${index}`).join("\n")}\n\`\`\``;
+			const pending = ui.localAskDialog([
+				{
+					id: "approval",
+					question: "Approve this exact message?",
+					options: [{ label: "Approve", preview }],
+				},
+			]);
+			const ask = harness.editorContainer.children[0];
+			expect(ask).toBeInstanceOf(AskDialogComponent);
+			expect(ask?.render?.(80).join("\n")).toContain("PREVIEW-0");
+
+			for (let page = 0; page < 10; page++) ask?.handleInput?.("\x1b[6~");
+			expect(ask?.render?.(80).join("\n")).toContain("PREVIEW-79");
+			for (let page = 0; page < 10; page++) ask?.handleInput?.("\x1b[5~");
+			expect(ask?.render?.(80).join("\n")).toContain("PREVIEW-0");
+			ask?.handleInput?.("\n");
+
+			expect(await pending).toEqual({
+				kind: "submit",
+				results: [
+					{
+						id: "approval",
+						question: "Approve this exact message?",
+						options: ["Approve"],
+						multi: false,
+						selectedOptions: ["Approve"],
+						customInput: undefined,
+						note: undefined,
+						timedOut: undefined,
+					},
+				],
+			});
+			expect(requestGuestUi).not.toHaveBeenCalled();
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("cancels localAskDialog locally without requesting a guest answer", async () => {
+		const harness = makeHarness();
+		const requestGuestUi = vi.fn();
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+		if (!ui.localAskDialog) throw new Error("localAskDialog was not registered");
+
+		const pending = ui.localAskDialog([
+			{
+				id: "approval",
+				question: "Approve?",
+				options: [{ label: "Approve" }, { label: "Reject" }],
+			},
+		]);
+		const ask = harness.editorContainer.children[0];
+		expect(ask).toBeInstanceOf(AskDialogComponent);
+		ask?.handleInput?.("\x1b");
+
+		expect(await pending).toBeUndefined();
+		expect(requestGuestUi).not.toHaveBeenCalled();
+	});
+
+	it("offers collaboration guests custom input by default", async () => {
+		const harness = makeHarness();
+		const requestGuestUi = vi.fn((request: CollabUiRequestDraft) => {
+			if (request.kind === "select") {
+				expect(guestOptionLabels(request)).toContain("Other (type your own)");
+				return Promise.resolve({ kind: "answered" as const, value: "Other (type your own)" });
+			}
+			expect(request.kind).toBe("editor");
+			return Promise.resolve({ kind: "answered" as const, value: "guest custom answer" });
+		});
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+
+		const result = await ui.askDialog?.([
+			{
+				id: "choice",
+				question: "Choose?",
+				options: [{ label: "Option A" }],
+			},
+		]);
+
+		expect(requestGuestUi).toHaveBeenCalledTimes(2);
+		expect(result).toEqual({
+			kind: "submit",
+			results: [
+				expect.objectContaining({
+					id: "choice",
+					selectedOptions: [],
+					customInput: "guest custom answer",
+				}),
+			],
+		});
+	});
+
+	it("advertises and honors disabled custom input for collaboration guest questions", async () => {
+		const harness = makeHarness();
+		let requestIndex = 0;
+		const requestGuestUi = vi.fn((request: CollabUiRequestDraft) => {
+			expect(request.kind).toBe("select");
+			const labels = guestOptionLabels(request);
+			switch (requestIndex++) {
+				case 0:
+					expect(labels).toEqual(["Option A", "Option B", "Chat about this"]);
+					return Promise.resolve({ kind: "answered" as const, value: "Option B" });
+				case 1:
+					expect(labels).toEqual(["Option A", "Option B", "Next →", "Chat about this"]);
+					return Promise.resolve({ kind: "answered" as const, value: "Next →" });
+				case 2:
+					expect(labels).toEqual(["Option C", "Chat about this"]);
+					return Promise.resolve({ kind: "answered" as const, value: "Option C" });
+				default:
+					throw new Error(`Unexpected guest request ${requestIndex}`);
+			}
+		});
+		harness.ctx.collabHost = { requestGuestUi } as never;
+		const ui = await harness.init();
+		expect(ui.askDialogCapabilities).toEqual({ allowCustomInput: true });
+
+		const result = await ui.askDialog?.([
+			{
+				id: "multi",
+				question: "Choose many?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+				multi: true,
+				allowCustomInput: false,
+			},
+			{
+				id: "single",
+				question: "Choose one?",
+				options: [{ label: "Option C" }],
+				allowCustomInput: false,
+			},
+		]);
+
+		expect(requestGuestUi).toHaveBeenCalledTimes(3);
+		expect(result).toEqual({
+			kind: "submit",
+			results: [
+				expect.objectContaining({ id: "multi", selectedOptions: ["Option B"], customInput: undefined }),
+				expect.objectContaining({ id: "single", selectedOptions: ["Option C"], customInput: undefined }),
+			],
+		});
 	});
 
 	it("bridges addAutocompleteProvider factories to the interactive mode context (#4919)", async () => {
