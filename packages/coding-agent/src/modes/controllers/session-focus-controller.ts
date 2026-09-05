@@ -177,6 +177,7 @@ export class SessionFocusController {
 			this.ctx.unsubscribe?.();
 			this.ctx.clearTransientSessionUi();
 			this.ctx.eventController.resetTranscriptAnchors();
+			this.ctx.eventController.resetTerminalActivity();
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {
 				if (generation !== this.#attachGeneration) return;
@@ -217,7 +218,6 @@ export class SessionFocusController {
 			this.ctx.statusLine.setSession(target, this.#focusedAgentId);
 			// Reset run bookkeeping before replay populates pending tool handles.
 			if (target.isStreaming) await this.ctx.eventController.handleEvent({ type: "agent_start" });
-			else setTerminalTitleState("idle");
 			if (generation !== this.#attachGeneration) return false;
 			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 			if (generation !== this.#attachGeneration) return false;
@@ -254,5 +254,6 @@ export class SessionFocusController {
 			}
 			throw error;
 		}
+
 	}
 }
