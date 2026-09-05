@@ -1,11 +1,11 @@
 /**
  * OpenAI Codex Web Search Provider
  *
- * Uses the configured Codex Responses transport for proxy/API-key setups and
- * the official ChatGPT backend for OAuth logins.
+ * Uses the standalone Codex search transport for Responses-Lite models and
+ * hosted Responses web search for the remaining Codex model catalog.
  */
 import { type Api, type AuthStorage, type FetchImpl, type Model, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
-import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { resolveCodexAlphaSearchUrl, resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -27,7 +27,8 @@ const DEFAULT_INSTRUCTIONS =
 
 interface CodexSearchTransport {
 	baseUrl: string;
-	url: string;
+	hostedUrl: string;
+	nativeUrl: string;
 	headers: Record<string, string>;
 	customEndpoint: boolean;
 }
@@ -38,6 +39,18 @@ interface CodexSearchResult {
 	model: string;
 	requestId: string;
 	usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+}
+
+interface CodexSearchCallOptions {
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	systemPrompt?: string;
+	searchContextSize?: "low" | "medium" | "high";
+	reasoningEffort?: string;
+	modelId: string;
+	sessionId?: string;
+	fetch?: FetchImpl;
+	transport: CodexSearchTransport;
 }
 
 /** Codex API response structure */
@@ -275,13 +288,14 @@ function extractTextSources(text: string): SearchSource[] {
 
 async function resolveCodexSearchTransport(params: SearchParams): Promise<CodexSearchTransport> {
 	const baseUrl = params.model.baseUrl;
-	const url = resolveCodexResponsesUrl(baseUrl);
+	const hostedUrl = resolveCodexResponsesUrl(baseUrl);
 	const headers = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 	return {
 		baseUrl,
-		url,
+		hostedUrl,
+		nativeUrl: resolveCodexAlphaSearchUrl(baseUrl),
 		headers: { ...headers },
-		customEndpoint: url !== resolveCodexResponsesUrl(CODEX_BASE_URL),
+		customEndpoint: hostedUrl !== resolveCodexResponsesUrl(CODEX_BASE_URL),
 	};
 }
 
@@ -308,6 +322,100 @@ function buildCodexHeaders(
 	headers.set("Accept", "text/event-stream");
 	headers.set("Content-Type", "application/json");
 	return headers;
+}
+
+function buildCodexNativeSearchHeaders(
+	accessToken: string,
+	accountId: string | undefined,
+	configuredHeaders: Record<string, string>,
+): Headers {
+	const headers = buildCodexHeaders(accessToken, accountId, configuredHeaders);
+	headers.delete(OPENAI_HEADERS.BETA);
+	headers.set("Accept", "application/json");
+	return headers;
+}
+
+function parseCodexNativeSearchSource(result: unknown): SearchSource | null {
+	if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+	const record = result as Record<string, unknown>;
+	if (record.type !== "text_result" || typeof record.url !== "string") return null;
+	const url = normalizeExtractedUrl(record.url);
+	if (!url) return null;
+	const title = typeof record.title === "string" && record.title.trim() ? record.title : url;
+	const snippet = typeof record.snippet === "string" && record.snippet.trim() ? record.snippet : undefined;
+	return { title, url, ...(snippet ? { snippet } : {}) };
+}
+
+async function callCodexNativeSearch(
+	auth: { accessToken: string; accountId?: string },
+	query: string,
+	options: CodexSearchCallOptions,
+): Promise<CodexSearchResult> {
+	const headers = buildCodexNativeSearchHeaders(auth.accessToken, auth.accountId, options.transport.headers);
+	const requestedModel = options.modelId;
+	const requestId = options.sessionId?.trim() || crypto.randomUUID();
+	const body = {
+		id: requestId,
+		model: requestedModel,
+		commands: {
+			search_query: [{ q: query }],
+		},
+		settings: {
+			search_context_size: options.searchContextSize ?? "high",
+			allowed_callers: ["direct"],
+			external_web_access: true,
+		},
+	};
+	const fetchImpl = options.fetch ?? fetch;
+	const response = await fetchImpl(options.transport.nativeUrl, {
+		method: "POST",
+		headers,
+		body: JSON.stringify(body),
+		signal: withHardTimeout(options.signal, options.timeoutMs),
+	});
+	const responseText = await response.text();
+	if (!response.ok) {
+		const classified = classifyProviderHttpError("codex", response.status, responseText);
+		if (classified) throw classified;
+		throw new SearchProviderError(
+			"codex",
+			`Codex Alpha Search API error (${response.status}): ${responseText}`,
+			response.status,
+		);
+	}
+
+	let payload: unknown;
+	try {
+		payload = JSON.parse(responseText);
+	} catch {
+		throw new SearchProviderError("codex", "Codex Alpha Search returned invalid JSON", 502);
+	}
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		throw new SearchProviderError("codex", "Codex Alpha Search returned an invalid response object", 502);
+	}
+	const record = payload as Record<string, unknown>;
+	if (typeof record.output !== "string" || !Array.isArray(record.results)) {
+		throw new SearchProviderError(
+			"codex",
+			"Codex Alpha Search response is missing output or structured search result evidence",
+			502,
+		);
+	}
+
+	const sources: SearchSource[] = [];
+	for (const result of record.results) {
+		const source = parseCodexNativeSearchSource(result);
+		if (source) addSource(sources, source);
+	}
+	if (sources.length === 0) {
+		throw new SearchProviderError("codex", "Codex Alpha Search returned no valid structured search sources", 502);
+	}
+	return {
+		answer: record.output.trim(),
+		sources,
+		model: requestedModel,
+		requestId,
+	};
 }
 
 /**
@@ -346,20 +454,10 @@ function classifyCodexSseErrorStatus(code: string, message: string): number {
 /**
  * Calls the Codex Responses API with web search enabled for the exact selected model.
  */
-async function callCodexSearch(
+async function callCodexHostedSearch(
 	auth: { accessToken: string; accountId?: string },
 	query: string,
-	options: {
-		signal?: AbortSignal;
-		timeoutMs?: number;
-		systemPrompt?: string;
-		searchContextSize?: "low" | "medium" | "high";
-		/** Wire `reasoning.effort`; omitted when undefined so the server default applies. */
-		reasoningEffort?: string;
-		modelId: string;
-		fetch?: FetchImpl;
-		transport: CodexSearchTransport;
-	},
+	options: CodexSearchCallOptions,
 ): Promise<CodexSearchResult> {
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
@@ -390,7 +488,7 @@ async function callCodexSearch(
 	if (options.reasoningEffort !== undefined) body.reasoning = { effort: options.reasoningEffort };
 
 	const fetchImpl = options.fetch ?? fetch;
-	const response = await fetchImpl(options.transport.url, {
+	const response = await fetchImpl(options.transport.hostedUrl, {
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
@@ -554,16 +652,14 @@ async function callCodexSearch(
 	};
 }
 
-/** Execute web search through the selected Codex model and transport. */
+/** Execute web search through the selected model; role resolution owns fallback selection. */
 export async function searchCodex(params: SearchParams): Promise<SearchResponse> {
 	const transport = await resolveCodexSearchTransport(params);
-	// The ChatGPT-backend Codex endpoint speaks the undocumented codex-rs
-	// request shape (responses-lite moves tools into an `additional_tools`
-	// developer item), so the documented `web_search.filters.allowed_domains`
-	// parameter cannot be assumed to survive it. Instead, re-emit directive
-	// queries with the full Google-style operator syntax — the backing index
-	// parses the classic operator set — and leave directive-free queries
-	// byte-identical.
+	const callSearch = params.model.useResponsesLite === true ? callCodexNativeSearch : callCodexHostedSearch;
+	// Preserve query directives across both Codex transports. The hosted
+	// request shape cannot reliably carry documented filter fields, while the
+	// native route accepts the same Google-style operators in search_query.q.
+	// Leave directive-free queries byte-identical.
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const query = parsed.hasDirectives ? formatQuery(parsed, GOOGLE_QUERY_SYNTAX) : params.query;
 
@@ -571,13 +667,14 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		// Re-resolved per attempt so a retried or rotated credential sees the
 		// registry headers current at call time.
 		const requestTransport = await resolveCodexSearchTransport(params);
-		return callCodexSearch(auth, query, {
+		return callSearch(auth, query, {
 			signal: params.signal,
 			timeoutMs: params.timeoutMs,
 			systemPrompt: params.systemPrompt,
 			searchContextSize: "high",
 			reasoningEffort: searchReasoningEffort(params.model, params.thinkingLevel),
 			modelId: params.model.id,
+			sessionId: params.sessionId,
 			fetch: params.fetch,
 			transport: requestTransport,
 		});
