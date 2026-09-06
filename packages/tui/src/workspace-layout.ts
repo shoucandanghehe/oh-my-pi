@@ -93,6 +93,8 @@ export interface WorkspacePane {
 	minWidth?: number;
 	minHeight?: number;
 	overflow?: "head" | "tail";
+	/** Visibility at the workspace's current terminal dimensions; hidden panes retain their state. */
+	isVisible?: (width: number, height: number) => boolean;
 	scroll?: "workspace" | "component";
 }
 
@@ -176,12 +178,51 @@ function normalizeNode(node: WorkspaceLayoutNode): WorkspaceLayoutNode {
 	return { ...node, children };
 }
 
+function visibleNode(node: WorkspaceLayoutNode, hidden: ReadonlySet<string>): WorkspaceLayoutNode | undefined {
+	if (node.kind === "pane") return hidden.has(node.paneId) ? undefined : node;
+	let children: WorkspaceSplitChild[] | undefined;
+	for (let index = 0; index < node.children.length; index++) {
+		const child = node.children[index]!;
+		const visible = visibleNode(child.node, hidden);
+		if (visible !== child.node && !children) children = node.children.slice(0, index);
+		if (children && visible) children.push(visible === child.node ? child : { ...child, node: visible });
+	}
+	if (!children) return node;
+	if (children.length === 0) return undefined;
+	if (children.length === 1) return children[0]!.node;
+	return { ...node, children };
+}
+
+function findSplit(node: WorkspaceLayoutNode, splitId: string): WorkspaceSplitNode | undefined {
+	if (node.kind === "pane") return undefined;
+	if (node.splitId === splitId) return node;
+	for (const child of node.children) {
+		const split = findSplit(child.node, splitId);
+		if (split) return split;
+	}
+	return undefined;
+}
+
+function replacePaneNode(node: WorkspaceLayoutNode, paneId: string, replacementId: string): WorkspaceLayoutNode {
+	if (node.kind === "pane") return node.paneId === paneId ? { kind: "pane", paneId: replacementId } : node;
+	for (let index = 0; index < node.children.length; index++) {
+		const child = node.children[index]!;
+		const replacement = replacePaneNode(child.node, paneId, replacementId);
+		if (replacement === child.node) continue;
+		const children = [...node.children];
+		children[index] = { ...child, node: replacement };
+		return { ...node, children };
+	}
+	return node;
+}
+
 function insertBeside(
 	node: WorkspaceLayoutNode,
 	targetPaneId: string,
 	inserted: WorkspacePaneNode,
 	edge: WorkspaceEdge,
 	splitId: string,
+	ratio = 0.5,
 ): ReplaceSplitResult {
 	if (node.kind === "pane") {
 		if (node.paneId !== targetPaneId) return { node, changed: false };
@@ -194,12 +235,12 @@ function insertBeside(
 				axis,
 				children: insertedFirst
 					? [
-							{ node: inserted, weight: 1 },
-							{ node, weight: 1 },
+							{ node: inserted, weight: 1 - ratio },
+							{ node, weight: ratio },
 						]
 					: [
-							{ node, weight: 1 },
-							{ node: inserted, weight: 1 },
+							{ node, weight: ratio },
+							{ node: inserted, weight: 1 - ratio },
 						],
 			},
 			changed: true,
@@ -207,7 +248,7 @@ function insertBeside(
 	}
 	for (let index = 0; index < node.children.length; index++) {
 		const child = node.children[index]!;
-		const result = insertBeside(child.node, targetPaneId, inserted, edge, splitId);
+		const result = insertBeside(child.node, targetPaneId, inserted, edge, splitId, ratio);
 		if (!result.changed) continue;
 		const children = [...node.children];
 		children[index] = { ...child, node: result.node };
@@ -248,23 +289,26 @@ function resizeSplit(
 	boundary: number,
 	beforeSize: number,
 	afterSize: number,
+	afterBoundary = boundary + 1,
 ): ReplaceSplitResult {
 	if (node.kind === "pane") return { node, changed: false };
 	if (node.splitId === splitId) {
-		if (boundary < 0 || boundary >= node.children.length - 1) return { node, changed: false };
+		if (boundary < 0 || afterBoundary <= boundary || afterBoundary >= node.children.length) {
+			return { node, changed: false };
+		}
 		const before = node.children[boundary]!;
-		const after = node.children[boundary + 1]!;
+		const after = node.children[afterBoundary]!;
 		const pairWeight = positiveWeight(before.weight) + positiveWeight(after.weight);
 		const pairSize = Math.max(1, beforeSize + afterSize);
 		const beforeWeight = pairWeight * (Math.max(0, beforeSize) / pairSize);
 		const children = [...node.children];
 		children[boundary] = { ...before, weight: Math.max(Number.EPSILON, beforeWeight) };
-		children[boundary + 1] = { ...after, weight: Math.max(Number.EPSILON, pairWeight - beforeWeight) };
+		children[afterBoundary] = { ...after, weight: Math.max(Number.EPSILON, pairWeight - beforeWeight) };
 		return { node: { ...node, children }, changed: true };
 	}
 	for (let index = 0; index < node.children.length; index++) {
 		const child = node.children[index]!;
-		const result = resizeSplit(child.node, splitId, boundary, beforeSize, afterSize);
+		const result = resizeSplit(child.node, splitId, boundary, beforeSize, afterSize, afterBoundary);
 		if (!result.changed) continue;
 		const children = [...node.children];
 		children[index] = { ...child, node: result.node };
@@ -294,14 +338,24 @@ export class WorkspaceModel {
 		return containsPane(this.#root, paneId);
 	}
 
-	splitPane(targetPaneId: string, newPaneId: string, edge: WorkspaceEdge): boolean {
-		if (!targetPaneId || !newPaneId || this.hasPane(newPaneId)) return false;
+	splitPane(targetPaneId: string, newPaneId: string, edge: WorkspaceEdge, ratio = 0.5): boolean {
+		if (
+			!targetPaneId ||
+			!newPaneId ||
+			this.hasPane(newPaneId) ||
+			!Number.isFinite(ratio) ||
+			ratio <= 0 ||
+			ratio >= 1
+		) {
+			return false;
+		}
 		const result = insertBeside(
 			this.#root,
 			targetPaneId,
 			{ kind: "pane", paneId: newPaneId },
 			edge,
 			this.#nextSplitId(),
+			ratio,
 		);
 		if (!result.changed) return false;
 		this.#root = normalizeNode(result.node);
@@ -614,6 +668,10 @@ interface WorkspaceResizeDrag {
 	kind: "resize";
 	splitId: string;
 	boundary: number;
+	afterBoundary: number;
+	root: WorkspaceLayoutNode;
+	beforePaneId: string;
+	afterPaneId: string;
 	axis: WorkspaceAxis;
 	start: number;
 	beforeSize: number;
@@ -694,13 +752,20 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	#dragSnapshot: readonly string[] | undefined;
 	#hoveredPaneId: string | undefined;
 	#textSelectionPaneId: string | undefined;
-	#paneRenderCache = new Map<string, { component: Component; width: number; height: number; lines: string[] }>();
+	#paneRenderCache = new Map<
+		string,
+		{ component: Component; width: number; height: number; focused: boolean; lines: string[] }
+	>();
 	#targetedPaneTargets: Map<string, Component[]> | undefined;
 	readonly #chromeRenderTarget: Component = { render: () => [] };
 	#targetPaneCache = new WeakMap<Component, { paneId: string; component: Component }>();
 	#renderWidth = 0;
 	#renderHeight = 0;
 	#renderRoot: WorkspaceLayoutNode | undefined;
+	#renderModelRoot: WorkspaceLayoutNode | undefined;
+	#layoutRoot: WorkspaceLayoutNode | undefined;
+	#layoutHiddenPaneIds: ReadonlySet<string> | undefined;
+	#layoutVisibleRoot: WorkspaceLayoutNode | undefined;
 
 	constructor(options: WorkspaceLayoutOptions) {
 		this.#model = options.model;
@@ -725,6 +790,80 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 
 	get frame(): WorkspaceFrame | undefined {
 		return this.#frame;
+	}
+
+	/** Fresh model geometry; unlike frame, this does not replace the last painted hit-test frame. */
+	getLayoutFrame(): WorkspaceFrame | undefined {
+		if (this.#renderWidth <= 0) return undefined;
+		const height = Math.max(1, Math.trunc(this.#height()));
+		return this.#layoutFrame(this.#visibleRoot(this.#renderWidth, height), this.#renderWidth, height);
+	}
+
+	#layoutFrame(root: WorkspaceLayoutNode, width: number, height: number): WorkspaceFrame {
+		return layoutWorkspace(root, { x: 0, y: 0, width, height }, paneId => {
+			const pane = this.#panes.get(paneId);
+			return { minWidth: pane?.minWidth ?? 10, minHeight: pane?.minHeight ?? 3 };
+		});
+	}
+
+	#visibleRoot(width: number, height: number): WorkspaceLayoutNode {
+		let hidden: Set<string> | undefined;
+		let hasOptionalPane = false;
+		for (const [paneId, pane] of this.#panes) {
+			if (!pane.isVisible) continue;
+			hasOptionalPane = true;
+			if (!pane.isVisible(width, height)) (hidden ??= new Set()).add(paneId);
+		}
+		let root = hidden ? visibleNode(this.#model.root, hidden) : this.#model.root;
+		if (root && hasOptionalPane) {
+			const minimum = minimumSize(
+				root,
+				paneId => {
+					const pane = this.#panes.get(paneId);
+					return { minWidth: pane?.minWidth ?? 10, minHeight: pane?.minHeight ?? 3 };
+				},
+				1,
+				new Map(),
+			);
+			if (minimum.width > width || minimum.height > height) {
+				for (const [paneId, pane] of this.#panes) {
+					if (pane.isVisible) (hidden ??= new Set()).add(paneId);
+				}
+				if (hidden) root = visibleNode(this.#model.root, hidden);
+			}
+		}
+		const previous = this.#layoutHiddenPaneIds;
+		let sameVisibility = (hidden?.size ?? 0) === (previous?.size ?? 0);
+		if (hidden && sameVisibility) {
+			for (const paneId of hidden) {
+				if (!previous?.has(paneId)) {
+					sameVisibility = false;
+					break;
+				}
+			}
+		}
+		if (this.#layoutRoot === this.#model.root && this.#layoutVisibleRoot && sameVisibility) {
+			return this.#layoutVisibleRoot;
+		}
+		this.#layoutRoot = this.#model.root;
+		this.#layoutHiddenPaneIds = hidden;
+		this.#layoutVisibleRoot = root ?? { kind: "pane", paneId: firstPaneId(this.#model.root) };
+		return this.#layoutVisibleRoot;
+	}
+
+	#syncVisibleState(frame: WorkspaceFrame): void {
+		if (this.#hoveredPaneId && !frame.panes.has(this.#hoveredPaneId)) this.#setHoveredPane(undefined);
+		if (this.#textSelectionPaneId && !frame.panes.has(this.#textSelectionPaneId)) {
+			this.setAppViewportTextSelectionActive(false);
+		}
+		if (!frame.panes.has(this.#focusedPaneId)) {
+			const paneId = frame.panes.keys().next().value;
+			const pane = paneId ? this.#panes.get(paneId) : undefined;
+			if (pane) {
+				this.#focusedPaneId = pane.paneId;
+				this.#focus?.(this.#paneFocusComponent(pane));
+			}
+		}
 	}
 
 	get focusedPaneId(): string {
@@ -757,6 +896,8 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	focusPane(paneId: string): boolean {
 		const pane = this.#panes.get(paneId);
 		if (!pane) return false;
+		const frame = this.getLayoutFrame();
+		if (frame && !frame.panes.has(paneId)) return false;
 		const previousPane = this.#panes.get(this.#focusedPaneId);
 		const previousFocus = previousPane ? this.#paneFocusComponent(previousPane) : undefined;
 		const nextFocus = this.#paneFocusComponent(pane);
@@ -778,19 +919,25 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	}
 
 	focusNextPane(direction: 1 | -1 = 1): boolean {
-		const paneIds = [...(this.#frame?.panes.keys() ?? [])];
+		const paneIds = [...(this.getLayoutFrame()?.panes.keys() ?? [])];
 		if (paneIds.length < 2) return false;
 		const current = Math.max(0, paneIds.indexOf(this.#focusedPaneId));
 		const next = (current + direction + paneIds.length) % paneIds.length;
 		return this.focusPane(paneIds[next]!);
 	}
 
-	splitPane(targetPaneId: string, pane: WorkspacePane, edge: WorkspaceEdge): boolean {
+	splitPane(
+		targetPaneId: string,
+		pane: WorkspacePane,
+		edge: WorkspaceEdge,
+		options: { focus?: boolean; ratio?: number } = {},
+	): boolean {
 		if (this.#panes.has(pane.paneId) || !this.#canDock(targetPaneId, pane, edge)) return false;
-		if (!this.#model.splitPane(targetPaneId, pane.paneId, edge)) return false;
+		if (!this.#model.splitPane(targetPaneId, pane.paneId, edge, options.ratio)) return false;
 		this.#panes.set(pane.paneId, pane);
 		this.#targetPaneCache = new WeakMap();
-		this.focusPane(pane.paneId);
+		if (options.focus !== false) this.focusPane(pane.paneId);
+		this.#requestRender();
 		return true;
 	}
 
@@ -799,11 +946,10 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	 * can be split in place. Existing components, focus targets, and scroll
 	 * state survive; only geometry and equalized split weights change.
 	 */
-	reflowPane(pane: WorkspacePane): boolean {
-		if (this.#panes.has(pane.paneId) || !this.#frame || this.#renderWidth <= 0 || this.#renderHeight <= 0) {
-			return false;
-		}
-		const root = findWorkspaceReflowLayout([...this.#panes.values(), pane], this.#renderWidth, this.#renderHeight);
+	reflowPane(pane: WorkspacePane, options: { focus?: boolean } = {}): boolean {
+		const height = Math.max(1, Math.trunc(this.#height()));
+		if (this.#panes.has(pane.paneId) || !this.#frame || this.#renderWidth <= 0) return false;
+		const root = findWorkspaceReflowLayout([...this.#panes.values(), pane], this.#renderWidth, height);
 		if (!root) return false;
 		this.#model.replaceLayout(root);
 		this.#panes.set(pane.paneId, pane);
@@ -811,13 +957,15 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		this.#drag = undefined;
 		this.#dropTarget = undefined;
 		this.#dragSnapshot = undefined;
-		this.focusPane(pane.paneId);
+		if (options.focus !== false) this.focusPane(pane.paneId);
+		this.#requestRender();
 		return true;
 	}
 
 	closePane(paneId: string): boolean {
 		if (!this.#model.closePane(paneId)) return false;
 		if (this.#hoveredPaneId === paneId) this.#setHoveredPane(undefined);
+		if (this.#textSelectionPaneId === paneId) this.setAppViewportTextSelectionActive(false);
 		const pane = this.#panes.get(paneId);
 		this.#panes.delete(paneId);
 		this.#targetPaneCache = new WeakMap();
@@ -825,9 +973,34 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		this.#paneRenderCache.delete(paneId);
 		pane?.component.dispose?.();
 		if (this.#focusedPaneId === paneId) {
-			this.#focusedPaneId = firstPaneId(this.#model.root);
+			this.#focusedPaneId = this.getLayoutFrame()?.panes.keys().next().value ?? firstPaneId(this.#model.root);
 			const next = this.#panes.get(this.#focusedPaneId);
 			if (next) this.#focus?.(this.#paneFocusComponent(next));
+		}
+		this.#requestRender();
+		return true;
+	}
+
+	/** Transfer a leaf to a new component without changing its canonical split position. */
+	replacePane(paneId: string, pane: WorkspacePane): boolean {
+		const previous = this.#panes.get(paneId);
+		if (!previous || !pane.paneId || !this.#model.hasPane(paneId) || this.#panes.has(pane.paneId)) return false;
+		const root = replacePaneNode(this.#model.root, paneId, pane.paneId);
+		if (this.#hoveredPaneId === paneId) this.#setHoveredPane(undefined);
+		if (this.#textSelectionPaneId === paneId) this.setAppViewportTextSelectionActive(false);
+		this.#model.replaceLayout(root);
+		this.#panes.delete(paneId);
+		this.#panes.set(pane.paneId, pane);
+		this.#targetPaneCache = new WeakMap();
+		this.#viewports.delete(paneId);
+		this.#paneRenderCache.delete(paneId);
+		this.#drag = undefined;
+		this.#dropTarget = undefined;
+		this.#dragSnapshot = undefined;
+		previous.component.dispose?.();
+		if (!this.focusPane(pane.paneId)) {
+			const frame = this.getLayoutFrame();
+			if (frame) this.#syncVisibleState(frame);
 		}
 		this.#requestRender();
 		return true;
@@ -837,21 +1010,24 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		const pane = this.#panes.get(paneId);
 		if (!pane || !this.#canDock(targetPaneId, pane, edge)) return false;
 		if (!this.#model.movePane(paneId, targetPaneId, edge)) return false;
-		this.#focusedPaneId = paneId;
-		this.#focus?.(this.#paneFocusComponent(pane));
+		this.focusPane(paneId);
 		this.#requestRender();
 		return true;
 	}
 
 	wantsAppViewportHover(): boolean {
-		for (const pane of this.#panes.values()) {
-			const provider = pane.component as Component & Partial<AppViewportHoverProvider>;
-			if (provider.wantsAppViewportHover?.()) return true;
+		for (const paneId of this.#frame?.panes.keys() ?? this.#panes.keys()) {
+			const provider = this.#panes.get(paneId)?.component as
+				| (Component & Partial<AppViewportHoverProvider>)
+				| undefined;
+			if (provider?.wantsAppViewportHover?.()) return true;
 		}
 		return false;
 	}
 
 	handleAppViewportInput(data: string): boolean {
+		const frame = this.getLayoutFrame();
+		if (frame) this.#syncVisibleState(frame);
 		const pane = this.#panes.get(this.#focusedPaneId);
 		if (
 			!matchesKey(data, "pageUp") &&
@@ -886,6 +1062,16 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		const localRow = Math.floor(row) - rect.y - 1;
 		const rowOffset = pane.scroll === "component" ? 0 : (this.#viewports.get(paneId)?.offset ?? 0);
 		const contentRow = localRow + rowOffset;
+		const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+		if (provider.getAppViewportTextSelectionRect) {
+			const nested = provider.getAppViewportTextSelectionRect(contentRow, Math.floor(col) - rect.x);
+			if (!nested) return undefined;
+			const top = Math.max(rect.y + 1, rect.y + 1 + nested.row - rowOffset);
+			const left = Math.max(rect.x, rect.x + nested.col);
+			const bottom = Math.min(rect.y + rect.height, rect.y + 1 + nested.row - rowOffset + nested.height);
+			const right = Math.min(rect.x + rect.width, rect.x + nested.col + nested.width);
+			return { row: top, col: left, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+		}
 		const leftInset = Math.max(
 			0,
 			Math.min(Math.trunc(pane.component.getTextSelectionInset?.(contentRow) ?? 0), rect.width - 1),
@@ -928,6 +1114,13 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		const rect = paneId ? this.#frame?.panes.get(paneId) : undefined;
 		if (!paneId || !pane || !rect || row < rect.y + 1) return undefined;
 		if (pane.scroll !== "component") return this.#viewports.get(paneId)?.offset ?? 0;
+		const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+		if (provider.getAppViewportTextSelectionScrollOffset) {
+			return provider.getAppViewportTextSelectionScrollOffset(
+				Math.floor(row) - rect.y - 1,
+				Math.floor(col) - rect.x,
+			);
+		}
 		return pane.component.getTextSelectionScrollOffset?.(Math.floor(row) - rect.y - 1);
 	}
 
@@ -935,17 +1128,34 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		if (!active) {
 			const previous = this.#textSelectionPaneId;
 			this.#textSelectionPaneId = undefined;
-			if (previous) textSelectionAware(this.#panes.get(previous)?.component)?.setTextSelectionActive(false);
+			if (previous) this.#setPaneTextSelectionActive(previous, false);
 			return;
 		}
 		if (row === undefined || col === undefined) return;
 		const paneId = this.#paneAt(row, col);
 		if (!paneId) return;
 		if (this.#textSelectionPaneId && this.#textSelectionPaneId !== paneId) {
-			textSelectionAware(this.#panes.get(this.#textSelectionPaneId)?.component)?.setTextSelectionActive(false);
+			this.#setPaneTextSelectionActive(this.#textSelectionPaneId, false);
 		}
 		this.#textSelectionPaneId = paneId;
-		textSelectionAware(this.#panes.get(paneId)?.component)?.setTextSelectionActive(true);
+		this.#setPaneTextSelectionActive(paneId, true, row, col);
+	}
+
+	#setPaneTextSelectionActive(paneId: string, active: boolean, row?: number, col?: number): void {
+		const pane = this.#panes.get(paneId);
+		if (!pane) return;
+		const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+		if (!provider.setAppViewportTextSelectionActive) {
+			textSelectionAware(pane.component)?.setTextSelectionActive(active);
+			return;
+		}
+		const rect = this.#frame?.panes.get(paneId);
+		const offset = pane.scroll === "component" ? 0 : (this.#viewports.get(paneId)?.offset ?? 0);
+		provider.setAppViewportTextSelectionActive(
+			active,
+			rect && row !== undefined ? row - rect.y - 1 + offset : undefined,
+			rect && col !== undefined ? col - rect.x : undefined,
+		);
 	}
 
 	getAppViewportTextSelection(selection: TextSelectionRange): string | undefined {
@@ -955,9 +1165,12 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		const paneId = startPaneId ?? endPaneId;
 		const pane = paneId ? this.#panes.get(paneId) : undefined;
 		const rect = paneId ? this.#frame?.panes.get(paneId) : undefined;
-		if (!paneId || !pane?.component.getTextSelection || !rect) return undefined;
+		if (!paneId || !pane || !rect) return undefined;
+		const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+		const getSelection = provider.getAppViewportTextSelection ?? pane.component.getTextSelection;
+		if (!getSelection) return undefined;
 		const rowOffset = pane.scroll === "component" ? 0 : (this.#viewports.get(paneId)?.offset ?? 0);
-		return pane.component.getTextSelection({
+		return getSelection.call(pane.component, {
 			start: {
 				row: selection.start.row - rect.y - 1 + rowOffset,
 				col: selection.start.col - rect.x,
@@ -970,6 +1183,14 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	}
 
 	handleAppViewportMouse(event: SgrMouseEvent): boolean {
+		for (const [paneId, rect] of this.#frame?.panes ?? []) {
+			const target = this.#panes.get(paneId)?.component as
+				| (Component & Partial<MouseRoutable> & { wantsMouseCapture?: () => boolean })
+				| undefined;
+			if (!target?.routeMouse || !target.wantsMouseCapture?.()) continue;
+			target.routeMouse(event, event.row - rect.y - 1, event.col - rect.x);
+			return true;
+		}
 		const drag = this.#drag;
 		if (drag) {
 			if (event.release) {
@@ -990,7 +1211,22 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 						drag.beforeMin - drag.beforeSize,
 						Math.min(rawDelta, drag.afterSize - drag.afterMin),
 					);
-					this.#model.resizeSplit(drag.splitId, drag.boundary, drag.beforeSize + delta, drag.afterSize - delta);
+					if (drag.root !== this.#model.root) {
+						this.#drag = undefined;
+					} else {
+						const resized = resizeSplit(
+							this.#model.root,
+							drag.splitId,
+							drag.boundary,
+							drag.beforeSize + delta,
+							drag.afterSize - delta,
+							drag.afterBoundary,
+						);
+						if (resized.changed) {
+							this.#model.replaceLayout(resized.node);
+							drag.root = this.#model.root;
+						}
+					}
 				} else {
 					drag.active ||= Math.abs(event.row - drag.startRow) + Math.abs(event.col - drag.startCol) > 0;
 					this.#dropTarget = drag.active ? this.#dropTargetAt(event.row, event.col, drag.paneId) : undefined;
@@ -1004,10 +1240,21 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		if (event.leftClick) {
 			const sash = this.#frame?.sashes.find(candidate => containsPoint(candidate.rect, event.row, event.col));
 			if (sash) {
+				const visible = this.#renderRoot ? findSplit(this.#renderRoot, sash.splitId) : undefined;
+				const canonical = findSplit(this.#model.root, sash.splitId);
+				if (!visible || !canonical || this.#renderModelRoot !== this.#model.root) return true;
+				const beforePaneId = firstPaneId(visible.children[sash.boundary]!.node);
+				const afterPaneId = firstPaneId(visible.children[sash.boundary + 1]!.node);
+				const boundary = canonical.children.findIndex(child => containsPane(child.node, beforePaneId));
+				const afterBoundary = canonical.children.findIndex(child => containsPane(child.node, afterPaneId));
 				this.#drag = {
 					kind: "resize",
 					splitId: sash.splitId,
-					boundary: sash.boundary,
+					boundary,
+					afterBoundary,
+					root: this.#model.root,
+					beforePaneId,
+					afterPaneId,
 					axis: sash.axis,
 					start: sash.axis === "x" ? event.col : event.row,
 					beforeSize: sash.beforeSize,
@@ -1021,7 +1268,7 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 			if (paneId) {
 				this.focusPane(paneId);
 				const rect = this.#frame?.panes.get(paneId);
-				if (rect && event.row === rect.y) {
+				if (rect && Math.floor(event.row) === rect.y) {
 					this.#dragSnapshot = undefined;
 					this.#drag = {
 						kind: "move",
@@ -1038,8 +1285,8 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		const paneId = this.#paneAt(event.row, event.col);
 		const pane = paneId ? this.#panes.get(paneId) : undefined;
 		const rect = paneId ? this.#frame?.panes.get(paneId) : undefined;
-		if (event.motion) this.#setHoveredPane(pane && rect && event.row > rect.y ? paneId : undefined);
-		if (!paneId || !pane || !rect || event.row <= rect.y) return event.wheel !== null;
+		if (event.motion) this.#setHoveredPane(pane && rect && Math.floor(event.row) > rect.y ? paneId : undefined);
+		if (!paneId || !pane || !rect || Math.floor(event.row) <= rect.y) return event.wheel !== null;
 		const line = event.row - rect.y - 1;
 		const col = event.col - rect.x;
 		if (event.wheel !== null && pane.scroll !== "component") {
@@ -1065,18 +1312,46 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	render(width: number): readonly string[] {
 		const height = Math.max(1, Math.trunc(this.#height()));
 		const canvasWidth = Math.max(1, Math.trunc(width));
-		this.#frame = layoutWorkspace(this.#model.root, { x: 0, y: 0, width: canvasWidth, height }, paneId => {
-			const pane = this.#panes.get(paneId);
-			return { minWidth: pane?.minWidth ?? 10, minHeight: pane?.minHeight ?? 3 };
-		});
-		const lines = [...this.#renderNode(this.#model.root)];
+		const root = this.#visibleRoot(canvasWidth, height);
+		const geometryChanged =
+			this.#renderRoot !== root || this.#renderWidth !== canvasWidth || this.#renderHeight !== height;
+		if (geometryChanged) this.#targetedPaneTargets = undefined;
+		const drag = this.#drag;
+		if (drag) {
+			const resizedSplit = drag.kind === "resize" ? findSplit(root, drag.splitId) : undefined;
+			const resizeStillVisible =
+				drag.kind === "resize" &&
+				resizedSplit !== undefined &&
+				resizedSplit.children.some(
+					(child, index) =>
+						firstPaneId(child.node) === drag.beforePaneId &&
+						resizedSplit.children[index + 1] !== undefined &&
+						firstPaneId(resizedSplit.children[index + 1]!.node) === drag.afterPaneId,
+				);
+			if (
+				this.#renderWidth !== canvasWidth ||
+				this.#renderHeight !== height ||
+				(drag.kind === "move"
+					? !containsPane(root, drag.paneId)
+					: drag.root !== this.#model.root || !resizeStillVisible)
+			) {
+				this.#drag = undefined;
+				this.#dropTarget = undefined;
+				this.#dragSnapshot = undefined;
+			}
+		}
+		if (this.#dropTarget && !containsPane(root, this.#dropTarget.paneId)) this.#dropTarget = undefined;
+		this.#frame = this.#layoutFrame(root, canvasWidth, height);
+		this.#syncVisibleState(this.#frame);
+		const lines = [...this.#renderNode(root)];
 		if (this.#dropTarget) {
 			const rect = this.#frame.panes.get(this.#dropTarget.paneId);
 			if (rect) this.#paintDropPreview(lines, canvasWidth, rect, this.#dropTarget.edge);
 		}
 		this.#renderWidth = canvasWidth;
 		this.#renderHeight = height;
-		this.#renderRoot = this.#model.root;
+		this.#renderRoot = root;
+		this.#renderModelRoot = this.#model.root;
 		return lines;
 	}
 
@@ -1088,7 +1363,7 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 			this.#frame === undefined ||
 			this.#renderWidth !== canvasWidth ||
 			this.#renderHeight !== height ||
-			this.#renderRoot !== this.#model.root
+			this.#renderRoot !== this.#visibleRoot(canvasWidth, height)
 		) {
 			return this.render(width);
 		}
@@ -1116,12 +1391,19 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 
 	dispose(): void {
 		this.#setHoveredPane(undefined);
+		this.setAppViewportTextSelectionActive(false);
 		for (const pane of this.#panes.values()) pane.component.dispose?.();
 		this.#panes.clear();
 		this.#targetPaneCache = new WeakMap();
 		this.#paneRenderCache.clear();
 		this.#viewports.clear();
 		this.#frame = undefined;
+		this.#renderWidth = 0;
+		this.#renderRoot = undefined;
+		this.#renderModelRoot = undefined;
+		this.#layoutRoot = undefined;
+		this.#layoutHiddenPaneIds = undefined;
+		this.#layoutVisibleRoot = undefined;
 		this.#drag = undefined;
 		this.#dropTarget = undefined;
 		this.#dragSnapshot = undefined;
@@ -1180,18 +1462,19 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		if (!pane)
 			return Array.from({ length: rect.height }, () => fitWorkspaceLine(`Missing pane: ${paneId}`, rect.width));
 		const paneTargets = this.#targetedPaneTargets?.get(paneId);
+		const focused = paneId === this.#focusedPaneId;
 		if (this.#targetedPaneTargets && !paneTargets) {
 			const cached = this.#paneRenderCache.get(paneId);
 			if (
 				cached &&
 				cached.component === pane.component &&
 				cached.width === rect.width &&
-				cached.height === rect.height
+				cached.height === rect.height &&
+				cached.focused === focused
 			) {
 				return cached.lines;
 			}
 		}
-		const focused = paneId === this.#focusedPaneId;
 		const header = pane.renderHeader
 			? pane.renderHeader(rect.width, focused)
 			: this.#renderHeader
@@ -1255,6 +1538,7 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 			component: pane.component,
 			width: rect.width,
 			height: rect.height,
+			focused,
 			lines,
 		});
 		return lines;
@@ -1342,13 +1626,36 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 
 	#canDock(targetPaneId: string, pane: WorkspacePane, edge: WorkspaceEdge): boolean {
 		if (targetPaneId === pane.paneId || !this.#model.hasPane(targetPaneId)) return false;
-		const targetRect = this.#frame?.panes.get(targetPaneId);
+		if (
+			this.#renderWidth > 0 &&
+			pane.isVisible?.(this.#renderWidth, Math.max(1, Math.trunc(this.#height()))) === false
+		) {
+			return true;
+		}
+		const frame = this.getLayoutFrame();
+		const targetRect = frame?.panes.get(targetPaneId);
 		const target = this.#panes.get(targetPaneId);
-		if (!targetRect || !target) return true;
+		if (!frame) return true;
+		if (!targetRect || !target) return false;
 		const axis: WorkspaceAxis = edge === "left" || edge === "right" ? "x" : "y";
 		const available = axis === "x" ? targetRect.width : targetRect.height;
 		const targetMinimum = axis === "x" ? (target.minWidth ?? 10) : (target.minHeight ?? 3);
 		const paneMinimum = axis === "x" ? (pane.minWidth ?? 10) : (pane.minHeight ?? 3);
-		return available >= targetMinimum + paneMinimum + 1;
+		const required = targetMinimum + paneMinimum + 1;
+		if (available >= required) return true;
+		if (pane.isVisible) return false;
+		let optional: Set<string> | undefined;
+		for (const [paneId, candidate] of this.#panes) {
+			if (candidate.isVisible) (optional ??= new Set()).add(paneId);
+		}
+		if (!optional) return false;
+		const mandatoryRoot = visibleNode(this.#model.root, optional);
+		if (!mandatoryRoot) return false;
+		const mandatoryRect = this.#layoutFrame(
+			mandatoryRoot,
+			this.#renderWidth,
+			Math.max(1, Math.trunc(this.#height())),
+		).panes.get(targetPaneId);
+		return mandatoryRect !== undefined && (axis === "x" ? mandatoryRect.width : mandatoryRect.height) >= required;
 	}
 }

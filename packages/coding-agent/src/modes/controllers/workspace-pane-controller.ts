@@ -9,6 +9,10 @@ export interface WorkspacePaneOptions {
 	minWidth: number;
 	minHeight: number;
 	focus?: boolean;
+	placement?: { targetPaneId: string; edge: WorkspaceEdge };
+	replacePaneId?: string;
+	/** A caller transferring an existing component retains it when docking fails. */
+	disposeOnFailure?: boolean;
 	createPane: (close: () => void) => Component;
 }
 
@@ -30,8 +34,6 @@ export class WorkspacePaneController {
 		}
 		if (existing) this.#paneIdByKey.delete(options.key);
 
-		const previousPaneId = this.workspace.focusedPaneId;
-
 		const component = options.createPane(() => {
 			this.close(options.key);
 		});
@@ -47,32 +49,42 @@ export class WorkspacePaneController {
 			minWidth: options.minWidth,
 			minHeight: options.minHeight,
 		};
-		const candidates = [...(this.workspace.frame?.panes.keys() ?? [])]
+		if (options.replacePaneId) {
+			if (this.workspace.replacePane(options.replacePaneId, pane)) {
+				this.#paneIdByKey.set(options.key, options.paneId);
+				if (options.placement) {
+					this.workspace.movePane(options.paneId, options.placement.targetPaneId, options.placement.edge);
+				}
+				return true;
+			}
+			if (options.disposeOnFailure !== false) component.dispose?.();
+			return false;
+		}
+		const frame = this.workspace.getLayoutFrame();
+		const candidates = [...(frame?.panes.keys() ?? [])]
 			.filter(paneId => paneId !== MAIN_WORKSPACE_PANE_ID && paneId !== options.paneId)
 			.sort((a, b) => {
-				const aRect = this.workspace.frame?.panes.get(a);
-				const bRect = this.workspace.frame?.panes.get(b);
+				const aRect = frame?.panes.get(a);
+				const bRect = frame?.panes.get(b);
 				return (bRect?.width ?? 0) * (bRect?.height ?? 0) - (aRect?.width ?? 0) * (aRect?.height ?? 0);
 			});
 		candidates.push(MAIN_WORKSPACE_PANE_ID);
-		for (const targetPaneId of candidates) {
-			const rect = this.workspace.frame?.panes.get(targetPaneId);
+		for (const targetPaneId of options.placement ? [options.placement.targetPaneId] : candidates) {
+			const rect = frame?.panes.get(targetPaneId);
 			const preferred: WorkspaceEdge = rect && rect.height > rect.width ? "bottom" : "right";
 			const alternate: WorkspaceEdge = preferred === "right" ? "bottom" : "right";
-			for (const edge of [preferred, alternate]) {
-				if (this.workspace.splitPane(targetPaneId, pane, edge)) {
+			for (const edge of options.placement ? [options.placement.edge] : [preferred, alternate]) {
+				if (this.workspace.splitPane(targetPaneId, pane, edge, { focus: options.focus })) {
 					this.#paneIdByKey.set(options.key, options.paneId);
-					if (options.focus === false) this.workspace.focusPane(previousPaneId);
 					return true;
 				}
 			}
 		}
-		if (this.workspace.reflowPane(pane)) {
+		if (!options.placement && this.workspace.reflowPane(pane, { focus: options.focus })) {
 			this.#paneIdByKey.set(options.key, options.paneId);
-			if (options.focus === false) this.workspace.focusPane(previousPaneId);
 			return true;
 		}
-		component.dispose?.();
+		if (options.disposeOnFailure !== false) component.dispose?.();
 		return false;
 	}
 
