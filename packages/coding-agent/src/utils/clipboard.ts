@@ -6,24 +6,17 @@ import {
 import { isWsl } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils/mime";
+import * as ptree from "@oh-my-pi/pi-utils/ptree";
 import MAC_FILE_URL_SCRIPT from "./mac-file-urls.applescript" with { type: "text" };
 
 type SpawnCaptureOptions = { input?: string; timeoutMs?: number };
 
 /**
- * Run a subprocess and capture its stdout without blocking the event loop.
- *
- * `readTextFromClipboard`, `readMacFileUrlsFromClipboard`, and the Termux copy
- * path all shell out to CLI clipboard tools. The synchronous `execSync` API
- * parks the render loop until the child exits or the timeout fires, so a hung
- * clipboard daemon freezes the TUI for the full 2000ms budget (#4235). This
- * helper mirrors the previous semantics — capture stdout, throw on non-zero
- * exit or timeout, forward optional stdin — but yields to the event loop while
- * the child runs.
- *
- * @throws Error when the child fails to spawn, is killed by the timeout, or
- *   exits with a non-zero status. Callers rely on this to use platform
- *   fallbacks or report an empty clipboard.
+ * Capture clipboard output with a deadline independent of process exit and EOF.
+ * WSL interop and inherited pipes can remain open after a kill; never wait for
+ * them to acknowledge cancellation before reporting the timeout. Process-tree
+ * cleanup is delegated to the shared manager, with a hard-kill fallback for
+ * bridges the native process enumerator cannot see.
  */
 async function spawnCapture(cmd: string[], options: SpawnCaptureOptions & { encoding: "bytes" }): Promise<Uint8Array>;
 async function spawnCapture(cmd: string[], options?: SpawnCaptureOptions): Promise<string>;
@@ -32,30 +25,39 @@ async function spawnCapture(
 	options: SpawnCaptureOptions & { encoding?: "bytes" } = {},
 ): Promise<string | Uint8Array> {
 	const timeoutMs = options.timeoutMs ?? 2000;
-	const proc = Bun.spawn(cmd, {
-		stdout: "pipe",
-		stderr: "ignore",
+	const child = ptree.spawn(cmd, {
+		detached: true,
+		timeout: timeoutMs,
 		stdin: options.input !== undefined ? Buffer.from(options.input) : "ignore",
 	});
-	let timedOut = false;
+	const deadline = Promise.withResolvers<never>();
 	const timer = setTimeout(() => {
-		timedOut = true;
-		proc.kill();
+		const error = new ptree.TimeoutError(timeoutMs, "");
+		deadline.reject(error);
+		child.kill(error, -1);
+		try {
+			child.proc.kill("SIGKILL");
+		} catch {
+			// The managed process-tree kill may have already reaped the root.
+		}
 	}, timeoutMs);
 	try {
-		const response = new Response(proc.stdout);
-		const stdout =
-			options.encoding === "bytes" ? new Uint8Array(await response.arrayBuffer()) : await response.text();
-		await proc.exited;
-		if (timedOut) {
-			throw new Error(`${cmd[0]} timed out after ${timeoutMs}ms`);
-		}
-		if (proc.exitCode !== 0) {
-			throw new Error(`${cmd[0]} exited with code ${proc.exitCode}`);
-		}
+		const capture = async () => {
+			const bytes = options.encoding === "bytes" ? await child.bytes() : undefined;
+			const result = await child.wait();
+			return bytes ?? result.stdout;
+		};
+		const stdout = await Promise.race([capture(), deadline.promise]);
 		return stdout;
+	} catch (error) {
+		if (error instanceof ptree.TimeoutError) throw new Error(`${cmd[0]} timed out after ${timeoutMs}ms`);
+		if (error instanceof ptree.Exception) throw new Error(`${cmd[0]} exited with code ${error.exitCode}`);
+		throw error;
 	} finally {
 		clearTimeout(timer);
+		// Do not await bridge termination: the deadline also bounds unresponsive
+		// WSL process handles and cancellation of inherited pipes.
+		if (child.exitCode === null) child.kill();
 	}
 }
 
@@ -86,12 +88,14 @@ export async function readMacFileUrlsFromClipboard(): Promise<string[]> {
 	}
 }
 
+let pendingClipboardWrite: Promise<void> = Promise.resolve();
+
 /**
  * Copy text to the system clipboard.
  *
  * Emits OSC 52 first when running in a real terminal (works over SSH/mosh),
- * then attempts native clipboard copy as best-effort for local sessions.
- * On Termux, tries `termux-clipboard-set` before native.
+ * then attempts platform clipboard copy as best-effort for local sessions.
+ * Clipboard daemons and host interop must never run on the render thread.
  *
  * @param text - UTF-8 text to place on the clipboard.
  */
@@ -124,7 +128,11 @@ export async function copyToClipboard(text: string): Promise<void> {
 		}
 	}
 
-	// Also try native tools (best effort for local sessions)
+	// Moving native writes off-thread must not let an older copy finish last.
+	const previous = pendingClipboardWrite;
+	const completed = Promise.withResolvers<void>();
+	pendingClipboardWrite = completed.promise;
+	await previous;
 	try {
 		if (process.env.TERMUX_VERSION) {
 			try {
@@ -134,74 +142,112 @@ export async function copyToClipboard(text: string): Promise<void> {
 				// Fall through to native
 			}
 		}
+		if (isWsl()) {
+			try {
+				await spawnCapture(
+					["powershell.exe", "-NoProfile", "-NonInteractive", "-Sta", "-Command", POWERSHELL_COPY_SCRIPT],
+					{ input: text, timeoutMs: POWERSHELL_TIMEOUT_MS },
+				);
+				return;
+			} catch (error) {
+				logger.warn("clipboard: Windows clipboard copy failed", { error: String(error) });
+				// Interop can be disabled; retain the local clipboard fallback.
+			}
+		}
+		if (process.platform === "darwin") {
+			// AppKit clipboard writes need a main thread. pbcopy provides its own,
+			// without blocking ours or moving AppKit onto a native worker thread.
+			await spawnCapture(["pbcopy"], { input: text });
+			return;
+		}
 
 		await nativeCopyToClipboard(text);
-	} catch {
-		// Ignore — clipboard copy is best-effort
+	} catch (error) {
+		// Retain the best-effort API, but do not silently hide a native failure.
+		logger.warn("clipboard: clipboard copy failed", { error: String(error) });
+	} finally {
+		completed.resolve();
 	}
 }
 
-// PowerShell one-liner that emits the Windows clipboard image as base64-encoded
-// PNG on stdout, or nothing when the clipboard does not hold image data. Used
-// for native Windows fallback and WSL interop because arboard can miss host
-// clipboard image payloads in those terminal paths.
-const POWERSHELL_IMAGE_SCRIPT = `
+const POWERSHELL_TIMEOUT_MS = 8000;
+
+const POWERSHELL_COPY_SCRIPT = `
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = [Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$img = [System.Windows.Forms.Clipboard]::GetImage()
-if ($img -ne $null) {
-	$ms = New-Object System.IO.MemoryStream
-	$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-	[Console]::Out.Write([Convert]::ToBase64String($ms.ToArray()))
+$text = [Console]::In.ReadToEnd()
+if ($text.Length -eq 0) {
+	[System.Windows.Forms.Clipboard]::Clear()
+} else {
+	[System.Windows.Forms.Clipboard]::SetText($text)
 }
 `;
 
-const POWERSHELL_TIMEOUT_MS = 8000;
+export interface ClipboardContent {
+	image: ClipboardImage | null;
+	text: string;
+	/** Finder file paths; empty on platforms without a file-URL reader. */
+	fileUrls: string[];
+}
 
-/**
- * Read an image through the Windows host's PowerShell.
- *
- * Native Windows uses this as a fallback when arboard reports no image or
- * cannot access the clipboard. WSLg exposes a Wayland socket but no native
- * clipboard image transport, so arboard returns `ContentNotAvailable` there;
- * PowerShell, reached via WSL interop, can read the Windows clipboard directly
- * and round-trip the bitmap as PNG.
- *
- * Returns null when no image is on the clipboard, the host PowerShell is
- * missing, or the bridge times out.
- */
-async function readImageViaPowerShell(): Promise<ClipboardImage | null> {
-	try {
-		const proc = Bun.spawn(
-			["powershell.exe", "-NoProfile", "-NonInteractive", "-Sta", "-Command", POWERSHELL_IMAGE_SCRIPT],
-			{
-				stdout: "pipe",
-				stderr: "ignore",
-				stdin: "ignore",
-			},
-		);
-		const timer = setTimeout(() => proc.kill(), POWERSHELL_TIMEOUT_MS);
-		let stdout = "";
+// One STA startup and one data object for both representations. A successful
+// empty envelope is authoritative, unlike a failed/missing host bridge.
+const POWERSHELL_CONTENT_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$data = [System.Windows.Forms.Clipboard]::GetDataObject()
+$image = $null
+$text = ''
+if ($null -ne $data) {
+	$img = $data.GetData([System.Windows.Forms.DataFormats]::Bitmap, $true)
+	if ($null -ne $img) {
+		$ms = New-Object System.IO.MemoryStream
 		try {
-			stdout = await new Response(proc.stdout).text();
-			await proc.exited;
-		} catch (err) {
-			// powershell.exe can be a Windows process reached either natively or
-			// over WSL interop; if it doesn't reap cleanly, report no image instead
-			// of surfacing an opaque bridge failure to the prompt.
-			logger.warn("clipboard: powershell read failed", { error: String(err) });
-			return null;
+			$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+			$image = [Convert]::ToBase64String($ms.ToArray())
 		} finally {
-			clearTimeout(timer);
+			$ms.Dispose()
+			$img.Dispose()
 		}
-		if (proc.exitCode !== 0) return null;
-		const b64 = stdout.trim();
-		if (!b64) return null;
-		const bytes = Buffer.from(b64, "base64");
-		if (bytes.byteLength === 0) return null;
-		return { data: bytes, mimeType: "image/png" };
-	} catch {
+	}
+	$text = [string]$data.GetData([System.Windows.Forms.DataFormats]::UnicodeText, $true)
+}
+[Console]::Out.Write((@{ image = $image; text = $text } | ConvertTo-Json -Compress))
+`;
+
+async function readContentViaPowerShell(): Promise<ClipboardContent | null> {
+	try {
+		const stdout = await spawnCapture(
+			["powershell.exe", "-NoProfile", "-NonInteractive", "-Sta", "-Command", POWERSHELL_CONTENT_SCRIPT],
+			{ timeoutMs: POWERSHELL_TIMEOUT_MS },
+		);
+		let value: unknown;
+		try {
+			value = JSON.parse(stdout.replace(/^\uFEFF/, ""));
+		} catch {
+			// JSON parse errors may include clipboard text. Never log the payload.
+			throw new Error("Invalid clipboard response from PowerShell");
+		}
+		if (
+			typeof value !== "object" ||
+			value === null ||
+			!("image" in value) ||
+			!("text" in value) ||
+			(value.image !== null && typeof value.image !== "string") ||
+			typeof value.text !== "string"
+		) {
+			throw new Error("Invalid clipboard response from PowerShell");
+		}
+		return {
+			image: value.image ? { data: Buffer.from(value.image, "base64"), mimeType: "image/png" } : null,
+			text: value.text.replaceAll("\r\n", "\n"),
+			fileUrls: [],
+		};
+	} catch (error) {
+		logger.warn("clipboard: Windows clipboard read failed", { error: String(error) });
 		return null;
 	}
 }
@@ -221,37 +267,21 @@ $ErrorActionPreference = 'Stop'
  * Read clipboard text through Windows PowerShell — native win32 or the WSL
  * host over interop.
  *
- * Same rationale as `readImageViaPowerShell`: under WSL, the WSLg Wayland
- * clipboard only works when `wl-clipboard` happens to be installed in the
- * distro, while `powershell.exe` is always reachable. Forcing UTF-8 output
- * encoding keeps non-ASCII text intact regardless of the console codepage
- * (the legacy win32 `Get-Clipboard` shell-out mangled it), and `Bun.spawn`
- * keeps a cold PowerShell start off the TUI event loop.
+ * Forcing UTF-8 output encoding keeps non-ASCII text intact regardless of
+ * the console codepage. Text-only callers need not transfer image bytes.
  *
  * Returns null when the bridge fails (WSL callers fall through to
  * wl-paste/xclip); an empty string is a successful "no text" read.
  */
 async function readTextViaPowerShell(): Promise<string | null> {
 	try {
-		const proc = Bun.spawn(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_TEXT_SCRIPT], {
-			stdout: "pipe",
-			stderr: "ignore",
-			stdin: "ignore",
-		});
-		const timer = setTimeout(() => proc.kill(), POWERSHELL_TIMEOUT_MS);
-		let stdout = "";
-		try {
-			stdout = await new Response(proc.stdout).text();
-			await proc.exited;
-		} catch (err) {
-			logger.warn("clipboard: powershell text read failed", { error: String(err) });
-			return null;
-		} finally {
-			clearTimeout(timer);
-		}
-		if (proc.exitCode !== 0) return null;
+		const stdout = await spawnCapture(
+			["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_TEXT_SCRIPT],
+			{ timeoutMs: POWERSHELL_TIMEOUT_MS },
+		);
 		return stdout.replaceAll("\r\n", "\n");
-	} catch {
+	} catch (error) {
+		logger.warn("clipboard: Windows clipboard text read failed", { error: String(error) });
 		return null;
 	}
 }
@@ -281,11 +311,9 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 	}
 
 	if (isWsl()) {
-		const image = await readImageViaPowerShell();
-		if (image) return image;
-		// Fall through: arboard may still succeed on a future WSLg release —
-		// but only when we actually have a display server. Headless WSL has
-		// no display, so arboard would reject anyway.
+		const content = await readContentViaPowerShell();
+		if (content !== null) return content.image;
+		// Only a failed bridge permits falling back to the Linux clipboard.
 	}
 
 	if (process.platform === "win32") {
@@ -295,9 +323,13 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 		} catch (err) {
 			logger.warn("clipboard: native Windows image read failed", { error: String(err) });
 		}
-		return await readImageViaPowerShell();
+		return (await readContentViaPowerShell())?.image ?? null;
 	}
 
+	return await readLocalImageFromClipboard();
+}
+
+async function readLocalImageFromClipboard(): Promise<ClipboardImage | null> {
 	if (process.platform === "linux" && process.env.WAYLAND_DISPLAY) {
 		try {
 			const offeredMimeTypes = new Set((await spawnCapture(["wl-paste", "--list-types"])).split(/\r?\n/));
@@ -348,6 +380,15 @@ export async function readTextFromClipboard(): Promise<string> {
 			if (text !== null) return text;
 			// Bridge failed — fall through to the wl-paste/xclip paths below.
 		}
+		return await readLocalTextFromClipboard();
+	} catch (error) {
+		logger.warn("clipboard: failed to read clipboard text", { error: String(error) });
+	}
+	return "";
+}
+
+async function readLocalTextFromClipboard(): Promise<string> {
+	try {
 		const hasWaylandDisplay = Boolean(process.env.WAYLAND_DISPLAY);
 		const hasX11Display = Boolean(process.env.DISPLAY);
 		if (hasWaylandDisplay) {
@@ -365,4 +406,27 @@ export async function readTextFromClipboard(): Promise<string> {
 		logger.warn("clipboard: failed to read clipboard text", { error: String(error) });
 	}
 	return "";
+}
+
+/**
+ * Read smart-paste representations with one Windows/WSL PowerShell invocation.
+ * A successful empty host clipboard never probes Linux. If the host bridge
+ * fails, local platform readers remain available without retrying PowerShell.
+ */
+export async function readClipboardContent(): Promise<ClipboardContent> {
+	if (!process.env.TERMUX_VERSION && (isWsl() || process.platform === "win32")) {
+		const content = await readContentViaPowerShell();
+		if (content !== null) return content;
+		const [image, text] = await Promise.all([
+			readLocalImageFromClipboard(),
+			process.platform === "win32" ? Promise.resolve("") : readLocalTextFromClipboard(),
+		]);
+		return { image, text, fileUrls: [] };
+	}
+	const [image, text, fileUrls] = await Promise.all([
+		readImageFromClipboard(),
+		readTextFromClipboard(),
+		readMacFileUrlsFromClipboard(),
+	]);
+	return { image, text, fileUrls };
 }

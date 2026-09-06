@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { BtwManager } from "@oh-my-pi/pi-coding-agent/session/btw-manager";
 import {
 	BTW_THREAD_CUSTOM_TYPE,
 	type BtwThreadEvent,
 	type BtwThreadModelRef,
+	restoreBtwThreads,
 } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
 import {
 	EphemeralConversation,
@@ -58,6 +59,17 @@ function immediateConversation(checkpoint?: EphemeralConversationCheckpoint): Ep
 			return { replyText: `reply:${text}`, assistantMessage: assistant(`reply:${text}`) };
 		},
 	});
+}
+
+function journalEntries(events: readonly BtwThreadEvent[]): CustomEntry<BtwThreadEvent>[] {
+	return events.map((data, index) => ({
+		type: "custom",
+		customType: BTW_THREAD_CUSTOM_TYPE,
+		data,
+		id: `event-${index + 1}`,
+		parentId: "main-leaf",
+		timestamp: new Date(index * 1_000).toISOString(),
+	}));
 }
 
 describe("BtwManager", () => {
@@ -225,6 +237,68 @@ describe("BtwManager", () => {
 		expect(manager.thread(second)?.turns.map(turn => turn.replyText)).toEqual(["two", "bee"]);
 	});
 
+	it("restores attachment-only draft edits and replays submitted images without crossing threads or changing Main", async () => {
+		const firstImage: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
+		const secondImage: ImageContent = { type: "image", data: "c2Vjb25k", mimeType: "image/png" };
+		const mainMessages: AgentMessage[] = [{ role: "user", content: "Main context", timestamp: 1 }];
+		const events: BtwThreadEvent[] = [];
+		const requests: AgentMessage[][] = [];
+		let sequence = 0;
+		const createConversation = (_model: BtwThreadModelRef, checkpoint?: EphemeralConversationCheckpoint) =>
+			new EphemeralConversation({
+				snapshotBaseMessages: () => mainMessages,
+				sideSessionId: checkpoint?.sideSessionId ?? `side-${sequence}`,
+				checkpoint,
+				runTurn: async messages => {
+					requests.push(messages);
+					return { replyText: "Seen", assistantMessage: assistant("Seen") };
+				},
+			});
+		const restore = () =>
+			new BtwManager({
+				entries: journalEntries(JSON.parse(JSON.stringify(events)) as BtwThreadEvent[]),
+				appendEvent: event => events.push(event),
+				createConversation,
+				nextKey: () => `thread-${++sequence}`,
+				now: () => sequence * 100,
+			});
+		const manager = restore();
+		const first = manager.createChild("First", "main-leaf", MODEL);
+		const second = manager.createChild("Second", "main-leaf", MODEL);
+		manager.setDraft(first, "", [firstImage]);
+		manager.persistDraft(first);
+		manager.setDraft(first, "", [secondImage, firstImage], [undefined, "local://first.png"]);
+		expect(manager.persistDraft(first)).toBe(true);
+		manager.select(second);
+		manager.setDraft(second, "Other draft", [firstImage], ["local://other.png"]);
+		manager.persistDraft(second);
+		manager.select(first);
+		expect(manager.thread(first)?.draftImages).toEqual([secondImage, firstImage]);
+
+		const restored = restore();
+		const draft = restored.thread(first)!;
+		expect(draft.draftImageLinks).toEqual([undefined, "local://first.png"]);
+		await restored.prompt(first, draft.draft, undefined, undefined, draft.draftImages);
+		expect(requests[0]?.at(-1)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "" }, secondImage, firstImage],
+		});
+		const afterSubmit = restore();
+		expect(afterSubmit.thread(first)).toMatchObject({ draft: "", draftImages: [], draftImageLinks: [] });
+		expect(afterSubmit.thread(second)).toMatchObject({
+			draft: "Other draft",
+			draftImages: [firstImage],
+			draftImageLinks: ["local://other.png"],
+		});
+		await afterSubmit.prompt(first, "Follow up");
+		expect(requests[1]?.filter(message => message.role === "user").map(message => message.content)).toEqual([
+			"Main context",
+			[{ type: "text", text: "" }, secondImage, firstImage],
+			[{ type: "text", text: "Follow up" }],
+		]);
+		expect(mainMessages).toEqual([{ role: "user", content: "Main context", timestamp: 1 }]);
+	});
+
 	it("journals promotion removal before transition and can revoke it without replacing the live thread", async () => {
 		const events: BtwThreadEvent[] = [];
 		const manager = new BtwManager({
@@ -238,13 +312,20 @@ describe("BtwManager", () => {
 		await manager.prompt(key, "Promote?");
 		manager.continueQuick(key);
 		const liveThread = manager.thread(key);
+		const image: ImageContent = { type: "image", data: "ZHJhZnQ=", mimeType: "image/png" };
+		manager.setDraft(key, "", [image], ["local://draft.png"]);
+		manager.persistDraft(key);
 
 		expect(manager.preparePromotion(key)).toBe(true);
 		expect(manager.thread(key)).toBe(liveThread);
-		expect(events.map(event => event.op)).toEqual(["create", "remove"]);
+		expect(events.map(event => event.op)).toEqual(["create", "draft", "remove"]);
 		expect(manager.rollbackPromotion(key)).toBe(true);
 		expect(manager.thread(key)).toBe(liveThread);
-		expect(events.map(event => event.op)).toEqual(["create", "remove", "create"]);
+		expect(restoreBtwThreads(journalEntries(events))[0]).toMatchObject({
+			draft: "",
+			draftImages: [image],
+			draftImageLinks: ["local://draft.png"],
+		});
 	});
 
 	it("creates a durable child directly, journaling it with a frozen snapshot before the first turn", async () => {
@@ -345,7 +426,7 @@ describe("BtwManager", () => {
 		expect(events.map(event => event.op)).toEqual(["create", "request"]);
 	});
 
-	it("persists and resumes a durable request interrupted by paused exit", async () => {
+	it("preserves an image-only paused request across restart and a failed continuation", async () => {
 		const entries: CustomEntry<BtwThreadEvent>[] = [];
 		const appendEvent = (event: BtwThreadEvent): void => {
 			const sequence = entries.length + 1;
@@ -358,6 +439,8 @@ describe("BtwManager", () => {
 				timestamp: new Date(sequence * 1_000).toISOString(),
 			});
 		};
+		const image: ImageContent = { type: "image", data: "cGF1c2Vk", mimeType: "image/png" };
+		const images = [image];
 		const turnStarted = Promise.withResolvers<void>();
 		const interrupted = new BtwManager({
 			entries: [],
@@ -379,22 +462,59 @@ describe("BtwManager", () => {
 			now: () => 100,
 		});
 		const key = interrupted.createChild("Pause me", "anchor-1", MODEL);
-		const pending = interrupted.prompt(key, "Finish after resume");
+		const pending = interrupted.prompt(key, "", undefined, undefined, images);
 		await turnStarted.promise;
+		images.length = 0;
+		const draftImage: ImageContent = { type: "image", data: "ZHJhZnQ=", mimeType: "image/png" };
+		interrupted.setDraft(key, "Next question", [draftImage], ["local://next.png"]);
 
 		interrupted.prepareForPausedExit();
 		await pending.catch(() => undefined);
+		expect(interrupted.thread(key)?.pausedRequest?.images).toEqual([image]);
 
-		const restored = new BtwManager({
-			entries,
-			appendEvent,
-			createConversation: (_model, checkpoint) => immediateConversation(checkpoint),
-			nextKey: () => "unused",
-			now: () => 200,
+		const requests: AgentMessage[][] = [];
+		let fail = true;
+		const restore = () =>
+			new BtwManager({
+				entries: JSON.parse(JSON.stringify(entries)) as CustomEntry<BtwThreadEvent>[],
+				appendEvent,
+				createConversation: (_model, checkpoint) =>
+					new EphemeralConversation({
+						snapshotBaseMessages: () => [],
+						sideSessionId: checkpoint?.sideSessionId ?? "side-paused",
+						checkpoint,
+						runTurn: async messages => {
+							requests.push(messages);
+							if (fail) throw new Error("Provider unavailable");
+							return { replyText: "Resumed", assistantMessage: assistant("Resumed") };
+						},
+					}),
+				nextKey: () => "unused",
+				now: () => 200,
+			});
+		const restored = restore();
+		expect(await restored.continuePaused()).toEqual({
+			continued: 0,
+			skipped: ["Pause me: Provider unavailable"],
+			complete: false,
 		});
-		const result = await restored.continuePaused();
-
-		expect(result).toEqual({ continued: 1, skipped: [], complete: true });
-		expect(restored.thread(key)?.turns.map(turn => turn.input)).toEqual(["Finish after resume"]);
+		fail = false;
+		const retried = restore();
+		expect(await retried.continuePaused()).toEqual({ continued: 1, skipped: [], complete: true });
+		expect(
+			requests.map(messages => {
+				const message = messages.at(-1);
+				return message?.role === "user" ? message.content : undefined;
+			}),
+		).toEqual([
+			[{ type: "text", text: "" }, image],
+			[{ type: "text", text: "" }, image],
+		]);
+		expect(retried.thread(key)?.pausedRequest).toBeUndefined();
+		expect(retried.thread(key)).toMatchObject({
+			draft: "Next question",
+			draftImages: [draftImage],
+			draftImageLinks: ["local://next.png"],
+		});
 	});
 });

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -1426,6 +1426,70 @@ describe("BtwController", () => {
 		expect(completedTranscript.match(/Inspecting fixture/g)).toHaveLength(1);
 		expect(completedTranscript).toContain("Direct answer");
 		controller.dispose();
+	});
+
+	it("submits a pane image to BTW and journals it without modifying Main", async () => {
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		const requests: AgentMessage[][] = [];
+		const events: BtwThreadEvent[] = [];
+		const completed = Promise.withResolvers<void>();
+		const model = { provider: "anthropic", id: "claude-sonnet-4-5" };
+		const session = {
+			sessionId: "session-1",
+			model,
+			createEphemeralConversation: (_instructions: string, checkpoint?: EphemeralConversationCheckpoint) =>
+				new EphemeralConversation({
+					snapshotBaseMessages: () => [],
+					sideSessionId: "image-side",
+					checkpoint,
+					runTurn: async messages => {
+						requests.push(messages);
+						return { replyText: "Image received", assistantMessage: createAssistantMessage("Image received") };
+					},
+				}),
+		} as unknown as InteractiveModeContext["session"];
+		let pane: BtwConversationPane | undefined;
+		const ctx = {
+			...makeCtx(session),
+			workspaceEnabled: true,
+			keybindings: { getKeys: () => [] },
+			sessionManager: {
+				getEntries: () => [],
+				appendCustomEntry: (_type: string, event: BtwThreadEvent) => {
+					events.push(event);
+					if (event.op === "turn") completed.resolve();
+				},
+				getLeafId: () => "leaf-1",
+				getSessionId: () => "session-1",
+				getEntry: () => ({}),
+				getCwd: () => process.cwd(),
+			},
+			openBtwWorkspacePane: (component: BtwConversationPane) => {
+				pane = component;
+				return true;
+			},
+			closeBtwWorkspacePane: () => true,
+		} as unknown as InteractiveModeContext;
+		const controller = new BtwController(ctx);
+		try {
+			await controller.start("");
+			if (!pane) throw new Error("Expected BTW pane");
+			const editor = pane.getPasteTarget()!;
+			editor.setDraft("[Image #1]", [image]);
+			pane.handleInput("\r");
+			await completed.promise;
+			const request = requests[0]?.at(-1);
+			expect(request?.role).toBe("user");
+			expect(request && "content" in request ? request.content : undefined).toEqual([
+				{ type: "text", text: "[Image #1]" },
+				image,
+			]);
+			expect(events.find(event => event.op === "turn")).toMatchObject({ turn: { images: [image] } });
+			expect(pane.getPasteTarget()?.pendingImages).toEqual([]);
+			expect(ctx.btwContainer.children).toHaveLength(0);
+		} finally {
+			controller.dispose();
+		}
 	});
 
 	it("keeps QuickAsk inline, then upgrades the same turn into one durable workspace pane", async () => {

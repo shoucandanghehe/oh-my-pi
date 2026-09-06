@@ -20,6 +20,7 @@ import {
 import { sanitizeStatusText } from "../shared";
 import { theme } from "../theme/theme";
 import type { AgentTranscriptViewer } from "./agent-transcript-viewer";
+import type { CustomEditor } from "./custom-editor";
 
 export interface AutoAgentDockOptions {
 	axis: "x" | "y";
@@ -84,6 +85,11 @@ export class AutoAgentDock
 
 	get focusedAgentId(): string | undefined {
 		return this.#slots[this.#activeSlot];
+	}
+
+	getPasteTarget(): CustomEditor | undefined {
+		const id = this.focusedAgentId;
+		return id ? this.#viewers.get(id)?.getPasteTarget() : undefined;
 	}
 
 	get visibleAgentIds(): readonly string[] {
