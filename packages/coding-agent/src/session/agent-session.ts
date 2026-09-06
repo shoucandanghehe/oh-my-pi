@@ -9094,7 +9094,7 @@ export class AgentSession {
 		snapshot.push(createSideChannelNoToolsMessage());
 		snapshot.push({
 			role: "user",
-			content: [{ type: "text", text: args.promptText }],
+			content: [{ type: "text", text: args.promptText }, ...(args.images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
@@ -9977,7 +9977,7 @@ export class AgentSession {
 			for (const turn of turns) {
 				this.sessionManager.appendMessage({
 					role: "user",
-					content: [{ type: "text", text: turn.input }],
+					content: [{ type: "text", text: turn.input }, ...(turn.images ?? [])],
 					timestamp: turn.timestamp,
 				});
 				this.sessionManager.appendMessage(

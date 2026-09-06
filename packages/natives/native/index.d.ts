@@ -982,7 +982,7 @@ export interface ContextLine {
  * # Errors
  * Returns an error if clipboard access fails.
  */
-export declare function copyToClipboard(text: string): void
+export declare function copyToClipboard(text: string): Promise<undefined>
 
 /**
  * All pairs `(i, j)` with `i < j` whose cosine similarity meets `threshold`.
