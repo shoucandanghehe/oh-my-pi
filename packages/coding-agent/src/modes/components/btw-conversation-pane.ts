@@ -1,5 +1,5 @@
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AppViewportHoverProvider,
 	CombinedAutocompleteProvider,
@@ -28,6 +28,7 @@ import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
 import { renderWorkspacePaneHeader } from "../shared";
 import { theme } from "../theme/theme";
 import { ChatTranscriptPane } from "./chat-transcript-pane";
+import type { CustomEditor } from "./custom-editor";
 import type { StatusLineComponent } from "./status-line";
 
 export interface BtwThreadView {
@@ -37,6 +38,8 @@ export interface BtwThreadView {
 	readonly model: BtwThreadModelRef;
 	readonly error: string | undefined;
 	readonly draft: string;
+	readonly draftImages?: readonly ImageContent[];
+	readonly draftImageLinks?: readonly (string | undefined)[];
 	readonly turns: readonly EphemeralConversationTurn[];
 	readonly getTool?: (name: string) => AgentTool | undefined;
 	readonly status?: EphemeralConversationStatus;
@@ -44,6 +47,7 @@ export interface BtwThreadView {
 	readonly request:
 		| {
 				readonly input: string;
+				readonly images?: readonly ImageContent[];
 				readonly messages: readonly AgentMessage[];
 				readonly streamMessage: AssistantMessage | undefined;
 				readonly timestamp: number;
@@ -59,12 +63,12 @@ export interface BtwConversationPaneOptions {
 	proseOnlyThinking: () => boolean;
 	requestRender: () => void;
 	statusLine: Pick<StatusLineComponent, "getTopBorder" | "setRuntimeStatus" | "dispose">;
-	onSubmit: (input: string) => boolean;
+	onSubmit: (input: string, images?: ImageContent[], key?: string) => boolean;
 	onNewThread: () => boolean;
 	canCopy: (key: string) => boolean;
 	onCopy: (key: string) => Promise<boolean>;
 	onClose: () => void;
-	onDraftChange: (key: string, text: string) => void;
+	onDraftChange: (key: string, text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]) => void;
 	onPersistDraft: (key: string) => void;
 	onSelectThread: (key: string) => boolean;
 	onMarkRead: (key: string) => void;
@@ -157,12 +161,8 @@ export class BtwConversationPane
 			editor: {
 				label: "Ask BTW",
 				placeholder: "Continue the side conversation…",
-				onSubmit: input => {
-					const selectedKey = this.#selectedKey;
-					const accepted = options.onSubmit(input);
-					if (accepted && selectedKey) options.onDraftChange(selectedKey, "");
-					return accepted;
-				},
+				images: true,
+				onSubmit: (input, images, key) => options.onSubmit(input, images, key),
 				autocompleteProvider: new CombinedAutocompleteProvider(BTW_SLASH_COMMANDS, options.cwd),
 			},
 			expandKeys: options.expandKeys,
@@ -170,8 +170,8 @@ export class BtwConversationPane
 			getPlaceholder: () =>
 				"No threads yet — type a question to start a durable BTW thread, or use /btw <question> from Main.",
 			getNotice: () => this.#selected()?.error,
-			onEditorChange: text => {
-				if (this.#selectedKey) this.#options.onDraftChange(this.#selectedKey, text);
+			onEditorChange: (text, images, imageLinks, key) => {
+				if (key && !this.#abandoned) this.#options.onDraftChange(key, text, images, imageLinks);
 			},
 			onInput: (data, editorEmpty) => this.#handleInput(data, editorEmpty),
 			onClose: options.onClose,
@@ -223,8 +223,14 @@ export class BtwConversationPane
 		}
 		if (previousSelected !== this.#selectedKey) {
 			if (previousSelected) this.#options.onPersistDraft(previousSelected);
-			this.#pane.setEditorText(selected?.draft ?? "");
+			this.#pane.selectEditor(
+				selected?.key,
+				selected?.draft ?? "",
+				selected?.draftImages,
+				selected?.draftImageLinks,
+			);
 		}
+		this.#pane.retainEditors(threads.map(thread => thread.key));
 		this.#showDisplayedThread();
 		if (selected) this.#options.onMarkRead(selected.key);
 		this.#ensureRailTargetVisible();
@@ -357,6 +363,10 @@ export class BtwConversationPane
 		this.#pane.handleInput(data);
 	}
 
+	getPasteTarget(): CustomEditor | undefined {
+		return this.#pane.getPasteTarget();
+	}
+
 	containsComponent(component: Component): boolean {
 		return componentContains(this.#pane, component);
 	}
@@ -426,8 +436,7 @@ export class BtwConversationPane
 		}
 		this.#stopRailAnimation();
 		if (!this.#abandoned && this.#selectedKey) {
-			this.#options.onDraftChange(this.#selectedKey, this.#pane.getEditorText());
-			this.#options.onPersistDraft(this.#selectedKey);
+			this.#persistCurrentDraft();
 		}
 		this.#pane.dispose();
 		this.#options.statusLine.dispose();
@@ -633,7 +642,7 @@ export class BtwConversationPane
 		for (const turn of thread.turns) {
 			messages.push({
 				role: "user",
-				content: [{ type: "text", text: turn.input }],
+				content: [{ type: "text", text: turn.input }, ...(turn.images ?? [])],
 				timestamp: turn.timestamp,
 			});
 			if (turn.intermediateMessages) messages.push(...turn.intermediateMessages);
@@ -642,7 +651,7 @@ export class BtwConversationPane
 		if (thread.request) {
 			messages.push({
 				role: "user",
-				content: [{ type: "text", text: thread.request.input }],
+				content: [{ type: "text", text: thread.request.input }, ...(thread.request.images ?? [])],
 				timestamp: thread.request.timestamp,
 			});
 			messages.push(...thread.request.messages);
@@ -662,7 +671,13 @@ export class BtwConversationPane
 
 	#persistCurrentDraft(): void {
 		if (!this.#selectedKey) return;
-		this.#options.onDraftChange(this.#selectedKey, this.#pane.getEditorText());
+		const editor = this.#pane.getPasteTarget();
+		this.#options.onDraftChange(
+			this.#selectedKey,
+			this.#pane.getEditorText(),
+			editor?.pendingImages,
+			editor?.pendingImageLinks,
+		);
 		this.#options.onPersistDraft(this.#selectedKey);
 	}
 	#clearAppViewportHoverNow(): void {

@@ -24,6 +24,9 @@
 ### Fixed
 
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.
+- Clipboard images and text stay in the focused split-pane composer, including BTW drafts and replies, instead of leaking into Main.
+- Pasting an image and immediately pressing Enter waits for the attachment before submitting.
+- Clipboard copy no longer blocks terminal rendering, and Windows/WSL paste avoids repeated clipboard probes and waits that outlive subprocess timeouts.
 
 ## [18.1.11] - 2026-09-05
 

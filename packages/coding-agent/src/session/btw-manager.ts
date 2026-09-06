@@ -1,4 +1,5 @@
 import { type AgentMessage, PAUSE_SHUTDOWN_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { ContinuePausedAgentsResult } from "./agent-session-types";
 import {
 	type BtwPausedRequest,
@@ -21,6 +22,7 @@ export type BtwThreadPhase = "ready" | "running" | "error";
 
 export interface BtwThreadRequest {
 	input: string;
+	images?: ImageContent[];
 	messages: AgentMessage[];
 	streamMessage: Extract<AgentMessage, { role: "assistant" }> | undefined;
 	timestamp: number;
@@ -52,6 +54,8 @@ interface BtwThreadOptions {
 	phase?: BtwThreadPhase;
 	error?: string;
 	draft?: string;
+	draftImages?: ImageContent[];
+	draftImageLinks?: (string | undefined)[];
 	readThrough?: number;
 	pausedRequest?: BtwPausedRequest;
 }
@@ -67,7 +71,8 @@ export class BtwThread {
 	phase: BtwThreadPhase;
 	error: string | undefined;
 	draft: string;
-	persistedDraft: string;
+	draftImages: ImageContent[];
+	draftImageLinks: (string | undefined)[];
 	readThrough: number;
 	request: BtwThreadRequest | undefined;
 	abortController: AbortController | undefined;
@@ -84,7 +89,8 @@ export class BtwThread {
 		this.phase = options.phase ?? "ready";
 		this.error = options.error;
 		this.draft = options.draft ?? "";
-		this.persistedDraft = this.draft;
+		this.draftImages = options.draftImages ?? [];
+		this.draftImageLinks = options.draftImageLinks ?? [];
 		this.readThrough = Math.min(options.readThrough ?? 0, options.conversation.turns.length);
 		this.pausedRequest = options.pausedRequest;
 	}
@@ -109,6 +115,7 @@ export class BtwManager {
 	readonly #threads = new Map<string, BtwThread>();
 	readonly #childKeys: string[] = [];
 	readonly #preparedPromotions = new Set<string>();
+	readonly #dirtyDrafts = new Set<string>();
 	#quickKey: string | undefined;
 	#activeKey: string | undefined;
 
@@ -147,6 +154,7 @@ export class BtwManager {
 			const previous = this.#threads.get(this.#quickKey);
 			previous?.abortController?.abort();
 			this.#threads.delete(this.#quickKey);
+			this.#dirtyDrafts.delete(this.#quickKey);
 		}
 		const key = this.#nextKey();
 		const title =
@@ -182,6 +190,7 @@ export class BtwManager {
 		this.#childKeys.push(key);
 		this.#activeKey = key;
 		this.#appendEvent(this.#createEvent(thread));
+		this.persistDraft(key);
 		this.#onChange?.();
 		return true;
 	}
@@ -227,19 +236,36 @@ export class BtwManager {
 		return true;
 	}
 
-	setDraft(key: string, text: string): boolean {
+	setDraft(key: string, text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]): boolean {
 		const thread = this.#threads.get(key);
-		if (!thread || thread.draft === text) return false;
+		if (!thread) return false;
+		const imagesChanged =
+			thread.draftImages.length !== (images?.length ?? 0) ||
+			thread.draftImages.some((image, index) => image !== images?.[index]);
+		const linksChanged =
+			thread.draftImageLinks.length !== (imageLinks?.length ?? 0) ||
+			thread.draftImageLinks.some((link, index) => link !== imageLinks?.[index]);
+		if (thread.draft === text && !imagesChanged && !linksChanged) return false;
 		thread.draft = text;
+		if (imagesChanged) thread.draftImages = images ? [...images] : [];
+		if (linksChanged) thread.draftImageLinks = imageLinks ? [...imageLinks] : [];
+		this.#dirtyDrafts.add(key);
 		this.#onChange?.();
 		return true;
 	}
 
 	persistDraft(key: string): boolean {
 		const thread = this.#threads.get(key);
-		if (thread?.kind !== "child" || thread.persistedDraft === thread.draft) return false;
-		this.#appendEvent({ version: 1, op: "draft", key, text: thread.draft });
-		thread.persistedDraft = thread.draft;
+		if (thread?.kind !== "child" || !this.#dirtyDrafts.has(key)) return false;
+		this.#appendEvent({
+			version: 1,
+			op: "draft",
+			key,
+			text: thread.draft,
+			images: thread.draftImages.length ? thread.draftImages : undefined,
+			imageLinks: thread.draftImageLinks.length ? thread.draftImageLinks : undefined,
+		});
+		this.#dirtyDrafts.delete(key);
 		return true;
 	}
 
@@ -266,6 +292,8 @@ export class BtwManager {
 		const thread = this.#threads.get(key);
 		if (!thread || !this.#preparedPromotions.delete(key)) return false;
 		this.#appendEvent(this.#createEvent(thread));
+		if (thread.draft || thread.draftImages.length || thread.draftImageLinks.length) this.#dirtyDrafts.add(key);
+		this.persistDraft(key);
 		return true;
 	}
 
@@ -293,23 +321,34 @@ export class BtwManager {
 		input: string,
 		onTextDelta?: (delta: string) => void,
 		onThinkingDelta?: (delta: string) => void,
+		images?: ImageContent[],
 	): Promise<EphemeralTurnResult> {
 		const thread = this.#threads.get(key);
 		if (!thread) throw new Error(`Unknown BTW thread: ${key}`);
 		if (thread.pausedRequest) throw new Error("BTW thread is paused; run /continue before sending another message");
 		if (thread.phase === "running") throw new Error("BTW thread already has a reply in progress");
 		const trimmed = input.trim();
-		if (!trimmed) throw new Error("BTW input must not be empty");
-		if (thread.kind === "child" && (thread.draft || thread.persistedDraft)) {
-			thread.draft = "";
-			this.persistDraft(key);
-		}
+		if (!trimmed && !images?.length) throw new Error("BTW input must not be empty");
+		const requestImages = images?.length ? [...images] : undefined;
+		this.setDraft(key, "");
+		if (thread.kind === "child") this.persistDraft(key);
 		const request: BtwThreadRequest = {
 			input: trimmed,
+			images: requestImages,
 			messages: [],
 			streamMessage: undefined,
 			timestamp: this.#now(),
 		};
+		return this.#runRequest(thread, request, onTextDelta, onThinkingDelta);
+	}
+
+	async #runRequest(
+		thread: BtwThread,
+		request: BtwThreadRequest,
+		onTextDelta?: (delta: string) => void,
+		onThinkingDelta?: (delta: string) => void,
+	): Promise<EphemeralTurnResult> {
+		const key = thread.key;
 		const abortController = new AbortController();
 		thread.request = request;
 		thread.abortController = abortController;
@@ -321,12 +360,14 @@ export class BtwManager {
 				op: "request",
 				key,
 				input: request.input,
+				images: request.images,
 				timestamp: request.timestamp,
 			});
 		}
 		this.#onChange?.();
 		try {
-			const result = await thread.conversation.prompt(trimmed, {
+			const result = await thread.conversation.prompt(request.input, {
+				images: request.images,
 				dedupeReply: false,
 				signal: abortController.signal,
 				onTextDelta: delta => {
@@ -377,9 +418,12 @@ export class BtwManager {
 	prepareForPausedExit(): void {
 		let changed = false;
 		for (const thread of this.#threads.values()) {
-			if (thread.kind !== "child" || !thread.request) continue;
+			if (thread.kind !== "child") continue;
+			this.persistDraft(thread.key);
+			if (!thread.request) continue;
 			thread.pausedRequest = {
 				input: thread.request.input,
+				images: thread.request.images,
 				timestamp: thread.request.timestamp,
 			};
 			const abortController = thread.abortController;
@@ -402,7 +446,7 @@ export class BtwManager {
 				if (!request) return;
 				thread.pausedRequest = undefined;
 				try {
-					await this.prompt(thread.key, request.input);
+					await this.#runRequest(thread, { ...request, messages: [], streamMessage: undefined });
 					continued++;
 				} catch (error) {
 					thread.pausedRequest = request;
@@ -413,6 +457,7 @@ export class BtwManager {
 						op: "request",
 						key: thread.key,
 						input: request.input,
+						images: request.images,
 						timestamp: request.timestamp,
 					});
 					skipped.push(`${thread.title}: ${thread.error}`);
@@ -443,6 +488,7 @@ export class BtwManager {
 		this.#threads.clear();
 		this.#childKeys.length = 0;
 		this.#preparedPromotions.clear();
+		this.#dirtyDrafts.clear();
 		this.#quickKey = undefined;
 		this.#activeKey = undefined;
 	}
@@ -465,6 +511,7 @@ export class BtwManager {
 
 	#forget(key: string): boolean {
 		if (!this.#threads.delete(key)) return false;
+		this.#dirtyDrafts.delete(key);
 		const childIndex = this.#childKeys.indexOf(key);
 		if (childIndex >= 0) this.#childKeys.splice(childIndex, 1);
 		if (this.#quickKey === key) this.#quickKey = undefined;
@@ -496,6 +543,8 @@ export class BtwManager {
 			phase: restored.phase,
 			error: restored.error,
 			draft: restored.draft,
+			draftImages: restored.draftImages,
+			draftImageLinks: restored.draftImageLinks,
 			pausedRequest: restored.pausedRequest,
 			readThrough: restored.readThrough,
 		});

@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import btwConversationPrompt from "../../prompts/system/btw-conversation.md" with { type: "text" };
 import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
@@ -359,13 +359,13 @@ export class BtwController {
 				proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 				requestRender: () => this.ctx.ui.requestRender(),
 				statusLine: this.ctx.statusLine.createPeer(this.ctx.session),
-				onSubmit: input => this.#submitPaneInput(manager, input),
+				onSubmit: (input, images, key) => this.#submitPaneInput(manager, input, images, key),
 				onNewThread: () => this.#createChild(manager, "") !== undefined,
 				canCopy: key => this.#threadCopyText(key) !== undefined,
 				onCopy: key => this.handleCopy(key),
 				onClose: () => this.#closeWorkspacePane(),
-				onDraftChange: (key, text) => {
-					manager.setDraft(key, text);
+				onDraftChange: (key, text, images, imageLinks) => {
+					manager.setDraft(key, text, images, imageLinks);
 				},
 				onSelectThread: key => manager.select(key),
 				onMarkRead: key => {
@@ -398,7 +398,8 @@ export class BtwController {
 					thread.phase === "ready" &&
 					thread.request === undefined &&
 					thread.turns.length === 0 &&
-					!thread.draft.trim()
+					!thread.draft.trim() &&
+					thread.draftImages.length === 0
 				) {
 					manager.remove(thread.key, "deleted");
 				}
@@ -407,21 +408,23 @@ export class BtwController {
 		this.ctx.closeBtwWorkspacePane();
 	}
 
-	#submitPaneInput(manager: BtwManager, input: string): boolean {
+	#submitPaneInput(manager: BtwManager, input: string, images?: ImageContent[], sourceKey?: string): boolean {
 		if (this.#branchInFlight) {
 			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
 			return false;
 		}
 		const trimmed = input.trim();
-		if (!trimmed) return false;
+		if (!trimmed && !images?.length) return false;
 		const commandEnd = trimmed.indexOf(" ");
 		const command = commandEnd < 0 ? trimmed : trimmed.slice(0, commandEnd);
 		if (command === "/new") {
 			const question = commandEnd < 0 ? "" : trimmed.slice(commandEnd + 1).trim();
-			return question ? this.#createChildAndSend(manager, question) : this.#createChild(manager, "") !== undefined;
+			return question || images?.length
+				? this.#createChildAndSend(manager, question, images)
+				: this.#createChild(manager, "") !== undefined;
 		}
-		const key = manager.activeKey;
-		return key ? this.#sendThreadInput(key, trimmed) : this.#createChildAndSend(manager, trimmed);
+		const key = sourceKey ?? manager.activeKey;
+		return key ? this.#sendThreadInput(key, trimmed, images) : this.#createChildAndSend(manager, trimmed, images);
 	}
 
 	#createChild(manager: BtwManager, input: string): string | undefined {
@@ -450,18 +453,18 @@ export class BtwController {
 	}
 
 	/** Create a durable child from the pane (no QuickAsk hop) and send its first question. */
-	#createChildAndSend(manager: BtwManager, input: string): boolean {
+	#createChildAndSend(manager: BtwManager, input: string, images?: ImageContent[]): boolean {
 		const key = this.#createChild(manager, input);
 		if (!key) return false;
-		this.#sendThreadInput(key, input);
+		this.#sendThreadInput(key, input, images);
 		return true;
 	}
 
-	#sendThreadInput(key: string, input: string): boolean {
+	#sendThreadInput(key: string, input: string, images?: ImageContent[]): boolean {
 		const manager = this.#manager;
 		const thread = manager?.thread(key);
 		const trimmed = input.trim();
-		if (!manager || !thread || thread.kind !== "child" || !trimmed) return false;
+		if (!manager || !thread || thread.kind !== "child" || (!trimmed && !images?.length)) return false;
 		const commandEnd = trimmed.indexOf(" ");
 		const command = commandEnd < 0 ? trimmed : trimmed.slice(0, commandEnd);
 		const argument = commandEnd < 0 ? "" : trimmed.slice(commandEnd + 1).trim();
@@ -506,7 +509,7 @@ export class BtwController {
 		manager.setDraft(key, "");
 		this.ctx.terminalActivity.set(thread, "working");
 		void manager
-			.prompt(key, trimmed)
+			.prompt(key, trimmed, undefined, undefined, images)
 			.catch(error => {
 				if (thread.phase === "error") this.ctx.showError(error instanceof Error ? error.message : String(error));
 			})
@@ -525,6 +528,8 @@ export class BtwController {
 			model: thread.model,
 			error: thread.error,
 			draft: thread.draft,
+			draftImages: thread.draftImages,
+			draftImageLinks: thread.draftImageLinks,
 			turns: thread.turns,
 			getTool: name => thread.conversation.getTool(name),
 			unread: thread.unread,
@@ -532,6 +537,7 @@ export class BtwController {
 			request: thread.request
 				? {
 						input: thread.request.input,
+						images: thread.request.images,
 						messages: thread.request.messages,
 						streamMessage: thread.request.streamMessage,
 						timestamp: thread.request.timestamp,
