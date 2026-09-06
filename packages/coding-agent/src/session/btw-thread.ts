@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { EphemeralConversationTurn } from "./ephemeral-conversation";
 import type { SessionEntry } from "./session-entries";
 
@@ -18,6 +19,7 @@ export interface BtwPromotionRequest {
 
 export interface BtwPausedRequest {
 	input: string;
+	images?: ImageContent[];
 	timestamp: number;
 }
 
@@ -43,9 +45,9 @@ export type BtwThreadEvent =
 			turns: readonly EphemeralConversationTurn[];
 	  })
 	| (BtwThreadEventBase & { op: "turn"; turn: EphemeralConversationTurn })
-	| (BtwThreadEventBase & { op: "draft"; text: string })
+	| (BtwThreadEventBase & { op: "draft"; text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] })
 	| (BtwThreadEventBase & { op: "read"; through: number })
-	| (BtwThreadEventBase & { op: "request"; input?: string; timestamp?: number })
+	| (BtwThreadEventBase & { op: "request"; input?: string; images?: ImageContent[]; timestamp?: number })
 	| (BtwThreadEventBase & { op: "terminal"; error?: string })
 	| (BtwThreadEventBase & { op: "remove"; reason: "deleted" | "promoted" });
 
@@ -59,6 +61,8 @@ export interface RestoredBtwThread {
 	baseMessages: readonly AgentMessage[];
 	turns: readonly EphemeralConversationTurn[];
 	draft: string;
+	draftImages: ImageContent[];
+	draftImageLinks: (string | undefined)[];
 	readThrough: number;
 	phase: "ready" | "error";
 	error?: string;
@@ -75,6 +79,8 @@ interface MutableRestoredBtwThread {
 	baseMessages: readonly AgentMessage[];
 	turns: EphemeralConversationTurn[];
 	draft: string;
+	draftImages: ImageContent[];
+	draftImageLinks: (string | undefined)[];
 	readThrough: number;
 	phase: "ready" | "running" | "error";
 	error?: string;
@@ -129,21 +135,32 @@ function parseEvent(value: unknown): BtwThreadEvent | undefined {
 	if (data.op === "turn" && objectRecord(data.turn)) {
 		return { ...base, op: "turn", turn: data.turn as unknown as EphemeralConversationTurn };
 	}
-	if (data.op === "draft" && typeof data.text === "string") return { ...base, op: "draft", text: data.text };
+	if (data.op === "draft" && typeof data.text === "string") {
+		return {
+			...base,
+			op: "draft",
+			text: data.text,
+			images: Array.isArray(data.images) ? (data.images as ImageContent[]) : undefined,
+			imageLinks: Array.isArray(data.imageLinks)
+				? data.imageLinks.map(link => (typeof link === "string" ? link : undefined))
+				: undefined,
+		};
+	}
 	if (data.op === "read" && typeof data.through === "number" && Number.isInteger(data.through) && data.through >= 0) {
 		return { ...base, op: "read", through: data.through };
 	}
 	if (data.op === "request") {
 		if (data.input === undefined && data.timestamp === undefined) return { ...base, op: "request" };
+		const images = Array.isArray(data.images) ? (data.images as ImageContent[]) : undefined;
 		if (
 			typeof data.input !== "string" ||
-			!data.input ||
+			(!data.input && !images?.length) ||
 			typeof data.timestamp !== "number" ||
 			!Number.isFinite(data.timestamp)
 		) {
 			return undefined;
 		}
-		return { ...base, op: "request", input: data.input, timestamp: data.timestamp };
+		return { ...base, op: "request", input: data.input, images, timestamp: data.timestamp };
 	}
 	if (data.op === "terminal" && (data.error === undefined || typeof data.error === "string")) {
 		return { ...base, op: "terminal", error: data.error };
@@ -173,6 +190,8 @@ export function restoreBtwThreads(entries: Iterable<SessionEntry>): RestoredBtwT
 				baseMessages: event.baseMessages,
 				turns: [...event.turns],
 				draft: "",
+				draftImages: [],
+				draftImageLinks: [],
 				readThrough: 0,
 				phase: "ready",
 			});
@@ -189,6 +208,8 @@ export function restoreBtwThreads(entries: Iterable<SessionEntry>): RestoredBtwT
 				break;
 			case "draft":
 				thread.draft = event.text;
+				thread.draftImages = event.images ?? [];
+				thread.draftImageLinks = event.imageLinks ?? [];
 				break;
 			case "read":
 				thread.readThrough = Math.min(event.through, thread.turns.length);
@@ -198,7 +219,7 @@ export function restoreBtwThreads(entries: Iterable<SessionEntry>): RestoredBtwT
 				thread.error = undefined;
 				thread.pausedRequest =
 					event.input !== undefined && event.timestamp !== undefined
-						? { input: event.input, timestamp: event.timestamp }
+						? { input: event.input, images: event.images, timestamp: event.timestamp }
 						: undefined;
 				break;
 			case "terminal":

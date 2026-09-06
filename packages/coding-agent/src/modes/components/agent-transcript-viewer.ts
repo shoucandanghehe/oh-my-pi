@@ -15,6 +15,7 @@
  */
 import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AppViewportHoverProvider,
 	type Component,
@@ -45,6 +46,7 @@ import { fgAnsi } from "../theme/color";
 import { theme } from "../theme/theme";
 import type { AgentHubRemote } from "./agent-hub";
 import { ChatTranscriptPane } from "./chat-transcript-pane";
+import type { CustomEditor } from "./custom-editor";
 import { StatusLineComponent } from "./status-line";
 
 type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose">;
@@ -357,8 +359,9 @@ export class AgentTranscriptViewer
 				? {
 						label: `Message ${displayId}`,
 						placeholder: `Message ${displayId}…`,
-						onSubmit: text => {
-							this.#submit(text);
+						images: !deps.remote,
+						onSubmit: (text, images) => {
+							this.#submit(text, images);
 							return true;
 						},
 					}
@@ -402,6 +405,10 @@ export class AgentTranscriptViewer
 		if (focused) this.#abandonAutoClose();
 		this.#pane.focused = focused;
 		if (!focused) this.#pane.clearAppViewportHover();
+	}
+
+	getPasteTarget(): CustomEditor | undefined {
+		return this.#sendable ? this.#pane.getPasteTarget() : undefined;
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
@@ -769,7 +776,7 @@ export class AgentTranscriptViewer
 		this.#pane.handleInput(data);
 	}
 
-	#submit(trimmed: string): void {
+	#submit(trimmed: string, images?: ImageContent[]): void {
 		this.#pane.setNotice(undefined);
 		const id = this.deps.agentId;
 		if (this.deps.remote) {
@@ -784,7 +791,7 @@ export class AgentTranscriptViewer
 				// Revives a parked agent; returns the live session for running/idle.
 				const session = await lifecycle().ensureLive(id);
 				// Steers a mid-turn agent; sends a normal prompt to an idle one.
-				await session.prompt(trimmed, { streamingBehavior: "steer" });
+				await session.prompt(trimmed, { streamingBehavior: "steer", images });
 			} catch (error) {
 				this.#pane.setNotice(error instanceof Error ? error.message : String(error));
 			}

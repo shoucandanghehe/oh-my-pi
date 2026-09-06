@@ -136,11 +136,15 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(originalFile).toBeDefined();
 		const originalRaw = fs.readFileSync(originalFile!, "utf8");
 		const assistantMessage = createBtwAssistant();
+		const image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
 
 		const result = await activeSession.branchFromBtw({
 			anchorLeafId: requiredLeafId(activeSession),
 			sessionId: activeSession.sessionManager.getSessionId(),
-			turns: [createBtwTurn("why did this fail?", assistantMessage), createBtwTurn("what should happen next?")],
+			turns: [
+				{ ...createBtwTurn("why did this fail?", assistantMessage), images: [image] },
+				createBtwTurn("what should happen next?"),
+			],
 		});
 
 		expect(result.cancelled).toBe(false);
@@ -149,7 +153,10 @@ describe("AgentSession.branchFromBtw", () => {
 		expect(result.sessionFile).not.toBe(originalFile);
 		expect(fs.readFileSync(originalFile!, "utf8")).toBe(originalRaw);
 		const messages = activeSession.messages;
-		expect(messages.at(-4)).toMatchObject({ role: "user", content: [{ type: "text", text: "why did this fail?" }] });
+		expect(messages.at(-4)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "why did this fail?" }, image],
+		});
 		expect(messages.at(-3)?.role).toBe("assistant");
 		expect(messages.at(-2)).toMatchObject({
 			role: "user",

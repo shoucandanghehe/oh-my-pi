@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AppViewportHoverProvider,
 	type AutocompleteProvider,
@@ -23,6 +24,7 @@ import {
 import type { KeyId } from "../../config/keybindings";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { replaceTabs, shortenPath, truncateToWidth } from "../../tools/render-utils";
+import { compactImageMarkers } from "../composer-attachments";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "./chat-transcript-builder";
@@ -33,7 +35,8 @@ export type ChatTranscriptPaneEditorOptions =
 			label: string;
 			placeholder: string;
 			readOnly?: false;
-			onSubmit: (text: string) => boolean;
+			onSubmit: (text: string, images?: ImageContent[], key?: string) => boolean;
+			images?: boolean;
 			autocompleteProvider?: AutocompleteProvider;
 	  }
 	| {
@@ -57,7 +60,7 @@ export interface ChatTranscriptPaneOptions {
 	getPlaceholder: (maxWidth: number) => string;
 	getNotice?: () => string | undefined;
 	onInput?: (data: string, editorEmpty: boolean) => boolean;
-	onEditorChange?: (text: string) => void;
+	onEditorChange?: (text: string, images: ImageContent[], imageLinks: (string | undefined)[], key?: string) => void;
 	onClose: () => void;
 }
 
@@ -74,7 +77,8 @@ export class ChatTranscriptPane
 {
 	readonly #builder: ChatTranscriptBuilder;
 	readonly #scrollView = new ScrollView([], { height: 10, scrollbar: "auto", scrollbarStyle: "braille" });
-	readonly #editor: CustomEditor | undefined;
+	#editor: CustomEditor | undefined;
+	readonly #editors = new Map<string | undefined, CustomEditor>();
 
 	#followBottom = true;
 	#focused = false;
@@ -100,25 +104,71 @@ export class ChatTranscriptPane
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
 		this.#builder = new ChatTranscriptBuilder(options.builder);
 		this.#initialEntryId = options.initialEntryId;
-		if (options.editor) {
-			const editor = new CustomEditor(getEditorTheme());
-			const label = ` ${replaceTabs(options.editor.label)} `;
-			editor.borderColor = text => theme.fg(editor.focused ? "accent" : "muted", text);
-			editor.setTopBorderProvider(
-				options.getEditorTopBorder ??
-					(() => ({
-						content: theme.fg("accent", label),
-						width: visibleWidth(label),
-					})),
-			);
-			editor.setPlaceholder(options.editor.placeholder);
-			editor.setMaxHeight(4);
-			editor.onExit = options.onClose;
-			editor.disableSubmit = options.editor.readOnly === true;
-			if (options.editor.autocompleteProvider) editor.setAutocompleteProvider(options.editor.autocompleteProvider);
-			editor.onAutocompleteUpdate = () => options.builder.requestRender();
-			if (!editor.disableSubmit) editor.onSubmit = text => this.#submit(text);
-			this.#editor = editor;
+		this.#editor = this.#createEditor();
+	}
+
+	#createEditor(key?: string): CustomEditor | undefined {
+		const options = this.options;
+		if (!options.editor) return undefined;
+		const editor = new CustomEditor(getEditorTheme());
+		const label = ` ${replaceTabs(options.editor.label)} `;
+		editor.borderColor = text => theme.fg(editor.focused ? "accent" : "muted", text);
+		editor.setTopBorderProvider(
+			options.getEditorTopBorder ??
+				(() => ({
+					content: theme.fg("accent", label),
+					width: visibleWidth(label),
+				})),
+		);
+		editor.setPlaceholder(options.editor.placeholder);
+		editor.setMaxHeight(4);
+		editor.onExit = options.onClose;
+		editor.disableSubmit = options.editor.readOnly === true;
+		if (options.editor.autocompleteProvider) editor.setAutocompleteProvider(options.editor.autocompleteProvider);
+		editor.onAutocompleteUpdate = () => options.builder.requestRender();
+		editor.acceptsImagePaste = options.editor.readOnly !== true && options.editor.images === true;
+		editor.onChange = () => {
+			options.onEditorChange?.(editor.getExpandedText(), editor.pendingImages, editor.pendingImageLinks, key);
+			options.builder.requestRender();
+		};
+		if (!editor.disableSubmit) editor.onSubmit = text => this.#submit(editor, text, key);
+		this.#editors.set(key, editor);
+		return editor;
+	}
+	getPasteTarget(): CustomEditor | undefined {
+		return this.options.editor?.readOnly ? undefined : this.#editor;
+	}
+
+	/** Each thread keeps its own editor while clipboard reads are in flight. */
+	selectEditor(
+		key: string | undefined,
+		text: string,
+		images?: readonly ImageContent[],
+		links?: readonly (string | undefined)[],
+	): void {
+		if (this.#editor) this.#editor.focused = false;
+		let editor = this.#editors.get(key);
+		if (!editor) {
+			editor = this.#createEditor(key);
+			if (editor) {
+				const onChange = editor.onChange;
+				editor.onChange = undefined;
+				editor.setDraft(text, images);
+				editor.pendingImageLinks = links ? [...links] : editor.pendingImageLinks;
+				editor.imageLinks = editor.pendingImageLinks;
+				editor.onChange = onChange;
+			}
+		}
+		this.#editor = editor;
+		this.focused = this.#focused;
+	}
+
+	retainEditors(keys: readonly string[]): void {
+		for (const [key, editor] of this.#editors) {
+			if (key === undefined || keys.includes(key)) continue;
+			editor.onChange = undefined;
+			editor.onSubmit = undefined;
+			this.#editors.delete(key);
 		}
 	}
 
@@ -172,7 +222,7 @@ export class ChatTranscriptPane
 	}
 
 	getEditorText(): string {
-		return this.#editor?.getText() ?? "";
+		return this.#editor?.getExpandedText() ?? "";
 	}
 
 	setEditorText(text: string): void {
@@ -335,8 +385,7 @@ export class ChatTranscriptPane
 		}
 		if (matchesKey(data, "escape")) {
 			if (!editorEmpty) {
-				this.#editor?.setText("");
-				this.options.onEditorChange?.(this.#editor?.getText() ?? "");
+				this.#editor?.clearDraft();
 				this.options.builder.requestRender();
 				return;
 			}
@@ -360,7 +409,7 @@ export class ChatTranscriptPane
 		if (editorEmpty && this.#handleScroll(data)) return;
 		if (this.#editor && this.options.editor?.readOnly !== true) {
 			this.#editor.handleInput(data);
-			this.options.onEditorChange?.(this.#editor.getText());
+			// Editor.onChange also covers asynchronous clipboard completion.
 			this.options.builder.requestRender();
 		}
 	}
@@ -537,18 +586,23 @@ export class ChatTranscriptPane
 	}
 
 	dispose(): void {
+		for (const editor of this.#editors.values()) {
+			editor.onSubmit = undefined;
+		}
 		this.#builder.dispose();
 	}
 
-	#submit(text: string): void {
+	#submit(editor: CustomEditor, text: string, key?: string): void {
 		if (this.options.editor?.readOnly === true) return;
-		const trimmed = text.trim();
-		if (!trimmed) {
-			this.#editor?.setText("");
+		const compacted = compactImageMarkers(text.trim(), editor.pendingImages.length);
+		const trimmed = compacted?.text ?? text.trim();
+		const images = compacted ? compacted.keep.map(index => editor.pendingImages[index]!) : [...editor.pendingImages];
+		if (!trimmed && images.length === 0) return;
+		if (!this.options.editor?.onSubmit(trimmed, images.length ? images : undefined, key)) {
+			editor.setDraft(trimmed, images);
 			return;
 		}
-		if (!this.options.editor?.onSubmit(trimmed)) return;
-		this.#editor?.setText("");
+		editor.clearDraft();
 		this.#notice = undefined;
 		this.options.builder.requestRender();
 	}

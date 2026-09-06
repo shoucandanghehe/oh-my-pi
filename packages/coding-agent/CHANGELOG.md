@@ -25,6 +25,9 @@
 
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.
 - `memory://` now resolves against the session that issued it: a caller's own memory backend answers `memory://<id>`, so co-located sessions no longer read each other's memory rows, and a caller whose session is no longer live fails closed instead of being answered by a peer. Prompt completion binds to the same caller, so `memory://<memory-id>` stays on offer while a subagent shares the working directory. Advisors retain their owning session's memory access even without a session file.
+- Clipboard images and text stay in the focused split-pane composer, including BTW drafts and replies, instead of leaking into Main.
+- Pasting an image and immediately pressing Enter waits for the attachment before submitting.
+- Clipboard copy no longer blocks terminal rendering, and Windows/WSL paste avoids repeated clipboard probes and waits that outlive subprocess timeouts.
 
 ## [18.1.11] - 2026-09-05
 
