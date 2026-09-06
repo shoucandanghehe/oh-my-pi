@@ -109,11 +109,17 @@
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Added
+
+- Extension ask dialogs can now disable custom answers with `allowCustomInput: false`, consistently hiding the `Other (type your own)` option on host and collaboration guest UIs.
+- Interactive extensions can now detect `allowCustomInput` support through `ctx.ui.askDialogCapabilities` before relying on custom-answer suppression.
+
 ### Changed
 
 - Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 - Transcript usage row now shows the prompt-to-yield time as a bare delta, keeping the clock icon for time to first token only.
+- App-viewport subagents now share a stable auxiliary area with up to two visible transcripts and overflow tabs (Alt+Left/Right); completed panes still close automatically, while focused and manually opened panes stay available.
 
 ### Fixed
 
@@ -133,8 +139,6 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
-- Extension ask dialogs can now disable custom answers with `allowCustomInput: false`, consistently hiding the `Other (type your own)` option on host and collaboration guest UIs.
-- Interactive extensions can now detect `allowCustomInput` support through `ctx.ui.askDialogCapabilities` before relying on custom-answer suppression.
 
 ### Fixed
 
