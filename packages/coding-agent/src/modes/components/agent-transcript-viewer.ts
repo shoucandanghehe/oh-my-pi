@@ -440,8 +440,12 @@ export class AgentTranscriptViewer
 		return this.#pane.getTextSelectionScrollOffset(row);
 	}
 
+	get autoCloseProtected(): boolean {
+		return this.focused || this.#autoCloseAbandoned;
+	}
+
 	startAutoClose(onComplete: () => void): void {
-		if (this.#disposed || this.#autoCloseAbandoned || this.#autoClose) return;
+		if (this.#disposed || this.autoCloseProtected || this.#autoClose) return;
 		this.#autoClose = { frame: 0, onComplete };
 		this.#autoCloseTimer = setInterval(() => {
 			const animation = this.#autoClose;

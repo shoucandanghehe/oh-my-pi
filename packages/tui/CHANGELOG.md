@@ -5,6 +5,13 @@
 ### Fixed
 
 - Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.
+### Added
+
+- Workspace panes can retain their layout while hidden on small terminals, and nested panes support independent text selection and drag capture.
+
+### Fixed
+
+- Consecutive workspace splits now use current layout geometry without requiring an intermediate render; background splits no longer briefly steal focus.
 
 ## [18.1.9] - 2026-09-04
 
