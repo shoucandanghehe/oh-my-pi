@@ -103,7 +103,7 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -190,6 +190,7 @@ import { TranscriptContainer } from "./components/transcript-container";
 import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
 import { Composer, type ComposerStatusSnapshot } from "./composer";
 import { writeComposerStatusCache, writeComposerWelcomeCache } from "./composer-cache";
+import { AutoAgentWorkspaceController } from "./controllers/auto-agent-workspace-controller";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -607,7 +608,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mainScrollRoot: Container | undefined;
 	#mainStickyRoot: Container | undefined;
 	#workspacePanes: WorkspacePaneController | undefined;
-	readonly #autoAgentViewers = new Map<string, AgentTranscriptViewer>();
+	#autoAgentWorkspace: AutoAgentWorkspaceController | undefined;
+	#autoAgentWorkspaceSessionId: string | undefined;
 	#workspaceWelcome: WelcomeComponent | undefined;
 
 	isInitialized = false;
@@ -1113,6 +1115,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				focus: component => this.ui.setFocus(component),
 			});
 			this.#workspacePanes = new WorkspacePaneController(this.#workspaceLayout);
+			this.#autoAgentWorkspace = new AutoAgentWorkspaceController({
+				workspace: this.#workspaceLayout,
+				panes: this.#workspacePanes,
+				createViewer: (id, close) => this.#createAgentWorkspaceViewer(id, close),
+				requestRender: () => this.ui.requestRender(),
+				onDetachError: () => this.showWarning("The terminal is too small to detach this agent pane"),
+			});
 		}
 	}
 
@@ -1143,67 +1152,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	#openAutoAgentWorkspacePane(id: string): void {
-		const workspacePanes = this.#workspacePanes;
-		if (!workspacePanes || workspacePanes.has(`agent:${id}`)) return;
-		let viewer: AgentTranscriptViewer | undefined;
-		const key = `agent:${id}`;
-		const opened = workspacePanes.open({
-			key,
-			paneId: key,
-			title: id,
-			minWidth: AGENT_WORKSPACE_MIN_WIDTH,
-			minHeight: AGENT_WORKSPACE_MIN_HEIGHT,
-			focus: false,
-			createPane: close => {
-				viewer = this.#createAgentWorkspaceViewer(id, () => {
-					this.#autoAgentViewers.delete(id);
-					close();
-				});
-				return viewer;
-			},
-		});
-		if (opened && viewer) this.#autoAgentViewers.set(id, viewer);
-	}
-
-	#handleAgentRegistryEvent(event: RegistryEvent): void {
-		const { ref } = event;
-		if (ref.kind !== "sub") return;
-		if (event.type === "registered") {
-			if (ref.status === "running") this.#openAutoAgentWorkspacePane(ref.id);
-			return;
-		}
-		if (event.type === "status_changed" && ref.status === "running") {
-			const viewer = this.#autoAgentViewers.get(ref.id);
-			if (viewer) viewer.cancelAutoClose();
-			else this.#openAutoAgentWorkspacePane(ref.id);
-			return;
-		}
-		const viewer = this.#autoAgentViewers.get(ref.id);
-		if (!viewer) return;
-		if (event.type === "status_changed" || event.type === "removed") {
-			viewer.startAutoClose(() => {
-				if (this.#autoAgentViewers.get(ref.id) !== viewer) return;
-				this.#autoAgentViewers.delete(ref.id);
-				this.#workspacePanes?.close(`agent:${ref.id}`);
-			});
-		}
-	}
-
 	async openAgentWorkspacePane(id: string): Promise<void> {
-		if (!this.#workspacePanes) {
+		if (!this.#autoAgentWorkspace) {
 			throw new Error("Agent workspace panes require the app-viewport render backend");
 		}
-		if (
-			!this.#workspacePanes.open({
-				key: `agent:${id}`,
-				paneId: `agent:${id}`,
-				title: id,
-				minWidth: AGENT_WORKSPACE_MIN_WIDTH,
-				minHeight: AGENT_WORKSPACE_MIN_HEIGHT,
-				createPane: close => this.#createAgentWorkspaceViewer(id, close),
-			})
-		) {
+		if (!this.#autoAgentWorkspace.openManual(id)) {
 			throw new Error("The terminal is too small to open another agent pane");
 		}
 	}
@@ -2522,14 +2475,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
-		if (this.#agentRegistrySubscriptionTarget !== registry) {
+		const sessionId = this.sessionManager.getSessionId();
+		if (this.#agentRegistrySubscriptionTarget !== registry || this.#autoAgentWorkspaceSessionId !== sessionId) {
 			this.#agentRegistryUnsubscribe?.();
-			for (const id of this.#autoAgentViewers.keys()) this.#workspacePanes?.close(`agent:${id}`);
-			this.#autoAgentViewers.clear();
+			this.#autoAgentWorkspace?.reset();
+			this.#autoAgentWorkspaceSessionId = sessionId;
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				this.syncRunningSubagentBadge();
-				this.#handleAgentRegistryEvent(event);
+				this.#autoAgentWorkspace?.handleEvent(event);
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
@@ -5056,7 +5010,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#eventBusUnsubscribers = [];
 		this.#workspacePanes?.dispose();
-		this.#autoAgentViewers.clear();
+		this.#autoAgentWorkspace?.reset();
 		this.#observerRegistry.dispose();
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;
