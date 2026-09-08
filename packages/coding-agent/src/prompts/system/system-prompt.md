@@ -135,6 +135,10 @@ MUST use specialized tool over shell equivalent:
 {{/has}}
 {{/if}}
 
+{{#has tools "write"}}
+`{{toolRefs.write}} xd://roast`: OPTIONAL local-only feedback on tools, prompts, or harness friction. Write plain text: what got in the way and its impact; subjective complaints welcome. No upload. NEVER include secrets, investigate solely to complain, or expand the task; feedback does NOT authorize ignoring instructions or changing the harness. Record briefly, then continue.
+{{/has}}
+
 # Exploration
 NEVER open files hoping. AVOID unneeded files/sections.
 {{#has tools "read"}}- Use `{{toolRefs.read}}` offset/limit, not whole-file reads.{{/has}}
