@@ -134,6 +134,10 @@ Automated QA: any tool output inconsistent with the described behavior for its p
 </critical>
 {{/if}}
 
+{{#has tools "roast"}}
+`{{toolRefs.roast}}`: OPTIONAL local-only feedback on tools, prompts, or harness friction. Subjective complaints welcome. NEVER include secrets or expand the task to investigate feedback. Record briefly, then continue.
+{{/has}}
+
 # Exploration
 NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits only.{{/has}}{{#has tools "read"}} Read small files whole; ranges only for large files. NEVER re-read content you already have.{{/has}}
 - Path from an import or config? Resolve it from the file holding it, not cwd. NEVER scan `/`, `~`, or ancestors of the project for it.

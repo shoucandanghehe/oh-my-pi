@@ -75,6 +75,7 @@ import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import { type PlanProposalHandler, specialToolCommands } from "./resolve";
+import { ROAST_COMMAND_NAME } from "./roast";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { TodoTool } from "./todo";
@@ -981,6 +982,7 @@ export const SPECIAL_TOOL_NAMES: ReadonlySet<string> = new Set([
 	REJECT_COMMAND_NAME,
 	PROPOSE_COMMAND_NAME,
 	REPORT_ISSUE_COMMAND_NAME,
+	ROAST_COMMAND_NAME,
 ]);
 
 /** Whether the special tool `name` has something to act on beside the top-level `tools`. */

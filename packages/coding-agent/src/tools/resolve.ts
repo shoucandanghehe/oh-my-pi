@@ -26,6 +26,7 @@ import resolveReminderPrompt from "../prompts/system/resolve-reminder.md" with {
 import resolveUnsatisfiedPrompt from "../prompts/system/resolve-unsatisfied.md" with { type: "text" };
 import type { Tool, ToolSession } from ".";
 import { createReportIssueTool, isAutoQaEnabled } from "./report-tool-issue";
+import { createRoastTool } from "./roast";
 import { toolCommandCallName, toolCommandDispatches } from "./tool-commands";
 
 /**
@@ -407,12 +408,17 @@ function createProposeTool(session: ToolSession): AgentTool<typeof proposeSchema
 
 /**
  * Tools behind the plain-text special commands this session supports: `resolve`,
- * `reject`, `propose`, and `report_issue` (when Auto-QA is enabled). Each has one
- * required string field, so the CLI form is `resolve "<reason>"`. The set is stable
+ * `reject`, `propose`, `roast`, and `report_issue` (when Auto-QA is enabled).
+ * Each has one required string field, so the CLI form is `resolve "<reason>"`. The set is stable
  * for the session; a command with nothing to act on fails with a message.
  */
 export function specialToolCommands(session: ToolSession): Tool[] {
-	const tools: Tool[] = [createResolveTool(session), createRejectTool(session), createProposeTool(session)];
+	const tools: Tool[] = [
+		createResolveTool(session),
+		createRejectTool(session),
+		createProposeTool(session),
+		createRoastTool(session),
+	];
 	if (isAutoQaEnabled(session.settings)) tools.push(createReportIssueTool(session));
 	return tools;
 }
