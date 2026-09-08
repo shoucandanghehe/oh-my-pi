@@ -84,6 +84,7 @@ import {
 import type { ToolActivityContext, ToolActivitySummary } from "./renderers";
 import { dispatchReportIssueDevice, REPORT_ISSUE_DEVICE_NAME, renderReportIssueDeviceCall } from "./report-tool-issue";
 import { dispatchResolutionDevice, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
+import { dispatchRoastDevice, ROAST_DEVICE_NAME } from "./roast";
 import {
 	deleteRowByKey,
 	deleteRowByRowId,
@@ -527,6 +528,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const xdevTarget = parseXdUrl(path);
 		if (xdevTarget) {
 			if (xdevTarget.name === REPORT_ISSUE_DEVICE_NAME) return "write";
+			if (xdevTarget.name === ROAST_DEVICE_NAME) return { tier: "write", policyKey: ROAST_DEVICE_NAME };
 			if (xdevTarget.name && isResolutionDeviceName(xdevTarget.name)) return "read";
 			const inst =
 				xdevTarget.name && this.session.xdev ? resolveXdevTool(this.session.xdev, xdevTarget.name) : undefined;
@@ -1166,6 +1168,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 										isError: result.isError,
 										useless: result.useless,
 									};
+									return;
+								}
+								if (name === ROAST_DEVICE_NAME) {
+									const { result, xdev } = await dispatchRoastDevice(this.session, deviceContent);
+									xdResult = { ...result, details: { xdev } };
 									return;
 								}
 								if (name && isResolutionDeviceName(name)) {

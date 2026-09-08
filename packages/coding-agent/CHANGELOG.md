@@ -99,6 +99,7 @@
 - Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 - Fixed WorkPool children retaining a stale Gemini-formatted `yield` declaration when pooled items were installed or cleared.
 - Preserve effective context and output limits when model overrides change unrelated settings, such as thinking effort levels.
+- Agents can leave optional tool, prompt, and harness feedback through `xd://roast`, saved locally in `roast.db` without uploading.
 
 ## [18.1.14] - 2026-09-07
 

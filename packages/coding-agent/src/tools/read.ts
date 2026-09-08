@@ -138,6 +138,7 @@ import { parseSqlitePathCandidates } from "./sqlite-reader";
 import { formatBytes, shortenPath } from "./render-utils";
 import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-issue";
 import { isResolutionDeviceName, resolutionDeviceUsage } from "./resolve";
+import { ROAST_DEVICE_NAME, roastDeviceUsage } from "./roast";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { xdevDocs, xdevListing } from "./xdev";
@@ -2460,6 +2461,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			xd: {
 				read: async name => {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
+					if (name === ROAST_DEVICE_NAME) return roastDeviceUsage;
 					if (name && isResolutionDeviceName(name)) return resolutionDeviceUsage(name);
 					const xdev = this.session.xdev;
 					if (!xdev) throw new ToolError("xd:// is not mounted in this session.");

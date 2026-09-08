@@ -716,6 +716,12 @@ export function getDocsRsCacheDir(): string {
 export function getAutoQaDbPath(): string {
 	return dirs.rootSubdir("autoqa.db", "data");
 }
+
+/** Get the local-only harness feedback database path (~/.omp/roast.db; XDG data directory). */
+export function getRoastDbPath(): string {
+	return dirs.rootSubdir("roast.db", "data");
+}
+
 /**
  * Stable 7-character hex digest of an absolute filesystem path.
  *
