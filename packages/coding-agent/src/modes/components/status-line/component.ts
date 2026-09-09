@@ -546,7 +546,10 @@ export class StatusLineComponent implements Component {
 		peer.#settings = this.#settings;
 		peer.#effectiveSettings = undefined;
 		peer.#autoCompactEnabled = this.#autoCompactEnabled;
-		peer.#hookStatuses = new Map(this.#hookStatuses);
+		if (session === this.session) {
+			peer.#hookStatuses = new Map(this.#hookStatuses);
+			peer.#sortedHookStatuses = this.#sortedHookStatuses;
+		}
 		peer.#subagentCount = this.#subagentCount;
 		peer.#runningSubagentIds = new Set(this.#runningSubagentIds);
 		peer.#activeMeters = this.#activeMeters;
@@ -824,7 +827,9 @@ export class StatusLineComponent implements Component {
 		this.#sortedHookStatuses = Array.from(this.#hookStatuses.entries())
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([, status]) => status);
-		for (const peer of this.#peers) peer.setHookStatus(key, text);
+		for (const peer of this.#peers) {
+			if (peer.session === this.session) peer.setHookStatus(key, text);
+		}
 	}
 
 	watchBranch(onBranchChange: () => void): void {

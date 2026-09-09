@@ -20,6 +20,7 @@ import {
 	type AppViewportHoverProvider,
 	type Component,
 	componentContains,
+	Container,
 	type EditorTopBorder,
 	type Focusable,
 	type MouseRoutable,
@@ -34,6 +35,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
+import type { ExtensionRunner } from "../../extensibility/extensions/runner";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
@@ -47,9 +49,11 @@ import { theme } from "../theme/theme";
 import type { AgentHubRemote } from "./agent-hub";
 import { ChatTranscriptPane } from "./chat-transcript-pane";
 import type { CustomEditor } from "./custom-editor";
+import { ExtensionWidgets } from "./extension-widgets";
 import { StatusLineComponent } from "./status-line";
 
-type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose">;
+type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose"> &
+	Partial<Pick<StatusLineComponent, "setHookStatus" | "render">>;
 
 export interface AgentTranscriptViewerDeps {
 	agentId: string;
@@ -318,6 +322,10 @@ export class AgentTranscriptViewer
 		AppViewportHoverProvider
 {
 	readonly #pane: ChatTranscriptPane;
+	readonly #widgets: ExtensionWidgets;
+	readonly #belowEditor = new Container();
+	#extensionRunner: ExtensionRunner | undefined;
+	#detachPresentation: (() => void) | undefined;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
 	#localLoadToken = 0;
@@ -333,7 +341,7 @@ export class AgentTranscriptViewer
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
 	#statusLine: PaneStatusLine | undefined;
-	#statusLineSession: AgentSession | null;
+	#statusLineSession: AgentSession | null = null;
 	#autoClose: { frame: number; onComplete: () => void } | undefined;
 	#autoCloseTimer: NodeJS.Timeout | undefined;
 	#autoCloseAbandoned = false;
@@ -341,8 +349,9 @@ export class AgentTranscriptViewer
 
 	constructor(private readonly deps: AgentTranscriptViewerDeps) {
 		const displayId = replaceTabs(deps.agentId);
-		this.#statusLineSession = deps.registry.get(deps.agentId)?.session ?? null;
-		this.#statusLine = this.#statusLineSession ? deps.createStatusLine(this.#statusLineSession) : undefined;
+		this.#widgets = new ExtensionWidgets(deps.ui);
+		this.#belowEditor.addChild(this.#widgets.below);
+		this.#belowEditor.addChild({ render: width => this.#statusLine?.render?.(width) ?? [] });
 		this.#pane = new ChatTranscriptPane({
 			builder: {
 				ui: deps.ui,
@@ -371,6 +380,8 @@ export class AgentTranscriptViewer
 						readOnly: true,
 					},
 			expandKeys: deps.expandKeys,
+			aboveEditor: this.#widgets.above,
+			belowEditor: this.#belowEditor,
 			renderWorkspaceHeader: (width, focused) => this.renderWorkspaceHeader(width, focused),
 			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
 			getPlaceholder: () => this.#placeholder(),
@@ -478,6 +489,7 @@ export class AgentTranscriptViewer
 	}
 
 	dispose(): void {
+		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#clearAutoCloseTimer();
 		this.#autoClose = undefined;
@@ -485,6 +497,9 @@ export class AgentTranscriptViewer
 		this.#localLoadToken++;
 		this.#localLoading = undefined;
 		this.#remoteToken++;
+		this.#detachPresentation?.();
+		this.#detachPresentation = undefined;
+		this.#widgets.clear();
 		this.#statusLine?.dispose();
 		this.#pane.dispose();
 	}
@@ -502,6 +517,7 @@ export class AgentTranscriptViewer
 	/** Refresh the transcript from a local file or remote host. */
 	#refresh(): void {
 		if (this.#disposed) return;
+		this.#syncSessionPresentation();
 		if (this.deps.remote) {
 			this.#fetchRemote();
 			return;
@@ -821,6 +837,7 @@ export class AgentTranscriptViewer
 	}
 
 	render(width: number): readonly string[] {
+		this.#syncSessionPresentation();
 		const lines = this.#pane.render(width);
 		this.#lastRenderedBodyRows = lines.length;
 		return this.#autoClose
@@ -856,15 +873,42 @@ export class AgentTranscriptViewer
 		clearInterval(this.#autoCloseTimer);
 		this.#autoCloseTimer = undefined;
 	}
-	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
-		const ref = this.deps.registry.get(this.deps.agentId);
-		const session = ref?.session ?? null;
-		if (session !== this.#statusLineSession) {
+	#syncSessionPresentation(): void {
+		const session = this.deps.registry.get(this.deps.agentId)?.session ?? null;
+		const runner = this.deps.remote ? undefined : session?.extensionRunner;
+		if (session !== this.#statusLineSession || runner !== this.#extensionRunner) {
 			this.#statusLine?.dispose();
 			this.#statusLine = session ? this.deps.createStatusLine(session) : undefined;
 			this.#statusLineSession = session;
 		}
+		if (runner === this.#extensionRunner) return;
+		this.#detachPresentation?.();
+		this.#detachPresentation = undefined;
+		this.#widgets.clear();
+		this.#extensionRunner = runner;
+		if (!runner) return;
+		this.#detachPresentation = runner.observePresentation({
+			setWidget: (key, content, options) => {
+				try {
+					this.#widgets.setWidget(key, content, options);
+				} catch (error) {
+					logger.error("Pane extension widget failed", { agentId: this.deps.agentId, key, error });
+					this.#pane.setNotice(
+						`Extension widget ${key}: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				this.deps.requestRender();
+			},
+			setStatus: (key, text) => {
+				this.#statusLine?.setHookStatus?.(key, text);
+				this.deps.requestRender();
+			},
+		});
+	}
+
+	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
 		if (this.#statusLine) return this.#statusLine.getTopBorder(availableWidth);
+		const ref = this.deps.registry.get(this.deps.agentId);
 		return StatusLineComponent.getErrorTopBorder(
 			`Status unavailable (${ref?.status ?? "missing"}) · ${this.deps.agentId} · live AgentSession missing`,
 			availableWidth,
