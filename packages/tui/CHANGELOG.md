@@ -16,6 +16,9 @@
 ### Changed
 
 - The software cursor now reflects the Vim mode: a reverse-video block in Normal/Visual and an underline in Insert. Both occupy one cell, so layout is unchanged, and non-modal editors keep the reverse-video block they always had.
+### Fixed
+
+- Workspace header clicks no longer initiate a pane drag from sub-cell pointer jitter.
 
 ## [18.1.15] - 2026-09-08
 
