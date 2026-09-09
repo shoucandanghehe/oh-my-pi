@@ -17,6 +17,7 @@ import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { componentContains, renderTargeted, type TargetedRender } from "../tui";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { VirtualRowAnchor } from "../tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
@@ -32,14 +33,17 @@ import type { ViewportHeightAware, WorkspacePaneHeaderProvider } from "../worksp
 import type { AgentHubRegistry, AgentHubSession, AgentLifecycleLike, AgentStatus } from "./agent-hub-types";
 import { theme } from "../theme/theme";
 import type { AppViewportHoverProvider } from "../tui";
+import { Container } from "../tui";
 import { fgAnsi } from "../theme/color";
 import type { AgentHubRemote } from "./agent-hub";
 import { ChatTranscriptPane } from "../chat/chat-transcript-pane";
 import { StatusLineComponent } from "../status-line/component";
 import type { CustomEditor } from "../prompt/custom-editor";
 import { sanitizeErrorLine } from "../chrome/error-block";
+import { ExtensionWidgets } from "../chrome/extension-widgets";
 
-type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose">;
+type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose"> &
+	Partial<Pick<StatusLineComponent, "setHookStatus" | "render">>;
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
 export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
@@ -335,6 +339,10 @@ export class AgentTranscriptViewer
 	readonly #pane: ChatTranscriptPane;
 	readonly #deps: AgentTranscriptViewerDeps;
 	#model: string | undefined;
+	readonly #widgets: ExtensionWidgets;
+	readonly #belowEditor = new Container();
+	#extensionRunner: ExtensionRunner | undefined;
+	#detachPresentation: (() => void) | undefined;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
 	#localLoadToken = 0;
@@ -350,7 +358,7 @@ export class AgentTranscriptViewer
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
 	#statusLine: PaneStatusLine | undefined;
-	#statusLineSession: AgentHubSession | null;
+	#statusLineSession: AgentHubSession | null = null;
 	#autoClose: { frame: number; onComplete: () => void } | undefined;
 	#autoCloseTimer: NodeJS.Timeout | undefined;
 	#autoCloseAbandoned = false;
@@ -361,6 +369,9 @@ export class AgentTranscriptViewer
 		const displayId = replaceTabs(deps.agentId);
 		this.#statusLineSession = deps.registry.get(deps.agentId)?.session ?? null;
 		this.#statusLine = this.#statusLineSession ? deps.createStatusLine(deps.agentId) : undefined;
+		this.#widgets = new ExtensionWidgets(deps.ui);
+		this.#belowEditor.addChild(this.#widgets.below);
+		this.#belowEditor.addChild({ render: width => this.#statusLine?.render?.(width) ?? [] });
 		this.#pane = new ChatTranscriptPane({
 			builder: {
 				ui: deps.ui,
@@ -389,6 +400,8 @@ export class AgentTranscriptViewer
 						readOnly: true,
 					},
 			expandKeys: deps.expandKeys,
+			aboveEditor: this.#widgets.above,
+			belowEditor: this.#belowEditor,
 			renderWorkspaceHeader: (width, focused) => this.renderWorkspaceHeader(width, focused),
 			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
 			getPlaceholder: () => this.#placeholder(),
@@ -465,6 +478,14 @@ export class AgentTranscriptViewer
 		return this.#pane.getTextSelectionScrollOffset(row);
 	}
 
+	getTextSelectionAnchor(row: number): VirtualRowAnchor | undefined {
+		return this.#pane.getTextSelectionAnchor(row);
+	}
+
+	resolveTextSelectionAnchor(anchor: VirtualRowAnchor): number | undefined {
+		return this.#pane.resolveTextSelectionAnchor(anchor);
+	}
+
 	get autoCloseProtected(): boolean {
 		return this.focused || this.#autoCloseAbandoned;
 	}
@@ -496,6 +517,7 @@ export class AgentTranscriptViewer
 	}
 
 	dispose(): void {
+		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#clearAutoCloseTimer();
 		this.#autoClose = undefined;
@@ -503,6 +525,9 @@ export class AgentTranscriptViewer
 		this.#localLoadToken++;
 		this.#localLoading = undefined;
 		this.#remoteToken++;
+		this.#detachPresentation?.();
+		this.#detachPresentation = undefined;
+		this.#widgets.clear();
 		this.#statusLine?.dispose();
 		this.#pane.dispose();
 	}
@@ -520,6 +545,7 @@ export class AgentTranscriptViewer
 	/** Refresh the transcript from a local file or remote host. */
 	#refresh(): void {
 		if (this.#disposed) return;
+		this.#syncSessionPresentation();
 		if (this.#deps.remote) {
 			this.#fetchRemote();
 			return;
@@ -877,6 +903,7 @@ export class AgentTranscriptViewer
 	}
 
 	render(width: number): readonly string[] {
+		this.#syncSessionPresentation();
 		const lines = this.#pane.render(width);
 		this.#lastRenderedBodyRows = lines.length;
 		return this.#autoClose
@@ -913,15 +940,42 @@ export class AgentTranscriptViewer
 		clearInterval(this.#autoCloseTimer);
 		this.#autoCloseTimer = undefined;
 	}
-	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
-		const ref = this.#deps.registry.get(this.#deps.agentId);
-		const session = ref?.session ?? null;
-		if (session !== this.#statusLineSession) {
+	#syncSessionPresentation(): void {
+		const session = this.#deps.registry.get(this.#deps.agentId)?.session ?? null;
+		const runner = this.#deps.remote ? undefined : this.#deps.getExtensionPresentation?.(this.#deps.agentId);
+		if (session !== this.#statusLineSession || runner !== this.#extensionRunner) {
 			this.#statusLine?.dispose();
 			this.#statusLine = session ? this.#deps.createStatusLine(this.#deps.agentId) : undefined;
 			this.#statusLineSession = session;
 		}
+		if (runner === this.#extensionRunner) return;
+		this.#detachPresentation?.();
+		this.#detachPresentation = undefined;
+		this.#widgets.clear();
+		this.#extensionRunner = runner;
+		if (!runner) return;
+		this.#detachPresentation = runner.observePresentation({
+			setWidget: (key, content, options) => {
+				try {
+					this.#widgets.setWidget(key, content, options);
+				} catch (error) {
+					logger.error("Pane extension widget failed", { agentId: this.deps.agentId, key, error });
+					this.#pane.setNotice(
+						`Extension widget ${key}: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				this.deps.requestRender();
+			},
+			setStatus: (key, text) => {
+				this.#statusLine?.setHookStatus?.(key, text);
+				this.deps.requestRender();
+			},
+		});
+	}
+
+	#getEditorTopBorder(availableWidth: number): EditorTopBorder {
 		if (this.#statusLine) return this.#statusLine.getTopBorder(availableWidth);
+		const ref = this.deps.registry.get(this.deps.agentId);
 		return StatusLineComponent.getErrorTopBorder(
 			`Status unavailable (${ref?.status ?? "missing"}) · ${this.#deps.agentId} · live session missing`,
 			availableWidth,

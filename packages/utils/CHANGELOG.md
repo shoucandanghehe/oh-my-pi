@@ -113,6 +113,7 @@
 ### Fixed
 
 - Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.1.16] - 2026-09-09
 

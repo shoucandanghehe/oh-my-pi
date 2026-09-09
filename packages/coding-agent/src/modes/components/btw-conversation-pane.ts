@@ -17,6 +17,7 @@ import {
 	type TextSelectionRange,
 	type TUI,
 	type ViewportHeightAware,
+	type VirtualRowAnchor,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { KeyId } from "../../config/keybindings";
@@ -286,6 +287,14 @@ export class BtwConversationPane
 
 	getTextSelectionScrollOffset(row: number): number | undefined {
 		return this.#pane.getTextSelectionScrollOffset(row);
+	}
+
+	getTextSelectionAnchor(row: number): VirtualRowAnchor | undefined {
+		return this.#pane.getTextSelectionAnchor(row);
+	}
+
+	resolveTextSelectionAnchor(anchor: VirtualRowAnchor): number | undefined {
+		return this.#pane.resolveTextSelectionAnchor(anchor);
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {

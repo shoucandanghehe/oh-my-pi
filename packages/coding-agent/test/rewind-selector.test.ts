@@ -13,6 +13,7 @@ import { type BranchVariantPath, RewindSelectorComponent } from "@oh-my-pi/pi-tu
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -79,12 +80,21 @@ function makeEntries(): SessionMessageEntry[] {
 	];
 }
 
+function testUi(): TUI {
+	return {
+		terminal: { rows: 40 },
+		requestRender() {},
+		requestComponentRender() {},
+		resetDisplay() {},
+	} as unknown as TUI;
+}
+
 function makeSelector(
 	onSelect: (id: string) => void,
 	siblingPaths?: (entryId: string) => BranchVariantPath[],
 ): RewindSelectorComponent {
 	return new RewindSelectorComponent(makeEntries(), {
-		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+		ui: testUi(),
 		cwd: "/tmp",
 		requestRender: () => {},
 		siblingPaths,
@@ -100,6 +110,7 @@ describe("RewindSelectorComponent", () => {
 	beforeEach(async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
 		setKeybindings(KeybindingsManager.inMemory());
+		setChatTranscriptDisplayPreferences({ hideToolActivity: false, showTokenUsage: false, showTurnTime: false });
 	});
 	afterEach(() => {
 		setKeybindings(KeybindingsManager.inMemory());
@@ -282,7 +293,7 @@ describe("RewindSelectorComponent", () => {
 		const selected: string[] = [];
 		let cancelled = false;
 		const selector = new RewindSelectorComponent(makeEntries(), {
-			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			ui: testUi(),
 			cwd: "/tmp",
 			requestRender: () => {},
 			onSelect: id => selected.push(id),
@@ -304,5 +315,278 @@ describe("RewindSelectorComponent", () => {
 		selector.handleInput(ENTER);
 
 		expect(selected).toEqual(["u1"]);
+	});
+
+	it("renders only the visible part of long history and keeps distant entries reachable", () => {
+		let paints = 0;
+		const entries = Array.from({ length: 2_000 }, (_, index) =>
+			entry(`m${index}`, index === 0 ? null : `m${index - 1}`, {
+				role: "custom",
+				customType: "virtual-history",
+				content: `history-${index}`,
+				display: true,
+				timestamp: index,
+			}),
+		);
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(entries, {
+			ui: testUi(),
+			cwd: process.cwd(),
+			getMessageRenderer: () => message => ({
+				measureRows: () => 1,
+				render: () => {
+					paints++;
+					return [String(message.content)];
+				},
+			}),
+			requestRender() {},
+			onSelect: id => selected.push(id),
+			onCancel() {},
+		});
+		try {
+			const first = selector
+				.render(100)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(first).toContain("history-1999");
+			expect(first).not.toContain("history-0\n");
+			expect(paints).toBeLessThan(100);
+			selector.handleInput(ENTER);
+			selector.handleInput("\x1b[H");
+			const top = selector
+				.render(100)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(top).toContain("history-0");
+			expect(paints).toBeLessThan(200);
+			selector.handleInput(ENTER);
+			expect(selected).toEqual(["m1999", "m1999"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps the selected long block anchored after cold layout and supports expansion", () => {
+		const selector = new RewindSelectorComponent(
+			[entry("long", null, { role: "custom", customType: "long", content: "long", display: true, timestamp: 1 })],
+			{
+				ui: testUi(),
+				cwd: process.cwd(),
+				getMessageRenderer:
+					() =>
+					(_message, { expanded }) => ({
+						measureRows: () => (expanded ? 142 : 102),
+						render: () => [
+							"",
+							...Array.from({ length: expanded ? 140 : 100 }, (_, index) => `body-row-${index}`),
+							"",
+						],
+					}),
+				requestRender() {},
+				onSelect() {},
+				onCancel() {},
+			},
+		);
+		try {
+			const first = selector
+				.render(100)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+			expect(first).toContain("body-row-99");
+			expect(first).not.toContain("body-row-0\n");
+			expect(
+				selector
+					.render(100)
+					.map(line => Bun.stripANSI(line))
+					.join("\n"),
+			).toEqual(first);
+			selector.handleInput("\x0f");
+			selector.render(100);
+			selector.handleInput("\x1b[F");
+			expect(
+				selector
+					.render(100)
+					.map(line => Bun.stripANSI(line))
+					.join("\n"),
+			).toContain("body-row-139");
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("builds recent turns on demand while Home and cross-turn navigation retain the full history", () => {
+		let constructed = 0;
+		const entries = Array.from({ length: 200 }, (_, index) => [
+			entry(`u${index}`, index ? `c${index - 1}` : null, userMessage(`prompt-${index}`)),
+			entry(`c${index}`, `u${index}`, {
+				role: "custom",
+				customType: "lazy",
+				content: `answer-${index}`,
+				display: true,
+				timestamp: index,
+			}),
+		]).flat();
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(entries, {
+			ui: testUi(),
+			cwd: process.cwd(),
+			getMessageRenderer: () => message => {
+				constructed++;
+				return { measureRows: () => 20, render: () => Array.from({ length: 20 }, () => String(message.content)) };
+			},
+			requestRender() {},
+			onSelect: id => selected.push(id),
+			onCancel() {},
+		});
+		try {
+			expect(selector.hasTargets).toBe(true);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("answer-199");
+			expect(constructed).toBeLessThan(30);
+			selector.handleInput(ENTER);
+			selector.handleInput("\x1b[H");
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("prompt-0");
+			expect(constructed).toBeLessThan(30);
+			selector.handleInput(LEFT);
+			selector.render(100);
+			selector.handleInput(UP);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("answer-198");
+			selector.handleInput(ENTER);
+			expect(selected).toEqual(["c199", "c198"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps an interleaved prompt with the tool call whose result arrives after it", () => {
+		const selector = new RewindSelectorComponent(
+			[
+				entry("u1", null, userMessage("first prompt")),
+				entry("a1", "u1", assistantWithBashCall("call-1")),
+				entry("steer", "a1", userMessage("interleaved prompt")),
+				entry("result", "steer", bashResult("call-1")),
+				entry("u2", "result", userMessage("last prompt")),
+			],
+			{
+				ui: testUi(),
+				cwd: process.cwd(),
+				requestRender() {},
+				onSelect() {},
+				onCancel() {},
+			},
+		);
+		try {
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("file.txt");
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("scrolls to the real end of an unvisited alternate branch without replaying its middle", () => {
+		let constructed = 0;
+		const alternate = Array.from({ length: 200 }, (_, index) => [
+			entry(`bu${index}`, index ? `bc${index - 1}` : null, userMessage(`alternate-${index}`)),
+			entry(`bc${index}`, `bu${index}`, {
+				role: "custom",
+				customType: "lazy",
+				content: `branch-answer-${index}`,
+				display: true,
+				timestamp: index,
+			}),
+		]).flat();
+		const selector = new RewindSelectorComponent([entry("main", null, userMessage("current"))], {
+			ui: testUi(),
+			cwd: process.cwd(),
+			getMessageRenderer: () => message => {
+				constructed++;
+				return { measureRows: () => 20, render: () => Array.from({ length: 20 }, () => String(message.content)) };
+			},
+			siblingPaths: () => [{ rootId: "bu0", entries: alternate }],
+			requestRender() {},
+			onSelect() {},
+			onCancel() {},
+		});
+		try {
+			selector.render(120);
+			selector.handleInput(RIGHT);
+			// A queued End must win over the branch's pending scroll-to-selection.
+			selector.handleInput("\x1b[F");
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("branch-answer-199");
+			expect(constructed).toBeLessThan(30);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("searches an unvisited old turn and preserves that selection when returning to lazy navigation", () => {
+		let constructed = 0;
+		const entries = Array.from({ length: 80 }, (_, index) => [
+			entry(`u${index}`, index ? `c${index - 1}` : null, userMessage(`prompt-${index}`)),
+			entry(`c${index}`, `u${index}`, {
+				role: "custom",
+				customType: "search",
+				content: index === 0 ? "ancient needle" : `answer-${index}`,
+				display: true,
+				timestamp: index,
+			}),
+		]).flat();
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(entries, {
+			ui: testUi(),
+			cwd: process.cwd(),
+			getMessageRenderer: () => message => {
+				constructed++;
+				return { measureRows: () => 20, render: () => Array.from({ length: 20 }, () => String(message.content)) };
+			},
+			requestRender() {},
+			onSelect: id => selected.push(id),
+			onCancel() {},
+		});
+		try {
+			selector.render(100);
+			expect(constructed).toBeLessThan(30);
+			for (const key of ["f", ..."needle"]) selector.handleInput(key);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("ancient needle");
+			selector.handleInput(ENTER);
+			selector.handleInput("\x1b");
+			selector.handleInput(ENTER);
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			expect(selected).toEqual(["c0", "c0", "u1"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("searches only rendered expansion content and refuses Enter when no item matches", () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent([
+			entry("u", null, userMessage("prompt")),
+			entry("c", "u", { role: "custom", customType: "expand", content: "body", display: true, timestamp: 2 }),
+		], {
+			ui: testUi(),
+			cwd: process.cwd(),
+			getMessageRenderer: () => (_message, { expanded }) => ({
+				measureRows: () => 1,
+				render: () => [expanded ? "hidden needle" : "collapsed body"],
+			}),
+			requestRender() {},
+			onSelect: id => selected.push(id),
+			onCancel() {},
+		});
+		try {
+			selector.render(80);
+			for (const key of ["f", ..."needle"]) selector.handleInput(key);
+			expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain('No items match "needle"');
+			selector.handleInput(ENTER);
+			expect(selected).toEqual([]);
+			selector.handleInput("\x0f");
+			expect(Bun.stripANSI(selector.render(80).join("\n"))).toContain("hidden needle");
+			selector.handleInput(ENTER);
+			selector.handleInput("\x0f");
+			selector.handleInput(ENTER);
+			expect(selected).toEqual(["c"]);
+		} finally {
+			selector.dispose();
+		}
 	});
 });

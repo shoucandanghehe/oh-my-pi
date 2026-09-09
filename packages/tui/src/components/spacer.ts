@@ -1,3 +1,4 @@
+import { RowMeasurement } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
 
 /**
@@ -26,6 +27,11 @@ export class Spacer implements Component {
 
 	measureRows(_width: number): number {
 		return this.#lines;
+	}
+
+	getRowMeasurement(_width: number): RowMeasurement | undefined {
+		if (this.measureRows !== Spacer.prototype.measureRows) return undefined;
+		return new RowMeasurement([], [], 0, this.#lines);
 	}
 
 	render(_width: number): readonly string[] {

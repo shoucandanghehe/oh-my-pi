@@ -48,10 +48,6 @@ function createWorkspace(width = 120, initialHeight = 40) {
 	const controller = new AutoAgentWorkspaceController({
 		workspace,
 		panes,
-		requestRender: () => {},
-		onDetachError: () => {
-			throw new Error("Unexpected detach failure");
-		},
 		createViewer: (id, onClose) => {
 			const viewer = new AgentTranscriptViewer({
 				agentId: id,
@@ -99,149 +95,167 @@ function createWorkspace(width = 120, initialHeight = 40) {
 }
 
 describe("automatic agent workspace", () => {
-	it("switches overflow tabs with pixel mouse and keyboard, and captures a drag into Main", () => {
-		const h = createWorkspace();
+	it("opens ordinary panes without a two-pane cap, leaving Main and focus stable", () => {
+		const h = createWorkspace(160, 80);
 		try {
-			for (const id of ["A", "B", "C"]) h.add(id);
-			const lines = h.paint().split("\n");
-			const tabRow = lines.findIndex(line => line.includes(" A ") && line.includes(" C "));
-			const tabCol = lines[tabRow]!.indexOf(" C ") + 1;
-			const press = parseSgrMouse("\x1b[<0;1;1M")!;
-			h.workspace.handleAppViewportMouse({ ...press, row: tabRow + 0.5, col: tabCol + 0.5 });
-			expect(h.viewers.get("C")!.focused).toBe(true);
-			h.input("\x1b[1;3D");
-			expect(h.viewers.get("B")!.focused).toBe(true);
-			h.input("\x1b[1;3C");
-			expect(h.viewers.get("C")!.focused).toBe(true);
-			const selected = h.paint().split("\n");
-			const headerRow = selected.findIndex(line => line.includes("C running"));
-			const headerCol = selected[headerRow]!.indexOf("C running");
-			h.workspace.handleAppViewportMouse({ ...press, row: headerRow + 0.5, col: headerCol + 0.5 });
-			const release = parseSgrMouse("\x1b[<0;1;1m")!;
-			h.workspace.handleAppViewportMouse({ ...release, row: 10.5, col: 10.5 });
-			expect(h.panes.has("agent:C")).toBe(true);
+			h.add("A");
 			h.paint();
-			expect(h.workspace.focusedPaneId).toBe("agent:C");
+			const main = { ...h.workspace.frame!.panes.get("main")! };
+			for (const id of ["B", "C", "D"]) h.add(id);
+			h.paint();
+			expect([...h.workspace.frame!.panes.keys()].sort()).toEqual([
+				"agent:A",
+				"agent:B",
+				"agent:C",
+				"agent:D",
+				"main",
+			]);
+			expect(h.workspace.frame!.panes.get("main")).toEqual(main);
+			expect(h.workspace.focusedPaneId).toBe("main");
 		} finally {
 			h.dispose();
 		}
 	});
 
-	it("keeps Main identical for batched and painted registrations, including overflow", () => {
-		const batched = createWorkspace();
-		const painted = createWorkspace();
-		try {
-			batched.add("A");
-			painted.add("A");
-			painted.paint();
-			const mainAfterFirst = { ...painted.workspace.frame!.panes.get("main")! };
-			for (const id of ["B", "C", "D"]) {
-				batched.add(id);
-				painted.add(id);
-				painted.paint();
-				expect(painted.workspace.frame!.panes.get("main")).toEqual(mainAfterFirst);
-			}
-			batched.paint();
-			expect([...batched.workspace.frame!.panes]).toEqual([...painted.workspace.frame!.panes]);
-			expect(batched.workspace.focusedPaneId).toBe("main");
-			for (const viewer of batched.viewers.values()) expect(viewer.focused).toBe(false);
-		} finally {
-			batched.dispose();
-			painted.dispose();
-		}
-	});
-
-	it("closes ended viewers, refills from overflow, and reclaims Main after the last exit", () => {
+	it("defers when space is full, refills after exit, and cancels exit on a resumed run", () => {
 		vi.useFakeTimers();
 		const h = createWorkspace();
 		try {
 			for (const id of ["A", "B", "C"]) h.add(id);
-			const split = h.workspace.model.root;
-			if (split.kind !== "split") throw new Error("Expected an auxiliary region");
-			h.workspace.model.resizeSplit(split.splitId, 0, 65, 54);
 			h.paint();
+			expect(h.panes.has("agent:C")).toBe(false);
 			const main = { ...h.workspace.frame!.panes.get("main")! };
-			const disposeA = vi.spyOn(h.viewers.get("A")!, "dispose");
 			h.registry.setStatus("A", "idle");
 			vi.advanceTimersByTime(2_000);
-			expect(disposeA).not.toHaveBeenCalled();
-			vi.advanceTimersByTime(1_100);
+			expect(h.panes.has("agent:A")).toBe(true);
+			h.registry.setStatus("A", "running");
+			vi.advanceTimersByTime(2_000);
+			expect(h.panes.has("agent:A")).toBe(true);
+			h.registry.setStatus("A", "idle");
+			vi.advanceTimersByTime(3_100);
 			h.paint();
-			expect(disposeA).toHaveBeenCalledTimes(1);
+			expect(h.panes.has("agent:A")).toBe(false);
+			expect(h.panes.has("agent:C")).toBe(true);
 			expect(h.workspace.frame!.panes.get("main")).toEqual(main);
-			h.workspace.focusPane("auto-agents");
-			expect([...h.viewers.values()].filter(viewer => viewer.focused)).toHaveLength(1);
-			h.workspace.focusPane("main");
-			h.registry.setStatus("B", "parked");
+			h.registry.setStatus("B", "idle");
 			h.registry.setStatus("C", "idle");
 			vi.advanceTimersByTime(3_100);
 			h.paint();
 			expect([...h.workspace.frame!.panes.keys()]).toEqual(["main"]);
-			h.add("D");
-			h.paint();
-			expect(h.workspace.frame!.panes.get("main")).toEqual(main);
 		} finally {
 			h.dispose();
 		}
 	});
 
-	it("does not close the viewer already focused when its run yields", () => {
+	it("focuses headers without moving panes and permits dragging out and back through Workspace", () => {
+		vi.useFakeTimers();
+		const h = createWorkspace(160, 60);
+		const press = parseSgrMouse("\x1b[<0;1;1M")!;
+		const release = parseSgrMouse("\x1b[<0;1;1m")!;
+		const motion = parseSgrMouse("\x1b[<32;1;1M")!;
+		try {
+			h.add("A");
+			h.add("B");
+			h.paint();
+			const root = h.workspace.model.root;
+			for (const id of ["A", "B", "A"]) {
+				const rect = h.workspace.frame!.panes.get(`agent:${id}`)!;
+				h.workspace.handleAppViewportMouse({ ...press, row: rect.y + 0.2, col: rect.x + 2.2 });
+				h.workspace.handleAppViewportMouse({ ...motion, row: rect.y + 0.3, col: rect.x + 2.3 });
+				h.workspace.handleAppViewportMouse({ ...release, row: rect.y + 0.3, col: rect.x + 2.3 });
+				expect(h.workspace.focusedPaneId).toBe(`agent:${id}`);
+				expect(h.workspace.model.root).toBe(root);
+				h.paint();
+			}
+			const original = h.workspace.frame!.panes.get("agent:A")!;
+			h.workspace.handleAppViewportMouse({ ...press, row: original.y, col: original.x + 2 });
+			h.workspace.handleAppViewportMouse({ ...motion, row: 20, col: 1 });
+			h.workspace.handleAppViewportMouse({ ...release, row: 20, col: 1 });
+			h.paint();
+			expect(h.workspace.frame!.panes.get("agent:A")!.x).toBeLessThan(h.workspace.frame!.panes.get("main")!.x);
+			const moved = h.workspace.frame!.panes.get("agent:A")!;
+			const target = h.workspace.frame!.panes.get("agent:B")!;
+			h.workspace.handleAppViewportMouse({ ...press, row: moved.y, col: moved.x + 2 });
+			h.workspace.handleAppViewportMouse({
+				...motion,
+				row: target.y + target.height - 1,
+				col: target.x + target.width / 2,
+			});
+			h.workspace.handleAppViewportMouse({
+				...release,
+				row: target.y + target.height - 1,
+				col: target.x + target.width / 2,
+			});
+			h.paint();
+			expect(h.workspace.frame!.panes.get("agent:A")!.x).toBe(h.workspace.frame!.panes.get("agent:B")!.x);
+			expect(h.workspace.frame!.panes.get("agent:A")!.y).toBeGreaterThan(h.workspace.frame!.panes.get("agent:B")!.y);
+			h.workspace.focusPane("main");
+			h.registry.setStatus("A", "idle");
+			vi.advanceTimersByTime(4_000);
+			expect(h.panes.has("agent:A")).toBe(true);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	it("allows resizing between agents and preserves user-sized panes after they yield", () => {
+		vi.useFakeTimers();
+		const h = createWorkspace(160, 60);
+		try {
+			h.add("A");
+			h.add("B");
+			h.paint();
+			const before = h.workspace.frame!.panes.get("agent:A")!.height;
+			const sash = h.workspace.frame!.sashes.find(item => item.axis === "y")!;
+			const col = sash.rect.x + 2;
+			const row = sash.rect.y;
+			h.workspace.handleAppViewportMouse({ ...parseSgrMouse("\x1b[<0;1;1M")!, row, col });
+			h.workspace.handleAppViewportMouse({ ...parseSgrMouse("\x1b[<32;1;1M")!, row: row + 4, col });
+			h.workspace.handleAppViewportMouse({ ...parseSgrMouse("\x1b[<0;1;1m")!, row: row + 4, col });
+			h.paint();
+			expect(h.workspace.frame!.panes.get("agent:A")!.height).toBeGreaterThan(before);
+			h.registry.setStatus("A", "idle");
+			h.registry.setStatus("B", "idle");
+			vi.advanceTimersByTime(4_000);
+			expect(h.panes.has("agent:A")).toBe(true);
+			expect(h.panes.has("agent:B")).toBe(true);
+		} finally {
+			h.dispose();
+		}
+	});
+
+	it("protects focused and explicitly opened panes, and suppresses a closed pane for its current run", () => {
 		vi.useFakeTimers();
 		const h = createWorkspace();
 		try {
 			h.add("A");
 			h.paint();
-			h.workspace.focusPane("auto-agents");
-			expect(h.viewers.get("A")!.focused).toBe(true);
+			h.workspace.focusPane("agent:A");
 			h.registry.setStatus("A", "idle");
 			vi.advanceTimersByTime(4_000);
-			expect(h.workspace.model.hasPane("auto-agents")).toBe(true);
-			h.input("\x1b");
-			expect(h.workspace.model.hasPane("auto-agents")).toBe(false);
+			expect(h.panes.has("agent:A")).toBe(true);
 			h.registry.setStatus("A", "running");
-			expect(h.workspace.model.hasPane("auto-agents")).toBe(true);
-		} finally {
-			h.dispose();
-		}
-	});
-
-	it("removes a completed hidden agent without disturbing visible slots", () => {
-		const h = createWorkspace();
-		try {
-			for (const id of ["A", "B", "C"]) h.add(id);
-			h.paint();
-			const disposeC = vi.spyOn(h.viewers.get("C")!, "dispose");
-			h.registry.setStatus("C", "idle");
-			expect(disposeC).toHaveBeenCalledTimes(1);
-			h.workspace.focusPane("auto-agents");
-			expect(h.viewers.get("A")!.focused).toBe(true);
-		} finally {
-			h.dispose();
-		}
-	});
-
-	it("hides and restores the dock on resize without losing its viewers or Main ratio", () => {
-		const h = createWorkspace();
-		try {
-			h.add("A");
+			h.input("\x1b");
+			expect(h.panes.has("agent:A")).toBe(false);
 			h.add("B");
+			expect(h.panes.has("agent:A")).toBe(false);
+			h.registry.setStatus("A", "idle");
+			h.registry.setStatus("A", "running");
+			expect(h.panes.has("agent:A")).toBe(true);
 			h.paint();
-			const main = { ...h.workspace.frame!.panes.get("main")! };
-			const disposeA = vi.spyOn(h.viewers.get("A")!, "dispose");
-			h.workspace.focusPane("auto-agents");
-			h.paint(60, 40);
-			expect([...h.workspace.frame!.panes.keys()]).toEqual(["main"]);
-			expect(h.workspace.focusedPaneId).toBe("main");
-			expect(h.workspace.model.hasPane("auto-agents")).toBe(true);
-			expect(disposeA).not.toHaveBeenCalled();
-			h.paint(120, 40);
-			expect(h.workspace.frame!.panes.get("main")).toEqual(main);
+			const root = h.workspace.model.root;
+			expect(h.controller.openManual("A")).toBe(true);
+			expect(h.workspace.model.root).toBe(root);
+			h.workspace.focusPane("main");
+			h.registry.setStatus("A", "idle");
+			vi.advanceTimersByTime(4_000);
+			expect(h.panes.has("agent:A")).toBe(true);
 		} finally {
 			h.dispose();
 		}
 	});
 
-	it("leaves manual workspaces untouched and honors a user-closed automatic region", () => {
+	it("does not split manual panes to automatically display a waiting agent", () => {
 		const h = createWorkspace();
 		try {
 			h.panes.open({
@@ -253,42 +267,12 @@ describe("automatic agent workspace", () => {
 				createPane: () => ({ render: () => ["BTW"] }),
 			});
 			h.paint();
-			const layout = h.workspace.model.root;
+			const root = h.workspace.model.root;
 			h.add("A");
-			expect(h.workspace.model.root).toBe(layout);
-			h.panes.close("btw");
-			h.add("B");
-			h.paint();
-			h.controller.closeDock();
-			h.add("C");
-			expect(h.workspace.model.root).toEqual({ kind: "pane", paneId: "main" });
-			expect(h.controller.openManual("A")).toBe(true);
-			expect(h.panes.has("agent:A")).toBe(true);
-			expect(h.workspace.model.hasPane("auto-agents")).toBe(true);
-		} finally {
-			h.dispose();
-		}
-	});
-
-	it("transfers the last automatic viewer to manual ownership without another split or auto-close", () => {
-		vi.useFakeTimers();
-		const h = createWorkspace(90, 30);
-		try {
-			h.add("A");
-			h.paint();
-			const disposeA = vi.spyOn(h.viewers.get("A")!, "dispose");
-			const main = { ...h.workspace.frame!.panes.get("main")! };
-			expect(h.controller.openManual("A")).toBe(true);
-			h.paint();
-			expect(h.workspace.frame!.panes.get("main")).toEqual(main);
-			expect(h.workspace.model.hasPane("auto-agents")).toBe(false);
-			expect(h.panes.has("agent:A")).toBe(true);
-			h.registry.setStatus("A", "idle");
-			vi.advanceTimersByTime(4_000);
-			expect(disposeA).not.toHaveBeenCalled();
-			h.input("\x1b");
+			expect(h.workspace.model.root).toBe(root);
 			expect(h.panes.has("agent:A")).toBe(false);
-			expect(disposeA).toHaveBeenCalledTimes(1);
+			expect(h.controller.openManual("A")).toBe(true);
+			expect(h.panes.has("agent:A")).toBe(true);
 		} finally {
 			h.dispose();
 		}

@@ -10,9 +10,7 @@ export interface WorkspacePaneOptions {
 	minHeight: number;
 	focus?: boolean;
 	placement?: { targetPaneId: string; edge: WorkspaceEdge };
-	replacePaneId?: string;
-	/** A caller transferring an existing component retains it when docking fails. */
-	disposeOnFailure?: boolean;
+	onLayoutChange?: () => void;
 	createPane: (close: () => void) => Component;
 }
 
@@ -48,18 +46,8 @@ export class WorkspacePaneController {
 			scroll: "component" as const,
 			minWidth: options.minWidth,
 			minHeight: options.minHeight,
+			onLayoutChange: options.onLayoutChange,
 		};
-		if (options.replacePaneId) {
-			if (this.workspace.replacePane(options.replacePaneId, pane)) {
-				this.#paneIdByKey.set(options.key, options.paneId);
-				if (options.placement) {
-					this.workspace.movePane(options.paneId, options.placement.targetPaneId, options.placement.edge);
-				}
-				return true;
-			}
-			if (options.disposeOnFailure !== false) component.dispose?.();
-			return false;
-		}
 		const frame = this.workspace.getLayoutFrame();
 		const candidates = [...(frame?.panes.keys() ?? [])]
 			.filter(paneId => paneId !== MAIN_WORKSPACE_PANE_ID && paneId !== options.paneId)
@@ -84,7 +72,7 @@ export class WorkspacePaneController {
 			this.#paneIdByKey.set(options.key, options.paneId);
 			return true;
 		}
-		if (options.disposeOnFailure !== false) component.dispose?.();
+		component.dispose?.();
 		return false;
 	}
 

@@ -11,7 +11,6 @@ import {
 	type MouseRoutable,
 	matchesKey,
 	normalizeTextSelection,
-	renderTargeted,
 	routeSgrMouseInput,
 	ScrollView,
 	type SgrMouseEvent,
@@ -19,6 +18,7 @@ import {
 	type TextSelectionRange,
 	type ViewportHeightAware,
 	type VirtualViewportFrame,
+	type VirtualRowAnchor,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { KeyId } from "../../config/keybindings";
@@ -52,6 +52,8 @@ export interface ChatTranscriptPaneOptions {
 	initialEntryId?: string;
 	editor?: ChatTranscriptPaneEditorOptions;
 	expandKeys: readonly KeyId[];
+	aboveEditor?: Component;
+	belowEditor?: Component;
 	getHeaderLines?: () => readonly string[];
 	getFooterLines?: () => readonly string[];
 	getHint?: (hasEditor: boolean) => string;
@@ -81,6 +83,7 @@ export class ChatTranscriptPane
 	readonly #editors = new Map<string | undefined, CustomEditor>();
 
 	#followBottom = true;
+	#textSelectionActive = false;
 	#focused = false;
 	#notice: string | undefined;
 	#viewportHeight: number | undefined;
@@ -96,13 +99,17 @@ export class ChatTranscriptPane
 	#hasFullFrame = false;
 	#virtualContent = false;
 	#estimatedTotalRows = 0;
+	#renderedScrollOffset = 0;
 	#returnToBottomVisible = false;
 	#returnToBottomRow = -1;
 	#returnToBottomCol = -1;
 	#returnToBottomHovered = false;
 
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
-		this.#builder = new ChatTranscriptBuilder(options.builder);
+		this.#builder = new ChatTranscriptBuilder({
+			...options.builder,
+			onVirtualLayoutUpdate: () => options.builder.requestRender(),
+		});
 		this.#initialEntryId = options.initialEntryId;
 		this.#editor = this.#createEditor();
 	}
@@ -201,6 +208,7 @@ export class ChatTranscriptPane
 	}
 
 	setTextSelectionActive(active: boolean): void {
+		this.#textSelectionActive = active;
 		this.#followBottom = !active && this.#scrollView.getScrollOffset() >= this.#scrollView.getMaxScrollOffset();
 	}
 
@@ -217,6 +225,8 @@ export class ChatTranscriptPane
 	containsComponent(component: Component): boolean {
 		return (
 			(this.#editor !== undefined && componentContains(this.#editor, component)) ||
+			(this.options.aboveEditor !== undefined && componentContains(this.options.aboveEditor, component)) ||
+			(this.options.belowEditor !== undefined && componentContains(this.options.belowEditor, component)) ||
 			componentContains(this.#builder.container, component)
 		);
 	}
@@ -283,20 +293,15 @@ export class ChatTranscriptPane
 	}
 
 	getTextSelection(selection: TextSelectionRange): string | undefined {
+		this.#materializeVirtualGeometry();
 		const normalized = normalizeTextSelection(selection);
 		const contentStart = this.#scrollViewStartLine;
 		const viewportEnd = contentStart + this.#selectionViewportHeight;
-		if (normalized.start.row >= viewportEnd || normalized.end.row < contentStart) return undefined;
+		if (!this.#textSelectionActive && (normalized.start.row >= viewportEnd || normalized.end.row < contentStart))
+			return undefined;
 		const visibleStart = normalized.start.row - contentStart;
 		const visibleEnd = normalized.end.row - contentStart;
 		if (this.#virtualContent) {
-			if (visibleEnd >= this.#selectionContentLines.length) {
-				this.#builder.container.renderVirtualViewport(Math.max(1, this.#renderWidth - 1), {
-					rows: visibleEnd + 1,
-					offset: this.#scrollView.getScrollOffset(),
-					followBottom: false,
-				});
-			}
 			const scrollOffset = this.#scrollView.getScrollOffset();
 			return this.#builder.container.getVirtualTextSelection(Math.max(1, this.#renderWidth - 1), {
 				start: { row: scrollOffset + visibleStart, col: normalized.start.col },
@@ -348,6 +353,29 @@ export class ChatTranscriptPane
 		return localRow >= contentStart && localRow < contentStart + this.#selectionViewportHeight
 			? this.#scrollView.getScrollOffset()
 			: undefined;
+	}
+
+	#materializeVirtualGeometry(): void {
+		if (this.#virtualContent && this.#renderedScrollOffset !== this.#scrollView.getScrollOffset()) {
+			this.render(this.#renderWidth);
+		}
+	}
+
+	getTextSelectionAnchor(row: number): VirtualRowAnchor | undefined {
+		this.#materializeVirtualGeometry();
+		const localRow = row - this.#scrollViewStartLine;
+		if (!this.#virtualContent || localRow < 0 || localRow >= this.#selectionViewportHeight) return undefined;
+		const child = this.#builder.container.getVirtualRowAnchor(
+			Math.max(1, this.#renderWidth - 1),
+			this.#scrollView.getScrollOffset() + localRow,
+		);
+		return child ? { component: this, row, width: this.#renderWidth, child } : undefined;
+	}
+
+	resolveTextSelectionAnchor(anchor: VirtualRowAnchor): number | undefined {
+		if (anchor.component !== this || anchor.width !== this.#renderWidth || !anchor.child) return undefined;
+		const row = this.#builder.container.resolveVirtualRowAnchor(Math.max(1, this.#renderWidth - 1), anchor.child);
+		return row === undefined ? undefined : this.#scrollViewStartLine + row - this.#scrollView.getScrollOffset();
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
@@ -418,7 +446,7 @@ export class ChatTranscriptPane
 		const contentWidth = Math.max(1, width - 1);
 		const notice = this.#notice ?? this.options.getNotice?.();
 		const noticeLine = notice ? ` ${theme.fg("error", sanitizeNotice(notice, Math.max(10, width - 2)))}` : undefined;
-		const editorLines = this.#editor ? this.#editor.render(width) : [];
+		const editorLines = this.#renderEditor(width);
 		const viewportHeight = this.#contentViewportHeight(editorLines, noticeLine);
 		let scrollOffset = this.#scrollView.getScrollOffset();
 		if (this.#initialEntryId) {
@@ -445,6 +473,14 @@ export class ChatTranscriptPane
 		return this.#renderFrame(width, contentLines, editorLines, noticeLine, virtualFrame);
 	}
 
+	#renderEditor(width: number): readonly string[] {
+		return [
+			...(this.options.aboveEditor?.render(width) ?? []),
+			...(this.#editor?.render(width) ?? []),
+			...(this.options.belowEditor?.render(width) ?? []),
+		].map(line => truncateToWidth(replaceTabs(line), width));
+	}
+
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
 		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
 		if (
@@ -458,7 +494,11 @@ export class ChatTranscriptPane
 		const contentTargets: Component[] = [];
 		const editorTargets: Component[] = [];
 		for (const target of targets) {
-			if (this.#editor !== undefined && componentContains(this.#editor, target)) {
+			if (
+				(this.#editor !== undefined && componentContains(this.#editor, target)) ||
+				(this.options.aboveEditor && componentContains(this.options.aboveEditor, target)) ||
+				(this.options.belowEditor && componentContains(this.options.belowEditor, target))
+			) {
 				editorTargets.push(target);
 			} else if (componentContains(this.#builder.container, target)) {
 				contentTargets.push(target);
@@ -467,10 +507,7 @@ export class ChatTranscriptPane
 			}
 		}
 		const contentWidth = Math.max(1, width - 1);
-		const editorLines =
-			editorTargets.length > 0 && this.#editor
-				? renderTargeted(this.#editor, width, editorTargets)
-				: this.#cachedEditorLines;
+		const editorLines = editorTargets.length > 0 ? this.#renderEditor(width) : this.#cachedEditorLines;
 		const viewportHeight = this.#contentViewportHeight(editorLines, this.#cachedNoticeLine);
 		let virtualFrame: VirtualViewportFrame | undefined;
 		if (!this.#builder.isEmpty) {
@@ -536,6 +573,7 @@ export class ChatTranscriptPane
 
 		this.#scrollViewStartLine = 0;
 		const lines = [...this.#scrollView.render(width)];
+		this.#renderedScrollOffset = this.#scrollView.getScrollOffset();
 		if (this.#editor) lines.push(this.#renderReturnToBottomControl(width, lines.length));
 		else this.#clearReturnToBottomControl();
 		if (noticeLine) lines.push(noticeLine);
@@ -583,6 +621,8 @@ export class ChatTranscriptPane
 		this.#builder.container.invalidate();
 		this.#editor?.invalidate?.();
 		this.#scrollView.invalidate?.();
+		this.options.aboveEditor?.invalidate?.();
+		this.options.belowEditor?.invalidate?.();
 	}
 
 	dispose(): void {
@@ -630,6 +670,7 @@ export class ChatTranscriptPane
 	}
 
 	#syncFollow(): void {
-		this.#followBottom = this.#scrollView.getScrollOffset() >= this.#scrollView.getMaxScrollOffset();
+		this.#followBottom =
+			!this.#textSelectionActive && this.#scrollView.getScrollOffset() >= this.#scrollView.getMaxScrollOffset();
 	}
 }

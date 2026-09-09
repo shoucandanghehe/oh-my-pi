@@ -1,3 +1,5 @@
+import { RowMeasurement, WrappedText } from "@oh-my-pi/pi-natives";
+import { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import {
 	Lexer,
@@ -25,6 +27,7 @@ import {
 	encodeTextSized,
 	getPaddingX,
 	getSegmenter,
+	getWidthConfigEpoch,
 	isOsc66Line,
 	padding,
 	replaceTabs,
@@ -1786,8 +1789,12 @@ export class Markdown implements Component {
 	#activeTextSelectionRows: RenderedTextSelectionRow[] | undefined;
 	#activeTextSelectionLogicalLine = 0;
 	#transientRenderCache = false;
-	#sharedRenderCache = true;
-	#layoutOnly = false;
+	#layoutProbe?: Markdown;
+	#layoutPlans?: { width?: number; rows: (WrappedText | number)[] }[];
+	#layoutContext?: { imageProtocol: string; hyperlinks: boolean; textSizing: boolean; widthEpoch: number };
+	// Parsing depends on normalized source, not viewport width or presentation.
+	#lexedText?: string;
+	#lexedTokens?: Token[];
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
 	// block tokens are frozen, plus those tokens. marked has no resumable lexer,
@@ -1935,6 +1942,9 @@ export class Markdown implements Component {
 			this.#streamPrefixTokens = undefined;
 			this.#streamPrefixLineCache = undefined;
 			this.#tailRowCache = undefined;
+			this.#lexedText = undefined;
+			this.#lexedTokens = undefined;
+			this.#layoutProbe = undefined;
 			// B+: the captured fast-path rows index the replaced content — drop
 			// the recipe so a fresh stream cannot splice onto stale rows.
 			this.#fastTail = undefined;
@@ -1947,6 +1957,7 @@ export class Markdown implements Component {
 		this.#cachedText = undefined;
 		this.#cachedWidth = undefined;
 		this.#cachedLines = undefined;
+		this.#layoutProbe = undefined;
 	}
 
 	/**
@@ -1986,6 +1997,7 @@ export class Markdown implements Component {
 	// raw-span offsets). Every fallback is correctness-preserving — only speed
 	// differs; the render loop sees the identical token list either way.
 	#lexTokens(text: string): Token[] {
+		if (this.#lexedText === text && this.#lexedTokens) return this.#lexedTokens;
 		// When a frozen prefix exists, it was already verified ref-def-free when
 		// frozen (#freezeStablePrefix only runs when canStream was true). The prefix
 		// ends at a "\n\n" block boundary (stableBlockBoundary), so the tail starts
@@ -2040,6 +2052,8 @@ export class Markdown implements Component {
 			const tailTokens = lexDocument(refDefText);
 			const tokens = [...prefixTokens, ...tailTokens];
 			this.#freezeStablePrefix(text, tokens, { preserveExisting: true });
+			this.#lexedText = text;
+			this.#lexedTokens = tokens;
 			return tokens;
 		}
 		const tokens = lexDocument(text);
@@ -2051,6 +2065,8 @@ export class Markdown implements Component {
 			this.#streamPrefixLineCache = undefined;
 			this.#tailRowCache = undefined;
 		}
+		this.#lexedText = text;
+		this.#lexedTokens = tokens;
 		return tokens;
 	}
 
@@ -2095,38 +2111,133 @@ export class Markdown implements Component {
 		}
 		const highlightCodeForLayout = this.#theme.highlightCodeForLayout;
 		if (!highlightCodeForLayout) return this.render(width).length;
-		const layoutTheme: MarkdownTheme = {
-			...this.#theme,
-			heading: identityMarkdownStyle,
-			link: identityMarkdownStyle,
-			linkUrl: identityMarkdownStyle,
-			code: identityMarkdownStyle,
-			codeBlock: identityMarkdownStyle,
-			codeBlockBorder: identityMarkdownStyle,
-			quote: identityMarkdownStyle,
-			quoteBorder: identityMarkdownStyle,
-			hr: identityMarkdownStyle,
-			listBullet: identityMarkdownStyle,
-			bold: identityMarkdownStyle,
-			italic: identityMarkdownStyle,
-			strikethrough: identityMarkdownStyle,
-			underline: identityMarkdownStyle,
-			highlightCode: highlightCodeForLayout,
-		};
-		delete layoutTheme.createHighlightStream;
-		const probe = new Markdown(
-			this.#text,
-			this.#paddingX,
-			this.#paddingY,
-			layoutTheme,
-			undefined,
-			this.#codeBlockIndent,
-		);
-		probe.#ignoreTight = this.#ignoreTight;
-		probe.#sharedRenderCache = false;
-		probe.#layoutOnly = true;
-		probe.transientRenderCache = this.transientRenderCache;
-		return probe.render(width).length;
+		let probe = this.#layoutProbe;
+		if (!probe) {
+			const layoutTheme: MarkdownTheme = {
+				...this.#theme,
+				heading: identityMarkdownStyle,
+				link: identityMarkdownStyle,
+				linkUrl: identityMarkdownStyle,
+				code: identityMarkdownStyle,
+				codeBlock: identityMarkdownStyle,
+				codeBlockBorder: identityMarkdownStyle,
+				quote: identityMarkdownStyle,
+				quoteBorder: identityMarkdownStyle,
+				hr: identityMarkdownStyle,
+				listBullet: identityMarkdownStyle,
+				bold: identityMarkdownStyle,
+				italic: identityMarkdownStyle,
+				strikethrough: identityMarkdownStyle,
+				underline: identityMarkdownStyle,
+				highlightCode: highlightCodeForLayout,
+			};
+			delete layoutTheme.createHighlightStream;
+			probe = new Markdown(
+				this.#text,
+				this.#paddingX,
+				this.#paddingY,
+				layoutTheme,
+				undefined,
+				this.#codeBlockIndent,
+			);
+			probe.#ignoreTight = this.#ignoreTight;
+			probe.transientRenderCache = this.transientRenderCache;
+			this.#layoutProbe = probe;
+		}
+		return probe.#measureLayoutRows(width);
+	}
+
+	getRowMeasurement(width: number): RowMeasurement | undefined {
+		if (this.measureRows !== Markdown.prototype.measureRows) return undefined;
+		const rows = this.measureRows(width);
+		if (!this.#text.trim()) return new RowMeasurement([], [], 0, 0);
+		const probe = this.#layoutProbe;
+		if (!probe) return undefined;
+		probe.#measureLayoutRows(width);
+		const texts: WrappedText[] = [];
+		let fixedRows = this.#paddingY * 2;
+		for (const plan of probe.#layoutPlans!) {
+			if (plan.width !== undefined) return undefined;
+			for (const row of plan.rows) {
+				if (typeof row === "number") fixedRows += row;
+				else texts.push(row);
+			}
+		}
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		if (!Number.isInteger(paddingX * 2) || paddingX < 0 || paddingX * 2 > 0xffff_ffff) return undefined;
+		return new RowMeasurement(texts, [], paddingX * 2, texts.length === 0 ? rows : fixedRows);
+	}
+
+	#measureLayoutRows(width: number): number {
+		const imageProtocol = TERMINAL.imageProtocol ?? "";
+		const widthEpoch = getWidthConfigEpoch();
+		const context = this.#layoutContext;
+		if (
+			!context ||
+			context.imageProtocol !== imageProtocol ||
+			context.hyperlinks !== TERMINAL.hyperlinks ||
+			context.textSizing !== TERMINAL.textSizing ||
+			context.widthEpoch !== widthEpoch
+		) {
+			if (!this.#text.trim()) return 0;
+			this.#lexTokens(this.#normalizeRenderText());
+			this.#layoutPlans = [];
+			this.#layoutContext = {
+				imageProtocol,
+				hyperlinks: TERMINAL.hyperlinks,
+				textSizing: TERMINAL.textSizing,
+				widthEpoch,
+			};
+		}
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		const plans = this.#layoutPlans!;
+		const tokens = this.#lexedTokens!;
+		const stableCount = this.transientRenderCache ? (this.#streamPrefixTokens?.length ?? 0) : 0;
+		let rowCount = 0;
+		try {
+			for (let index = 0; index < tokens.length; index++) {
+				let plan = plans[index];
+				if (!plan || (plan.width !== undefined && plan.width !== contentWidth)) {
+					const token = tokens[index]!;
+					const nextType = tokens[index + 1]?.type;
+					this.#renderingStablePrefix = index < stableCount;
+					const lines = this.#renderToken(token, contentWidth, nextType);
+					// Reuse the renderer's logical rows, never a second Markdown parser.
+					// Structural wrapping still belongs to lists, tables, trees and diagrams.
+					const widthIndependent =
+						token.type === "space" ||
+						isMathToken(token) ||
+						(token.type === "paragraph" && !lines.some(line => TREE_GUIDE_ANCHOR_RE.test(line.text))) ||
+						(token.type === "heading" && !(token.depth === 1 && TERMINAL.textSizing)) ||
+						(token.type === "code" && !(token.lang === "mermaid" && this.#theme.resolveMermaidAscii));
+					plan = {
+						width: widthIndependent ? undefined : contentWidth,
+						rows:
+							token.type === "list"
+								? [lines.length]
+								: lines.map(line =>
+										line.text === "" || TERMINAL.isImageLine(line.text) || isOsc66Line(line.text)
+											? 1
+											: new WrappedText(line.text, DEFAULT_TAB_WIDTH),
+									),
+					};
+					plans[index] = plan;
+				}
+				for (const row of plan.rows) rowCount += typeof row === "number" ? row : row.measureRows(contentWidth);
+			}
+		} finally {
+			this.#renderingStablePrefix = false;
+		}
+		return Math.max(1, rowCount + this.#paddingY * 2);
+	}
+
+	#normalizeRenderText(): string {
+		const tabbed = replaceTabs(this.#text);
+		const normalized = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
+		// Fence repair changes the source behind the streaming guard memo.
+		if (!this.transientRenderCache && normalized.length < tabbed.length) this.#lastScanValid = false;
+		return normalized;
 	}
 
 	render(width: number): readonly string[] {
@@ -2307,7 +2418,7 @@ export class Markdown implements Component {
 		// theme.heading is used as the representative theme probe — it's required
 		// by MarkdownTheme and is one of the most styling-sensitive entries.
 		let cacheKey: string | undefined;
-		if (!this.transientRenderCache && this.#sharedRenderCache) {
+		if (!this.transientRenderCache) {
 			cacheKey = this.#renderCacheKey(normalizedText, signature);
 			const cached = renderCache.get(cacheKey);
 			if (cached !== undefined) {
@@ -2325,7 +2436,7 @@ export class Markdown implements Component {
 		const tokens = this.#lexTokens(normalizedText);
 		let contentLines: string[];
 		const contentSelectionRows: RenderedTextSelectionRow[] = [];
-		this.#activeTextSelectionRows = this.#layoutOnly ? undefined : contentSelectionRows;
+		this.#activeTextSelectionRows = contentSelectionRows;
 		this.#activeTextSelectionLogicalLine = 0;
 		this.#activeRenderSignature = signature;
 		try {
@@ -2336,11 +2447,6 @@ export class Markdown implements Component {
 			this.#activeRenderSignature = undefined;
 			this.#activeTextSelectionRows = undefined;
 			this.#activeTextSelectionLogicalLine = 0;
-		}
-		if (this.#layoutOnly) {
-			contentLines.length = Math.max(1, contentLines.length + this.#paddingY * 2);
-			contentLines.fill("");
-			return contentLines;
 		}
 		const emptyLines = this.#renderEmptyPaddingLines(signature);
 

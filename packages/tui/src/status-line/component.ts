@@ -643,8 +643,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		peer.#topAttachment = this.#topAttachment;
 		peer.#standaloneGap = this.#standaloneGap;
 		peer.#autoCompactEnabled = this.#autoCompactEnabled;
-		peer.#hookStatuses = new Map(this.#hookStatuses);
-		peer.#sortedHookStatuses = this.#sortedHookStatuses;
+		if (session === this.session) {
+			peer.#hookStatuses = new Map(this.#hookStatuses);
+			peer.#sortedHookStatuses = this.#sortedHookStatuses;
+		}
 		peer.#subagentCount = this.#subagentCount;
 		peer.#runningSubagentIds = new Set(this.#runningSubagentIds);
 		peer.#activeMeters = this.#activeMeters;
@@ -1033,7 +1035,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([, status]) => status);
 		this.#invalidateStatusLineRenderCache();
-		for (const peer of this.#peers) peer.setHookStatus(key, text);
+		for (const peer of this.#peers) {
+			if (peer.session === this.session) peer.setHookStatus(key, text);
+		}
 	}
 
 	watchBranch(onBranchChange: () => void): void {

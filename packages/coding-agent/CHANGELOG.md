@@ -1001,6 +1001,11 @@
 - Custom `Other` answers are now applied before the Ask dialog becomes interactive again, so the next Enter is no longer discarded ([#11558](https://github.com/can1357/oh-my-pi/pull/11558) by [@schickling-assistant](https://github.com/schickling-assistant)).
 - Explicit per-model price overrides retain their configured flat rates instead of inheriting time-based pricing.
 - Fixed wrong-typed `compat.stripImageInput` in `models.yml` being silently accepted, so the documented vision opt-out is now validated like its neighbours ([#11697](https://github.com/can1357/oh-my-pi/issues/11697)).
+### Fixed
+
+- Double-Escape rewind opens quickly in long sessions, loading earlier turns and alternate branches as you navigate without discarding history.
+- Long app-viewport sessions restore and resize with visible content first, refining offscreen row counts in the background without shifting the reading position or text selection.
+- Reduced unrelated pane redraws during BTW, agent-transcript, and tool-progress updates.
 
 ## [18.1.16] - 2026-09-09
 
@@ -1014,6 +1019,8 @@
 ### Fixed
 
 - Fixed automatic recovery from proxied Python HTTP/2 stream resets and HTTP/1.1 chunked response interruptions, including continuation after completed tool calls ([#11160](https://github.com/can1357/oh-my-pi/pull/11160) by [@cyriusweng](https://github.com/cyriusweng)).
+- Local agent panes now display their own extension widgets and statuses, including live TPS widgets, with cleanup on close and restoration on reopen.
+- Agent transcripts now open as ordinary draggable, resizable workspace panes without an enclosing Agents pane or a two-pane limit; automatic placement follows available space and preserves manually arranged panes.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Unset `tiny` model roles now honor the configured `@smol` fallback in direct execution and the `/models` Roles view ([#11311](https://github.com/can1357/oh-my-pi/issues/11311)).
 - Extension Control Center (`/extensions`) search now accepts `j` and `k`, so extensions like `jira`/`json` are searchable; bare `j`/`k` no longer move the list selection (use arrow keys or the configured `tui.select.up`/`down`) ([#11350](https://github.com/can1357/oh-my-pi/issues/11350)).

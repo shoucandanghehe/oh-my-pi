@@ -27,6 +27,8 @@ import {
 	matchesKey,
 	PowerAssertion,
 	PtySession,
+	RowMeasurement,
+	WrappedText,
 	parseKey,
 	pdfToMarkdown,
 	summarizeCode,
@@ -37,6 +39,28 @@ import {
 } from "../native/index.js";
 
 const addonUrl = new URL("../native/index.js", import.meta.url).href;
+
+describe("prepared row measurements", () => {
+	it("composes nested padding without changing exact wrapped heights", () => {
+		const text = "Nested padding must preserve 中文 and long wrapped words across narrow widths.";
+		const leaf = new RowMeasurement([new WrappedText(text, 3)], [], 2, 1);
+		const outer = new RowMeasurement([], [leaf], 4, 2);
+		for (const width of [80, 20, 6, 1, 40]) {
+			expect(outer.measureRows(width)).toBe(wrapTextWithAnsi(text, Math.max(1, width - 6), 3).length + 3);
+		}
+	});
+
+	it("retains composed text measurements after temporary child wrappers are collected", () => {
+		const text = "Deferred measurement keeps 中文 and wrapped words alive.";
+		const measurement = (() => {
+			const child = new RowMeasurement([new WrappedText(text, 3)], [], 2, 1);
+			return new RowMeasurement([], [child], 4, 2);
+		})();
+		Bun.gc(true);
+		expect(measurement.measureRows(20)).toBe(wrapTextWithAnsi(text, 14, 3).length + 3);
+		expect(measurement.measureRows(40)).toBe(wrapTextWithAnsi(text, 34, 3).length + 3);
+	});
+});
 
 describe("macOS spelling", () => {
 	it("reports platform capability and uses UTF-16 ranges", async () => {

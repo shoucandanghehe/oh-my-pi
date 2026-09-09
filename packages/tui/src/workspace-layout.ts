@@ -9,6 +9,7 @@ import type {
 	Component,
 	TargetedRender,
 	ViewportTailProvider,
+	VirtualRowAnchor,
 } from "./tui";
 import { componentContains, renderTargeted } from "./tui";
 import { padding, sliceByColumn, TERMINAL_STATE_TERMINATOR, truncateToWidth, visibleWidth } from "./utils";
@@ -96,6 +97,8 @@ export interface WorkspacePane {
 	/** Visibility at the workspace's current terminal dimensions; hidden panes retain their state. */
 	isVisible?: (width: number, height: number) => boolean;
 	scroll?: "workspace" | "component";
+	/** A successful move or manual divider resize hands layout ownership to the caller. */
+	onLayoutChange?: () => void;
 }
 
 export interface WorkspaceLayoutOptions {
@@ -201,19 +204,6 @@ function findSplit(node: WorkspaceLayoutNode, splitId: string): WorkspaceSplitNo
 		if (split) return split;
 	}
 	return undefined;
-}
-
-function replacePaneNode(node: WorkspaceLayoutNode, paneId: string, replacementId: string): WorkspaceLayoutNode {
-	if (node.kind === "pane") return node.paneId === paneId ? { kind: "pane", paneId: replacementId } : node;
-	for (let index = 0; index < node.children.length; index++) {
-		const child = node.children[index]!;
-		const replacement = replacePaneNode(child.node, paneId, replacementId);
-		if (replacement === child.node) continue;
-		const children = [...node.children];
-		children[index] = { ...child, node: replacement };
-		return { ...node, children };
-	}
-	return node;
 }
 
 function insertBeside(
@@ -981,36 +971,12 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		return true;
 	}
 
-	/** Transfer a leaf to a new component without changing its canonical split position. */
-	replacePane(paneId: string, pane: WorkspacePane): boolean {
-		const previous = this.#panes.get(paneId);
-		if (!previous || !pane.paneId || !this.#model.hasPane(paneId) || this.#panes.has(pane.paneId)) return false;
-		const root = replacePaneNode(this.#model.root, paneId, pane.paneId);
-		if (this.#hoveredPaneId === paneId) this.#setHoveredPane(undefined);
-		if (this.#textSelectionPaneId === paneId) this.setAppViewportTextSelectionActive(false);
-		this.#model.replaceLayout(root);
-		this.#panes.delete(paneId);
-		this.#panes.set(pane.paneId, pane);
-		this.#targetPaneCache = new WeakMap();
-		this.#viewports.delete(paneId);
-		this.#paneRenderCache.delete(paneId);
-		this.#drag = undefined;
-		this.#dropTarget = undefined;
-		this.#dragSnapshot = undefined;
-		previous.component.dispose?.();
-		if (!this.focusPane(pane.paneId)) {
-			const frame = this.getLayoutFrame();
-			if (frame) this.#syncVisibleState(frame);
-		}
-		this.#requestRender();
-		return true;
-	}
-
 	movePane(paneId: string, targetPaneId: string, edge: WorkspaceEdge): boolean {
 		const pane = this.#panes.get(paneId);
 		if (!pane || !this.#canDock(targetPaneId, pane, edge)) return false;
 		if (!this.#model.movePane(paneId, targetPaneId, edge)) return false;
 		this.focusPane(paneId);
+		pane.onLayoutChange?.();
 		this.#requestRender();
 		return true;
 	}
@@ -1124,6 +1090,35 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		return pane.component.getTextSelectionScrollOffset?.(Math.floor(row) - rect.y - 1);
 	}
 
+	getAppViewportTextSelectionAnchor(row: number, col: number): VirtualRowAnchor | undefined {
+		const paneId = this.#paneAt(row, col);
+		const pane = paneId ? this.#panes.get(paneId) : undefined;
+		const rect = paneId ? this.#frame?.panes.get(paneId) : undefined;
+		if (!paneId || !pane || !rect || row < rect.y + 1) return undefined;
+		const offset = pane.scroll === "component" ? 0 : (this.#viewports.get(paneId)?.offset ?? 0);
+		const localRow = Math.floor(row) - rect.y - 1 + offset;
+		const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+		const child = provider.getAppViewportTextSelectionAnchor
+			? provider.getAppViewportTextSelectionAnchor(localRow, Math.floor(col) - rect.x)
+			: pane.component.getTextSelectionAnchor?.(localRow);
+		return child ? { component: pane.component, row: localRow, width: rect.width, child } : undefined;
+	}
+
+	resolveAppViewportTextSelectionAnchor(anchor: VirtualRowAnchor): number | undefined {
+		for (const [paneId, pane] of this.#panes) {
+			if (pane.component !== anchor.component) continue;
+			const rect = this.#frame?.panes.get(paneId);
+			if (!rect || rect.width !== anchor.width || !anchor.child) return undefined;
+			const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+			const row = provider.resolveAppViewportTextSelectionAnchor
+				? provider.resolveAppViewportTextSelectionAnchor(anchor.child)
+				: pane.component.resolveTextSelectionAnchor?.(anchor.child);
+			const offset = pane.scroll === "component" ? 0 : (this.#viewports.get(paneId)?.offset ?? 0);
+			return row === undefined ? undefined : rect.y + 1 + row - offset;
+		}
+		return undefined;
+	}
+
 	setAppViewportTextSelectionActive(active: boolean, row?: number, col?: number): void {
 		if (!active) {
 			const previous = this.#textSelectionPaneId;
@@ -1161,8 +1156,8 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	getAppViewportTextSelection(selection: TextSelectionRange): string | undefined {
 		const startPaneId = this.#paneAt(selection.start.row, selection.start.col);
 		const endPaneId = this.#paneAt(selection.end.row, selection.end.col);
-		if (startPaneId && endPaneId && startPaneId !== endPaneId) return undefined;
-		const paneId = startPaneId ?? endPaneId;
+		if (!this.#textSelectionPaneId && startPaneId && endPaneId && startPaneId !== endPaneId) return undefined;
+		const paneId = this.#textSelectionPaneId ?? startPaneId ?? endPaneId;
 		const pane = paneId ? this.#panes.get(paneId) : undefined;
 		const rect = paneId ? this.#frame?.panes.get(paneId) : undefined;
 		if (!paneId || !pane || !rect) return undefined;
@@ -1225,10 +1220,20 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 						if (resized.changed) {
 							this.#model.replaceLayout(resized.node);
 							drag.root = this.#model.root;
+							const split = findSplit(drag.root, drag.splitId);
+							if (split) {
+								const before = split.children[drag.boundary]!.node;
+								const after = split.children[drag.afterBoundary]!.node;
+								for (const pane of this.#panes.values()) {
+									if (containsPane(before, pane.paneId) || containsPane(after, pane.paneId)) {
+										pane.onLayoutChange?.();
+									}
+								}
+							}
 						}
 					}
 				} else {
-					drag.active ||= Math.abs(event.row - drag.startRow) + Math.abs(event.col - drag.startCol) > 0;
+					drag.active ||= Math.abs(event.row - drag.startRow) + Math.abs(event.col - drag.startCol) >= 1;
 					this.#dropTarget = drag.active ? this.#dropTargetAt(event.row, event.col, drag.paneId) : undefined;
 				}
 				this.#requestRender();
