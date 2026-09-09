@@ -20,6 +20,7 @@ import {
 	type ViewportTailProvider,
 	type VirtualViewportFrame,
 	type VirtualViewportProvider,
+	type VirtualRowAnchor,
 } from "@oh-my-pi/pi-tui";
 import { theme } from "../theme/theme";
 
@@ -106,6 +107,10 @@ export class MainSessionPane
 	#materializeGeometry(): void {
 		if (!this.#tailFrameActive || this.#virtualFrameActive) return;
 		const width = Math.max(1, this.#renderWidth);
+		if (this.#virtualScrollProvider()) {
+			this.renderViewportTail(width, this.#height);
+			return;
+		}
 		const sticky = this.#stickyRoot.render(width);
 		const scroll = this.#scrollRoot.render(Math.max(1, width - 1));
 		this.#renderFrame(width, scroll, sticky);
@@ -120,12 +125,7 @@ export class MainSessionPane
 		this.#materializeGeometry();
 		const normalized = normalizeTextSelection(selection);
 		const intersectsScrollViewport = normalized.start.row < this.#selectionViewportHeight && normalized.end.row >= 0;
-		if (
-			this.#virtualFrameActive &&
-			intersectsScrollViewport &&
-			normalized.start.row >= 0 &&
-			normalized.end.row < this.#selectionViewportHeight
-		) {
+		if (this.#virtualFrameActive && (intersectsScrollViewport || this.#textSelectionActive)) {
 			return this.#virtualScrollProvider()?.getVirtualTextSelection?.(Math.max(1, this.#renderWidth - 1), {
 				start: { row: normalized.start.row + this.#offset, col: normalized.start.col },
 				end: { row: normalized.end.row + this.#offset, col: normalized.end.col },
@@ -227,6 +227,25 @@ export class MainSessionPane
 		this.#materializeGeometry();
 		const localRow = Math.trunc(row);
 		return localRow >= 0 && localRow < this.#selectionViewportHeight ? this.#offset : undefined;
+	}
+
+	getTextSelectionAnchor(row: number): VirtualRowAnchor | undefined {
+		this.#materializeGeometry();
+		if (!this.#virtualFrameActive || row < 0 || row >= this.#selectionViewportHeight) return undefined;
+		const child = this.#virtualScrollProvider()?.getVirtualRowAnchor?.(
+			Math.max(1, this.#renderWidth - 1),
+			row + this.#offset,
+		);
+		return child ? { component: this, row, width: this.#renderWidth, child } : undefined;
+	}
+
+	resolveTextSelectionAnchor(anchor: VirtualRowAnchor): number | undefined {
+		if (anchor.component !== this || anchor.width !== this.#renderWidth || !anchor.child) return undefined;
+		const row = this.#virtualScrollProvider()?.resolveVirtualRowAnchor?.(
+			Math.max(1, this.#renderWidth - 1),
+			anchor.child,
+		);
+		return row === undefined ? undefined : row - this.#offset;
 	}
 
 	handleInput(data: string): void {
