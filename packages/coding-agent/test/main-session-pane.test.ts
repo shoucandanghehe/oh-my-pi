@@ -19,6 +19,7 @@ import {
 	WorkspaceLayout,
 	WorkspaceModel,
 } from "@oh-my-pi/pi-tui";
+import { waitForImmediate } from "@oh-my-pi/pi-utils";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
 import { defaultMarkdownTheme } from "../../tui/test/test-themes.js";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
@@ -111,6 +112,104 @@ function mouse(overrides: Partial<SgrMouseEvent>): SgrMouseEvent {
 }
 
 describe("MainSessionPane", () => {
+	it("keeps selected text and the visible anchor fixed while background heights refine", async () => {
+		const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+		await initTheme(false);
+		const term = new VirtualTerminal(60, 18);
+		const scheduler = new StressRenderScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		const visited = new Set<Component>();
+		class LayoutRows extends StaticRows {
+			constructor(
+				readonly lines: readonly string[],
+				readonly prefix: boolean,
+			) {
+				super(lines);
+			}
+			isTranscriptBlockFinalized(): boolean {
+				return true;
+			}
+			measureRows(): number {
+				if (this.prefix) visited.add(this);
+				return this.lines.length;
+			}
+		}
+		const transcript = new TranscriptContainer(component => tui.requestComponentRender(component));
+		const prefixCount = 2000;
+		for (let index = 0; index < prefixCount; index++) {
+			transcript.addChild(
+				new LayoutRows(
+					Array.from({ length: 8 }, (_, row) => `prefix-${index}-${row}`),
+					true,
+				),
+			);
+		}
+		for (let index = 0; index < 20; index++) transcript.addChild(new LayoutRows([`tail-${index}`], false));
+		const scrollRoot = new Container();
+		scrollRoot.addChild(new StaticRows(["header"]));
+		scrollRoot.addChild(transcript);
+		scrollRoot.addChild(new StaticRows(["hud"]));
+		const main = new MainSessionPane({
+			scrollRoot,
+			stickyRoot: new StaticRows(["status", "editor"]),
+			requestRender: () => tui.requestRender(),
+			requestComponentRender: component => tui.requestComponentRender(component),
+		});
+		const workspace = new WorkspaceLayout({
+			model: WorkspaceModel.single("main"),
+			height: () => term.rows,
+			requestRender: () => tui.requestRender(),
+			requestComponentRender: component => tui.requestComponentRender(component),
+			panes: [{ paneId: "main", title: "Main", component: main, scroll: "component" }],
+		});
+		tui.addChild(workspace);
+		let copied = "";
+		tui.onAppViewportSelectionCopy = text => {
+			copied = text;
+		};
+		try {
+			tui.start();
+			await scheduler.drain(term);
+			const initial = term.getViewport().map(line => Bun.stripANSI(line));
+			const selected = "tail-19";
+			const row = initial.findIndex(line => line.includes(selected));
+			expect(row).toBeGreaterThan(0);
+			const col = initial[row]!.indexOf(selected);
+			const offset = main.getTextSelectionScrollOffset(row - 1)!;
+			expect(visited.size).toBeLessThan(prefixCount);
+			term.sendInput(`\x1b[<0;${col + 1};${row + 1}M`);
+			await scheduler.drain(term);
+			term.sendInput(`\x1b[<32;${col + selected.length};${row + 1}M`);
+			await scheduler.drain(term);
+			term.sendInput(`\x1b[<0;${col + selected.length};${row + 1}m`);
+			await scheduler.drain(term);
+			for (let turn = 0; turn < 256; turn++) {
+				await waitForImmediate();
+				await scheduler.drain(term);
+				if (visited.size === prefixCount) break;
+			}
+			expect(visited.size).toBe(prefixCount);
+			expect(main.getTextSelectionScrollOffset(row - 1)!).toBeGreaterThan(offset);
+			expect(Bun.stripANSI(term.getViewport()[row]!)).toContain(selected);
+			term.sendInput("\x03");
+			await scheduler.drain(term);
+			expect(copied).toBe(selected);
+			term.sendInput("\x1b[5~");
+			await scheduler.drain(term);
+			copied = "";
+			term.sendInput("\x03");
+			await scheduler.drain(term);
+			expect(copied).toBe(selected);
+		} finally {
+			transcript.dispose();
+			tui.stop();
+			await waitForImmediate();
+			if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+			else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+		}
+	});
+
 	it("recovers selected history from its logical text providers", () => {
 		const history = new Container();
 		history.addChild(new Text("alpha beta gamma", 1, 0));

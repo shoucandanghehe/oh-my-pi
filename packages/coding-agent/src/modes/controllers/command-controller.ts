@@ -1641,7 +1641,7 @@ export class CommandController {
 				return;
 			}
 		}
-		const moved = await this.#withSessionMove(async () => {
+		const moved = await this.#withSavedSettings(async () => {
 			if (!isDirectory) {
 				const confirmed = await this.ctx.showHookConfirm(
 					"Create directory?",
@@ -1680,7 +1680,7 @@ export class CommandController {
 			return undefined;
 		}
 		let created: SessionWorktree | undefined;
-		await this.#withSessionMove(async () => {
+		await this.#withSavedSettings(async () => {
 			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
 			const cwd = this.ctx.sessionManager.getCwd();
 			this.ctx.statusContainer.disposeChildren();
@@ -1730,8 +1730,8 @@ export class CommandController {
 		return created;
 	}
 
-	/** Save source settings before acquiring the gate for a complete relocation operation. */
-	async #withSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
+	/** Save source settings before a complete relocation operation. */
+	async #withSavedSettings(operation: () => Promise<boolean>): Promise<boolean> {
 		try {
 			await this.ctx.settings.flush();
 		} catch (err) {
@@ -1739,10 +1739,10 @@ export class CommandController {
 			return false;
 		}
 
-		return this.ctx.withBtwSessionMove(operation);
+		return operation();
 	}
 
-	/** Relocate only while #withSessionMove holds the BTW gate; false means no successful move. */
+	/** Relocate after source settings are saved; false means no successful move. */
 	async #relocateSession(resolvedPath: string): Promise<boolean> {
 		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return false;
 
@@ -1809,7 +1809,7 @@ export class CommandController {
 		}
 
 		if (shouldPersistCwd) {
-			await this.#withSessionMove(() => this.#executeBashCommand(command, excludeFromContext, isDeferred, true));
+			await this.#withSavedSettings(() => this.#executeBashCommand(command, excludeFromContext, isDeferred, true));
 		} else {
 			await this.#executeBashCommand(command, excludeFromContext, isDeferred, false);
 		}

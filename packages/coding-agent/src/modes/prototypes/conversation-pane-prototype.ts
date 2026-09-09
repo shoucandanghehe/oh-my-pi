@@ -109,7 +109,7 @@ function initialMessages(kind: ConversationKind): AgentMessage[] {
 			),
 			userMessage("What should stay different?", now + 2_000),
 			assistantMessage(
-				"- **Main** keeps full commands, tools, and session status.\n- **Agent** keeps messaging and a read-only Advisor mode.\n- **BTW** stays ephemeral and tool-free.\n\nThe shell—scrolling, focus, composer, status, and selection—should feel identical.",
+				"- **Main** keeps full commands, tools, and session status.\n- **Agent** keeps messaging and a read-only Advisor mode.\n- **BTW** keeps durable side threads with read-only tools.\n\nThe shell—scrolling, focus, composer, status, and selection—should feel identical.",
 				now + 3_000,
 			),
 			assistantMessage(
@@ -131,7 +131,7 @@ function initialMessages(kind: ConversationKind): AgentMessage[] {
 	return [
 		userMessage("Can I ask follow-up questions here without interrupting Main?", now),
 		assistantMessage(
-			"Yes. This remains a tool-free, ephemeral side conversation. The new shell should make that constraint feel intentional rather than second-class.",
+			"Yes. This is a durable side conversation with read-only tools, isolated from Main's later messages.",
 			now + 1_000,
 		),
 		userMessage("And then promote the useful answer?", now + 2_000),

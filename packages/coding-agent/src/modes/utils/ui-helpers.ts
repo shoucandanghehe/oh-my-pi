@@ -3,10 +3,10 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, waitForImmediate } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { InternalUrlRouter } from "../../internal-urls";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
@@ -117,12 +117,6 @@ const TRANSCRIPT_RENDER_CHUNK_MS = 8;
  * durable in the session file and reach the display on the next rebuild.
  */
 const TRANSCRIPT_REPLAY_MAX_ATTEMPTS = 5;
-
-function waitForImmediate(): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	setImmediate(resolve);
-	return promise;
-}
 
 type QueuedMessages = {
 	steering: string[];

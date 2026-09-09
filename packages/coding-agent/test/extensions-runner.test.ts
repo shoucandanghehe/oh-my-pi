@@ -3400,7 +3400,7 @@ describe("ExtensionRunner", () => {
 					getSystemPrompt: () => [],
 				} as never,
 				undefined,
-				{ select, notify: () => {} } as never,
+				{ ...runner.getUIContext(), select, notify: () => {} } as ExtensionUIContext,
 			);
 		};
 		const alwaysAskContext = {
