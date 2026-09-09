@@ -1,31 +1,23 @@
 import type { WorkspaceEdge, WorkspaceLayout } from "@oh-my-pi/pi-tui";
 import type { RegistryEvent } from "../../registry/agent-registry";
 import type { AgentTranscriptViewer } from "../components/agent-transcript-viewer";
-import { AutoAgentDock } from "../components/auto-agent-dock";
 import type { WorkspacePaneController } from "./workspace-pane-controller";
 
-const DOCK_PANE_ID = "auto-agents";
 const MAIN_PANE_ID = "main";
 const MAIN_READABLE_WIDTH = 48;
-const MAIN_READABLE_HEIGHT = 12;
-const DOCK_READABLE_WIDTH = 36;
-const DOCK_READABLE_HEIGHT = 14;
+const AGENT_READABLE_WIDTH = 36;
 
 interface AutoAgentWorkspaceOptions {
 	workspace: WorkspaceLayout;
 	panes: WorkspacePaneController;
 	createViewer: (id: string, close: () => void) => AgentTranscriptViewer;
-	requestRender: () => void;
-	onDetachError: () => void;
 }
 
-/** Owns automatic presentation, never the geometry of manual panes. */
+/** Automatic visibility policy; every transcript is an ordinary Workspace pane. */
 export class AutoAgentWorkspaceController {
-	#dock: AutoAgentDock | undefined;
+	readonly #automatic = new Map<string, AgentTranscriptViewer>();
 	readonly #running = new Set<string>();
 	readonly #dismissed = new Set<string>();
-	#suppressed = false;
-	#closedPlacement: { edge: WorkspaceEdge; ratio: number } | undefined;
 
 	constructor(private readonly options: AutoAgentWorkspaceOptions) {}
 
@@ -34,167 +26,105 @@ export class AutoAgentWorkspaceController {
 		if (ref.kind !== "sub" || event.type === "metadata_changed") return;
 		if (event.type !== "removed" && ref.status === "running") {
 			this.#running.add(ref.id);
-			const viewer = this.#dock?.getViewer(ref.id);
-			if (viewer) viewer.cancelAutoClose();
-			else this.#openAutomatic(ref.id);
+			this.#automatic.get(ref.id)?.cancelAutoClose();
+			this.#fillVacancies();
 			return;
 		}
 		this.#running.delete(ref.id);
 		this.#dismissed.delete(ref.id);
-		const dock = this.#dock;
-		const viewer = dock?.getViewer(ref.id);
-		if (!dock || !viewer || viewer.autoCloseProtected) return;
-		if (!this.options.workspace.getLayoutFrame()?.panes.has(DOCK_PANE_ID) || !dock.visibleAgentIds.includes(ref.id)) {
-			this.#removeAutomatic(ref.id);
-			return;
-		}
+		const viewer = this.#automatic.get(ref.id);
+		if (!viewer || viewer.autoCloseProtected) return;
 		viewer.startAutoClose(() => {
-			if (this.#dock?.getViewer(ref.id) === viewer) this.#removeAutomatic(ref.id);
+			if (this.#automatic.get(ref.id) !== viewer) return;
+			this.#automatic.delete(ref.id);
+			this.options.panes.close(`agent:${ref.id}`);
+			this.#fillVacancies();
 		});
 	}
 
-	/** An explicit open transfers ownership to a persistent manual pane. */
+	/** An explicit open pins the existing pane without moving or recreating it. */
 	openManual(id: string, edge?: WorkspaceEdge): boolean {
-		if (this.#suppressed) {
-			this.#suppressed = false;
-			for (const runningId of this.#running) {
-				if (runningId !== id) this.#openAutomatic(runningId);
-			}
+		const viewer = this.#automatic.get(id);
+		if (viewer) {
+			if (!this.options.workspace.focusPane(`agent:${id}`)) return false;
+			viewer.cancelAutoClose();
+			this.#automatic.delete(id);
+			return true;
 		}
+		return this.#open(id, false, edge ? { targetPaneId: MAIN_PANE_ID, edge } : undefined);
+	}
+
+	reset(): void {
+		this.#running.clear();
+		this.#dismissed.clear();
+		for (const id of this.#automatic.keys()) this.options.panes.close(`agent:${id}`);
+		this.#automatic.clear();
+	}
+
+	#fillVacancies(): void {
+		const { workspace, panes } = this.options;
+		for (const id of this.#automatic.keys()) {
+			if (panes.has(`agent:${id}`)) continue;
+			this.#automatic.delete(id);
+			if (this.#running.has(id)) this.#dismissed.add(id);
+		}
+		for (const id of this.#running) {
+			if (this.#dismissed.has(id) || panes.has(`agent:${id}`)) continue;
+			// Never split a manual/operated pane or reflow a user's workspace.
+			const frame = workspace.getLayoutFrame();
+			const main = frame?.panes.get(MAIN_PANE_ID);
+			if (workspace.model.root.kind === "pane" && workspace.model.root.paneId === MAIN_PANE_ID) {
+				if (
+					!this.#open(id, true, {
+						targetPaneId: MAIN_PANE_ID,
+						edge: !main || main.width >= MAIN_READABLE_WIDTH + AGENT_READABLE_WIDTH + 1 ? "right" : "bottom",
+					})
+				)
+					break;
+				continue;
+			}
+			const candidates = [...this.#automatic]
+				.filter(([agentId, viewer]) => !viewer.autoCloseProtected && frame?.panes.has(`agent:${agentId}`))
+				.sort(([a], [b]) => {
+					const aRect = frame!.panes.get(`agent:${a}`)!;
+					const bRect = frame!.panes.get(`agent:${b}`)!;
+					return aRect.y - bRect.y || aRect.x - bRect.x;
+				});
+			for (const [agentId] of candidates) {
+				const targetPaneId = `agent:${agentId}`;
+				const rect = frame!.panes.get(targetPaneId)!;
+				if (this.#open(id, true, { targetPaneId, edge: main && rect.x !== main.x ? "bottom" : "right" })) break;
+			}
+			if (!panes.has(`agent:${id}`)) break;
+		}
+	}
+
+	#open(id: string, automatic: boolean, placement?: { targetPaneId: string; edge: WorkspaceEdge }): boolean {
 		const key = `agent:${id}`;
-		const dock = this.#dock;
-		const transferred = dock?.remove(id);
-		transferred?.cancelAutoClose();
+		let viewer: AgentTranscriptViewer | undefined;
 		const opened = this.options.panes.open({
 			key,
 			paneId: key,
 			title: id,
-			minWidth: 24,
-			minHeight: 6,
-			placement: edge ? { targetPaneId: MAIN_PANE_ID, edge } : undefined,
-			disposeOnFailure: !transferred,
-			replacePaneId: transferred && dock?.size === 0 ? DOCK_PANE_ID : undefined,
-			createPane: close => transferred ?? this.options.createViewer(id, close),
-		});
-		if (!opened) {
-			if (transferred) dock?.add(id, transferred);
-			return false;
-		}
-		if (this.#running.has(id)) this.#dismissed.add(id);
-		this.#suppressed = false;
-		if (dock?.size === 0) this.#closeEmptyDock();
-		for (const runningId of this.#running) this.#openAutomatic(runningId);
-		return true;
-	}
-
-	/** Explicit region close disables automatic reopening until a manual open. */
-	closeDock(): void {
-		this.#suppressed = true;
-		this.#rememberPlacement();
-		this.#dock = undefined;
-		this.options.workspace.closePane(DOCK_PANE_ID);
-	}
-
-	reset(): void {
-		this.#dock = undefined;
-		this.options.workspace.closePane(DOCK_PANE_ID);
-		this.#running.clear();
-		this.#dismissed.clear();
-		this.#suppressed = false;
-		this.#closedPlacement = undefined;
-	}
-
-	#openAutomatic(id: string): void {
-		if (this.#suppressed || this.#dismissed.has(id) || this.options.panes.has(`agent:${id}`) || this.#dock?.has(id))
-			return;
-		if (!this.#dock && !this.#createDock()) return;
-		this.#dock!.add(
-			id,
-			this.options.createViewer(id, () => {
-				// A header drag or explicit open may have transferred this viewer.
-				if (!this.#dock?.has(id)) {
-					this.options.panes.close(`agent:${id}`);
-					return;
-				}
-				if (this.#running.has(id)) this.#dismissed.add(id);
-				this.#removeAutomatic(id);
-			}),
-		);
-	}
-
-	#createDock(): boolean {
-		const { workspace } = this.options;
-		// Never guess where a user-created workspace wants a new automatic region.
-		if (workspace.model.root.kind !== "pane" || workspace.model.root.paneId !== MAIN_PANE_ID) return false;
-		const frame = workspace.getLayoutFrame();
-		const main = frame?.panes.get(MAIN_PANE_ID);
-		const edge: WorkspaceEdge =
-			this.#closedPlacement?.edge ??
-			(!main || main.width >= MAIN_READABLE_WIDTH + DOCK_READABLE_WIDTH + 1 ? "right" : "bottom");
-		const sideBySide = edge === "right" || edge === "left";
-		const dock = new AutoAgentDock({
-			axis: sideBySide ? "y" : "x",
-			requestRender: this.options.requestRender,
-			onClose: () => this.closeDock(),
-			onCloseAgent: id => {
-				if (this.#running.has(id)) this.#dismissed.add(id);
-				this.#removeAutomatic(id);
+			minWidth: automatic ? AGENT_READABLE_WIDTH : 24,
+			minHeight: automatic ? 12 : 6,
+			focus: !automatic,
+			placement,
+			onLayoutChange: () => {
+				viewer?.cancelAutoClose();
+				this.#automatic.delete(id);
 			},
-			onDetach: (id, targetEdge) => {
-				if (!this.openManual(id, targetEdge)) this.options.onDetachError();
+			createPane: close => {
+				viewer = this.options.createViewer(id, () => {
+					if (this.#running.has(id)) this.#dismissed.add(id);
+					this.#automatic.delete(id);
+					close();
+					this.#fillVacancies();
+				});
+				return viewer;
 			},
 		});
-		const opened = workspace.splitPane(
-			MAIN_PANE_ID,
-			{
-				paneId: DOCK_PANE_ID,
-				title: "Agents",
-				component: dock,
-				focusTarget: dock,
-				scroll: "component",
-				minWidth: DOCK_READABLE_WIDTH,
-				minHeight: DOCK_READABLE_HEIGHT,
-				isVisible: (width, height) =>
-					sideBySide
-						? width >= MAIN_READABLE_WIDTH + DOCK_READABLE_WIDTH + 1 && height >= DOCK_READABLE_HEIGHT
-						: width >= MAIN_READABLE_WIDTH && height >= MAIN_READABLE_HEIGHT + DOCK_READABLE_HEIGHT + 1,
-			},
-			edge,
-			{ focus: false, ratio: this.#closedPlacement?.ratio ?? 0.6 },
-		);
-		if (!opened) {
-			dock.dispose();
-			return false;
-		}
-		this.#dock = dock;
-		this.#closedPlacement = undefined;
-		return true;
-	}
-
-	#removeAutomatic(id: string): void {
-		this.#dock?.remove(id)?.dispose();
-		if (this.#dock?.size === 0) this.#closeEmptyDock();
-	}
-
-	#closeEmptyDock(): void {
-		this.#rememberPlacement();
-		this.#dock = undefined;
-		this.options.workspace.closePane(DOCK_PANE_ID);
-	}
-
-	#rememberPlacement(): void {
-		const root = this.options.workspace.model.root;
-		if (root.kind !== "split" || root.children.length !== 2) return;
-		const mainIndex = root.children.findIndex(
-			child => child.node.kind === "pane" && child.node.paneId === MAIN_PANE_ID,
-		);
-		if (mainIndex < 0) return;
-		const main = root.children[mainIndex]!;
-		const dock = root.children[1 - mainIndex]!;
-		if (dock.node.kind !== "pane" || dock.node.paneId !== DOCK_PANE_ID) return;
-		this.#closedPlacement = {
-			edge: root.axis === "x" ? (mainIndex === 0 ? "right" : "left") : mainIndex === 0 ? "bottom" : "top",
-			ratio: main.weight / (main.weight + dock.weight),
-		};
+		if (opened && automatic && viewer) this.#automatic.set(id, viewer);
+		return opened;
 	}
 }

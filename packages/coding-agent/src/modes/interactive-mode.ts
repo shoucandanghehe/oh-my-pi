@@ -1163,8 +1163,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				workspace: this.#workspaceLayout,
 				panes: this.#workspacePanes,
 				createViewer: (id, close) => this.#createAgentWorkspaceViewer(id, close),
-				requestRender: () => this.ui.requestRender(),
-				onDetachError: () => this.showWarning("The terminal is too small to detach this agent pane"),
 			});
 		}
 	}
