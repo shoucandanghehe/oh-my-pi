@@ -1,29 +1,8 @@
 /**
- * Fullscreen esc-esc rewind selector.
- *
- * Replays the current session's branch with {@link ChatTranscriptBuilder} on
- * the alternate screen (`ui.showOverlay(..., { fullscreen: true })`) and moves
- * a dotted outline over the rendered transcript block the rewind would land
- * on, instead of listing user messages in a detached picker. Entries that
- * render nothing (notices, hidden custom messages, tool results folded into
- * their call cards) are never outlined: results fold into the turn that
- * rendered their call so rewinding a turn keeps its tool output, and the rest
- * are skipped entirely.
- *
- * When the outlined turn has sibling branches in the session tree, the region
- * below the divergence renders as a horizontal strip of half-width columns —
- * the current path first, each alternate branch beside it — and Left/Right
- * slide between them with an eased camera animation. Sibling columns are
- * fully rendered transcripts of that branch's most-recent path, built lazily
- * and cached per divergence.
- *
- * Keys: Up/Down step through rendered items in transcript order (within the
- * active column when a strip is open), Left/Right slide between branch
- * variants at a fork and jump between user turns elsewhere, `f` opens a
- * filter (typing narrows the current path to matching items; Esc leaves the
- * filter with the selection kept), Enter rewinds to the outlined item, A loads
- * earlier turns without changing selection (stepping above the oldest replayed
- * turn loads them too), Esc cancels.
+ * Fullscreen rewind over lazily replayed user turns. Up/Down step through
+ * rendered items, Left/Right visit user turns or sibling branches, and `f`
+ * searches the rendered current path. Only searching materializes all turns;
+ * ordinary navigation paints the viewport without mutating the live transcript.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -36,25 +15,25 @@ import {
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
+	type VirtualViewportFrame,
 } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
-import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
+import type { TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
-import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
-import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
+import { DynamicBorder } from "../chrome/dynamic-border";
 import { padToWidth } from "../render/utils";
 import { expandKeyHint } from "../render/render-utils";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
+import { ScrollView } from "../components/scroll-view";
+import { RewindHistory, type RewindHistoryItem } from "./rewind-history";
 import {
-	appendOutlineEntries,
-	type ComposedColumn,
 	composeOutlineColumn,
 	type OutlineTarget,
-	isUserTurnEntry,
-	outlineVisibility,
+	type ViewportOutlineColumn,
 	positionRail,
+	isUserTurnEntry,
 	userTurnLabel,
 } from "../chat/transcript-outline";
 import type { TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
@@ -75,7 +54,6 @@ import {
 	turnPreview,
 } from "./copy-selector";
 
-/** One alternate branch at a divergence: its root and message path root → most-recent leaf. */
 export interface BranchVariantPath {
 	rootId: string;
 	entries: TranscriptEntry[];
@@ -84,7 +62,6 @@ export interface BranchVariantPath {
 export interface RewindSelectorDeps {
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
-	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
@@ -92,19 +69,13 @@ export interface RewindSelectorDeps {
 	proseOnlyThinking?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
-	/** Sibling branch paths of `entryId`'s turn (excluding the turn itself). */
 	siblingPaths?: (entryId: string) => BranchVariantPath[];
-	/** Rewind the session to `entryId` (a message entry anywhere in the tree). */
 	onSelect: (entryId: string) => void;
 	onCancel: () => void;
 }
 
-/** Lazily built transcript column for one alternate branch. */
 interface SiblingColumn {
-	rootId: string;
-	builder: ChatTranscriptBuilder;
-	targets: OutlineTarget[];
-	/** Short label for the column header: the branch's first user prompt. */
+	history: RewindHistory;
 	label: string;
 	/** Native list items for this column, built on first describe. */
 	nativeItems?: NativeNode[];
@@ -112,47 +83,32 @@ interface SiblingColumn {
 	pickerItems?: { main: readonly TspPickerItem[]; items: TspPickerItem[] };
 }
 
-/** Blank columns between branch-strip columns. */
+const CHROME_ROWS = 5;
 const STRIP_GAP = 2;
-/** Duration of the branch-swap camera slide. */
 const SLIDE_MS = 160;
 
 export class RewindSelectorComponent implements Component {
-	#builder: ChatTranscriptBuilder;
-	#browser: TranscriptBrowser;
-	#targets: OutlineTarget[] = [];
-	#selected = 0;
-	/** Per-main-target "renders at least one non-blank row", refreshed each frame. */
-	#mainVisible: boolean[] | undefined;
-	/** Same, for the active sibling column. */
-	#siblingVisible: boolean[] | undefined;
+	#history: RewindHistory;
+	#scrollView = new ScrollView([], {
+		height: 10,
+		scrollbar: "auto",
+		theme: { track: text => theme.fg("dim", text), thumb: text => theme.fg("accent", text) },
+	});
+	#border = new DynamicBorder();
+	#scrollToSelection = true;
 	#expanded = false;
-
-	// Branch strip: present when the selected turn has sibling branches.
-	// Column 0 is the current path; siblings follow in tree order.
+	#width = 80;
 	#variantCache = new Map<string, SiblingColumn[]>();
-	/** 0 = current path column; 1..n = sibling column index + 1. */
 	#activeVariant = 0;
-	/** Selected target within the active sibling column. */
-	#siblingSelected = 0;
-	/** Camera slide between variant positions (fractional column index). */
 	#slide: { from: number; to: number; startedAt: number } | undefined;
 	#slideTimer: NodeJS.Timeout | undefined;
 
-	/** Whole branch; the selector may currently replay only its tail. */
-	#entries: TranscriptEntry[];
-	/** True while older history is still unreplayed. */
-	#truncated = false;
 	/** Filter field while the filter prompt is open; undefined shows the full transcript. */
 	#filterInput: Input | undefined;
 	/** Filter query while the filter prompt is open; undefined shows the full transcript. */
 	get #filter(): string | undefined {
 		return this.#filterInput?.getValue();
 	}
-	/** Main transcript rows from the last frame; the filter matches what is on screen. */
-	#mainRows: readonly (readonly string[])[] = [];
-	/** Lowercased plain text per rendered child row array (row arrays are cached, so identity is stable). */
-	#rowText = new WeakMap<readonly string[], string>();
 	/** Native filter haystack: lowercased turn text per main target (no rendered rows under TSP). */
 	#nativeTexts: { targets: OutlineTarget[]; texts: string[] } | undefined;
 	/** Last described root and the state it was built from. */
@@ -163,117 +119,64 @@ export class RewindSelectorComponent implements Component {
 	#pickerItems = new TimelineItems();
 	/** Last described picker and the state it was built from. */
 	#picker: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
+	#filterItems: RewindHistoryItem[] = [];
 
 	constructor(
 		entries: TranscriptEntry[],
 		private readonly deps: RewindSelectorDeps,
 	) {
-		this.#entries = entries;
-		const tail = recentTranscriptEntries(entries);
-		this.#truncated = tail.length < entries.length;
-		this.#builder = this.#replay(tail);
-		this.#selected = Math.max(0, this.#targets.length - 1);
-		this.#browser = new TranscriptBrowser({
-			getHeight: () => this.deps.ui.terminal?.rows || process.stdout.rows || 40,
-			frame: context => this.#frame(context.contentWidth),
-		});
+		this.#history = new RewindHistory(entries, deps);
 	}
 
-	/** Number of selectable rewind points on the current path; hosts skip mounting when zero. */
-	get targetCount(): number {
-		return this.#targets.length;
-	}
-
-	#newBuilder(): ChatTranscriptBuilder {
-		const builder = new ChatTranscriptBuilder({
-			ui: this.deps.ui,
-			getTool: this.deps.getTool,
-			isBuiltInTool: this.deps.isBuiltInTool,
-			getMessageRenderer: this.deps.getMessageRenderer,
-			cwd: this.deps.cwd,
-			hideThinkingBlock: this.deps.hideThinkingBlock,
-			proseOnlyThinking: this.deps.proseOnlyThinking,
-			linkTargets: this.deps.linkTargets,
-			requestRender: this.deps.requestRender,
-		});
-		builder.setExpanded(this.#expanded);
-		return builder;
-	}
-
-	/** Build a transcript for `entries` and adopt its targets. */
-	#replay(entries: TranscriptEntry[]): ChatTranscriptBuilder {
-		const builder = this.#newBuilder();
-		this.#targets = appendOutlineEntries(builder, entries);
-		return builder;
-	}
-
-	/** Replay the whole branch, keeping the main outline on the same turn. */
-	#loadFullHistory(): void {
-		if (!this.#truncated) return;
-		const selectedId = this.#targets[this.#selected]?.turnId;
-		const previous = this.#builder;
-		this.#builder = this.#replay(this.#entries);
-		previous.dispose();
-		this.#truncated = false;
-		this.#mainVisible = undefined;
-		this.#mainRows = [];
-		const restored = selectedId ? this.#targets.findIndex(target => target.turnId === selectedId) : -1;
-		this.#selected = restored >= 0 ? restored : Math.max(0, this.#targets.length - 1);
-		this.deps.requestRender();
+	get hasTargets(): boolean {
+		return this.#history.target !== undefined;
 	}
 
 	invalidate(): void {
-		this.#builder.container.invalidate();
-		for (const columns of this.#variantCache.values()) {
-			for (const column of columns) column.builder.container.invalidate();
-		}
-		this.#browser.invalidate();
+		this.#history.invalidate();
+		for (const columns of this.#variantCache.values()) for (const column of columns) column.history.invalidate();
 	}
 
 	dispose(): void {
 		this.#stopSlide();
-		this.#builder.dispose();
-		for (const columns of this.#variantCache.values()) {
-			for (const column of columns) column.builder.dispose();
-		}
+		this.#history.dispose();
+		for (const columns of this.#variantCache.values()) for (const column of columns) column.history.dispose();
 		this.#variantCache.clear();
 	}
 
-	// ========================================================================
-	// Branch strip
-	// ========================================================================
-
-	/** Sibling columns for the selected turn, built lazily and cached per divergence. */
 	#stripColumns(): SiblingColumn[] {
-		const target = this.#targets[this.#selected];
+		const target = this.#history.target;
 		if (!target || !this.deps.siblingPaths) return [];
 		const cached = this.#variantCache.get(target.turnId);
 		if (cached) return cached;
 		const columns: SiblingColumn[] = [];
 		for (const sibling of this.deps.siblingPaths(target.turnId)) {
 			if (sibling.entries.length === 0) continue;
-			const builder = this.#newBuilder();
-			const targets = appendOutlineEntries(builder, sibling.entries);
+			const history = new RewindHistory(sibling.entries, this.deps, "first");
+			history.setExpanded(this.#expanded);
 			const firstUser = sibling.entries.find(isUserTurnEntry);
 			const label = (firstUser && userTurnLabel(firstUser)) || sibling.rootId;
-			columns.push({ rootId: sibling.rootId, builder, targets, label });
+			columns.push({ history, label });
 		}
 		this.#variantCache.set(target.turnId, columns);
 		return columns;
 	}
 
-	/** The target the dotted outline currently rests on. */
-	#outlinedTarget(): OutlineTarget | undefined {
-		if (this.#activeVariant > 0) {
-			return this.#stripColumns()[this.#activeVariant - 1]?.targets[this.#siblingSelected];
-		}
-		return this.#targets[this.#selected];
+	#stopSlide(): void {
+		this.#slide = undefined;
+		clearInterval(this.#slideTimer);
+		this.#slideTimer = undefined;
+	}
+
+	#slidePosition(now: number): number {
+		if (!this.#slide) return this.#activeVariant;
+		const t = Math.min(1, (now - this.#slide.startedAt) / SLIDE_MS);
+		return this.#slide.from + (this.#slide.to - this.#slide.from) * (1 - (1 - t) ** 3);
 	}
 
 	#slideTo(variant: number): void {
 		const now = Date.now();
-		const from = this.#slidePosition(now);
-		this.#slide = { from, to: variant, startedAt: now };
+		this.#slide = { from: this.#slidePosition(now), to: variant, startedAt: now };
 		this.#activeVariant = variant;
 		// The camera slide is repaint-only; a native surface has no camera to move.
 		if (isNativeRendering()) {
@@ -287,33 +190,41 @@ export class RewindSelectorComponent implements Component {
 		this.deps.requestRender();
 	}
 
-	#stopSlide(): void {
-		this.#slide = undefined;
-		if (this.#slideTimer !== undefined) {
-			clearInterval(this.#slideTimer);
-			this.#slideTimer = undefined;
+	#moveMain(delta: -1 | 1, userOnly: boolean): void {
+		if (!this.#history.move(delta, userOnly, Math.max(1, this.#width - 1))) return;
+		this.#activeVariant = 0;
+		this.#stopSlide();
+		this.#scrollToSelection = true;
+		this.deps.requestRender();
+	}
+
+	#moveVertical(delta: -1 | 1): void {
+		if (this.#activeVariant === 0) {
+			this.#moveMain(delta, false);
+			return;
+		}
+		const history = this.#stripColumns()[this.#activeVariant - 1]?.history;
+		const width = Math.max(24, Math.floor((this.#width - 1 - STRIP_GAP) / 2));
+		if (history?.move(delta, false, width)) {
+			this.#scrollToSelection = true;
+			this.deps.requestRender();
+		} else if (delta === -1) {
+			this.#activeVariant = 0;
+			this.#stopSlide();
+			this.#moveMain(-1, false);
+			this.#scrollToSelection = true;
+			this.deps.requestRender();
 		}
 	}
-
-	/** Fractional variant position of the camera at `now` (eased). */
-	#slidePosition(now: number): number {
-		if (!this.#slide) return this.#activeVariant;
-		const t = Math.min(1, (now - this.#slide.startedAt) / SLIDE_MS);
-		const eased = 1 - (1 - t) ** 3;
-		return this.#slide.from + (this.#slide.to - this.#slide.from) * eased;
-	}
-
-	// ========================================================================
-	// Input
-	// ========================================================================
 
 	handleInput(data: string): void {
 		if (data.startsWith("\x1b[<")) {
 			routeSgrMouseInput(data, event => {
 				if (event.wheel !== null) {
-					// A wheel notch at either end moves nothing: repainting it
-					// anyway makes the frame twitch under a fast wheel.
-					if (this.#browser.scroll(event.wheel * 3)) this.deps.requestRender();
+					this.#scrollToSelection = false;
+					const before = this.#scrollView.getScrollOffset();
+					this.#scrollView.scroll(event.wheel * 3);
+					if (before !== this.#scrollView.getScrollOffset()) this.deps.requestRender();
 				}
 				return true;
 			});
@@ -344,37 +255,40 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, "left")) {
-			this.#left();
+			if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
+			else this.#moveMain(-1, true);
 			return;
 		}
 		if (matchesKey(data, "right")) {
-			this.#right();
-			return;
-		}
-		if (data === "a" || data === "A") {
-			this.#loadFullHistory();
+			const columns = this.#stripColumns();
+			if (this.#activeVariant < columns.length) {
+				columns[this.#activeVariant]!.history.resetSelection();
+				this.#slideTo(this.#activeVariant + 1);
+			} else if (this.#activeVariant === 0) this.#moveMain(1, true);
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			this.#selectOutlined();
+			const history =
+				this.#activeVariant > 0 ? this.#stripColumns()[this.#activeVariant - 1]?.history : this.#history;
+			const target = history?.target;
+			if (target) this.deps.onSelect(target.entryId);
 			return;
 		}
-		// Page/home/end/shift+arrow scrolling without moving the selection.
-		if (this.#browser.handleScrollKey(data)) {
+		if (this.#scrollView.handleScrollKey(data)) {
+			this.#scrollToSelection = false;
 			this.deps.requestRender();
 		}
 	}
 
 	/** `f`: open the filter over the whole branch. */
 	#openFilter(): void {
-		// The filter must search the whole branch, not just the startup tail.
-		this.#loadFullHistory();
+		this.#scrollToSelection = true;
 		const input = new Input();
 		input.prompt = `${theme.fg("accent", "filter:")} `;
 		input.placeholder = "words…";
 		this.#filterInput = input;
 		this.#activeVariant = 0;
-		this.#siblingSelected = 0;
+		this.#refreshFilter();
 		this.#stopSlide();
 		this.deps.requestRender();
 	}
@@ -382,24 +296,24 @@ export class RewindSelectorComponent implements Component {
 	/** Left: the previous branch at a fork, else the previous user turn. */
 	#left(): void {
 		if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
-		else this.#move(-1, target => target.isUserTurn);
+		else this.#moveMain(-1, true);
 	}
 
 	/** Right: the next branch at a fork, else the next user turn. */
 	#right(): void {
 		const columns = this.#stripColumns();
 		if (this.#activeVariant < columns.length) {
-			this.#siblingSelected = 0;
+			columns[this.#activeVariant]!.history.resetSelection();
 			this.#slideTo(this.#activeVariant + 1);
 		} else if (this.#activeVariant === 0) {
-			this.#move(1, target => target.isUserTurn);
+			this.#moveMain(1, true);
 		}
 	}
 
 	/** Enter while filtering: rewind to the selection when it matches. */
 	#selectFiltered(): void {
-		const target = this.#filterMatches().includes(this.#selected) ? this.#targets[this.#selected] : undefined;
-		if (target) this.deps.onSelect(target.entryId);
+		const item = this.#filterMatches().find(item => item.target.entryId === this.#history.target?.entryId);
+		if (item) this.deps.onSelect(item.target.entryId);
 	}
 
 	/** Enter: rewind to the outlined turn (main path or the active branch column). */
@@ -410,16 +324,13 @@ export class RewindSelectorComponent implements Component {
 
 	#toggleExpanded(): void {
 		this.#expanded = !this.#expanded;
-		this.#builder.setExpanded(this.#expanded);
-		for (const columns of this.#variantCache.values()) {
-			for (const column of columns) column.builder.setExpanded(this.#expanded);
-		}
+		this.#history.setExpanded(this.#expanded);
+		for (const columns of this.#variantCache.values())
+			for (const column of columns) column.history.setExpanded(this.#expanded);
+		if (this.#filter !== undefined) this.#refreshFilter();
+		this.#scrollToSelection = true;
 		this.deps.requestRender();
 	}
-
-	// ========================================================================
-	// Filter
-	// ========================================================================
 
 	#handleFilterInput(data: string): void {
 		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
@@ -435,13 +346,11 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (matchesSelectUp(data) || matchesKey(data, "left")) {
-			const userTurnsOnly = !matchesSelectUp(data);
-			this.#stepFiltered(-1, userTurnsOnly);
+			this.#stepFiltered(-1, !matchesSelectUp(data));
 			return;
 		}
 		if (matchesSelectDown(data) || matchesKey(data, "right")) {
-			const userTurnsOnly = !matchesSelectDown(data);
-			this.#stepFiltered(1, userTurnsOnly);
+			this.#stepFiltered(1, !matchesSelectDown(data));
 			return;
 		}
 		const input = this.#filterInput!;
@@ -451,36 +360,60 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (input.handleInput(data)) {
-			if (input.getValue() !== before) this.#filterChanged();
+			if (input.getValue() !== before) this.#setFilter(input.getValue());
 			else this.deps.requestRender();
 			return;
 		}
-		if (this.#browser.handleScrollKey(data)) {
+		if (this.#scrollView.handleScrollKey(data)) {
+			this.#scrollToSelection = false;
 			this.deps.requestRender();
 		}
 	}
 
-	/** Leave the filter, keeping the selected item outlined in the full transcript. */
 	#closeFilter(): void {
 		this.#filterInput = undefined;
+		this.#filterItems = [];
+		this.#scrollToSelection = true;
 		this.deps.requestRender();
 	}
 
-	/** The query changed; keep the selection when it still matches, else rest on the newest match above it. */
-	#filterChanged(): void {
-		const matches = this.#filterMatches();
-		if (!matches.includes(this.#selected)) {
-			this.#selected = matches.findLast(index => index < this.#selected) ?? matches.at(-1) ?? this.#selected;
-		}
+	#setFilter(query: string): void {
+		this.#filterInput?.setValue(query);
+		this.#refreshFilter();
+		this.#scrollToSelection = true;
 		this.deps.requestRender();
+	}
+
+	/** Search materializes rendered targets only while the filter is open. */
+	#refreshFilter(): void {
+		this.#filterItems = this.#history.items(Math.max(1, this.#width - 1));
+		const matches = this.#filterMatches();
+		const point = this.#history.point;
+		if (!point || matches.some(item => item.target.entryId === this.#history.target?.entryId)) return;
+		const next =
+			matches.findLast(item =>
+				item.point.chunk < point.chunk || (item.point.chunk === point.chunk && item.point.target < point.target),
+			) ?? matches.at(-1);
+		if (next) {
+			this.#history.select(next.point);
+			this.#scrollToSelection = true;
+		}
 	}
 
 	#stepFiltered(delta: -1 | 1, userTurnsOnly: boolean): void {
-		const matches = this.#filterMatches().filter(index => !userTurnsOnly || this.#targets[index]!.isUserTurn);
-		const next =
-			delta < 0 ? matches.findLast(index => index < this.#selected) : matches.find(index => index > this.#selected);
-		if (next === undefined) return;
-		this.#selected = next;
+		const point = this.#history.point;
+		if (!point) return;
+		const matches = this.#filterMatches().filter(item => !userTurnsOnly || item.target.isUserTurn);
+		const next = delta < 0
+			? matches.findLast(item =>
+					item.point.chunk < point.chunk || (item.point.chunk === point.chunk && item.point.target < point.target),
+				)
+			: matches.find(item =>
+					item.point.chunk > point.chunk || (item.point.chunk === point.chunk && item.point.target > point.target),
+				);
+		if (!next) return;
+		this.#history.select(next.point);
+		this.#scrollToSelection = true;
 		this.deps.requestRender();
 	}
 
@@ -493,89 +426,17 @@ export class RewindSelectorComponent implements Component {
 	 * Matching the rendered rows keeps results honest: collapsed tool output
 	 * only matches once Ctrl+O expands it.
 	 */
-	#filterMatches(): number[] {
+	#filterMatches(): RewindHistoryItem[] {
 		const words = (this.#filter ?? "").toLowerCase().split(/\s+/).filter(Boolean);
 		const patterns = words.map(word =>
 			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
 				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
 				: new RegExp(RegExp.escape(word), "u"),
 		);
-		if (isNativeRendering() && this.#nativeTexts?.targets !== this.#targets) {
-			this.#nativeTexts = {
-				targets: this.#targets,
-				// Turn text plus its commands and tool output, like the expanded rendered rows.
-				texts: this.#targets.map(target => {
-					const blocks = collectBlocks(target.entries);
-					const parts = [targetCopy(target, blocks).content, ...blocks.map(block => block.content)];
-					return parts.join("\n").toLowerCase();
-				}),
-			};
-		}
-		const matches: number[] = [];
-		for (let index = 0; index < this.#targets.length; index++) {
-			if (!this.#isMainSelectable(index)) continue;
-			const target = this.#targets[index]!;
-			const texts = isNativeRendering()
-				? [this.#nativeTexts?.texts[index] ?? ""]
-				: this.#mainRows.slice(target.start, target.end).map(rows => {
-						let text = this.#rowText.get(rows);
-						if (text === undefined) {
-							text = Bun.stripANSI(rows.join("\n")).toLowerCase();
-							this.#rowText.set(rows, text);
-						}
-						return text;
-					});
-			if (patterns.every(pattern => texts.some(text => pattern.test(text)))) matches.push(index);
-		}
-		return matches;
-	}
-
-	/** Up/Down: step within the active column; leaving a sibling column's top exits the strip. */
-	#moveVertical(delta: -1 | 1): void {
-		if (this.#activeVariant > 0) {
-			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
-			let index = this.#siblingSelected + delta;
-			while (index >= 0 && index < targets.length && this.#siblingVisible?.[index] === false) index += delta;
-			if (index >= 0 && index < targets.length) {
-				this.#siblingSelected = index;
-				this.deps.requestRender();
-			} else if (delta === -1) {
-				// Off the top of an alternate: return to the current path above the fork.
-				this.#activeVariant = 0;
-				this.#siblingSelected = 0;
-				this.#stopSlide();
-				this.#move(-1, () => true);
-			}
-			return;
-		}
-		this.#move(delta, () => true);
-	}
-
-	/**
-	 * Step the main selection by `delta` to the nearest visible target passing
-	 * `accept`; stepping above the replayed tail loads the earlier history first.
-	 */
-	#move(delta: -1 | 1, accept: (target: OutlineTarget) => boolean): void {
-		let index = this.#selected + delta;
-		while (index >= 0 && index < this.#targets.length) {
-			if (this.#isMainSelectable(index) && accept(this.#targets[index]!)) {
-				this.#selected = index;
-				this.#activeVariant = 0;
-				this.#siblingSelected = 0;
-				this.#stopSlide();
-				this.deps.requestRender();
-				return;
-			}
-			index += delta;
-		}
-		if (delta < 0 && this.#truncated) {
-			this.#loadFullHistory();
-			this.#move(delta, accept);
-		}
-	}
-
-	#isMainSelectable(index: number): boolean {
-		return this.#mainVisible?.[index] ?? true;
+		return this.#filterItems.filter(item => {
+			const text = Bun.stripANSI(item.rows.join("\n")).toLowerCase();
+			return patterns.every(pattern => pattern.test(text));
+		});
 	}
 
 	// ========================================================================
@@ -918,223 +779,217 @@ export class RewindSelectorComponent implements Component {
 	// ========================================================================
 
 	render(width: number): readonly string[] {
-		return this.#browser.render(width);
-	}
-
-	#frame(contentWidth: number): TranscriptBrowserFrame {
-		// The outline consumes two columns each side ("┆ " / " ┆"), unselected
-		// rows a matching two-column left gutter so blocks never shift while stepping.
-		const children = this.#builder.container.children;
-		const prepared = this.#browser.prepareOutline(children, this.#targets, this.#selected, contentWidth);
-		this.#mainVisible = prepared.visible;
-		this.#mainRows = prepared.childRows;
-		if (prepared.selected !== this.#selected) {
-			// The current target collapsed (e.g. expansion toggle): rest on the
-			// nearest visible one and leave the strip.
-			this.#selected = prepared.selected;
+		this.#width = width;
+		const contentWidth = Math.max(1, width - 1);
+		const before = this.#history.point;
+		this.#history.ensureVisible(contentWidth);
+		if (before !== this.#history.point) {
 			this.#activeVariant = 0;
-			this.#siblingSelected = 0;
+			this.#stopSlide();
 		}
-
-		if (this.#filter !== undefined) return this.#filterFrame(this.#filter, prepared.childRows, contentWidth);
-
-		const columns = this.#stripColumns();
-		const composed =
+		if (this.#filter !== undefined) this.#refreshFilter();
+		const columns = this.#filter === undefined ? this.#stripColumns() : [];
+		const filtered = this.#filter === undefined ? undefined : this.#filterColumn(contentWidth);
+		const composed = filtered?.column ?? (
 			columns.length > 0
-				? this.#renderStrip(prepared.childRows, columns, contentWidth)
-				: this.#browser.composeOutline({
-						children,
-						targets: this.#targets,
-						selected: this.#selected,
-						columnWidth: contentWidth,
-						prepared,
-					}).column;
-		const position = this.#targets.length > 0 ? `${this.#selected + 1}/${this.#targets.length}  ` : "";
-		const upDown = editorKeys("tui.select.up", "tui.select.down");
-		const leftRight = formatKeyHints(["left", "right"]);
-		const lateral = columns.length > 0 ? `${leftRight} branches` : `${leftRight} user turns`;
-		const keys = `${upDown} step  ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${this.#truncated ? `${formatKeyHint("a")} earlier turns  ` : ""}${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`;
-		return {
-			header: [this.#header()],
-			body: {
-				lines: composed.lines,
-				anchor: this.#outlineAnchor(composed),
-			},
-			footer: [theme.fg("dim", `${position}${keys}`)],
-		};
-	}
-
-	#header(): string {
-		return `${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`;
-	}
-
-	/** Only the matching items of the current path, concatenated; no branch strip. */
-	#filterFrame(
-		query: string,
-		childRows: readonly (readonly string[])[],
-		contentWidth: number,
-	): TranscriptBrowserFrame {
-		const matches = this.#filterMatches();
-		const rows: (readonly string[])[] = [];
-		const targets: OutlineTarget[] = [];
-		for (const index of matches) {
-			const target = this.#targets[index]!;
-			const start = rows.length;
-			rows.push(...childRows.slice(target.start, target.end));
-			targets.push({ ...target, start, end: rows.length });
-		}
-		const selected = matches.indexOf(this.#selected);
-		const composed = composeOutlineColumn(rows, 0, rows.length, targets, selected, contentWidth, undefined);
-		const lines = matches.length > 0 ? composed.lines : [theme.fg("muted", `  No items match "${query}"`)];
-		const count =
-			matches.length === 0
-				? theme.fg("error", "no matches")
-				: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
-		const upDown = editorKeys("tui.select.up", "tui.select.down");
-		const keys = `${upDown} step  ${formatKeyHints(["left", "right"])} user turns  ${formatKeyHint("enter")} rewind  ${editorKey("tui.select.cancel")} show all`;
-		return {
-			header: [this.#header()],
-			body: {
-				lines,
-				anchor:
-					composed.selStart >= 0
-						? {
-								id: `rewind:filter:${query}:${this.#targets[this.#selected]?.turnId ?? this.#selected}`,
-								start: composed.selStart,
-								end: composed.selEnd,
-							}
-						: undefined,
-			},
-			footer: [
-				`${this.#filterInput!.render(visibleWidth(`filter: ${query}`) + 1)[0]}  ${count}  ${theme.fg("dim", keys)}`,
-			],
-		};
-	}
-
-	/** Selection anchor keyed by the outlined turn/sibling identity plus its composed range. */
-	#outlineAnchor(composed: ComposedColumn): { id: string; start: number; end: number } | undefined {
-		if (composed.selStart < 0) return undefined;
-		const outlined = this.#outlinedTarget();
-		const id =
-			this.#activeVariant > 0
-				? `rewind:sibling:${this.#stripColumns()[this.#activeVariant - 1]?.rootId ?? this.#activeVariant}:${outlined?.entryId ?? this.#siblingSelected}`
-				: `rewind:main:${outlined?.turnId ?? this.#selected}`;
-		return { id, start: composed.selStart, end: composed.selEnd };
-	}
-
-	/**
-	 * Shared prefix at full width, then the divergence as a camera-positioned
-	 * strip of half-width branch columns (current path first, siblings after).
-	 */
-	#renderStrip(mainRows: (readonly string[])[], columns: SiblingColumn[], contentWidth: number): ComposedColumn {
-		const anchor = this.#targets[this.#selected]!;
-		const colWidth = Math.max(24, Math.floor((contentWidth - STRIP_GAP) / 2));
-		const count = columns.length + 1;
-
-		// Shared history above the fork, full width, never outlined.
-		const prefix = composeOutlineColumn(mainRows, 0, anchor.start, [], -1, contentWidth, undefined);
-
-		// Column 0: the current path from the fork down, re-rendered at column width.
-		const suffixRows = this.#browser.renderOutlineRows(
-			this.#builder.container.children.slice(anchor.start),
-			colWidth,
+				? this.#renderStrip(columns, contentWidth)
+				: this.#history.column(contentWidth, { selected: this.#history.point })
 		);
-		const suffixTargets = this.#targets.slice(this.#selected).map(target => ({
-			...target,
-			start: target.start - anchor.start,
-			end: target.end - anchor.start,
+		const followBottom =
+			!this.#scrollToSelection && this.#scrollView.getScrollOffset() === this.#scrollView.getMaxScrollOffset();
+		const height = Math.max(3, (this.deps.ui.terminal?.rows || process.stdout.rows || 40) - CHROME_ROWS);
+		this.#scrollView.setHeight(height);
+		let visible: readonly string[] = [];
+		let selectionEdge: "top" | "bottom" | undefined;
+		for (let pass = 0; pass < 3; pass++) {
+			const total = composed.length;
+			const selectionStart = composed.selStart;
+			const selectionEnd = composed.selEnd;
+			this.#scrollView.setTotalRows(total);
+			if (this.#scrollToSelection && selectionStart >= 0) {
+				const offset = this.#scrollView.getScrollOffset();
+				const top = Math.max(0, selectionStart - 1);
+				const bottom = Math.min(total, selectionEnd + 1);
+				selectionEdge ??= top < offset ? "top" : bottom > offset + height ? "bottom" : undefined;
+				if (selectionEdge === "top") this.#scrollView.setScrollOffset(top);
+				else if (selectionEdge === "bottom") this.#scrollView.setScrollOffset(bottom - height);
+			}
+			const frame = composed.renderVirtualViewport(contentWidth, {
+				rows: height,
+				offset: this.#scrollView.getScrollOffset(),
+				followBottom,
+			});
+			visible = frame.lines;
+			this.#scrollView.setTotalRows(frame.estimatedTotalRows);
+			this.#scrollView.setScrollOffset(frame.offset);
+			if (
+				!this.#scrollToSelection ||
+				(total === composed.length && selectionStart === composed.selStart && selectionEnd === composed.selEnd)
+			)
+				break;
+		}
+		this.#scrollToSelection = false;
+		this.#scrollView.setLines(visible);
+		const lateral = columns.length > 0 ? "branches" : "user turns";
+		const footer = filtered?.footer ??
+			theme.fg("dim", `message ${this.#history.position}/${this.#history.entries.length}  ${editorKeys("tui.select.up", "tui.select.down")} step  ${formatKeyHints(["left", "right"])} ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`);
+		return [
+			...this.#border.render(width),
+			` ${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
+			...this.#border.render(width),
+			...this.#scrollView.render(width),
+			` ${truncateToWidth(footer, Math.max(0, width - 1))}`,
+			...this.#border.render(width),
+		];
+	}
+
+	#filterColumn(width: number): { column: ViewportOutlineColumn; footer: string } {
+		const matches = this.#filterMatches();
+		const rows = matches.map(item => item.rows);
+		const targets: OutlineTarget[] = matches.map((item, index) => ({
+			...item.target,
+			start: index,
+			end: index + 1,
 		}));
-		const composedColumns: ComposedColumn[] = [
-			composeOutlineColumn(
-				suffixRows,
-				0,
-				suffixRows.length,
-				suffixTargets,
-				this.#activeVariant === 0 ? 0 : -1,
-				colWidth,
-				this.#columnHeader(0, count, "current", colWidth),
-			),
+		const selected = matches.findIndex(item => item.target.entryId === this.#history.target?.entryId);
+		const composed = composeOutlineColumn(rows, 0, rows.length, targets, selected, width, undefined);
+		const lines = matches.length ? composed.lines : [theme.fg("muted", `  No items match "${this.#filter}"`)];
+		const count = matches.length === 0
+			? theme.fg("error", "no matches")
+			: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
+		return {
+			column: {
+				length: lines.length,
+				selStart: composed.selStart,
+				selEnd: composed.selEnd,
+				hasVirtualViewport: () => true,
+				getEstimatedVirtualRows: () => lines.length,
+				renderVirtualViewport: (_width, request) => {
+					const maxOffset = Math.max(0, lines.length - request.rows);
+					const offset = request.followBottom ? maxOffset : Math.max(0, Math.min(request.offset, maxOffset));
+					return { lines: lines.slice(offset, offset + request.rows), offset, estimatedTotalRows: lines.length };
+				},
+			},
+			footer: `${this.#filterInput!.render(visibleWidth(`filter: ${this.#filter}`) + 1)[0]}  ${count}  ${theme.fg("dim", `${editorKeys("tui.select.up", "tui.select.down")} step  ${formatKeyHints(["left", "right"])} user turns  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} show all`)}`,
+		};
+	}
+
+	#renderStrip(columns: SiblingColumn[], width: number): ViewportOutlineColumn {
+		const point = this.#history.point!;
+		const colWidth = Math.max(24, Math.floor((width - STRIP_GAP) / 2));
+		const prefix = this.#history.column(width, { to: point });
+		const count = columns.length + 1;
+		const caption = (index: number, label: string): string[] => [
+			` ${theme.fg(index === this.#activeVariant ? "accent" : "dim", truncateToWidth(`${theme.icon.branch} ${index + 1}/${count} ${theme.sep.dot} ${label}`, colWidth - 2))}`,
+			"",
+		];
+		const composed = [
+			this.#history.column(colWidth, {
+				from: point,
+				selected: this.#activeVariant === 0 ? point : undefined,
+				header: caption(0, "current"),
+			}),
 		];
 		for (let index = 0; index < columns.length; index++) {
 			const column = columns[index]!;
-			const rows = this.#browser.renderOutlineRows(column.builder.container.children, colWidth);
-			if (this.#activeVariant === index + 1) {
-				this.#siblingVisible = outlineVisibility(rows, column.targets);
-			}
-			composedColumns.push(
-				composeOutlineColumn(
-					rows,
-					0,
-					rows.length,
-					column.targets,
-					this.#activeVariant === index + 1 ? this.#siblingSelected : -1,
-					colWidth,
-					this.#columnHeader(index + 1, count, column.label, colWidth),
-				),
+			if (this.#activeVariant === index + 1) column.history.ensureVisible(colWidth);
+			composed.push(
+				column.history.column(colWidth, {
+					selected: this.#activeVariant === index + 1 ? column.history.point : undefined,
+					header: caption(index + 1, column.label),
+				}),
 			);
 		}
-
-		// Camera over the strip: keep the active (possibly mid-slide) column centered.
 		const stride = colWidth + STRIP_GAP;
 		const totalWidth = count * colWidth + (count - 1) * STRIP_GAP;
 		const cameraAt = (position: number) =>
-			Math.max(
-				0,
-				Math.min(position * stride - (contentWidth - colWidth) / 2, Math.max(0, totalWidth - contentWidth)),
-			);
-		const position = this.#slidePosition(Date.now());
-		const camera = cameraAt(position);
-
-		const height = Math.max(...composedColumns.map(column => column.lines.length));
-		const lines = prefix.lines;
-		// With more branches than the window fits, a dot rail tracks the active
-		// column and dim ellipses flag content beyond the visible edge.
-		// Edge markers follow the slide's destination, not the eased camera,
-		// so they flip in step with the dot rail.
-		if (count > 2) {
-			const settled = cameraAt(this.#activeVariant);
-			lines.push(
-				positionRail(
-					count,
-					this.#activeVariant,
-					settled > 0.5,
-					settled + contentWidth < totalWidth - 0.5,
-					contentWidth,
-				),
-				"",
-			);
-		}
-		const active = composedColumns[this.#activeVariant]!;
-		const selStart = active.selStart >= 0 ? lines.length + active.selStart : -1;
-		const selEnd = active.selEnd >= 0 ? lines.length + active.selEnd : -1;
-		for (let row = 0; row < height; row++) {
-			let line = "";
-			let filled = 0;
-			for (let index = 0; index < count; index++) {
-				const x0 = index * stride - camera;
-				const x1 = x0 + colWidth;
-				const visible0 = Math.max(0, x0);
-				const visible1 = Math.min(contentWidth, x1);
-				if (visible1 <= visible0) continue;
-				const source = colWidth > 0 ? padToWidth(composedColumns[index]!.lines[row] ?? "", colWidth) : "";
-				const slice = sliceByColumn(source, visible0 - x0, visible1 - visible0, true);
-				line +=
-					padding(Math.max(0, visible0 - filled)) +
-					(visible1 - visible0 > 0 ? padToWidth(slice, visible1 - visible0) : "");
-				filled = visible1;
-			}
-			lines.push(line);
-		}
-		return { lines, selStart, selEnd };
-	}
-
-	/** Two caption rows leading a strip column: `⎇ i/n · label` plus a spacer. */
-	#columnHeader(index: number, count: number, label: string, columnWidth: number): string[] {
-		const caption = truncateToWidth(
-			`${theme.icon.branch} ${index + 1}/${count} ${theme.sep.dot} ${label}`,
-			columnWidth - 2,
-		);
-		const active = index === this.#activeVariant;
-		return [` ${theme.fg(active ? "accent" : "dim", caption)}`, ""];
+			Math.max(0, Math.min(position * stride - (width - colWidth) / 2, Math.max(0, totalWidth - width)));
+		const camera = cameraAt(this.#slidePosition(Date.now()));
+		const settled = cameraAt(this.#activeVariant);
+		const rail =
+			count > 2
+				? [positionRail(count, this.#activeVariant, settled > 0.5, settled + width < totalWidth - 0.5, width), ""]
+				: [];
+		const active = composed[this.#activeVariant]!;
+		const totalRows = () => prefix.length + rail.length + Math.max(...composed.map(column => column.length));
+		return {
+			get length() {
+				return totalRows();
+			},
+			get selStart() {
+				return active.selStart < 0 ? -1 : prefix.length + rail.length + active.selStart;
+			},
+			get selEnd() {
+				return active.selEnd < 0 ? -1 : prefix.length + rail.length + active.selEnd;
+			},
+			hasVirtualViewport: () => true,
+			getEstimatedVirtualRows: totalRows,
+			renderVirtualViewport: (_width, request): VirtualViewportFrame => {
+				let offset = request.followBottom
+					? Math.max(0, totalRows() - request.rows)
+					: Math.max(0, Math.min(request.offset, Math.max(0, totalRows() - request.rows)));
+				const lines: string[] = [];
+				if (offset < prefix.length) {
+					const frame = prefix.renderVirtualViewport(width, {
+						rows: Math.min(request.rows, prefix.length - offset),
+						offset,
+						followBottom: false,
+					});
+					lines.push(...frame.lines);
+					offset = frame.offset;
+				}
+				const stripStart = prefix.length + rail.length;
+				for (let row = Math.max(offset, prefix.length); row < Math.min(offset + request.rows, stripStart); row++)
+					lines.push(rail[row - prefix.length]!);
+				let start = Math.max(0, offset - stripStart);
+				let end = Math.min(offset + request.rows - stripStart, Math.max(...composed.map(column => column.length)));
+				if (end > start) {
+					const visible = composed.flatMap((column, index) => {
+						const x0 = index * stride - camera;
+						const left = Math.max(0, x0);
+						const right = Math.min(width, x0 + colWidth);
+						return right <= left ? [] : [{ column, index, x0, left, right, rows: [] as readonly string[] }];
+					});
+					const primary =
+						visible.find(item => item.index === this.#activeVariant && item.column.length > start) ??
+						visible.find(item => item.column.length > start);
+					if (primary) {
+						const frame = primary.column.renderVirtualViewport(colWidth, {
+							offset: start,
+							rows: Math.min(end, primary.column.length) - start,
+							followBottom:
+								request.followBottom &&
+								primary.column.length === Math.max(...composed.map(column => column.length)),
+						});
+						primary.rows = frame.lines;
+						if (offset >= stripStart) {
+							start = frame.offset;
+							offset = stripStart + start;
+							end = Math.min(start + request.rows, Math.max(...composed.map(column => column.length)));
+						}
+					}
+					for (const item of visible) {
+						if (item === primary || start >= item.column.length) continue;
+						item.rows = item.column.renderVirtualViewport(colWidth, {
+							offset: start,
+							rows: Math.min(end, item.column.length) - start,
+							followBottom: false,
+						}).lines;
+					}
+					for (let row = start; row < end; row++) {
+						let line = "";
+						let filled = 0;
+						for (const column of visible) {
+							const source = padToWidth(column.rows[row - start] ?? "", colWidth);
+							const clipped = sliceByColumn(source, column.left - column.x0, column.right - column.left, true);
+							line += padding(Math.max(0, column.left - filled)) + padToWidth(clipped, column.right - column.left);
+							filled = column.right;
+						}
+						lines.push(line);
+					}
+				}
+				return { lines, offset, estimatedTotalRows: totalRows() };
+			},
+		};
 	}
 }

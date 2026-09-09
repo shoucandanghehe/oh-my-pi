@@ -74,10 +74,11 @@ export interface ChatTranscriptBuilderDeps {
 	/** Session-scoped resolved destinations for model-authored Markdown links. */
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
+	onVirtualLayoutUpdate?: (component: Component) => void;
 }
 
 export class ChatTranscriptBuilder {
-	readonly container = new TranscriptContainer();
+	readonly container: TranscriptContainer;
 	#pendingTools = new Map<string, ToolExecutionComponent | ReadToolGroupComponent>();
 	#readArgs = new Map<string, Record<string, unknown>>();
 	#readGroup: ReadToolGroupComponent | null = null;
@@ -100,9 +101,13 @@ export class ChatTranscriptBuilder {
 	#streamingAssistantComponent: AssistantMessageComponent | undefined;
 
 	readonly #deps: ChatTranscriptBuilderDeps;
+	readonly #previousUsage: Usage | undefined;
 
-	constructor(deps: ChatTranscriptBuilderDeps) {
+	constructor(deps: ChatTranscriptBuilderDeps, previousUsage?: Usage) {
 		this.#deps = deps;
+		this.#previousUsage = previousUsage;
+		this.container = new TranscriptContainer(deps.onVirtualLayoutUpdate);
+		this.#lastAssistantUsage = previousUsage;
 		this.container.setToolActivityVisible(!displayPreferences.hideToolActivity);
 	}
 
@@ -179,6 +184,15 @@ export class ChatTranscriptBuilder {
 		return undefined;
 	}
 
+	/** Close a detached replay at the next user-turn boundary without appending that prompt. */
+	finishReplayTurn(): void {
+		this.#flushPendingUsage();
+		this.#readGroup?.seal();
+		this.#readGroup = null;
+		this.#resolveWaitingPoll();
+		this.#resolveTodoSnapshot();
+	}
+
 	/** Tear down components (sealing pending spinners) and clear build state. */
 	reset(): void {
 		for (const pending of this.#pendingTools.values()) pending.seal();
@@ -193,7 +207,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageElapsedMs = undefined;
 		this.#turnStartedAt = undefined;
 		this.#turnUsage.reset();
-		this.#lastAssistantUsage = undefined;
+		this.#lastAssistantUsage = this.#previousUsage;
 		this.#servedModelTracker = new ServedModelTracker();
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;

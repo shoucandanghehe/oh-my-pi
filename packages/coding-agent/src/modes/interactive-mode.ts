@@ -1818,7 +1818,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
-		this.chatContainer = new TranscriptContainer();
+		this.chatContainer = new TranscriptContainer(
+			Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport"
+				? component => this.ui.requestComponentRender(component)
+				: undefined,
+		);
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
@@ -1991,8 +1995,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				workspace: this.#workspaceLayout,
 				panes: this.#workspacePanes,
 				createViewer: (id, close) => this.#createAgentWorkspaceViewer(id, close),
-				requestRender: () => this.ui.requestRender(),
-				onDetachError: () => this.showWarning("The terminal is too small to detach this agent pane"),
 			});
 		}
 	}
@@ -2004,7 +2006,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	): AgentTranscriptViewer {
 		const remote = registryOverride ? undefined : this.collabGuest?.hubRemote;
 		const lifecycle = registryOverride || remote ? undefined : () => AgentLifecycleManager.global();
-		return new AgentTranscriptViewer({
+		// Initial transcript loading may request a frame before construction returns.
+		// oxlint-disable-next-line prefer-const -- the callback must tolerate that unmounted state
+		let viewer: AgentTranscriptViewer | undefined;
+		viewer = new AgentTranscriptViewer({
 			agentId,
 			registry: registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
 			remote,
@@ -2018,10 +2023,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			expandKeys: this.keybindings.getKeys("app.tools.expand"),
 			hubKeys: [...this.keybindings.getKeys("app.agents.hub"), ...this.keybindings.getKeys("app.session.observe")],
 			createStatusLine: session => this.statusLine.createPeer(session),
-			requestRender: () => this.ui.requestRender(),
+			requestRender: () => {
+				if (viewer) this.ui.requestComponentRender(viewer);
+				else this.ui.requestRender();
+			},
 			onClose: close,
 			onHubToggle: () => this.showAgentHub(),
 		});
+		return viewer;
 	}
 
 	async openAgentWorkspacePane(id: string): Promise<void> {
@@ -6906,6 +6915,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Stop the shared tool-spinner ticker: a live block missed by per-component
 		// stopAnimation would otherwise keep an 80ms interval pinning the process.
 		stopSharedSpinnerTicker();
+		this.chatContainer.cancelVirtualLayout();
 		this.#liveCommandController.dispose();
 		this.#clearJudgmentBatchProgress();
 		this.#downloadActivityHud.dispose();

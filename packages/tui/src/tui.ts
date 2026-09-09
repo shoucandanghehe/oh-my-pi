@@ -19,6 +19,7 @@ import { $flag } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
+import { RowMeasurement } from "@oh-my-pi/pi-natives";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { appendBrailleScrollbar, BRAILLE_SCROLLBAR_BLANK, layoutBrailleScrollbar } from "./components/scroll-view";
 import { TuiDebugServer } from "./debug-server";
@@ -183,6 +184,7 @@ interface AppViewportSelectionScrollTracking {
 	row: number;
 	col: number;
 	offset: number;
+	anchor?: VirtualRowAnchor;
 }
 
 interface AppViewportTextSelection {
@@ -373,6 +375,12 @@ export interface Component {
 	 * rows when the component has a cheaper layout-only path.
 	 */
 	measureRows?(width: number): number;
+	/**
+	 * Snapshot exact row counts for all widths so a versioned owner can batch
+	 * stable history in native code. Return undefined for width-dependent
+	 * component behavior that cannot be represented by text wrapping and padding.
+	 */
+	getRowMeasurement?(width: number): RowMeasurement | undefined;
 
 	/**
 	 * Optional ownership seam for composed components whose descendants are not
@@ -392,6 +400,9 @@ export interface Component {
 
 	/** Current virtual row offset for a selectable row, or undefined for fixed rows. */
 	getTextSelectionScrollOffset?(row: number): number | undefined;
+	/** Stable logical row for selection tracking while virtual geometry changes. */
+	getTextSelectionAnchor?(row: number): VirtualRowAnchor | undefined;
+	resolveTextSelectionAnchor?(anchor: VirtualRowAnchor): number | undefined;
 
 	/**
 	 * Optional handler for keyboard input when component has focus
@@ -469,6 +480,9 @@ export interface AppViewportInputOwner {
 	getAppViewportTextSelectionRect?(row: number, col: number): AppViewportTextSelectionRect | undefined;
 	getAppViewportTextSelectionScrollOffset?(row: number, col: number): number | undefined;
 	getAppViewportTextSelection?(selection: TextSelectionRange): string | undefined;
+	/** Source-frame row anchors distinguish layout corrections from user scrolling. */
+	getAppViewportTextSelectionAnchor?(row: number, col: number): VirtualRowAnchor | undefined;
+	resolveAppViewportTextSelectionAnchor?(anchor: VirtualRowAnchor): number | undefined;
 	/** Freeze or release a scrolling text-selection surface. */
 	setAppViewportTextSelectionActive?(active: boolean, row?: number, col?: number): void;
 }
@@ -491,6 +505,14 @@ export interface VirtualViewportFrame {
 	readonly offset: number;
 }
 
+/** Component identity plus a body-relative row, optionally nested through containers. */
+export interface VirtualRowAnchor {
+	readonly component: Component;
+	readonly row: number;
+	readonly width: number;
+	readonly child?: VirtualRowAnchor;
+}
+
 /** Estimated-height viewport for tall components. */
 export interface VirtualViewportProvider {
 	hasVirtualViewport(): boolean;
@@ -504,6 +526,8 @@ export interface VirtualViewportProvider {
 	getVirtualTextSelectionInset?(width: number, row: number): number;
 	getVirtualTextSelectionRightInset?(width: number, row: number): number;
 	getVirtualTextSelection?(width: number, selection: TextSelectionRange): string | undefined;
+	getVirtualRowAnchor?(width: number, row: number): VirtualRowAnchor | undefined;
+	resolveVirtualRowAnchor?(width: number, anchor: VirtualRowAnchor): number | undefined;
 }
 
 function asVirtualViewportProvider(component: Component): VirtualViewportProvider | undefined {
@@ -719,6 +743,16 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 	// Child identities and target owners back component-scoped recomposition.
 	#memoChildren: Component[] = [];
 	#targetOwnerCache = new WeakMap<Component, Component>();
+	#virtualFrameWidth = -1;
+	#virtualFrameLayouts:
+		| Array<{
+				component: Component;
+				provider: VirtualViewportProvider | undefined;
+				lines: readonly string[] | undefined;
+				startRow: number;
+				rows: number;
+		  }>
+		| undefined;
 
 	#ignoreTight = false;
 
@@ -737,6 +771,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 			component.setIgnoreTight?.(true);
 		}
 		this.#memoLines = undefined;
+		this.#virtualFrameLayouts = undefined;
 		this.#targetOwnerCache = new WeakMap();
 	}
 
@@ -745,6 +780,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.#memoLines = undefined;
+			this.#virtualFrameLayouts = undefined;
 			this.#targetOwnerCache = new WeakMap();
 		}
 	}
@@ -752,6 +788,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 	clear(): void {
 		this.children = [];
 		this.#memoLines = undefined;
+		this.#virtualFrameLayouts = undefined;
 		this.#targetOwnerCache = new WeakMap();
 	}
 
@@ -763,6 +800,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 
 	invalidate(): void {
 		this.#memoLines = undefined;
+		this.#virtualFrameLayouts = undefined;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
@@ -774,6 +812,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 	 * {@link clear} for that). Idempotent per child via each child's own dispose.
 	 */
 	dispose(): void {
+		this.#virtualFrameLayouts = undefined;
 		for (const child of this.children) {
 			child.dispose?.();
 		}
@@ -904,6 +943,27 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		return this.#getVirtualTextSelectionInset(width, row, true);
 	}
 
+	getVirtualRowAnchor(width: number, row: number): VirtualRowAnchor | undefined {
+		for (const layout of this.#virtualSelectionLayouts(width)) {
+			if (row < layout.startRow || row >= layout.startRow + layout.rows) continue;
+			const localRow = row - layout.startRow;
+			return {
+				component: layout.component,
+				row: localRow,
+				width,
+				child: layout.provider?.getVirtualRowAnchor?.(width, localRow),
+			};
+		}
+		return undefined;
+	}
+
+	resolveVirtualRowAnchor(width: number, anchor: VirtualRowAnchor): number | undefined {
+		const layout = this.#virtualSelectionLayouts(width).find(value => value.component === anchor.component);
+		if (!layout) return undefined;
+		const row = anchor.child ? layout.provider?.resolveVirtualRowAnchor?.(width, anchor.child) : anchor.row;
+		return row === undefined ? undefined : layout.startRow + row;
+	}
+
 	getVirtualTextSelection(width: number, selection: TextSelectionRange): string | undefined {
 		const layouts = this.#virtualSelectionLayouts(width);
 		const normalized = normalizeTextSelection(selection);
@@ -963,6 +1023,12 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		rows: number;
 	}> {
 		width = Math.max(1, width);
+		if (
+			this.#virtualFrameWidth === width &&
+			this.#virtualFrameLayouts?.length === this.children.length &&
+			this.#virtualFrameLayouts.every((layout, index) => layout.component === this.children[index])
+		)
+			return this.#virtualFrameLayouts;
 		let startRow = 0;
 		return this.children.map(component => {
 			const provider = asVirtualViewportProvider(component);
@@ -981,6 +1047,10 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 	): VirtualViewportFrame {
 		width = Math.max(1, width);
 		const viewportRows = Math.max(0, Math.trunc(request.rows));
+		const anchor =
+			!request.followBottom && this.#virtualFrameLayouts
+				? this.getVirtualRowAnchor(this.#virtualFrameWidth, request.offset)
+				: undefined;
 		const layouts: Array<{
 			component: Component;
 			provider: VirtualViewportProvider | undefined;
@@ -1020,6 +1090,14 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		let offset = request.followBottom
 			? Math.max(0, totalRows - viewportRows)
 			: Math.max(0, Math.min(Math.trunc(request.offset), Math.max(0, totalRows - viewportRows)));
+		if (anchor) {
+			const layout = layouts.find(value => value.component === anchor.component);
+			if (layout) {
+				const row = anchor.child ? layout.provider?.resolveVirtualRowAnchor?.(width, anchor.child) : anchor.row;
+				if (row !== undefined)
+					offset = Math.max(0, Math.min(layout.startRow + row, Math.max(0, totalRows - viewportRows)));
+			}
+		}
 
 		for (let pass = 0; pass < 3 && viewportRows > 0; pass++) {
 			let geometryChanged = false;
@@ -1086,6 +1164,8 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 			const frameTo = Math.max(frameFrom, to - frame.offset);
 			lines.push(...frame.lines.slice(frameFrom, frameTo));
 		}
+		this.#virtualFrameWidth = width;
+		this.#virtualFrameLayouts = layouts;
 		return { lines, estimatedTotalRows: totalRows, offset };
 	}
 	measureRows(width: number): number {
@@ -1093,6 +1173,17 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		let rows = 0;
 		for (const child of this.children) rows += measureComponentRows(child, width);
 		return rows;
+	}
+
+	getRowMeasurement(width: number): RowMeasurement | undefined {
+		if (this.measureRows !== Container.prototype.measureRows) return undefined;
+		const children: RowMeasurement[] = [];
+		for (const child of this.children) {
+			const measurement = child.getRowMeasurement?.(Math.max(1, width));
+			if (!measurement) return undefined;
+			children.push(measurement);
+		}
+		return new RowMeasurement([], children, 0, 0);
 	}
 
 	render(width: number): readonly string[] {
@@ -3321,7 +3412,8 @@ export class TUI extends Container {
 		}
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
-		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		// App frames are demand-driven; measured cost and output backlog provide backpressure.
+		const cadenceDelay = this.#appViewportBackend ? 0 : Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
 		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
 		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
@@ -3645,11 +3737,28 @@ export class TUI extends Container {
 		const selection = this.#appViewportSelection;
 		if (!selection) return;
 		const offset = inputOwner?.getAppViewportTextSelectionScrollOffset?.(row, col);
-		const tracking = offset === undefined ? undefined : { row, col, offset };
+		const tracking: AppViewportSelectionScrollTracking | undefined =
+			offset === undefined
+				? undefined
+				: {
+						row,
+						col,
+						offset,
+						anchor: inputOwner?.resolveAppViewportTextSelectionAnchor
+							? inputOwner.getAppViewportTextSelectionAnchor?.(selection.focus.row, selection.focus.col)
+							: undefined,
+					};
 		if (target === "both") {
-			selection.anchorScroll = tracking ? { ...tracking } : undefined;
+			selection.anchorScroll = tracking
+				? {
+						...tracking,
+						anchor: inputOwner?.resolveAppViewportTextSelectionAnchor
+							? inputOwner.getAppViewportTextSelectionAnchor?.(selection.anchor.row, selection.anchor.col)
+							: undefined,
+					}
+				: undefined;
 			selection.focusScroll = tracking;
-		} else if (!selection.anchorScroll) {
+		} else if (tracking?.anchor || !selection.anchorScroll) {
 			selection.focusScroll = tracking;
 		}
 		this.#syncAppViewportTextSelectionOwner(inputOwner);
@@ -3659,8 +3768,12 @@ export class TUI extends Container {
 		point: AppViewportSelectionPoint,
 		tracking: AppViewportSelectionScrollTracking | undefined,
 		inputOwner: AppViewportInputOwner | undefined,
-	): AppViewportSelectionPoint {
+	): AppViewportSelectionPoint | undefined {
 		if (!tracking) return point;
+		if (tracking.anchor) {
+			const row = inputOwner?.resolveAppViewportTextSelectionAnchor?.(tracking.anchor);
+			return row === undefined ? undefined : { row, col: point.col };
+		}
 		const offset = inputOwner?.getAppViewportTextSelectionScrollOffset?.(tracking.row, tracking.col);
 		if (offset === undefined || offset === tracking.offset) return point;
 		const row = point.row - (offset - tracking.offset);
@@ -3671,8 +3784,24 @@ export class TUI extends Container {
 	#syncAppViewportSelectionScroll(inputOwner: AppViewportInputOwner | undefined): void {
 		const selection = this.#appViewportSelection;
 		if (!selection) return;
+		if (!this.#appViewportSelectionDrag && !selection.focusScroll && selection.anchorScroll?.anchor) {
+			const { row, col } = selection.focus;
+			const offset = inputOwner?.getAppViewportTextSelectionScrollOffset?.(row, col);
+			if (offset !== undefined) {
+				selection.focusScroll = {
+					row,
+					col,
+					offset,
+					anchor: inputOwner?.getAppViewportTextSelectionAnchor?.(row, col),
+				};
+			}
+		}
 		const anchor = this.#syncAppViewportSelectionScrollPoint(selection.anchor, selection.anchorScroll, inputOwner);
 		const focus = this.#syncAppViewportSelectionScrollPoint(selection.focus, selection.focusScroll, inputOwner);
+		if (!anchor || !focus) {
+			this.#clearAppViewportSelection();
+			return;
+		}
 		if (anchor.row === selection.anchor.row && focus.row === selection.focus.row) return;
 		selection.anchor = anchor;
 		selection.focus = focus;
@@ -3699,13 +3828,14 @@ export class TUI extends Container {
 
 		// During a held drag, the anchor follows its original content while the
 		// focus follows the pointer cell. The input owner has already scrolled.
-		selection.anchor = this.#syncAppViewportSelectionScrollPoint(
-			selection.anchor,
-			selection.anchorScroll,
-			inputOwner,
-		);
+		const anchor = this.#syncAppViewportSelectionScrollPoint(selection.anchor, selection.anchorScroll, inputOwner);
+		if (!anchor) {
+			this.#clearAppViewportSelection();
+			return;
+		}
+		selection.anchor = anchor;
 		selection.focus = focus;
-		selection.focusScroll = { row, col, offset };
+		selection.focusScroll = selection.anchorScroll.anchor ? undefined : { row, col, offset };
 		selection.active = selection.active || selection.anchor.row !== focus.row || selection.anchor.col !== focus.col;
 		this.#appViewportLastClick = null;
 	}
@@ -3945,18 +4075,22 @@ export class TUI extends Container {
 				return;
 			}
 		}
-		selection.anchor = anchorTracked
-			? this.#clampTrackedAppViewportSelectionPoint(selection.anchor, selection.bounds, maxRow)
-			: this.#constrainAppViewportSelectionPoint(
-					this.#clampAppViewportSelectionPoint(selection.anchor),
-					selection.bounds,
-				);
-		selection.focus = focusTracked
-			? this.#clampTrackedAppViewportSelectionPoint(selection.focus, selection.bounds, maxRow)
-			: this.#constrainAppViewportSelectionPoint(
-					this.#clampAppViewportSelectionPoint(selection.focus),
-					selection.bounds,
-				);
+		selection.anchor = selection.anchorScroll?.anchor
+			? selection.anchor
+			: anchorTracked
+				? this.#clampTrackedAppViewportSelectionPoint(selection.anchor, selection.bounds, maxRow)
+				: this.#constrainAppViewportSelectionPoint(
+						this.#clampAppViewportSelectionPoint(selection.anchor),
+						selection.bounds,
+					);
+		selection.focus = selection.focusScroll?.anchor
+			? selection.focus
+			: focusTracked
+				? this.#clampTrackedAppViewportSelectionPoint(selection.focus, selection.bounds, maxRow)
+				: this.#constrainAppViewportSelectionPoint(
+						this.#clampAppViewportSelectionPoint(selection.focus),
+						selection.bounds,
+					);
 	}
 
 	#clampTrackedAppViewportSelectionPoint(
