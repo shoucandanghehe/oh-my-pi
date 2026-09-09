@@ -3,19 +3,31 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
+
+let widgetAuth: AuthStorage;
+let widgetModels: ModelRegistry;
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
 	await initTheme(false);
+	widgetAuth = await AuthStorage.create(":memory:");
+	widgetModels = new ModelRegistry(widgetAuth);
 });
 
 afterAll(() => {
+	widgetAuth.close();
 	resetSettingsForTest();
 });
 
@@ -53,6 +65,138 @@ function createRunningViewer(ui: TUI = new TUI(new ProcessTerminal()), statusCon
 }
 
 describe("AgentTranscriptViewer", () => {
+	it("replays session widgets into their own pane, follows targeted updates, and disposes on close", () => {
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			process.cwd(),
+			SessionManager.inMemory(),
+			widgetModels,
+		);
+		const ctx = runner.createContext();
+		const registry = new AgentRegistry();
+		const ui = new TUI(new ProcessTerminal());
+		let value = 10;
+		let disposed = 0;
+		let live!: Component;
+		ctx.ui.setWidget(
+			"rate",
+			() => {
+				let closed = false;
+				live = {
+					render: () => [closed ? "disposed widget" : `Rate ${value * 2}`],
+					dispose: () => {
+						closed = true;
+						disposed++;
+					},
+				};
+				return live;
+			},
+			{ placement: "belowEditor" },
+		);
+		ctx.ui.setWidget("above", ["Before editor"]);
+		registry.register({
+			id: "Widgets",
+			displayName: "Widgets",
+			kind: "sub",
+			parentId: "Main",
+			status: "running",
+			session: { extensionRunner: runner } as AgentSession,
+		});
+		const open = () => {
+			const viewer = new AgentTranscriptViewer({
+				agentId: "Widgets",
+				registry,
+				ui,
+				cwd: process.cwd(),
+				expandKeys: [],
+				hubKeys: [],
+				createStatusLine: () => ({
+					getTopBorder: () => ({ content: " COMPOSER ", width: 10, revision: 0 }),
+					dispose() {},
+				}),
+				requestRender() {},
+				onClose() {},
+				onHubToggle() {},
+			});
+			viewer.setViewportHeight(14);
+			return viewer;
+		};
+		const viewer = open();
+		let reopened: AgentTranscriptViewer | undefined;
+		try {
+			const initial = Bun.stripANSI(viewer.render(80).join("\n"));
+			expect(initial).toContain("Before editor");
+			expect(initial.indexOf("Before editor")).toBeLessThan(initial.indexOf("COMPOSER"));
+			expect(initial.indexOf("COMPOSER")).toBeLessThan(initial.indexOf("Rate 20"));
+			expect(viewer.containsComponent(live)).toBe(true);
+			value = 21;
+			expect(Bun.stripANSI(viewer.renderTargeted(80, [live]).join("\n"))).toContain("Rate 42");
+			expect(ctx.hasUI).toBe(false);
+			viewer.dispose();
+			viewer.dispose();
+			expect(disposed).toBe(1);
+			value = 22;
+			reopened = open();
+			expect(Bun.stripANSI(reopened.render(80).join("\n"))).toContain("Rate 44");
+			ctx.ui.setWidget("rate", ["Ended at 42"], { placement: "belowEditor" });
+			expect(disposed).toBe(2);
+			const restored = Bun.stripANSI(reopened.render(80).join("\n"));
+			expect(restored).toContain("Ended at 42");
+			expect(restored).not.toContain("Rate 44");
+			ctx.ui.setWidget("rate", undefined);
+			expect(Bun.stripANSI(reopened.render(80).join("\n"))).not.toContain("Ended at 42");
+		} finally {
+			viewer.dispose();
+			reopened?.dispose();
+			runner.clearManagedTimers();
+		}
+	});
+
+	it("detaches the old runner on session revival without leaking its widgets into the new session", () => {
+		const makeRunner = () =>
+			new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), SessionManager.inMemory(), widgetModels);
+		const oldRunner = makeRunner();
+		const newRunner = makeRunner();
+		const registry = new AgentRegistry();
+		const oldWidget = { render: () => ["Old run"], dispose: vi.fn() };
+		oldRunner.getUIContext().setWidget("activity", () => oldWidget);
+		newRunner.getUIContext().setWidget("activity", ["Revived run"]);
+		registry.register({
+			id: "Revive",
+			displayName: "Revive",
+			kind: "sub",
+			parentId: "Main",
+			status: "running",
+			session: { extensionRunner: oldRunner } as AgentSession,
+		});
+		const viewer = new AgentTranscriptViewer({
+			agentId: "Revive",
+			registry,
+			ui: new TUI(new ProcessTerminal()),
+			cwd: process.cwd(),
+			expandKeys: [],
+			hubKeys: [],
+			createStatusLine: () => ({ getTopBorder: () => ({ content: "", width: 0, revision: 0 }), dispose() {} }),
+			requestRender() {},
+			onClose() {},
+			onHubToggle() {},
+		});
+		viewer.setViewportHeight(12);
+		try {
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("Old run");
+			registry.attachSession("Revive", { extensionRunner: newRunner } as AgentSession);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("Revived run");
+			expect(oldWidget.dispose).toHaveBeenCalledTimes(1);
+			oldRunner.getUIContext().setWidget("late", ["Late old update"]);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).not.toContain("Late old update");
+		} finally {
+			viewer.dispose();
+			oldRunner.clearManagedTimers();
+			newRunner.clearManagedTimers();
+		}
+	});
+
 	it("keeps an advisor on the unified shell with a read-only composer", () => {
 		const registry = new AgentRegistry();
 		registry.register({

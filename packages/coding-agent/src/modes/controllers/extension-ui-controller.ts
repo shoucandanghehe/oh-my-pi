@@ -15,7 +15,6 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
-	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 	SendUserMessageHandler,
@@ -25,6 +24,7 @@ import { getSessionSlashCommands } from "../../extensibility/extensions/get-comm
 import { AskDialogComponent, boundPromptTitle, normalizeDialogQuestions } from "../../modes/components/ask-dialog";
 import { installExtensionComposerShape } from "../../modes/components/composer-shape-registry";
 import { EditorTopGap } from "../../modes/components/editor-top-gap";
+import { ExtensionWidgets } from "../../modes/components/extension-widgets";
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
@@ -34,7 +34,6 @@ import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../sessi
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "../../tools/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
-const MAX_WIDGET_LINES = 10;
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
@@ -71,8 +70,7 @@ function toWireSelectOptions(options: ExtensionUISelectItem[]): CollabUiSelectIt
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
 	#composerShapeDisposers: Array<() => void> = [];
-	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
-	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
+	readonly #hookWidgets: ExtensionWidgets;
 	// Single-file dialog surface (`editorContainer` + focus) is shared by the
 	// selector / input / editor modals, so only one may be presented at a time;
 	// the rest queue. See `#presentDialog`.
@@ -84,7 +82,9 @@ export class ExtensionUiController {
 	 * call with the same picker/dialog primitives a live tool call would get.
 	 */
 	#toolUIContext: ExtensionUIContext | undefined;
-	constructor(private ctx: InteractiveModeContext) {}
+	constructor(private ctx: InteractiveModeContext) {
+		this.#hookWidgets = new ExtensionWidgets(ctx.ui);
+	}
 
 	#syncExtensionComposerShapes(): void {
 		this.disposeComposerShapes();
@@ -331,58 +331,25 @@ export class ExtensionUiController {
 	}
 
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void {
-		const placement = options?.placement ?? "aboveEditor";
-		this.#removeHookWidget(this.#hookWidgetsAbove, key);
-		this.#removeHookWidget(this.#hookWidgetsBelow, key);
-
-		if (content === undefined) {
-			this.#rebuildHookWidgets();
-			return;
-		}
-
-		const target = placement === "belowEditor" ? this.#hookWidgetsBelow : this.#hookWidgetsAbove;
-		target.set(key, this.#createHookWidget(content));
+		this.#hookWidgets.setWidget(key, content, options);
 		this.#rebuildHookWidgets();
 	}
 
-	#removeHookWidget(widgets: Map<string, ExtensionUiComponent>, key: string): void {
-		const existing = widgets.get(key);
-		existing?.dispose?.();
-		widgets.delete(key);
-	}
-
-	#createHookWidget(content: ExtensionWidgetContent): ExtensionUiComponent {
-		if (Array.isArray(content)) {
-			const container = new Container();
-			for (const line of content.slice(0, MAX_WIDGET_LINES)) {
-				container.addChild(new Text(line, 1, 0));
-			}
-			if (content.length > MAX_WIDGET_LINES) {
-				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
-			}
-			return container;
-		}
-		if (content === undefined) {
-			throw new Error("Widget content missing");
-		}
-		return content(this.ctx.ui, theme);
-	}
-
 	#rebuildHookWidgets(): void {
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgetsAbove, true, true);
-		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgetsBelow, false, false);
+		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgets.above, true, true);
+		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgets.below, false, false);
 		this.ctx.ui.requestRender();
 	}
 
 	#renderHookWidgetContainer(
 		container: Container,
-		widgets: Map<string, ExtensionUiComponent>,
+		widgets: Container,
 		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
 		container.clear();
 
-		if (widgets.size === 0) {
+		if (widgets.children.length === 0) {
 			if (spacerWhenEmpty) {
 				container.addChild(new EditorTopGap(() => this.ctx.statusRowOccupied));
 			}
@@ -392,7 +359,7 @@ export class ExtensionUiController {
 		if (leadingSpacer) {
 			container.addChild(new Spacer(1));
 		}
-		for (const widget of widgets.values()) {
+		for (const widget of widgets.children) {
 			container.addChild(widget);
 		}
 	}
@@ -1198,14 +1165,7 @@ export class ExtensionUiController {
 	}
 
 	clearHookWidgets(): void {
-		for (const widget of this.#hookWidgetsAbove.values()) {
-			widget.dispose?.();
-		}
-		for (const widget of this.#hookWidgetsBelow.values()) {
-			widget.dispose?.();
-		}
-		this.#hookWidgetsAbove.clear();
-		this.#hookWidgetsBelow.clear();
+		this.#hookWidgets.clear();
 		this.#rebuildHookWidgets();
 	}
 

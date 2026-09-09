@@ -49,6 +49,8 @@ import type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
+	ExtensionWidgetContent,
+	ExtensionWidgetOptions,
 	InputEvent,
 	InputEventResult,
 	McpNotificationEvent,
@@ -82,6 +84,9 @@ interface BeforeAgentStartCombinedResult {
 }
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+
+/** Session-owned presentation can be observed without granting an interactive UI host. */
+export type ExtensionPresentationSink = Pick<ExtensionUIContext, "setWidget" | "setStatus">;
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
@@ -443,6 +448,27 @@ interface ToolRegistrationScope {
 
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
+	#hasUI = false;
+	readonly #widgets = new Map<
+		string,
+		{ content: Exclude<ExtensionWidgetContent, undefined>; options?: ExtensionWidgetOptions }
+	>();
+	readonly #statuses = new Map<string, string>();
+	readonly #presentationSinks = new Set<ExtensionPresentationSink>();
+	#widgetHost: ExtensionUIContext["setWidget"] = noOpUIContext.setWidget;
+	#statusHost: ExtensionUIContext["setStatus"] = noOpUIContext.setStatus;
+	readonly #publishWidget: ExtensionUIContext["setWidget"] = (key, content, options) => {
+		if (content === undefined) this.#widgets.delete(key);
+		else this.#widgets.set(key, { content: Array.isArray(content) ? [...content] : content, options });
+		this.#widgetHost(key, content, options);
+		for (const sink of this.#presentationSinks) sink.setWidget(key, content, options);
+	};
+	readonly #publishStatus: ExtensionUIContext["setStatus"] = (key, text) => {
+		if (text === undefined) this.#statuses.delete(key);
+		else this.#statuses.set(key, text);
+		this.#statusHost(key, text);
+		for (const sink of this.#presentationSinks) sink.setStatus(key, text);
+	};
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	#errorListeners: Set<ExtensionErrorListener> = new Set();
@@ -616,7 +642,7 @@ export class ExtensionRunner {
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
 	) {
-		this.#uiContext = noOpUIContext;
+		this.#uiContext = this.#withPresentation(noOpUIContext);
 		this.#getMemoryFn = getMemory;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 	}
@@ -706,7 +732,8 @@ export class ExtensionRunner {
 			this.#compactFn = commandContextActions.compact;
 		}
 
-		this.#uiContext = uiContext ?? noOpUIContext;
+		this.#uiContext = this.#withPresentation(uiContext ?? noOpUIContext);
+		this.#hasUI = uiContext !== undefined;
 		this.#mode = mode;
 		this.#initialized = true;
 
@@ -886,8 +913,33 @@ export class ExtensionRunner {
 		return this.#uiContext;
 	}
 
+	/** Replay current presentation, then follow changes until this view detaches. */
+	observePresentation(sink: ExtensionPresentationSink): () => void {
+		this.#presentationSinks.add(sink);
+		try {
+			for (const [key, widget] of this.#widgets) sink.setWidget(key, widget.content, widget.options);
+			for (const [key, text] of this.#statuses) sink.setStatus(key, text);
+		} catch (error) {
+			this.#presentationSinks.delete(sink);
+			throw error;
+		}
+		return () => {
+			this.#presentationSinks.delete(sink);
+		};
+	}
+
+	#withPresentation(host: ExtensionUIContext): ExtensionUIContext {
+		// Preserve host prototype methods and live getters (theme, dialog capabilities).
+		const ui = Object.create(host) as ExtensionUIContext;
+		if (host.setWidget !== this.#publishWidget) this.#widgetHost = host.setWidget.bind(host);
+		if (host.setStatus !== this.#publishStatus) this.#statusHost = host.setStatus.bind(host);
+		ui.setWidget = this.#publishWidget;
+		ui.setStatus = this.#publishStatus;
+		return ui;
+	}
+
 	hasUI(): boolean {
-		return this.#uiContext !== noOpUIContext;
+		return this.#hasUI;
 	}
 
 	getExtensionPaths(): string[] {

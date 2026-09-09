@@ -11,7 +11,6 @@ import {
 	type MouseRoutable,
 	matchesKey,
 	normalizeTextSelection,
-	renderTargeted,
 	routeSgrMouseInput,
 	ScrollView,
 	type SgrMouseEvent,
@@ -52,6 +51,8 @@ export interface ChatTranscriptPaneOptions {
 	initialEntryId?: string;
 	editor?: ChatTranscriptPaneEditorOptions;
 	expandKeys: readonly KeyId[];
+	aboveEditor?: Component;
+	belowEditor?: Component;
 	getHeaderLines?: () => readonly string[];
 	getFooterLines?: () => readonly string[];
 	getHint?: (hasEditor: boolean) => string;
@@ -217,6 +218,8 @@ export class ChatTranscriptPane
 	containsComponent(component: Component): boolean {
 		return (
 			(this.#editor !== undefined && componentContains(this.#editor, component)) ||
+			(this.options.aboveEditor !== undefined && componentContains(this.options.aboveEditor, component)) ||
+			(this.options.belowEditor !== undefined && componentContains(this.options.belowEditor, component)) ||
 			componentContains(this.#builder.container, component)
 		);
 	}
@@ -418,7 +421,7 @@ export class ChatTranscriptPane
 		const contentWidth = Math.max(1, width - 1);
 		const notice = this.#notice ?? this.options.getNotice?.();
 		const noticeLine = notice ? ` ${theme.fg("error", sanitizeNotice(notice, Math.max(10, width - 2)))}` : undefined;
-		const editorLines = this.#editor ? this.#editor.render(width) : [];
+		const editorLines = this.#renderEditor(width);
 		const viewportHeight = this.#contentViewportHeight(editorLines, noticeLine);
 		let scrollOffset = this.#scrollView.getScrollOffset();
 		if (this.#initialEntryId) {
@@ -445,6 +448,14 @@ export class ChatTranscriptPane
 		return this.#renderFrame(width, contentLines, editorLines, noticeLine, virtualFrame);
 	}
 
+	#renderEditor(width: number): readonly string[] {
+		return [
+			...(this.options.aboveEditor?.render(width) ?? []),
+			...(this.#editor?.render(width) ?? []),
+			...(this.options.belowEditor?.render(width) ?? []),
+		].map(line => truncateToWidth(replaceTabs(line), width));
+	}
+
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
 		const termHeight = this.#viewportHeight ?? (process.stdout.rows || 40);
 		if (
@@ -458,7 +469,11 @@ export class ChatTranscriptPane
 		const contentTargets: Component[] = [];
 		const editorTargets: Component[] = [];
 		for (const target of targets) {
-			if (this.#editor !== undefined && componentContains(this.#editor, target)) {
+			if (
+				(this.#editor !== undefined && componentContains(this.#editor, target)) ||
+				(this.options.aboveEditor && componentContains(this.options.aboveEditor, target)) ||
+				(this.options.belowEditor && componentContains(this.options.belowEditor, target))
+			) {
 				editorTargets.push(target);
 			} else if (componentContains(this.#builder.container, target)) {
 				contentTargets.push(target);
@@ -467,10 +482,7 @@ export class ChatTranscriptPane
 			}
 		}
 		const contentWidth = Math.max(1, width - 1);
-		const editorLines =
-			editorTargets.length > 0 && this.#editor
-				? renderTargeted(this.#editor, width, editorTargets)
-				: this.#cachedEditorLines;
+		const editorLines = editorTargets.length > 0 ? this.#renderEditor(width) : this.#cachedEditorLines;
 		const viewportHeight = this.#contentViewportHeight(editorLines, this.#cachedNoticeLine);
 		let virtualFrame: VirtualViewportFrame | undefined;
 		if (!this.#builder.isEmpty) {
@@ -583,6 +595,8 @@ export class ChatTranscriptPane
 		this.#builder.container.invalidate();
 		this.#editor?.invalidate?.();
 		this.#scrollView.invalidate?.();
+		this.options.aboveEditor?.invalidate?.();
+		this.options.belowEditor?.invalidate?.();
 	}
 
 	dispose(): void {

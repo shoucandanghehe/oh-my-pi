@@ -573,6 +573,8 @@ Current no-op methods in this controller:
 
 `setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines). `setEditorText` and `pasteToEditor` schedule a repaint after mutating the editor, so prompt changes don't leave stale content on screen.
 
+Local agent panes render that session's `setWidget` declarations and `setStatus` values, not Main's. Widget factories receive the live TUI, and `requestComponentRender()` updates the owning pane. Closing a pane disposes its widget instances; reopening replays the current declarations and creates fresh instances. A revived session binds to its new runner, without retaining the previous runner's widgets.
+
 `askDialog` races the host TUI against a connected collaboration guest. Use
 `localAskDialog` for approvals or other decisions that must be answered on the
 host terminal: it has the same questions, result, timeout, and abort contract as
@@ -606,7 +608,7 @@ Unsupported/no-op in RPC implementation:
 
 ### Print/headless/subagent paths
 
-When no UI context is supplied to runner init, `ctx.hasUI` is `false` and methods are no-op/default-returning.
+When no UI context is supplied to runner init, `ctx.hasUI` remains `false`: a transcript pane does not grant an interactive dialog host. `setWidget` and `setStatus` retain session-local presentation for an attached local pane, even when called before that pane opens. Other methods remain no-op/default-returning. Presentation is not persisted across process restarts or transported to remote panes.
 `localAskDialog` is unavailable, so extensions that require a host-local answer must fail closed.
 
 ### ACP mode

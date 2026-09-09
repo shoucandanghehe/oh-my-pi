@@ -61,6 +61,7 @@
 ### Fixed
 
 - Fixed automatic recovery from proxied Python HTTP/2 stream resets and HTTP/1.1 chunked response interruptions, including continuation after completed tool calls ([#11160](https://github.com/can1357/oh-my-pi/pull/11160) by [@cyriusweng](https://github.com/cyriusweng)).
+- Local agent panes now display their own extension widgets and statuses, including live TPS widgets, with cleanup on close and restoration on reopen.
 - Agent transcripts now open as ordinary draggable, resizable workspace panes without an enclosing Agents pane or a two-pane limit; automatic placement follows available space and preserves manually arranged panes.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 - Unset `tiny` model roles now honor the configured `@smol` fallback in direct execution and the `/models` Roles view ([#11311](https://github.com/can1357/oh-my-pi/issues/11311)).

@@ -80,6 +80,22 @@ function makeComponent(statusLineSettings: StatusLineSettings): StatusLineCompon
 }
 
 describe("StatusLineComponent effective settings cache", () => {
+	it("keeps extension statuses session-local while mirroring the same session", () => {
+		const session = makeSession("Main");
+		const main = statusLines.track(new StatusLineComponent(session));
+		main.updateSettings({ preset: "custom", leftSegments: ["status"], rightSegments: [], showHookStatus: false });
+		main.setHookStatus("rate", "main-only-rate");
+		const other = statusLines.track(main.createPeer(makeSession("Child")));
+		const same = statusLines.track(main.createPeer(session));
+		expect(stripVTControlCharacters(other.getTopBorder(160).content)).not.toContain("main-only-rate");
+		expect(stripVTControlCharacters(same.getTopBorder(160).content)).toContain("main-only-rate");
+		other.setHookStatus("rate", "child-only-rate");
+		main.setHookStatus("rate", "main-updated-rate");
+		expect(stripVTControlCharacters(other.getTopBorder(160).content)).toContain("child-only-rate");
+		expect(stripVTControlCharacters(other.getTopBorder(160).content)).not.toContain("main-updated-rate");
+		expect(stripVTControlCharacters(main.getTopBorder(160).content)).not.toContain("child-only-rate");
+	});
+
 	it("keeps repeated cached renders byte-identical across presets and widths", () => {
 		const cases: StatusLineSettings[] = [
 			{ preset: "default", sessionAccent: false },
