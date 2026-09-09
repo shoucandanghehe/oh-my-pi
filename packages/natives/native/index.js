@@ -37,12 +37,14 @@ export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback;
 export const PowerAssertion = nativeBindings.PowerAssertion;
 export const Process = nativeBindings.Process;
 export const PtySession = nativeBindings.PtySession;
+export const RowMeasurement = nativeBindings.RowMeasurement;
 export const Shell = nativeBindings.Shell;
 export const TextPredictor = nativeBindings.TextPredictor;
 export const TtyWriter = nativeBindings.TtyWriter;
 export const VcsGitRepo = nativeBindings.VcsGitRepo;
 export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace;
 export const VcsRepo = nativeBindings.VcsRepo;
+export const WrappedText = nativeBindings.WrappedText;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");
