@@ -519,6 +519,26 @@ describe("TranscriptContainer", () => {
 		expect(transcript.blockStates()).toEqual(["committed", "active"]);
 	});
 
+	it("keeps targeted updates attached to their block after a preceding snapshot is removed", () => {
+		const transcript = new TranscriptContainer();
+		const kept = new Block(["kept"], true);
+		const removed = new Block(["superseded snapshot"], true);
+		const tail = new Block(["old tail"], false);
+		const nested = new Container();
+		nested.addChild(tail);
+		transcript.addChild(kept);
+		transcript.addChild(removed);
+		transcript.addChild(nested);
+		const viewport = { rows: 8, offset: 0, followBottom: false };
+		transcript.renderVirtualViewportTargeted(80, viewport, [tail]);
+
+		transcript.removeChild(removed);
+		tail.update(["new tail"]);
+		expect(transcript.renderVirtualViewportTargeted(80, viewport, [tail]).lines).toEqual(["kept", "", "new tail"]);
+		transcript.removeChild(nested);
+		expect(transcript.renderVirtualViewport(80, viewport).lines).toEqual(["kept"]);
+	});
+
 	it("replays committed history without rewinding lifecycle state", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new Block(["final"], true));

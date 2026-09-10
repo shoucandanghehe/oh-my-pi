@@ -97,7 +97,11 @@ export class ChatTranscriptBuilder {
 	#entryComponents = new Map<string, Component[]>();
 	#streamingAssistantComponent: AssistantMessageComponent | undefined;
 
-	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
+	constructor(
+		private readonly deps: ChatTranscriptBuilderDeps,
+		private readonly previousUsage?: Usage,
+	) {
+		this.#lastAssistantUsage = previousUsage;
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
 	}
 
@@ -187,6 +191,15 @@ export class ChatTranscriptBuilder {
 		return undefined;
 	}
 
+	/** Close a detached replay at the next user-turn boundary without appending that prompt. */
+	finishReplayTurn(): void {
+		this.#flushPendingUsage();
+		this.#readGroup?.seal();
+		this.#readGroup = null;
+		this.#resolveWaitingPoll();
+		this.#resolveTodoSnapshot();
+	}
+
 	/** Tear down components (sealing pending spinners) and clear build state. */
 	reset(): void {
 		for (const pending of this.#pendingTools.values()) pending.seal();
@@ -200,7 +213,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingReadUsageCallIds = undefined;
 		this.#pendingUsageElapsedMs = undefined;
 		this.#turnStartedAt = undefined;
-		this.#lastAssistantUsage = undefined;
+		this.#lastAssistantUsage = this.previousUsage;
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
 		this.#streamingAssistantComponent = undefined;
