@@ -264,10 +264,16 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	}
 
 	override removeChild(component: Component): void {
-		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
+		const index = this.children.indexOf(component);
+		if (index < 0 || !this.canRemoveBlock(component)) return;
 		super.removeChild(component);
-		this.#entries = this.#entries.filter(candidate => candidate.component !== component);
-		this.#directChildIndices = new Map(this.children.map((child, index) => [child, index]));
+		this.#entries.splice(index, 1);
+		this.#directChildIndices.delete(component);
+		// Superseded poll/todo cards are usually near the tail. Preserve the
+		// unchanged prefix instead of allocating a full-history index per removal.
+		for (let shifted = index; shifted < this.children.length; shifted++) {
+			this.#directChildIndices.set(this.children[shifted]!, shifted);
+		}
 		this.#targetOwnerIndices = new WeakMap();
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
@@ -924,6 +930,19 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	override getEstimatedVirtualRows(width: number): number {
 		this.#syncVirtualEntries(Math.max(1, width));
 		return this.#virtualTotalRows;
+	}
+
+	/** Visible body range of direct children [from, to), using the virtual layout ledger. */
+	getVirtualRowRange(width: number, from: number, to: number): { start: number; end: number } | undefined {
+		this.#syncVirtualEntries(Math.max(1, width));
+		let first = from;
+		let last = Math.min(to, this.#virtualEntries.length) - 1;
+		while (first <= last && this.#virtualEntries[first]!.rowCount <= this.#virtualEntries[first]!.sep) first++;
+		while (last >= first && this.#virtualEntries[last]!.rowCount <= this.#virtualEntries[last]!.sep) last--;
+		if (first > last) return undefined;
+		const head = this.#virtualEntries[first]!;
+		const tail = this.#virtualEntries[last]!;
+		return { start: head.startRow + head.sep, end: tail.startRow + tail.rowCount };
 	}
 
 	override renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportFrame {

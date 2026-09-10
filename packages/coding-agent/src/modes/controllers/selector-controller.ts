@@ -1319,7 +1319,7 @@ export class SelectorController {
 			onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
 			onCancel: done,
 		});
-		if (selector.targetCount === 0) {
+		if (!selector.hasTargets) {
 			selector.dispose();
 			this.ctx.showStatus("No messages to branch from");
 			return;

@@ -4,12 +4,18 @@
  * map each rendered turn to a selectable target, and compose gutter-prefixed
  * columns with a dotted outline around the selected target.
  */
-import type { Component } from "@oh-my-pi/pi-tui";
+import type {
+	Component,
+	VirtualViewportFrame,
+	VirtualViewportProvider,
+	VirtualViewportRequest,
+} from "@oh-my-pi/pi-tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { type ThemeColor, theme } from "../theme/theme";
 import type { ChatTranscriptBuilder } from "./chat-transcript-builder";
 import { fit } from "./overlay-box";
+import type { TranscriptContainer } from "./transcript-container";
 import { isUsageRowBlock } from "./usage-row";
 
 /** One selectable transcript item: a message entry plus its rendered block range. */
@@ -211,6 +217,123 @@ export function composeOutlineColumn(
 		for (const row of childRows[index]!) lines.push(row ? `  ${row}` : row);
 	}
 	return { lines, selStart, selEnd };
+}
+
+export interface ViewportOutlineColumn extends VirtualViewportProvider {
+	readonly length: number;
+	readonly selStart: number;
+	readonly selEnd: number;
+}
+
+/** A column backed by the existing transcript viewport, not a full array of rendered history. */
+export class VirtualOutlineColumn implements ViewportOutlineColumn {
+	constructor(
+		readonly container: TranscriptContainer,
+		readonly from: number,
+		readonly to: number,
+		readonly target: OutlineTarget | undefined,
+		readonly width: number,
+		readonly header: readonly string[] = [],
+	) {}
+
+	get #inner(): number {
+		return Math.max(10, this.width - 4);
+	}
+
+	get #range(): { start: number; end: number } {
+		return this.container.getVirtualRowRange(this.#inner, this.from, this.to) ?? { start: 0, end: 0 };
+	}
+
+	get #selection(): { start: number; end: number } | undefined {
+		const target = this.target;
+		return target && target.start >= this.from && target.end <= this.to
+			? this.container.getVirtualRowRange(this.#inner, target.start, target.end)
+			: undefined;
+	}
+
+	get length(): number {
+		const range = this.#range;
+		return this.header.length + range.end - range.start + (this.#selection ? 2 : 0);
+	}
+
+	get selStart(): number {
+		const selection = this.#selection;
+		return selection ? this.header.length + selection.start - this.#range.start : -1;
+	}
+
+	get selEnd(): number {
+		const selection = this.#selection;
+		return selection ? this.header.length + selection.end - this.#range.start + 2 : -1;
+	}
+
+	hasVirtualViewport(): boolean {
+		return true;
+	}
+
+	getEstimatedVirtualRows(): number {
+		return this.length;
+	}
+
+	renderVirtualViewport(_width: number, request: VirtualViewportRequest): VirtualViewportFrame {
+		let offset = request.offset;
+		let lines: readonly string[] = [];
+		for (let pass = 0; pass < 3; pass++) {
+			const total = this.length;
+			offset = request.followBottom
+				? Math.max(0, total - request.rows)
+				: Math.max(0, Math.min(offset, Math.max(0, total - request.rows)));
+			lines = this.#slice(offset, offset + request.rows);
+			if (total === this.length) break;
+		}
+		return { lines, offset, estimatedTotalRows: this.length };
+	}
+
+	#slice(from: number, to: number): string[] {
+		const range = this.#range;
+		const selection = this.#selection;
+		const top = this.selStart;
+		const bottom = this.selEnd - 1;
+		const end = Math.min(to, this.length);
+		const lines: string[] = [];
+		let row = Math.max(0, from);
+		while (row < end) {
+			if (row < this.header.length) {
+				lines.push(this.header[row++]!);
+				continue;
+			}
+			if (selection && (row === top || row === bottom)) {
+				lines.push(
+					outlineRule(
+						row === top ? theme.boxRound.topLeft : theme.boxRound.bottomLeft,
+						row === top ? theme.boxRound.topRight : theme.boxRound.bottomRight,
+						this.#inner,
+					),
+				);
+				row++;
+				continue;
+			}
+			const beforeOutline = selection && row < top;
+			const insideOutline = selection && row > top && row < bottom;
+			const segmentEnd = Math.min(end, beforeOutline ? top : insideOutline ? bottom : end);
+			const offset =
+				range.start +
+				row -
+				this.header.length -
+				(selection && row > top ? 1 : 0) -
+				(selection && row > bottom ? 1 : 0);
+			const frame = this.container.renderVirtualViewport(this.#inner, {
+				offset,
+				rows: segmentEnd - row,
+				followBottom: false,
+			});
+			const vertical = theme.fg("accent", theme.boxDotted.vertical);
+			for (const text of stripPromptZones(frame.lines)) {
+				lines.push(insideOutline ? `${vertical} ${fit(text, this.#inner)} ${vertical}` : text ? `  ${text}` : "");
+			}
+			row = segmentEnd;
+		}
+		return lines;
+	}
 }
 
 /** Centered position rail for horizontally windowed content: `… ○ ◉ ○ …`. */
