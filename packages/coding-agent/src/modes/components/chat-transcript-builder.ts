@@ -65,6 +65,7 @@ export interface ChatTranscriptBuilderDeps {
 	/** Session-scoped resolved destinations for model-authored Markdown links. */
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
+	onVirtualLayoutUpdate?: (component: Component) => void;
 }
 
 /** Extracts the plain-text content of a user message (string or text blocks). */
@@ -77,7 +78,7 @@ function userMessageText(message: Extract<AgentMessage, { role: "user" }>): stri
 }
 
 export class ChatTranscriptBuilder {
-	readonly container = new TranscriptContainer();
+	readonly container: TranscriptContainer;
 	#pendingTools = new Map<string, ToolExecutionComponent | ReadToolGroupComponent>();
 	#readArgs = new Map<string, Record<string, unknown>>();
 	#readGroup: ReadToolGroupComponent | null = null;
@@ -101,6 +102,7 @@ export class ChatTranscriptBuilder {
 		private readonly deps: ChatTranscriptBuilderDeps,
 		private readonly previousUsage?: Usage,
 	) {
+		this.container = new TranscriptContainer(deps.onVirtualLayoutUpdate);
 		this.#lastAssistantUsage = previousUsage;
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
 	}

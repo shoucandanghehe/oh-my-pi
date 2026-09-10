@@ -32,6 +32,7 @@ import {
 	type TUI,
 	type ViewportHeightAware,
 	type WorkspacePaneHeaderProvider,
+	type VirtualRowAnchor,
 } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
@@ -456,6 +457,14 @@ export class AgentTranscriptViewer
 
 	getTextSelectionScrollOffset(row: number): number | undefined {
 		return this.#pane.getTextSelectionScrollOffset(row);
+	}
+
+	getTextSelectionAnchor(row: number): VirtualRowAnchor | undefined {
+		return this.#pane.getTextSelectionAnchor(row);
+	}
+
+	resolveTextSelectionAnchor(anchor: VirtualRowAnchor): number | undefined {
+		return this.#pane.resolveTextSelectionAnchor(anchor);
 	}
 
 	get autoCloseProtected(): boolean {

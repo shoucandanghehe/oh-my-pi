@@ -10,6 +10,7 @@
 
 use std::{
 	cell::RefCell,
+	rc::Rc,
 	sync::atomic::{AtomicU8, Ordering},
 };
 
@@ -1262,6 +1263,257 @@ pub fn wrap_text_with_ansi(text: JsString, width: u32, tab_width: u32) -> Result
 		.collect())
 }
 
+struct WrapMeasureToken {
+	end:            usize,
+	width:          usize,
+	whitespace:     bool,
+	restore_before: bool,
+}
+
+struct WrapMeasureLine {
+	end:   usize,
+	width: usize,
+}
+
+/// Prepared text for exact row measurement without allocating wrapped strings.
+///
+/// Tokenization and Unicode width measurement are reused across viewport
+/// widths.
+struct PreparedWrap {
+	source:         Vec<u16>,
+	token_text:     Vec<u16>,
+	tokens:         Vec<WrapMeasureToken>,
+	lines:          Vec<WrapMeasureLine>,
+	tab_width:      usize,
+	width_override: u8,
+	cached_rows:    Option<(usize, usize, u32)>,
+}
+
+impl PreparedWrap {
+	fn from_utf16(source: Vec<u16>, tab_width: usize) -> Self {
+		let mut text = Self {
+			source,
+			token_text: Vec::new(),
+			tokens: Vec::new(),
+			lines: Vec::new(),
+			tab_width,
+			width_override: 0,
+			cached_rows: None,
+		};
+		text.prepare();
+		text
+	}
+
+	fn prepare(&mut self) {
+		self.width_override = HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.load(Ordering::Relaxed);
+		self.token_text.clear();
+		self.tokens.clear();
+		self.lines.clear();
+		self.cached_rows = None;
+		let mut state = WrapState::new();
+		let mut line_with_prefix = Vec::new();
+		for line in self.source.split(|&unit| unit == b'\n' as u16) {
+			line_with_prefix.clear();
+			if !self.lines.is_empty() {
+				write_active_codes(&state, &mut line_with_prefix);
+			}
+			line_with_prefix.extend_from_slice(line);
+			let line_width = visible_width_u16(&line_with_prefix, self.tab_width);
+			let mut token_state = WrapState::new();
+			for token in split_into_tokens_with_ansi(&line_with_prefix) {
+				self.token_text.extend_from_slice(&token);
+				self.tokens.push(WrapMeasureToken {
+					end:            self.token_text.len(),
+					width:          visible_width_u16(&token, self.tab_width),
+					whitespace:     token_is_whitespace(&token),
+					restore_before: !token_state.sgr.is_empty() || token_state.hyperlink.is_some(),
+				});
+				update_state_from_text(&token, &mut token_state);
+			}
+			self
+				.lines
+				.push(WrapMeasureLine { end: self.tokens.len(), width: line_width });
+			update_state_from_text(line, &mut state);
+		}
+	}
+}
+
+impl PreparedWrap {
+	/// Exact length of `wrapTextWithAnsi(text, width, tabWidth)`.
+	fn measure_rows(&mut self, width: u32) -> u32 {
+		if self.width_override != HANGUL_COMPAT_JAMO_WIDTH_OVERRIDE.load(Ordering::Relaxed) {
+			self.prepare();
+		}
+		let width = width as usize;
+		if let Some((min, max, rows)) = self.cached_rows
+			&& (min..=max).contains(&width)
+		{
+			return rows;
+		}
+		// Intersect the width bounds of every branch taken below. All widths
+		// inside this interval produce the same wrap decisions, not an estimate.
+		let mut min_width = 0;
+		let mut max_width = u32::MAX as usize;
+		let mut total = 0;
+		let mut start = 0;
+		for line in &self.lines {
+			if line.width <= width {
+				min_width = min_width.max(line.width);
+				total += 1;
+				start = line.end;
+				continue;
+			}
+			max_width = max_width.min(line.width - 1);
+			let mut rows = 0;
+			let mut current_width = 0;
+			let mut has_bytes = false;
+			for index in start..line.end {
+				let token = &self.tokens[index];
+				if token.width > width && !token.whitespace {
+					min_width = width;
+					max_width = width;
+					if has_bytes {
+						rows += 1;
+						has_bytes = false;
+						current_width = 0;
+					}
+					let token_start = if index == 0 {
+						0
+					} else {
+						self.tokens[index - 1].end
+					};
+					// Reuse the painter's grapheme/OSC-66 breaker for overlong words.
+					// Restored styles are zero-width and cannot change their row count.
+					let broken = break_long_word(
+						&self.token_text[token_start..token.end],
+						width,
+						self.tab_width,
+						&mut WrapState::new(),
+					);
+					if let Some(last) = broken.last() {
+						rows += broken.len() - 1;
+						current_width = visible_width_u16(last, self.tab_width);
+						has_bytes = true;
+					}
+				} else {
+					if !token.whitespace {
+						min_width = min_width.max(token.width);
+					}
+					let needed = current_width + token.width;
+					if needed > width && current_width > 0 {
+						max_width = max_width.min(needed - 1);
+						rows += 1;
+						has_bytes = token.restore_before || !token.whitespace;
+						current_width = if token.whitespace { 0 } else { token.width };
+					} else {
+						if current_width > 0 {
+							min_width = min_width.max(needed);
+						}
+						has_bytes = true;
+						current_width = needed;
+					}
+				}
+			}
+			total += (rows + usize::from(has_bytes)).max(1);
+			start = line.end;
+		}
+		self.cached_rows = Some((min_width, max_width, total as u32));
+		total as u32
+	}
+}
+
+/// Prepared text whose wrap data can also be shared by a composed row
+/// measurement.
+#[napi]
+pub struct WrappedText {
+	data: Rc<RefCell<PreparedWrap>>,
+}
+
+#[napi]
+impl WrappedText {
+	#[napi(constructor)]
+	pub fn new(text: JsString, tab_width: u32) -> Result<Self> {
+		Ok(Self {
+			data: Rc::new(RefCell::new(PreparedWrap::from_utf16(
+				js::utf16(text)?.to_vec(),
+				clamp_tab_width_for_ops(tab_width),
+			))),
+		})
+	}
+
+	/// Exact length of `wrapTextWithAnsi(text, width, tabWidth)`.
+	#[napi]
+	pub fn measure_rows(&self, width: u32) -> u32 {
+		self.data.borrow_mut().measure_rows(width)
+	}
+}
+
+struct RowMeasurePart {
+	text:  Rc<RefCell<PreparedWrap>>,
+	inset: u32,
+}
+
+struct RowMeasurePlan {
+	parts:      Vec<RowMeasurePart>,
+	fixed_rows: f64,
+}
+
+impl RowMeasurePlan {
+	fn measure(&self, width: u32) -> f64 {
+		let mut rows = self.fixed_rows;
+		for part in &self.parts {
+			rows += f64::from(
+				part
+					.text
+					.borrow_mut()
+					.measure_rows(width.saturating_sub(part.inset).max(1)),
+			);
+		}
+		rows
+	}
+}
+
+/// Immutable sum of exact text measurements and fixed rows, with a shared width
+/// inset.
+#[napi]
+pub struct RowMeasurement {
+	plan: Rc<RowMeasurePlan>,
+}
+
+#[napi]
+#[allow(clippy::use_self, reason = "napi ClassInstance arguments must name the exported class")]
+impl RowMeasurement {
+	#[napi(constructor)]
+	pub fn new(
+		texts: Vec<ClassInstance<WrappedText>>,
+		children: Vec<ClassInstance<RowMeasurement>>,
+		horizontal_inset: u32,
+		fixed_rows: f64,
+	) -> Self {
+		let mut plan = RowMeasurePlan { parts: Vec::new(), fixed_rows };
+		for text in texts {
+			plan
+				.parts
+				.push(RowMeasurePart { text: Rc::clone(&text.data), inset: horizontal_inset });
+		}
+		for child in children {
+			plan.fixed_rows += child.plan.fixed_rows;
+			for part in &child.plan.parts {
+				plan.parts.push(RowMeasurePart {
+					text:  Rc::clone(&part.text),
+					inset: part.inset.saturating_add(horizontal_inset),
+				});
+			}
+		}
+		Self { plan: Rc::new(plan) }
+	}
+
+	#[napi]
+	pub fn measure_rows(&self, width: u32) -> f64 {
+		self.plan.measure(width)
+	}
+}
+
 // ============================================================================
 // truncateToWidth
 // ============================================================================
@@ -1855,6 +2107,48 @@ mod tests {
 
 	fn to_u16(s: &str) -> Vec<u16> {
 		s.encode_utf16().collect()
+	}
+
+	#[test]
+	fn prepared_row_counts_match_painted_rows_across_wrap_boundaries() {
+		let fragments = [
+			"word",
+			" ",
+			"    ",
+			"\n",
+			"\t",
+			"界中文",
+			"e\u{301}",
+			"👩‍💻",
+			"\x1b[31m",
+			"\x1b[0m",
+			"\x1b[9m",
+			"\x1b]8;;https://example.com\x07link",
+			"\x1b]8;;\x07",
+			"\x1b_pi:c\x07",
+			"\x1b]66;s=2;大字\x07",
+			"abcdefghijklmnopqrstuvwxyz",
+			"\x1b\u{1}",
+		];
+		let mut seed = 12345u32;
+		for length in 0..128 {
+			let mut text = String::new();
+			for _ in 0..length {
+				seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+				text.push_str(fragments[seed as usize % fragments.len()]);
+			}
+			let source = to_u16(&text);
+			for tab_width in [1, 3, 8] {
+				let mut prepared = PreparedWrap::from_utf16(source.clone(), tab_width);
+				for width in (0..=40).chain((0..40).rev()) {
+					assert_eq!(
+						prepared.measure_rows(width) as usize,
+						wrap_text_with_ansi_impl(&source, width as usize, tab_width).len(),
+						"width={width}, tab_width={tab_width}, text={text:?}",
+					);
+				}
+			}
+		}
 	}
 
 	#[test]

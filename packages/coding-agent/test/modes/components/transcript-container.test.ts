@@ -7,6 +7,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { highlightCode, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
+import { waitForImmediate } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "../../helpers/agent-session-setup";
 
 class Block implements Component {
 	#rows: string[];
@@ -164,9 +166,46 @@ class CountingFinalizedBlock implements Component {
 	}
 }
 
+class ProgressiveBlock implements Component {
+	#version = 0;
+	measureCount = 0;
+	renderCount = 0;
+	lastMeasuredWidth = 0;
+
+	constructor(
+		readonly id: number,
+		private height: number,
+	) {}
+
+	updateHeight(height: number): void {
+		this.height = height;
+		this.#version++;
+	}
+
+	getTranscriptBlockVersion(): number {
+		return this.#version;
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	measureRows(width: number): number {
+		this.measureCount++;
+		this.lastMeasuredWidth = width;
+		return this.height + (width < 60 ? 2 : 0);
+	}
+
+	render(width: number): readonly string[] {
+		this.renderCount++;
+		return Array.from({ length: this.height + (width < 60 ? 2 : 0) }, (_, row) => `${this.id}:${row}`);
+	}
+}
+
 class HighlightedFinalizedBlock implements Component {
 	coloredMeasureCount = 0;
 	measureCount = 0;
+	renderCount = 0;
 	readonly #code: string;
 
 	constructor(index: number) {
@@ -188,6 +227,7 @@ class HighlightedFinalizedBlock implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		this.renderCount++;
 		return highlightCode(`${this.#code}\n# width ${width}`, "python");
 	}
 }
@@ -604,6 +644,154 @@ describe("TranscriptContainer", () => {
 });
 
 describe("TranscriptContainer virtual viewport", () => {
+	it("paints the tail first and rejects stale background versions and widths", async () => {
+		const heights = Array.from({ length: 256 }, (_, index) => 1 + (index % 4));
+		const blocks = heights.map((height, index) => new ProgressiveBlock(index, height));
+		let requested = false;
+		const transcript = new TranscriptContainer(() => {
+			requested = true;
+		});
+		for (const block of blocks) transcript.addChild(block);
+		let width = 80;
+		let frame = transcript.renderVirtualViewport(width, { rows: 8, offset: 0, followBottom: true });
+		try {
+			expect(frame.lines.at(-1)).toBe("255:3");
+			expect(blocks.reduce((sum, block) => sum + block.measureCount, 0)).toBe(0);
+			expect(blocks.reduce((sum, block) => sum + block.renderCount, 0)).toBeLessThan(64);
+
+			const changed = blocks[225]!;
+			for (let turn = 0; turn < 16 && changed.measureCount === 0; turn++) await waitForImmediate();
+			expect(changed.measureCount).toBeGreaterThan(0);
+			changed.updateHeight(17);
+			heights[225] = 17;
+			frame = transcript.renderVirtualViewport(width, { rows: 8, offset: frame.offset, followBottom: false });
+			const anchorLine = frame.lines[0];
+			const expected = heights.reduce((sum, height) => sum + height, 0) + blocks.length - 1;
+			for (let turn = 0; turn < 128; turn++) {
+				await waitForImmediate();
+				if (requested) {
+					requested = false;
+					frame = transcript.renderVirtualViewport(width, { rows: 8, offset: frame.offset, followBottom: false });
+					expect(frame.lines[0]).toBe(anchorLine);
+				}
+				if (frame.estimatedTotalRows === expected && changed.measureCount >= 2) break;
+			}
+			expect(changed.measureCount).toBeGreaterThanOrEqual(2);
+			expect(frame.estimatedTotalRows).toBe(expected);
+
+			width = 40;
+			frame = transcript.renderVirtualViewport(width, { rows: 8, offset: frame.offset, followBottom: false });
+			for (let turn = 0; turn < 128; turn++) {
+				await waitForImmediate();
+				if (requested) {
+					requested = false;
+					frame = transcript.renderVirtualViewport(width, { rows: 8, offset: frame.offset, followBottom: false });
+				}
+				if (frame.estimatedTotalRows === expected + blocks.length * 2 && blocks[0]!.lastMeasuredWidth === width)
+					break;
+			}
+			expect(frame.estimatedTotalRows).toBe(expected + blocks.length * 2);
+			expect(blocks[0]!.lastMeasuredWidth).toBe(width);
+			expect(frame.lines[0]).toBe(anchorLine);
+		} finally {
+			transcript.dispose();
+			await waitForImmediate();
+		}
+	});
+
+	it("cancels outstanding layout on clear and disposal without touching replacement content", async () => {
+		let notifications = 0;
+		const transcript = new TranscriptContainer(() => {
+			notifications++;
+		});
+		const blocks = Array.from({ length: 512 }, (_, index) => new ProgressiveBlock(index, 3));
+		for (const block of blocks) transcript.addChild(block);
+		transcript.renderVirtualViewport(80, { rows: 8, offset: 0, followBottom: true });
+		await waitForImmediate();
+		const measured = blocks.reduce((sum, block) => sum + block.measureCount, 0);
+		expect(measured).toBeGreaterThan(0);
+		expect(measured).toBeLessThan(blocks.length);
+		transcript.clear();
+		transcript.addChild(new ProgressiveBlock(999, 2));
+		const replacement = transcript.renderVirtualViewport(80, { rows: 8, offset: 0, followBottom: true });
+		expect(replacement.lines).toEqual(["999:0", "999:1"]);
+		transcript.dispose();
+		const notified = notifications;
+		for (let turn = 0; turn < 8; turn++) await waitForImmediate();
+		expect(blocks.reduce((sum, block) => sum + block.measureCount, 0)).toBe(measured);
+		expect(notifications).toBe(notified);
+	});
+
+	it("skips measured zero-height history when filling the visible window", async () => {
+		const transcript = new TranscriptContainer(() => {});
+		const head = new CountingFinalizedBlock(["head"]);
+		const empty = Array.from({ length: 512 }, () => new CountingFinalizedBlock([]));
+		const tail = new CountingFinalizedBlock(["tail"]);
+		const blocks = [head, ...empty, tail];
+		for (const block of blocks) transcript.addChild(block);
+		try {
+			const first = transcript.renderVirtualViewport(80, { rows: 8, offset: 0, followBottom: true });
+			expect(first.lines.at(-1)).toBe("tail");
+			for (let turn = 0; turn < 128 && blocks.some(block => block.measureCount + block.renderCount === 0); turn++) {
+				await waitForImmediate();
+			}
+			expect(blocks.every(block => block.measureCount + block.renderCount > 0)).toBe(true);
+			let frame = first;
+			for (let turn = 0; turn < 16; turn++) {
+				const renders = empty.reduce((sum, block) => sum + block.renderCount, 0);
+				frame = transcript.renderVirtualViewport(80, { rows: 8, offset: 0, followBottom: true });
+				if (frame.estimatedTotalRows === 3) {
+					expect(empty.reduce((sum, block) => sum + block.renderCount, 0)).toBe(renders);
+					if (frame.lines[0] === "head") break;
+				}
+				await waitForImmediate();
+			}
+			expect(frame.lines).toEqual(["head", "", "tail"]);
+		} finally {
+			transcript.dispose();
+			await waitForImmediate();
+		}
+	});
+
+	it("keeps exact rows after resizing, updating, removing and adopting prepared history", async () => {
+		await initTheme(false);
+		const messages = Array.from({ length: 40 }, (_, index) =>
+			createAssistantMessage(`Message ${index}: **stable content** with 中文. ${"Wrapped history. ".repeat(8)}`),
+		);
+		const blocks = messages.map(message => {
+			const block = new AssistantMessageComponent(message);
+			block.markTranscriptBlockFinalized();
+			return block;
+		});
+		let transcript = new TranscriptContainer();
+		for (const block of blocks) transcript.addChild(block);
+		const tail = { rows: 10, offset: 0, followBottom: true };
+		transcript.renderVirtualViewport(80, tail);
+
+		const verify = (width: number): void => {
+			const cold = new TranscriptContainer();
+			for (const message of messages) {
+				const block = new AssistantMessageComponent(message);
+				block.markTranscriptBlockFinalized();
+				cold.addChild(block);
+			}
+			const viewport = { rows: 10_000, offset: 0, followBottom: false };
+			expect(transcript.renderVirtualViewport(width, viewport)).toEqual(cold.renderVirtualViewport(width, viewport));
+		};
+		verify(48);
+		messages[0] = createAssistantMessage("Updated first block. ".repeat(30));
+		blocks[0]!.updateContent(messages[0]!);
+		transcript.renderVirtualViewportTargeted(48, tail, [blocks[0]!]);
+		verify(70);
+		transcript.removeChild(blocks[3]!);
+		messages.splice(3, 1);
+		verify(38);
+		const adopted = new TranscriptContainer();
+		adopted.adoptContentsFrom(transcript);
+		transcript = adopted;
+		verify(90);
+	});
+
 	it("renders only the visible tail and overscan from estimated history", () => {
 		const blocks = Array.from(
 			{ length: 10_000 },
@@ -702,7 +890,7 @@ describe("TranscriptContainer virtual viewport", () => {
 		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBe(rendersAfterFrame);
 	});
 
-	it("adopts a prepared large transcript without a cold first-frame rebuild", () => {
+	it("adopts a prepared large transcript without a cold first-frame rebuild", async () => {
 		const blocks = Array.from(
 			{ length: 100_000 },
 			(_value, index) => new CountingFinalizedBlock([`history-${index}`]),
@@ -710,21 +898,25 @@ describe("TranscriptContainer virtual viewport", () => {
 		const staged = new TranscriptContainer();
 		for (const block of blocks) staged.addChild(block);
 		staged.prepareVirtualStructure();
-		const transcript = new TranscriptContainer();
+		const transcript = new TranscriptContainer(() => {});
 		transcript.adoptContentsFrom(staged);
-
-		const startedAt = performance.now();
-		const rendered = transcript.renderVirtualViewport(80, {
-			rows: 40,
-			offset: 0,
-			followBottom: true,
-		});
-		const frameCost = performance.now() - startedAt;
-
-		expect(staged.children).toHaveLength(0);
-		expect(rendered.lines.at(-1)).toBe("history-99999");
-		expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(40);
-		expect(frameCost).toBeLessThan(10);
+		try {
+			const startedAt = performance.now();
+			const rendered = transcript.renderVirtualViewport(80, {
+				rows: 40,
+				offset: 0,
+				followBottom: true,
+			});
+			const frameCost = performance.now() - startedAt;
+			expect(staged.children).toHaveLength(0);
+			expect(rendered.lines.at(-1)).toBe("history-99999");
+			expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(40);
+			expect(blocks.reduce((total, block) => total + block.measureCount, 0)).toBe(0);
+			expect(frameCost).toBeLessThan(10);
+		} finally {
+			transcript.dispose();
+			await waitForImmediate();
+		}
 	});
 
 	it("does not add a phantom separator after measuring empty history", () => {
@@ -784,22 +976,30 @@ describe("TranscriptContainer virtual viewport", () => {
 	it("keeps syntax-highlighted history reflow within the interactive resize budget", async () => {
 		await initTheme(false);
 		const blocks = Array.from({ length: 100 }, (_value, index) => new HighlightedFinalizedBlock(index));
-		const transcript = new TranscriptContainer();
+		const transcript = new TranscriptContainer(() => {});
 		for (const block of blocks) transcript.addChild(block);
-		const initial = transcript.renderVirtualViewport(160, { rows: 40, offset: 0, followBottom: true });
-		for (const block of blocks) {
-			block.measureCount = 0;
-			block.coloredMeasureCount = 0;
+		try {
+			const initial = transcript.renderVirtualViewport(160, { rows: 40, offset: 0, followBottom: true });
+			for (const block of blocks) {
+				block.measureCount = 0;
+				block.renderCount = 0;
+				block.coloredMeasureCount = 0;
+			}
+			const startedAt = performance.now();
+			const resized = transcript.renderVirtualViewport(140, { rows: 40, offset: 0, followBottom: true });
+			expect(performance.now() - startedAt).toBeLessThan(50);
+			expect(resized.estimatedTotalRows).toBe(initial.estimatedTotalRows);
+			expect(blocks.reduce((total, block) => total + block.measureCount, 0)).toBe(0);
+			for (let turn = 0; turn < 32 && blocks.some(block => block.measureCount + block.renderCount === 0); turn++) {
+				await waitForImmediate();
+			}
+			expect(blocks.every(block => block.measureCount + block.renderCount > 0)).toBe(true);
+			expect(blocks.reduce((total, block) => total + block.renderCount, 0)).toBeLessThan(20);
+			expect(blocks.reduce((total, block) => total + block.coloredMeasureCount, 0)).toBe(0);
+		} finally {
+			transcript.dispose();
+			await waitForImmediate();
 		}
-
-		const startedAt = performance.now();
-		const resized = transcript.renderVirtualViewport(140, { rows: 40, offset: 0, followBottom: true });
-		const resizeCost = performance.now() - startedAt;
-
-		expect(resized.estimatedTotalRows).toBe(initial.estimatedTotalRows);
-		expect(blocks.reduce((total, block) => total + block.measureCount, 0)).toBe(100);
-		expect(blocks.reduce((total, block) => total + block.coloredMeasureCount, 0)).toBe(0);
-		expect(resizeCost).toBeLessThan(50);
 	});
 
 	it("remeasures an offscreen targeted stream before the user scrolls back toward it", () => {

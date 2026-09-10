@@ -357,7 +357,10 @@ export class BtwController {
 				expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
 				hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 				proseOnlyThinking: () => this.ctx.proseOnlyThinking,
-				requestRender: () => this.ctx.ui.requestRender(),
+				requestRender: () => {
+					if (this.#workspacePane) this.ctx.ui.requestComponentRender(this.#workspacePane);
+					else this.ctx.ui.requestRender();
+				},
 				statusLine: this.ctx.statusLine.createPeer(this.ctx.session),
 				onSubmit: (input, images, key) => this.#submitPaneInput(manager, input, images, key),
 				onNewThread: () => this.#createChild(manager, "") !== undefined,
