@@ -1861,6 +1861,33 @@ describe("Layout-only row measurement", () => {
 		expect(markdown.render(24)).toHaveLength(measuredRows);
 		expect(styleCallCount).toBeGreaterThan(0);
 	});
+
+	it("keeps measured and painted rows exact across resize, source replacement, and finalization", () => {
+		const layoutTheme = {
+			...defaultMarkdownTheme,
+			highlightCodeForLayout: (code: string): string[] => code.split("\n"),
+		};
+		const markdown = new Markdown("", 1, 0, layoutTheme);
+		for (const [text, transient] of [
+			["A **styled paragraph** that wraps differently when the pane changes width.", true],
+			["[reference][target]\n\n[target]: https://example.com/long-destination", true],
+			["```ts\nconst value = 1;\n```", true],
+			["```ts\nconst value = 1;\n```", false],
+			["", true],
+		] as const) {
+			markdown.transientRenderCache = transient;
+			markdown.setText(text);
+			for (const width of [24, 60, 24]) {
+				clearRenderCache();
+				const expected = new Markdown(text, 1, 0, layoutTheme);
+				expected.transientRenderCache = transient;
+				const rows = expected.render(width);
+				clearRenderCache();
+				expect(markdown.measureRows(width)).toBe(rows.length);
+				expect(markdown.render(width)).toEqual(rows);
+			}
+		}
+	});
 });
 
 describe("Module-level LRU render cache", () => {

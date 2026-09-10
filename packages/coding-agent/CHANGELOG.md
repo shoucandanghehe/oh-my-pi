@@ -51,6 +51,8 @@
 ### Fixed
 
 - Double-Escape rewind opens quickly in long sessions, loading earlier turns and alternate branches as you navigate without discarding history.
+- Long app-viewport sessions restore and resize with visible content first, refining offscreen row counts in the background without shifting the reading position or text selection.
+- Reduced unrelated pane redraws during BTW, agent-transcript, and tool-progress updates.
 
 ## [18.1.16] - 2026-09-09
 

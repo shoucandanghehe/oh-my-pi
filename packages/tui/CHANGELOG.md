@@ -19,6 +19,12 @@
 ### Fixed
 
 - Workspace header clicks no longer initiate a pane drag from sub-cell pointer jitter.
+- Markdown-heavy views resize faster by reusing exact layout measurements.
+- App-viewport updates no longer wait for a fixed 30 FPS cadence; slow-frame and terminal-output backpressure remain in effect.
+
+### Added
+
+- Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
 
 ## [18.1.15] - 2026-09-08
 

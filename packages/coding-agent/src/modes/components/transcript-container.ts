@@ -1,9 +1,11 @@
+import type { RowMeasurement } from "@oh-my-pi/pi-natives";
 import type {
 	Component,
 	HistoryBatch,
 	TextSelectionRange,
 	VirtualViewportFrame,
 	VirtualViewportProvider,
+	VirtualRowAnchor,
 	VirtualViewportRequest,
 } from "@oh-my-pi/pi-tui";
 import {
@@ -11,9 +13,12 @@ import {
 	componentContains,
 	extractComponentTextSelection,
 	measureComponentRows,
+	getPaddingX,
+	getWidthConfigEpoch,
 	normalizeTextSelection,
+	TERMINAL,
 } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, waitForImmediate } from "@oh-my-pi/pi-utils";
 import { withCodeHighlightingDisabledForLayout } from "../theme/tui-adapters";
 import { isToolActivityComponent } from "./tool-activity";
 
@@ -116,16 +121,142 @@ interface VirtualBlockExtent {
 	component: Component;
 	contribution: readonly string[] | undefined;
 	rawRef: readonly string[] | undefined;
-	bodyRows: number;
 	measuredWidth: number;
 	measuredGeneration: number;
 	measuredVersion: number | undefined;
 	layoutWidth: number;
 	layoutGeneration: number;
 	layoutVersion: number | undefined;
-	startRow: number;
-	rowCount: number;
-	sep: number;
+	measurement?: RowMeasurement;
+}
+
+interface VirtualLayoutMeasurement {
+	entry: VirtualBlockExtent;
+	width: number;
+	generation: number;
+	version: number | undefined;
+	bodyRows: number;
+	measurement: RowMeasurement | undefined;
+}
+
+interface VirtualWarmup {
+	token: number;
+	width: number;
+	generation: number;
+	entries: VirtualBlockExtent[];
+}
+
+/**
+ * Affine Fenwick index: unmeasured blocks share an estimate; measured blocks
+ * contribute exact weights. A nonempty block includes one separator, with the
+ * first separator removed from document coordinates.
+ */
+class VirtualRowIndex {
+	#heights: (number | undefined)[] = [];
+	#sums: number[] = [0];
+	#counts: number[] = [0];
+	#knownWeight = 0;
+	#knownCount = 0;
+	estimatedBodyRows = 1;
+
+	get totalRows(): number {
+		return Math.max(
+			0,
+			this.#knownWeight + (this.#heights.length - this.#knownCount) * (this.estimatedBodyRows + 1) - 1,
+		);
+	}
+
+	knownBodyRows(index: number): number | undefined {
+		return this.#heights[index];
+	}
+
+	bodyRows(index: number): number {
+		return this.#heights[index] ?? this.estimatedBodyRows;
+	}
+
+	startRow(index: number): number {
+		return Math.max(0, this.#prefix(index) - 1);
+	}
+
+	separator(index: number): number {
+		return this.bodyRows(index) > 0 && this.#prefix(index) > 0 ? 1 : 0;
+	}
+
+	append(height?: number): void {
+		this.#heights.push(height);
+		if (height !== undefined) {
+			this.#knownWeight += height > 0 ? height + 1 : 0;
+			this.#knownCount++;
+		}
+		this.#rebuildNode(this.#heights.length);
+	}
+
+	set(index: number, height: number): void {
+		const previous = this.#heights[index];
+		if (previous === height) return;
+		this.#heights[index] = height;
+		const delta = (height > 0 ? height + 1 : 0) - (previous !== undefined && previous > 0 ? previous + 1 : 0);
+		const countDelta = previous === undefined ? 1 : 0;
+		this.#knownWeight += delta;
+		this.#knownCount += countDelta;
+		for (let node = index + 1; node < this.#sums.length; node += node & -node) {
+			this.#sums[node]! += delta;
+			this.#counts[node]! += countDelta;
+		}
+	}
+
+	remove(index: number): void {
+		const previous = this.#heights[index];
+		if (previous !== undefined) {
+			this.#knownWeight -= previous > 0 ? previous + 1 : 0;
+			this.#knownCount--;
+		}
+		this.#heights.splice(index, 1);
+		this.#sums.length = this.#heights.length + 1;
+		this.#counts.length = this.#sums.length;
+		for (let node = index + 1; node < this.#sums.length; node++) this.#rebuildNode(node);
+	}
+
+	find(row: number): number {
+		let index = 0;
+		let sum = 0;
+		const target = row + 1;
+		for (let bit = 2 ** Math.floor(Math.log2(this.#heights.length || 1)); bit >= 1; bit /= 2) {
+			const next = index + bit;
+			if (next >= this.#sums.length) continue;
+			const weight = this.#sums[next]! + ((next & -next) - this.#counts[next]!) * (this.estimatedBodyRows + 1);
+			if (sum + weight <= target) {
+				sum += weight;
+				index = next;
+			}
+		}
+		return index < this.#heights.length ? index : -1;
+	}
+
+	next(index: number): number {
+		return this.find(this.startRow(index + 1));
+	}
+
+	#prefix(count: number): number {
+		let rows = 0;
+		for (let node = count; node > 0; node -= node & -node) {
+			rows += this.#sums[node]! + ((node & -node) - this.#counts[node]!) * (this.estimatedBodyRows + 1);
+		}
+		return rows;
+	}
+
+	#rebuildNode(node: number): void {
+		const height = this.#heights[node - 1];
+		let sum = height !== undefined && height > 0 ? height + 1 : 0;
+		let count = height === undefined ? 0 : 1;
+		const start = node - (node & -node);
+		for (let child = node - 1; child > start; child -= child & -child) {
+			sum += this.#sums[child]!;
+			count += this.#counts[child]!;
+		}
+		this.#sums[node] = sum;
+		this.#counts[node] = count;
+	}
 }
 
 const MAX_LIVE_BLOCKS = 256;
@@ -134,6 +265,10 @@ const PINNED_FRONTIER_WARN_MS = 30_000;
 const EMPTY_ROWS: readonly string[] = [];
 const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 const VIRTUAL_OVERSCAN_BLOCKS = 8;
+const VIRTUAL_WARMUP_CHUNK_ENTRIES = 32;
+const VIRTUAL_WARMUP_CHUNK_MS = 4;
+const VIRTUAL_FRAME_MAX_BLOCKS = 128;
+const VIRTUAL_LAYOUT_COMMIT_MAX_ENTRIES = 4096;
 
 function isBlockFinalized(component: Component): boolean {
 	return (component as Component & FinalizableBlock).isTranscriptBlockFinalized?.() ?? true;
@@ -210,20 +345,39 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	// allocations. Logs once per pinned episode after a grace period.
 	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
 	#virtualEntries: VirtualBlockExtent[] = [];
-	#measuredVirtualEntries = new Set<VirtualBlockExtent>();
+	#virtualRowIndex = new VirtualRowIndex();
+	#virtualMeasurementConfig = "";
 	#visibleVirtualEntries = new Set<VirtualBlockExtent>();
-	#virtualTotalRows = 0;
-	#virtualStructureDirty = true;
+	#virtualStructureDirty = false;
 	#virtualLayoutDirtyFrom = 0;
+	#virtualEstimateSeeded = false;
+	#virtualLayoutComplete = false;
+	#virtualWarmupToken = 0;
+	#virtualWarmup: VirtualWarmup | undefined;
+	#pendingVirtualMeasurements = new Map<VirtualBlockExtent, VirtualLayoutMeasurement>();
+	#virtualRepaintPending = false;
+	#virtualDisposed = false;
+	readonly #onVirtualLayoutUpdate: ((component: Component) => void) | undefined;
 	#virtualWidth = -1;
 	#virtualGeneration = -1;
 	#generation = 0;
+
+	constructor(onVirtualLayoutUpdate?: (component: Component) => void) {
+		super();
+		this.#onVirtualLayoutUpdate = onVirtualLayoutUpdate;
+	}
+
+	get #virtualTotalRows(): number {
+		return this.#virtualRowIndex.totalRows;
+	}
 
 	override addChild(component: Component): void {
 		// New transcript blocks arrive on the frame hot path. Extend the prepared
 		// ledger in place; removals and pre-structure batches still take full reconcile.
 		const canExtendVirtualLedger =
 			!this.#virtualStructureDirty && this.#virtualEntries.length === this.children.length;
+		this.#virtualDisposed = false;
+		this.#cancelVirtualWarmup();
 		super.addChild(component);
 		this.#directChildIndices.set(component, this.children.length - 1);
 		this.#applyPresentationState(component);
@@ -241,31 +395,27 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			this.#virtualLayoutDirtyFrom = 0;
 			return;
 		}
-		const bodyRows = 0;
-		const sep = 0;
-		const rowCount = bodyRows;
 		this.#virtualEntries.push({
 			component,
 			rawRef: undefined,
 			contribution: undefined,
-			bodyRows,
 			measuredWidth: -1,
 			measuredGeneration: -1,
 			measuredVersion: undefined,
 			layoutWidth: -1,
 			layoutGeneration: -1,
 			layoutVersion: undefined,
-			startRow: this.#virtualTotalRows,
-			rowCount,
-			sep,
 		});
 		this.#virtualLayoutDirtyFrom = Math.min(this.#virtualLayoutDirtyFrom, this.#virtualEntries.length - 1);
-		this.#virtualTotalRows += rowCount;
+		this.#virtualRowIndex.append();
 	}
 
 	override removeChild(component: Component): void {
 		const index = this.children.indexOf(component);
 		if (index < 0 || !this.canRemoveBlock(component)) return;
+		const synchronized = !this.#virtualStructureDirty && this.#virtualEntries.length === this.children.length;
+		const removed = synchronized ? this.#virtualEntries[index] : undefined;
+		this.#cancelVirtualWarmup();
 		super.removeChild(component);
 		this.#entries.splice(index, 1);
 		this.#directChildIndices.delete(component);
@@ -277,11 +427,22 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#targetOwnerIndices = new WeakMap();
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
-		this.#virtualStructureDirty = true;
-		this.#virtualLayoutDirtyFrom = 0;
+		if (synchronized) {
+			this.#virtualEntries.splice(index, 1);
+			this.#virtualRowIndex.remove(index);
+			if (removed) {
+				this.#visibleVirtualEntries.delete(removed);
+				this.#pendingVirtualMeasurements.delete(removed);
+			}
+			this.#virtualLayoutDirtyFrom = Math.min(this.#virtualLayoutDirtyFrom, index);
+		} else {
+			this.#virtualStructureDirty = true;
+			this.#virtualLayoutDirtyFrom = 0;
+		}
 	}
 
 	override clear(): void {
+		this.#cancelVirtualWarmup();
 		super.clear();
 		this.#entries = [];
 		this.#directChildIndices = new Map();
@@ -293,12 +454,27 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#replayPending = false;
 		this.#replayRequested = false;
 		this.#virtualEntries = [];
-		this.#measuredVirtualEntries = new Set<VirtualBlockExtent>();
+		this.#virtualRowIndex = new VirtualRowIndex();
+		this.#virtualMeasurementConfig = "";
 		this.#visibleVirtualEntries = new Set<VirtualBlockExtent>();
-		this.#virtualTotalRows = 0;
-		this.#virtualStructureDirty = true;
+		this.#pendingVirtualMeasurements = new Map();
+		this.#virtualEstimateSeeded = false;
+		this.#virtualDisposed = false;
+		this.#virtualStructureDirty = false;
 		this.#virtualLayoutDirtyFrom = 0;
 		this.#generation++;
+	}
+
+	/** Stop deferred work without discarding the displayed transcript. */
+	cancelVirtualLayout(): void {
+		this.#cancelVirtualWarmup();
+		this.#pendingVirtualMeasurements.clear();
+	}
+
+	override dispose(): void {
+		this.cancelVirtualLayout();
+		super.dispose();
+		this.#virtualDisposed = true;
 	}
 
 	/**
@@ -319,6 +495,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		if (this.children.length > 0) {
 			throw new Error("TranscriptContainer.adoptContentsFrom requires an empty destination");
 		}
+		this.#cancelVirtualWarmup();
 		const children = source.children;
 		const directChildIndices = source.#directChildIndices;
 		const targetOwnerIndices = source.#targetOwnerIndices;
@@ -330,9 +507,12 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		const expanded = source.#expanded;
 		const lastFrame = source.#lastFrame;
 		const virtualEntries = source.#virtualEntries;
-		const measuredVirtualEntries = source.#measuredVirtualEntries;
+		const virtualRowIndex = source.#virtualRowIndex;
+		const virtualMeasurementConfig = source.#virtualMeasurementConfig;
+		const pendingVirtualMeasurements = source.#pendingVirtualMeasurements;
+		const virtualEstimateSeeded = source.#virtualEstimateSeeded;
+		const virtualLayoutComplete = source.#virtualLayoutComplete;
 		const visibleVirtualEntries = source.#visibleVirtualEntries;
-		const virtualTotalRows = source.#virtualTotalRows;
 		const virtualStructureDirty = source.#virtualStructureDirty;
 		const virtualLayoutDirtyFrom = source.#virtualLayoutDirtyFrom;
 		const virtualWidth = source.#virtualWidth;
@@ -352,9 +532,13 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#expanded = expanded;
 		this.#lastFrame = lastFrame;
 		this.#virtualEntries = virtualEntries;
-		this.#measuredVirtualEntries = measuredVirtualEntries;
+		this.#virtualRowIndex = virtualRowIndex;
+		this.#virtualMeasurementConfig = virtualMeasurementConfig;
+		this.#pendingVirtualMeasurements = pendingVirtualMeasurements;
+		this.#virtualEstimateSeeded = virtualEstimateSeeded;
+		this.#virtualLayoutComplete = virtualLayoutComplete;
+		this.#virtualDisposed = false;
 		this.#visibleVirtualEntries = visibleVirtualEntries;
-		this.#virtualTotalRows = virtualTotalRows;
 		this.#virtualStructureDirty = virtualStructureDirty;
 		this.#virtualLayoutDirtyFrom = virtualLayoutDirtyFrom;
 		this.#virtualWidth = virtualWidth;
@@ -381,6 +565,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	}
 
 	override invalidate(): void {
+		this.#cancelVirtualWarmup();
 		this.#generation++;
 		super.invalidate();
 	}
@@ -388,13 +573,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded === expanded) return;
 		this.#expanded = expanded;
+		this.#cancelVirtualWarmup();
 		for (const entry of this.#visibleVirtualEntries) this.#applyPresentationState(entry.component);
-		for (const entry of this.#measuredVirtualEntries) {
-			if (entry.contribution !== undefined) entry.bodyRows = entry.contribution.length;
-			entry.contribution = undefined;
-			entry.rawRef = undefined;
-		}
-		this.#measuredVirtualEntries.clear();
 		this.#generation++;
 	}
 
@@ -763,7 +943,6 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			this.#childStartRows.set(entry.component, rows.length);
 			rows.push(...block);
 		}
-		this.#rebuildVirtualRows(0);
 		return rows;
 	}
 
@@ -773,7 +952,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			this.#syncVirtualEntries(Math.max(1, width));
 			const index = this.children.indexOf(child);
 			const entry = index >= 0 ? this.#virtualEntries[index] : undefined;
-			if (entry) return entry.startRow + entry.sep;
+			if (entry) return this.#virtualRowIndex.startRow(index) + this.#virtualRowIndex.separator(index);
 		}
 		return this.#childStartRows.get(child);
 	}
@@ -906,20 +1085,23 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		if (
 			targets.length === 0 ||
 			targets.includes(this) ||
-			this.#virtualEntries.some(entry => entry.contribution === undefined)
+			this.#virtualEntries.some(
+				entry =>
+					entry.contribution === undefined ||
+					entry.measuredWidth !== width ||
+					entry.measuredGeneration !== this.#generation,
+			)
 		) {
 			return this.render(width);
 		}
-		let changedFrom = this.#virtualEntries.length;
 		const measured = new Set<Component>();
 		for (const target of targets) {
 			const index = this.#ownerIndex(target);
 			if (index < 0 || measured.has(this.children[index]!)) continue;
 			measured.add(this.children[index]!);
-			if (this.#measureVirtualEntry(index, width)) changedFrom = Math.min(changedFrom, index);
+			this.#measureVirtualEntry(index, width);
 		}
 		if (measured.size === 0) return this.render(width);
-		if (changedFrom < this.#virtualEntries.length) this.#rebuildVirtualRows(changedFrom);
 		return this.#renderVirtualRows(0, this.#virtualTotalRows);
 	}
 
@@ -935,14 +1117,45 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	/** Visible body range of direct children [from, to), using the virtual layout ledger. */
 	getVirtualRowRange(width: number, from: number, to: number): { start: number; end: number } | undefined {
 		this.#syncVirtualEntries(Math.max(1, width));
-		let first = from;
-		let last = Math.min(to, this.#virtualEntries.length) - 1;
-		while (first <= last && this.#virtualEntries[first]!.rowCount <= this.#virtualEntries[first]!.sep) first++;
-		while (last >= first && this.#virtualEntries[last]!.rowCount <= this.#virtualEntries[last]!.sep) last--;
-		if (first > last) return undefined;
-		const head = this.#virtualEntries[first]!;
-		const tail = this.#virtualEntries[last]!;
-		return { start: head.startRow + head.sep, end: tail.startRow + tail.rowCount };
+		const end = Math.min(to, this.#virtualEntries.length);
+		if (from >= end) return undefined;
+		const startRow = this.#virtualRowIndex.startRow(from);
+		const endRow = this.#virtualRowIndex.startRow(end);
+		if (endRow <= startRow) return undefined;
+		const first = this.#virtualRowIndex.find(startRow);
+		const last = this.#virtualRowIndex.find(endRow - 1);
+		if (first < 0 || last < first) return undefined;
+		return {
+			start: this.#virtualRowIndex.startRow(first) + this.#virtualRowIndex.separator(first),
+			end:
+				this.#virtualRowIndex.startRow(last) +
+				this.#virtualRowIndex.separator(last) +
+				this.#virtualRowIndex.bodyRows(last),
+		};
+	}
+
+	override getVirtualRowAnchor(width: number, row: number): VirtualRowAnchor | undefined {
+		this.#syncVirtualEntries(Math.max(1, width));
+		if (row < 0 || row >= this.#virtualTotalRows) return undefined;
+		const index = this.#virtualRowIndex.find(row);
+		const entry = this.#virtualEntries[index];
+		if (!entry) return undefined;
+		return {
+			component: entry.component,
+			row: row - this.#virtualRowIndex.startRow(index) - this.#virtualRowIndex.separator(index),
+			width,
+		};
+	}
+
+	override resolveVirtualRowAnchor(_width: number, anchor: VirtualRowAnchor): number | undefined {
+		const index = this.#directChildIndices.get(anchor.component);
+		if (index === undefined || this.#virtualEntries[index]?.component !== anchor.component) return undefined;
+		const separator = this.#virtualRowIndex.separator(index);
+		return (
+			this.#virtualRowIndex.startRow(index) +
+			separator +
+			Math.max(-separator, Math.min(anchor.row, Math.max(0, this.#virtualRowIndex.bodyRows(index) - 1)))
+		);
 	}
 
 	override renderVirtualViewport(width: number, request: VirtualViewportRequest): VirtualViewportFrame {
@@ -978,14 +1191,16 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		const start = Math.max(0, Math.trunc(startRow));
 		const end = Math.max(start, Math.trunc(endRow));
 		const blocks: Component[] = [];
-		let index = this.#findVirtualEntry(start);
+		let index = this.#virtualRowIndex.find(start);
 		while (index >= 0 && index < this.#virtualEntries.length) {
 			const entry = this.#virtualEntries[index]!;
-			if (entry.startRow > end) break;
-			const contentStart = entry.startRow + entry.sep;
-			const contentEnd = entry.startRow + entry.rowCount - 1;
-			if (entry.rowCount > entry.sep && contentStart <= end && contentEnd >= start) blocks.push(entry.component);
-			index++;
+			const startRow = this.#virtualRowIndex.startRow(index);
+			if (startRow > end) break;
+			const contentStart = startRow + this.#virtualRowIndex.separator(index);
+			const bodyRows = this.#virtualRowIndex.bodyRows(index);
+			const contentEnd = contentStart + bodyRows - 1;
+			if (bodyRows > 0 && contentStart <= end && contentEnd >= start) blocks.push(entry.component);
+			index = this.#virtualRowIndex.next(index);
 		}
 		return blocks;
 	}
@@ -1002,54 +1217,58 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#syncVirtualEntries(Math.max(1, width));
 		const normalized = normalizeTextSelection(selection);
 		if (normalized.start.row < 0 || normalized.end.row >= this.#virtualTotalRows) return undefined;
-		let text = "";
-		let selected = false;
-		const append = (part: string): void => {
-			if (selected) text += "\n";
-			text += part;
-			selected = true;
-		};
-		let index = this.#findVirtualEntry(normalized.start.row);
-		while (index >= 0 && index < this.#virtualEntries.length) {
+		const first = this.#virtualRowIndex.find(normalized.start.row);
+		const last = this.#virtualRowIndex.find(normalized.end.row);
+		if (first < 0 || last < 0) return undefined;
+		const firstRow =
+			normalized.start.row - this.#virtualRowIndex.startRow(first) - this.#virtualRowIndex.separator(first);
+		const lastRow = normalized.end.row - this.#virtualRowIndex.startRow(last) - this.#virtualRowIndex.separator(last);
+		const parts: string[] = [];
+		for (let index = first; index <= last; index++) {
 			const entry = this.#virtualEntries[index]!;
-			if (entry.startRow > normalized.end.row) break;
-			const entryEnd = entry.startRow + entry.rowCount - 1;
-			const contentStart = entry.startRow + entry.sep;
-			if (entry.sep > 0 && normalized.start.row <= entry.startRow && normalized.end.row >= entry.startRow) {
-				append("");
+			let raw =
+				entry.measuredWidth === width && entry.measuredGeneration === this.#generation ? entry.rawRef : undefined;
+			if (!raw) {
+				// Copy may cross skipped history. Materialize only this explicit
+				// selection, without changing the displayed layout mid-copy.
+				this.#applyPresentationState(entry.component);
+				this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+				raw = entry.component.render(width);
 			}
-			const overlapStart = Math.max(normalized.start.row, contentStart);
-			const overlapEnd = Math.min(normalized.end.row, entryEnd);
-			if (overlapStart <= overlapEnd) {
-				const raw = entry.rawRef;
-				if (!raw) return undefined;
-				let leadingBlankRows = 0;
-				while (leadingBlankRows < raw.length && isPlainBlank(raw[leadingBlankRows]!)) leadingBlankRows++;
-				const part = extractComponentTextSelection(entry.component, raw, {
-					start: {
-						row: leadingBlankRows + overlapStart - contentStart,
-						col: overlapStart === normalized.start.row ? normalized.start.col : 0,
-					},
-					end: {
-						row: leadingBlankRows + overlapEnd - contentStart,
-						col: overlapEnd === normalized.end.row ? normalized.end.col : Number.MAX_SAFE_INTEGER,
-					},
-				});
-				if (part === undefined) return undefined;
-				append(part);
-			}
-			index++;
+			let leading = 0;
+			let end = raw.length;
+			while (leading < end && isPlainBlank(raw[leading]!)) leading++;
+			while (end > leading && isPlainBlank(raw[end - 1]!)) end--;
+			const bodyRows = end - leading;
+			if (bodyRows === 0) continue;
+			if (index > first || (firstRow < 0 && this.#virtualRowIndex.separator(index) > 0)) parts.push("");
+			const from = index === first ? Math.max(0, firstRow) : 0;
+			const to = index === last ? Math.min(lastRow, bodyRows - 1) : bodyRows - 1;
+			if (from > to) continue;
+			const part = extractComponentTextSelection(entry.component, raw, {
+				start: {
+					row: leading + from,
+					col: index === first && firstRow >= 0 ? normalized.start.col : 0,
+				},
+				end: {
+					row: leading + to,
+					col: index === last && lastRow < bodyRows ? normalized.end.col : Number.MAX_SAFE_INTEGER,
+				},
+			});
+			if (part === undefined) return undefined;
+			parts.push(part);
 		}
-		return selected ? text : undefined;
+		return parts.length > 0 ? parts.join("\n") : undefined;
 	}
 
 	#getVirtualTextSelectionInset(width: number, row: number, right: boolean): number {
 		this.#syncVirtualEntries(Math.max(1, width));
 		const targetRow = Math.trunc(row);
 		if (targetRow < 0 || targetRow >= this.#virtualTotalRows) return 0;
-		const entry = this.#virtualEntries[this.#findVirtualEntry(targetRow)];
-		if (!entry?.rawRef) return 0;
-		const contentStart = entry.startRow + entry.sep;
+		const index = this.#virtualRowIndex.find(targetRow);
+		const entry = this.#virtualEntries[index];
+		if (!entry?.rawRef || entry.measuredWidth !== width || entry.measuredGeneration !== this.#generation) return 0;
+		const contentStart = this.#virtualRowIndex.startRow(index) + this.#virtualRowIndex.separator(index);
 		if (targetRow < contentStart) return 0;
 		let leadingBlankRows = 0;
 		while (leadingBlankRows < entry.rawRef.length && isPlainBlank(entry.rawRef[leadingBlankRows]!)) {
@@ -1068,179 +1287,345 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		width = Math.max(1, width);
 		const rows = Math.max(0, Math.trunc(request.rows));
 		this.#syncVirtualEntries(width);
-
-		let totalRows = this.#virtualTotalRows;
 		let offset = request.followBottom
-			? Math.max(0, totalRows - rows)
-			: Math.max(0, Math.min(Math.trunc(request.offset), Math.max(0, totalRows - rows)));
-		const anchorIndex = request.followBottom ? -1 : this.#findVirtualEntry(offset);
-		const anchorIntraRow =
-			anchorIndex < 0 ? 0 : Math.max(0, offset - (this.#virtualEntries[anchorIndex]?.startRow ?? 0));
+			? Math.max(0, this.#virtualTotalRows - rows)
+			: Math.max(0, Math.min(Math.trunc(request.offset), Math.max(0, this.#virtualTotalRows - rows)));
+		// Capture in the displayed coordinate space before committing background
+		// corrections. Wheel deltas and scrollbar jumps both refer to that space.
+		const anchor = request.followBottom ? undefined : this.getVirtualRowAnchor(width, offset);
+		const anchoredOffset = (): number => {
+			const maxOffset = Math.max(0, this.#virtualTotalRows - rows);
+			if (request.followBottom) return maxOffset;
+			const anchored = anchor ? this.resolveVirtualRowAnchor(width, anchor) : undefined;
+			return Math.max(0, Math.min(anchored ?? offset, maxOffset));
+		};
+		this.#commitVirtualMeasurements();
+		offset = anchoredOffset();
 		const measured = new Set<number>();
-
 		if (targeted) {
-			let changedFrom = this.#virtualEntries.length;
 			for (const index of targeted) {
 				measured.add(index);
-				if (this.#measureVirtualEntry(index, width, true)) changedFrom = Math.min(changedFrom, index);
+				this.#measureVirtualEntry(index, width, true);
 			}
-			if (changedFrom < this.#virtualEntries.length) {
-				this.#rebuildVirtualRows(changedFrom);
-				totalRows = this.#virtualTotalRows;
-				if (request.followBottom) {
-					offset = Math.max(0, totalRows - rows);
-				} else if (anchorIndex >= 0) {
-					const anchor = this.#virtualEntries[anchorIndex];
-					const anchored = anchor
-						? anchor.startRow + Math.min(anchorIntraRow, Math.max(0, anchor.rowCount - 1))
-						: offset;
-					offset = Math.max(0, Math.min(anchored, Math.max(0, totalRows - rows)));
+			offset = anchoredOffset();
+		}
+
+		const deadline = this.#onVirtualLayoutUpdate ? performance.now() + VIRTUAL_WARMUP_CHUNK_MS : Infinity;
+		const maxBlocks = this.#onVirtualLayoutUpdate
+			? Math.max(VIRTUAL_FRAME_MAX_BLOCKS, rows + VIRTUAL_OVERSCAN_BLOCKS * 2)
+			: Infinity;
+		while (rows > 0 && this.#virtualTotalRows > 0 && measured.size < maxBlocks) {
+			const firstVisible = this.#virtualRowIndex.find(offset);
+			const lastVisible = this.#virtualRowIndex.find(Math.min(this.#virtualTotalRows - 1, offset + rows - 1));
+			if (firstVisible < 0 || lastVisible < 0) break;
+			const candidates: number[] = [];
+			for (let index = firstVisible; index >= 0 && index <= lastVisible; index = this.#virtualRowIndex.next(index)) {
+				candidates.push(index);
+			}
+			if (request.followBottom) candidates.reverse();
+			for (let extra = 1; extra <= VIRTUAL_OVERSCAN_BLOCKS; extra++) {
+				if (firstVisible - extra >= 0) candidates.push(firstVisible - extra);
+				if (lastVisible + extra < this.#virtualEntries.length) candidates.push(lastVisible + extra);
+			}
+			let changed = false;
+			for (const needsRender of [true, false]) {
+				for (const index of candidates) {
+					if (measured.has(index)) continue;
+					if (measured.size >= maxBlocks) break;
+					if ((index < firstVisible || index > lastVisible) && performance.now() >= deadline) continue;
+					const entry = this.#virtualEntries[index]!;
+					if (!this.#hasCurrentVirtualRows(entry, width) !== needsRender) continue;
+					measured.add(index);
+					if (targeted && !targeted.has(index) && this.#hasCurrentVirtualRows(entry, width)) continue;
+					changed = this.#measureVirtualEntry(index, width) || changed;
 				}
 			}
-		}
-
-		if (rows === 0 || totalRows === 0) {
-			this.#visibleVirtualEntries.clear();
-			return { lines: EMPTY_ROWS, estimatedTotalRows: totalRows, offset: 0 };
-		}
-
-		while (totalRows > 0) {
-			const firstVisible = this.#findVirtualEntry(offset);
-			const lastVisible = this.#findVirtualEntry(Math.min(totalRows - 1, offset + rows - 1));
-			if (firstVisible < 0 || lastVisible < 0) break;
-			const first = Math.max(0, firstVisible - VIRTUAL_OVERSCAN_BLOCKS);
-			const last = Math.min(this.#virtualEntries.length - 1, lastVisible + VIRTUAL_OVERSCAN_BLOCKS);
-			let changedFrom = this.#virtualEntries.length;
-			for (let index = first; index <= last; index++) {
-				if (measured.has(index)) continue;
-				measured.add(index);
-				if (targeted && !targeted.has(index) && this.#virtualEntries[index]?.contribution !== undefined) continue;
-				if (this.#measureVirtualEntry(index, width)) changedFrom = Math.min(changedFrom, index);
+			if (!this.#virtualEstimateSeeded) {
+				let bodyRows = 0;
+				let samples = 0;
+				for (const index of measured) {
+					const entry = this.#virtualEntries[index];
+					if (entry?.measuredWidth !== width || entry.measuredGeneration !== this.#generation) continue;
+					const count = entry.contribution?.length ?? 0;
+					if (count > 0) {
+						bodyRows += count;
+						samples++;
+					}
+				}
+				if (samples > 0) {
+					const estimate = Math.max(1, Math.round(bodyRows / samples));
+					changed ||= estimate !== this.#virtualRowIndex.estimatedBodyRows;
+					this.#virtualRowIndex.estimatedBodyRows = estimate;
+					this.#virtualEstimateSeeded = true;
+				}
 			}
-			if (changedFrom === this.#virtualEntries.length) break;
-			this.#rebuildVirtualRows(changedFrom);
-			totalRows = this.#virtualTotalRows;
-			if (request.followBottom) {
-				offset = Math.max(0, totalRows - rows);
-			} else if (anchorIndex >= 0) {
-				const anchor = this.#virtualEntries[anchorIndex];
-				const anchored = anchor
-					? anchor.startRow + Math.min(anchorIntraRow, Math.max(0, anchor.rowCount - 1))
-					: offset;
-				offset = Math.max(0, Math.min(anchored, Math.max(0, totalRows - rows)));
-			}
+			offset = anchoredOffset();
+			if (!changed) break;
 		}
 
 		const lines = this.#renderVirtualRows(offset, rows);
 		this.#visibleVirtualEntries.clear();
-		const finalFirst = this.#findVirtualEntry(offset);
-		const finalLast = this.#findVirtualEntry(Math.min(this.#virtualTotalRows - 1, offset + rows - 1));
-		for (let index = finalFirst; index >= 0 && index <= finalLast; index++) {
-			const entry = this.#virtualEntries[index];
-			if (entry) this.#visibleVirtualEntries.add(entry);
+		const first = this.#virtualRowIndex.find(offset);
+		const last = this.#virtualRowIndex.find(Math.min(this.#virtualTotalRows - 1, offset + rows - 1));
+		let incomplete = false;
+		for (let index = first; index >= 0 && index <= last; index = this.#virtualRowIndex.next(index)) {
+			const entry = this.#virtualEntries[index]!;
+			this.#visibleVirtualEntries.add(entry);
+			incomplete ||= !this.#hasCurrentVirtualRows(entry, width);
 		}
-		const frame = {
-			lines,
-			estimatedTotalRows: this.#virtualTotalRows,
-			offset,
-		};
-		return frame;
+		if (rows > 0 && this.#onVirtualLayoutUpdate) {
+			this.#scheduleVirtualWarmup(width);
+			if (this.#pendingVirtualMeasurements.size > 0 || incomplete) this.#requestVirtualRepaint();
+		}
+		return { lines, estimatedTotalRows: this.#virtualTotalRows, offset };
+	}
+
+	#hasCurrentVirtualRows(entry: VirtualBlockExtent, width: number): boolean {
+		return (
+			entry.contribution !== undefined &&
+			entry.rawRef !== undefined &&
+			entry.measuredWidth === width &&
+			entry.measuredGeneration === this.#generation &&
+			entry.measuredVersion === getBlockVersion(entry.component)
+		);
 	}
 
 	#syncVirtualEntries(width: number): void {
-		const structureChanged = this.#syncVirtualStructure();
-		const widthChanged = this.#virtualWidth !== width;
-		const epochChanged = widthChanged || this.#virtualGeneration !== this.#generation;
-		let measurementsCleared = false;
-		if (epochChanged) {
-			measurementsCleared = this.#measuredVirtualEntries.size > 0;
-			for (const entry of this.#measuredVirtualEntries) {
-				if (entry.contribution !== undefined) entry.bodyRows = entry.contribution.length;
-				entry.contribution = undefined;
-				entry.rawRef = undefined;
-			}
-			this.#measuredVirtualEntries.clear();
+		const measurementConfig = `${getWidthConfigEpoch()}:${getPaddingX(1)}:${TERMINAL.imageProtocol}:${TERMINAL.textSizing}:${TERMINAL.hyperlinks}`;
+		if (this.#virtualMeasurementConfig !== measurementConfig) {
+			this.#virtualMeasurementConfig = measurementConfig;
+			this.#generation++;
+		}
+		this.#syncVirtualStructure();
+		if (this.#virtualWidth !== width || this.#virtualGeneration !== this.#generation) {
+			this.#cancelVirtualWarmup();
+			this.#pendingVirtualMeasurements.clear();
 			this.#virtualWidth = width;
 			this.#virtualGeneration = this.#generation;
+			this.#virtualEstimateSeeded = false;
 			this.#virtualLayoutDirtyFrom = 0;
 		}
-		let changedFrom = this.#virtualEntries.length;
-		withCodeHighlightingDisabledForLayout(() => {
-			for (let index = this.#virtualLayoutDirtyFrom; index < this.#virtualEntries.length; index++) {
-				if (this.#measureVirtualLayout(index, width)) changedFrom = Math.min(changedFrom, index);
-			}
+		// Exports and standalone synchronous consumers retain their exact layout
+		// contract. Mounted viewports instead fill the same index incrementally.
+		if (!this.#onVirtualLayoutUpdate) {
+			withCodeHighlightingDisabledForLayout(() => {
+				for (let index = this.#virtualLayoutDirtyFrom; index < this.#virtualEntries.length; index++) {
+					const measurement = this.#measureVirtualLayout(index, width);
+					if (measurement) this.#applyVirtualMeasurement(measurement);
+				}
+			});
+			this.#virtualLayoutDirtyFrom = this.#virtualEntries.length;
+			this.#virtualLayoutComplete = true;
+		}
+	}
+
+	#cancelVirtualWarmup(): void {
+		this.#virtualWarmupToken++;
+		this.#virtualWarmup = undefined;
+		this.#virtualLayoutComplete = false;
+		this.#virtualRepaintPending = false;
+	}
+
+	#requestVirtualRepaint(): void {
+		if (!this.#onVirtualLayoutUpdate || this.#virtualDisposed || this.#virtualRepaintPending) return;
+		this.#virtualRepaintPending = true;
+		const token = this.#virtualWarmupToken;
+		setImmediate(() => {
+			if (token !== this.#virtualWarmupToken || this.#virtualDisposed) return;
+			this.#virtualRepaintPending = false;
+			this.#onVirtualLayoutUpdate?.(this);
 		});
-		this.#virtualLayoutDirtyFrom = this.#virtualEntries.length;
+	}
+
+	#scheduleVirtualWarmup(width: number): void {
+		if (this.#virtualDisposed || this.#virtualLayoutComplete || this.#virtualWarmup) return;
+		const warmup: VirtualWarmup = {
+			token: this.#virtualWarmupToken,
+			width,
+			generation: this.#generation,
+			entries: this.#virtualEntries,
+		};
+		this.#virtualWarmup = warmup;
+		setImmediate(() => {
+			void this.#runVirtualWarmup(warmup)
+				.catch(error => {
+					logger.warn("Transcript background layout stopped", { error: String(error) });
+				})
+				.finally(() => {
+					// Keep a failed attempt parked until a new layout epoch or mutation
+					// invalidates it, rather than retrying a broken renderer each frame.
+					if (this.#virtualWarmup === warmup && this.#virtualLayoutComplete) this.#virtualWarmup = undefined;
+				});
+		});
+	}
+
+	#virtualWarmupIsCurrent(warmup: VirtualWarmup): boolean {
+		return (
+			!this.#virtualDisposed &&
+			this.#virtualWarmup === warmup &&
+			this.#virtualWarmupToken === warmup.token &&
+			this.#generation === warmup.generation &&
+			this.#virtualWidth === warmup.width &&
+			this.#virtualEntries === warmup.entries
+		);
+	}
+
+	async #runVirtualWarmup(warmup: VirtualWarmup): Promise<void> {
+		let index = warmup.entries.length - 1;
+		while (index >= 0) {
+			if (!this.#virtualWarmupIsCurrent(warmup)) return;
+			const started = performance.now();
+			let count = 0;
+			withCodeHighlightingDisabledForLayout(() => {
+				while (
+					index >= 0 &&
+					count < VIRTUAL_WARMUP_CHUNK_ENTRIES &&
+					performance.now() - started < VIRTUAL_WARMUP_CHUNK_MS
+				) {
+					const entry = warmup.entries[index]!;
+					const pending = this.#pendingVirtualMeasurements.get(entry);
+					if (
+						!pending ||
+						pending.width !== warmup.width ||
+						pending.generation !== warmup.generation ||
+						pending.version !== getBlockVersion(entry.component)
+					) {
+						const measurement = this.#measureVirtualLayout(index, warmup.width);
+						if (measurement && this.#virtualWarmupIsCurrent(warmup)) {
+							if (
+								!this.#visibleVirtualEntries.has(entry) &&
+								measurement.bodyRows === this.#virtualRowIndex.bodyRows(index)
+							) {
+								// Equal-height offscreen results change no displayed coordinates.
+								this.#applyVirtualMeasurement(measurement);
+							} else {
+								this.#pendingVirtualMeasurements.set(entry, measurement);
+							}
+						}
+					}
+					index--;
+					count++;
+				}
+			});
+			if (!this.#virtualWarmupIsCurrent(warmup)) return;
+			if (this.#pendingVirtualMeasurements.size > 0) this.#requestVirtualRepaint();
+			if (index >= 0) await waitForImmediate();
+		}
+		if (this.#virtualWarmupIsCurrent(warmup)) this.#virtualLayoutComplete = true;
+	}
+
+	#commitVirtualMeasurements(): void {
+		if (this.#pendingVirtualMeasurements.size === 0) return;
+		const started = performance.now();
+		let count = 0;
+		for (const [entry, measurement] of this.#pendingVirtualMeasurements) {
+			this.#pendingVirtualMeasurements.delete(entry);
+			this.#applyVirtualMeasurement(measurement);
+			count++;
+			if (count >= VIRTUAL_LAYOUT_COMMIT_MAX_ENTRIES || performance.now() - started >= VIRTUAL_WARMUP_CHUNK_MS)
+				break;
+		}
+	}
+
+	#applyVirtualMeasurement(measurement: VirtualLayoutMeasurement): void {
+		const { entry, width, generation, version } = measurement;
+		const index = this.#directChildIndices.get(entry.component);
+		if (index === undefined || this.#virtualEntries[index] !== entry) return;
 		if (
-			changedFrom < this.#virtualEntries.length ||
-			measurementsCleared ||
-			(!structureChanged && this.#virtualEntries.length === 0 && this.#virtualTotalRows !== 0)
+			width !== this.#virtualWidth ||
+			generation !== this.#generation ||
+			version !== getBlockVersion(entry.component)
 		) {
-			this.#rebuildVirtualRows(changedFrom < this.#virtualEntries.length ? changedFrom : 0);
+			this.#cancelVirtualWarmup();
+			this.#requestVirtualRepaint();
+			return;
+		}
+		if (
+			entry.measuredWidth === width &&
+			entry.measuredGeneration === generation &&
+			entry.measuredVersion === version &&
+			entry.contribution !== undefined
+		)
+			return;
+		this.#virtualRowIndex.set(index, measurement.bodyRows);
+		entry.layoutWidth = width;
+		entry.layoutGeneration = generation;
+		entry.layoutVersion = version;
+		entry.measurement = measurement.measurement;
+		if (entry.measuredWidth !== width || entry.measuredGeneration !== generation) {
+			entry.rawRef = undefined;
+			entry.contribution = undefined;
 		}
 	}
 
 	#syncVirtualStructure(): boolean {
 		const children = this.children;
 		const entries = this.#virtualEntries;
-		const structureChanged = this.#virtualStructureDirty || entries.length !== children.length;
-		if (!structureChanged) return false;
-
-		const previous = new Map(entries.map(entry => [entry.component, entry]));
+		if (!this.#virtualStructureDirty && entries.length === children.length) return false;
+		this.#cancelVirtualWarmup();
+		const previous = new Map(entries.map((entry, index) => [entry.component, index]));
+		const rowIndex = new VirtualRowIndex();
+		rowIndex.estimatedBodyRows = this.#virtualRowIndex.estimatedBodyRows;
 		const next = children.map(component => {
-			const retained = previous.get(component);
-			if (retained) return retained;
+			const previousIndex = previous.get(component);
+			rowIndex.append(previousIndex === undefined ? undefined : this.#virtualRowIndex.knownBodyRows(previousIndex));
+			if (previousIndex !== undefined) return entries[previousIndex]!;
 			return {
 				component,
 				rawRef: undefined,
 				contribution: undefined,
-				bodyRows: 0,
 				measuredWidth: -1,
 				measuredGeneration: -1,
 				measuredVersion: undefined,
 				layoutWidth: -1,
 				layoutGeneration: -1,
 				layoutVersion: undefined,
-				startRow: 0,
-				rowCount: 0,
-				sep: 0,
 			};
 		});
 		this.#virtualEntries = next;
+		this.#virtualRowIndex = rowIndex;
 		this.#directChildIndices = new Map(children.map((component, index) => [component, index]));
 		this.#targetOwnerIndices = new WeakMap();
+		this.#visibleVirtualEntries.clear();
 		this.#virtualLayoutDirtyFrom = 0;
 		this.#virtualStructureDirty = false;
-		if (this.#measuredVirtualEntries.size > 0) {
-			const retained = new Set(next);
-			for (const entry of this.#measuredVirtualEntries) {
-				if (!retained.has(entry)) this.#measuredVirtualEntries.delete(entry);
-			}
-		}
-		this.#rebuildVirtualRows(0);
 		return true;
 	}
 
-	#measureVirtualLayout(index: number, width: number): boolean {
+	#measureVirtualLayout(index: number, width: number): VirtualLayoutMeasurement | undefined {
 		const entry = this.#virtualEntries[index];
-		if (!entry) return false;
-		const currentVersion = getBlockVersion(entry.component);
+		if (!entry) return undefined;
+		let currentVersion = getBlockVersion(entry.component);
 		if (
 			entry.layoutWidth === width &&
 			entry.layoutGeneration === this.#generation &&
 			entry.layoutVersion === currentVersion &&
 			(isBlockExplicitlyFinalized(entry.component) || currentVersion !== undefined)
-		) {
-			return false;
+		)
+			return undefined;
+		const pending = this.#pendingVirtualMeasurements.get(entry);
+		if (pending?.width === width && pending.generation === this.#generation && pending.version === currentVersion) {
+			return pending;
 		}
 		this.#applyPresentationState(entry.component);
 		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-		const previousRows = entry.bodyRows;
-		entry.bodyRows = Math.max(0, Math.trunc(measureComponentRows(entry.component, width)));
-		entry.layoutWidth = width;
-		entry.layoutGeneration = this.#generation;
-		entry.layoutVersion = currentVersion;
-		return entry.bodyRows !== previousRows;
+		currentVersion = getBlockVersion(entry.component);
+		const reusable = entry.layoutGeneration === this.#generation && entry.layoutVersion === currentVersion;
+		const bodyRows = Math.max(
+			0,
+			Math.trunc(
+				reusable && entry.measurement
+					? entry.measurement.measureRows(width)
+					: measureComponentRows(entry.component, width),
+			),
+		);
+		const measurement =
+			reusable && entry.measurement
+				? entry.measurement
+				: currentVersion !== undefined && isBlockExplicitlyFinalized(entry.component)
+					? entry.component.getRowMeasurement?.(width)
+					: undefined;
+		return { entry, width, generation: this.#generation, version: currentVersion, bodyRows, measurement };
 	}
 
 	#measureVirtualEntry(index: number, width: number, force = false): boolean {
@@ -1259,7 +1644,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		) {
 			return false;
 		}
-		const previousRows = entry.contribution?.length ?? entry.bodyRows;
+		const previousRows = this.#virtualRowIndex.bodyRows(index);
 		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 		const raw = entry.component.render(width);
 		const contribution = trimBlankEdges(raw);
@@ -1275,61 +1660,46 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	): void {
 		const entry = this.#virtualEntries[index];
 		if (!entry) return;
+		if (
+			entry.measurement &&
+			(entry.layoutGeneration !== this.#generation || entry.layoutVersion !== getBlockVersion(entry.component))
+		) {
+			entry.measurement = undefined;
+			this.#pendingVirtualMeasurements.delete(entry);
+		}
 		entry.rawRef = raw;
 		entry.contribution = contribution;
-		entry.bodyRows = contribution.length;
+		this.#virtualRowIndex.set(index, contribution.length);
 		entry.measuredWidth = width;
 		entry.measuredGeneration = this.#generation;
 		entry.measuredVersion = getBlockVersion(entry.component);
 		entry.layoutWidth = width;
 		entry.layoutGeneration = this.#generation;
 		entry.layoutVersion = entry.measuredVersion;
-		this.#measuredVirtualEntries.add(entry);
-	}
-
-	#rebuildVirtualRows(startIndex: number): void {
-		const entries = this.#virtualEntries;
-		const start = Math.max(0, Math.min(Math.trunc(startIndex), entries.length));
-		let row = start === 0 ? 0 : (entries[start - 1]?.startRow ?? 0) + (entries[start - 1]?.rowCount ?? 0);
-		let hasVisible = row > 0;
-		for (let index = start; index < entries.length; index++) {
-			const entry = entries[index]!;
-			const bodyRows = entry.contribution?.length ?? entry.bodyRows;
-			entry.startRow = row;
-			entry.sep = bodyRows > 0 && hasVisible ? 1 : 0;
-			entry.rowCount = entry.sep + bodyRows;
-			row += entry.rowCount;
-			if (bodyRows > 0) hasVisible = true;
-		}
-		this.#virtualTotalRows = row;
-	}
-
-	#findVirtualEntry(row: number): number {
-		let low = 0;
-		let high = this.#virtualEntries.length;
-		while (low < high) {
-			const middle = (low + high) >>> 1;
-			const entry = this.#virtualEntries[middle]!;
-			if (entry.startRow + entry.rowCount <= row) low = middle + 1;
-			else high = middle;
-		}
-		return low < this.#virtualEntries.length ? low : -1;
+		this.#pendingVirtualMeasurements.delete(entry);
 	}
 
 	#renderVirtualRows(offset: number, rows: number): readonly string[] {
 		const end = Math.min(this.#virtualTotalRows, offset + rows);
 		const lines: string[] = [];
-		let index = this.#findVirtualEntry(offset);
+		let index = this.#virtualRowIndex.find(offset);
 		while (index >= 0 && index < this.#virtualEntries.length && lines.length < rows) {
 			const entry = this.#virtualEntries[index]!;
-			if (entry.startRow >= end) break;
-			const from = Math.max(offset, entry.startRow);
-			const to = Math.min(end, entry.startRow + entry.rowCount);
+			const startRow = this.#virtualRowIndex.startRow(index);
+			if (startRow >= end) break;
+			const separator = this.#virtualRowIndex.separator(index);
+			const rowCount = this.#virtualRowIndex.bodyRows(index) + separator;
+			const contribution =
+				entry.measuredWidth === this.#virtualWidth && entry.measuredGeneration === this.#generation
+					? entry.contribution
+					: undefined;
+			const from = Math.max(offset, startRow);
+			const to = Math.min(end, startRow + rowCount);
 			for (let row = from; row < to; row++) {
-				const local = row - entry.startRow;
-				lines.push(local < entry.sep ? "" : (entry.contribution?.[local - entry.sep] ?? ""));
+				const local = row - startRow;
+				lines.push(local < separator ? "" : (contribution?.[local - separator] ?? ""));
 			}
-			index++;
+			index = this.#virtualRowIndex.next(index);
 		}
 		return lines;
 	}

@@ -1660,7 +1660,9 @@ export class EventController {
 	async #handleToolExecutionUpdate(
 		event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>,
 	): Promise<void> {
+		const hadWorkingLoader = this.ctx.loadingAnimation !== undefined;
 		this.#ensureWorkingLoaderWhileStreaming();
+		const workingLoaderAdded = !hadWorkingLoader && this.ctx.loadingAnimation !== undefined;
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
 			const asyncState = (event.partialResult.details as { async?: { state?: string } } | undefined)?.async?.state;
@@ -1680,7 +1682,8 @@ export class EventController {
 				this.ctx.pendingTools.delete(event.toolCallId);
 				this.#backgroundTaskCallIds.delete(event.toolCallId);
 			}
-			this.ctx.ui.requestRender();
+			if (workingLoaderAdded || isTerminal) this.ctx.ui.requestRender();
+			else this.ctx.ui.requestComponentRender(component);
 		}
 	}
 

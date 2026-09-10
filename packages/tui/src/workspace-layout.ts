@@ -9,6 +9,7 @@ import type {
 	Component,
 	TargetedRender,
 	ViewportTailProvider,
+	VirtualRowAnchor,
 } from "./tui";
 import { componentContains, renderTargeted } from "./tui";
 import { padding, sliceByColumn, TERMINAL_STATE_TERMINATOR, truncateToWidth, visibleWidth } from "./utils";
@@ -1089,6 +1090,35 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		return pane.component.getTextSelectionScrollOffset?.(Math.floor(row) - rect.y - 1);
 	}
 
+	getAppViewportTextSelectionAnchor(row: number, col: number): VirtualRowAnchor | undefined {
+		const paneId = this.#paneAt(row, col);
+		const pane = paneId ? this.#panes.get(paneId) : undefined;
+		const rect = paneId ? this.#frame?.panes.get(paneId) : undefined;
+		if (!paneId || !pane || !rect || row < rect.y + 1) return undefined;
+		const offset = pane.scroll === "component" ? 0 : (this.#viewports.get(paneId)?.offset ?? 0);
+		const localRow = Math.floor(row) - rect.y - 1 + offset;
+		const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+		const child = provider.getAppViewportTextSelectionAnchor
+			? provider.getAppViewportTextSelectionAnchor(localRow, Math.floor(col) - rect.x)
+			: pane.component.getTextSelectionAnchor?.(localRow);
+		return child ? { component: pane.component, row: localRow, width: rect.width, child } : undefined;
+	}
+
+	resolveAppViewportTextSelectionAnchor(anchor: VirtualRowAnchor): number | undefined {
+		for (const [paneId, pane] of this.#panes) {
+			if (pane.component !== anchor.component) continue;
+			const rect = this.#frame?.panes.get(paneId);
+			if (!rect || rect.width !== anchor.width || !anchor.child) return undefined;
+			const provider = pane.component as Component & Partial<AppViewportInputOwner>;
+			const row = provider.resolveAppViewportTextSelectionAnchor
+				? provider.resolveAppViewportTextSelectionAnchor(anchor.child)
+				: pane.component.resolveTextSelectionAnchor?.(anchor.child);
+			const offset = pane.scroll === "component" ? 0 : (this.#viewports.get(paneId)?.offset ?? 0);
+			return row === undefined ? undefined : rect.y + 1 + row - offset;
+		}
+		return undefined;
+	}
+
 	setAppViewportTextSelectionActive(active: boolean, row?: number, col?: number): void {
 		if (!active) {
 			const previous = this.#textSelectionPaneId;
@@ -1126,8 +1156,8 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 	getAppViewportTextSelection(selection: TextSelectionRange): string | undefined {
 		const startPaneId = this.#paneAt(selection.start.row, selection.start.col);
 		const endPaneId = this.#paneAt(selection.end.row, selection.end.col);
-		if (startPaneId && endPaneId && startPaneId !== endPaneId) return undefined;
-		const paneId = startPaneId ?? endPaneId;
+		if (!this.#textSelectionPaneId && startPaneId && endPaneId && startPaneId !== endPaneId) return undefined;
+		const paneId = this.#textSelectionPaneId ?? startPaneId ?? endPaneId;
 		const pane = paneId ? this.#panes.get(paneId) : undefined;
 		const rect = paneId ? this.#frame?.panes.get(paneId) : undefined;
 		if (!paneId || !pane || !rect) return undefined;

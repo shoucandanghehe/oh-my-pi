@@ -1,3 +1,5 @@
+import { RowMeasurement, WrappedText } from "@oh-my-pi/pi-natives";
+import { DEFAULT_TAB_WIDTH } from "@oh-my-pi/pi-utils";
 import {
 	extractMappedTextSelection,
 	mapLogicalTextSelectionRows,
@@ -133,6 +135,19 @@ export class Text implements Component {
 		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
 		const contentWidth = Math.max(1, width - paddingX * 2);
 		return wrapTextWithAnsi(normalizedText, contentWidth).length + this.#paddingY * 2;
+	}
+
+	getRowMeasurement(_width: number): RowMeasurement | undefined {
+		if (this.measureRows !== Text.prototype.measureRows) return undefined;
+		if (!this.#text || !this.#text.trim()) return new RowMeasurement([], [], 0, 0);
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		if (!Number.isInteger(paddingX * 2) || paddingX < 0 || paddingX * 2 > 0xffff_ffff) return undefined;
+		return new RowMeasurement(
+			[new WrappedText(replaceTabs(this.#text), DEFAULT_TAB_WIDTH)],
+			[],
+			paddingX * 2,
+			this.#paddingY * 2,
+		);
 	}
 
 	render(width: number): readonly string[] {

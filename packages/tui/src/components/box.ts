@@ -1,3 +1,4 @@
+import { RowMeasurement } from "@oh-my-pi/pi-natives";
 import { type Component, measureComponentRows } from "../tui";
 import {
 	getPaddingX,
@@ -131,6 +132,22 @@ export class Box implements Component {
 		let contentRows = 0;
 		for (const child of this.children) contentRows += measureComponentRows(child, contentWidth);
 		return contentRows === 0 ? 0 : contentRows + this.#paddingY * 2 + (border ? 2 : 0);
+	}
+
+	getRowMeasurement(width: number): RowMeasurement | undefined {
+		if (this.measureRows !== Box.prototype.measureRows || this.#border) return undefined;
+		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+		if (!Number.isInteger(paddingX * 2) || paddingX < 0 || paddingX * 2 > 0xffff_ffff) return undefined;
+		const contentWidth = Math.max(1, width - paddingX * 2);
+		const children: RowMeasurement[] = [];
+		let contentRows = 0;
+		for (const child of this.children) {
+			const measurement = child.getRowMeasurement?.(contentWidth);
+			if (!measurement) return undefined;
+			children.push(measurement);
+			contentRows += measurement.measureRows(contentWidth);
+		}
+		return new RowMeasurement([], children, paddingX * 2, contentRows === 0 ? 0 : this.#paddingY * 2);
 	}
 
 	render(width: number): readonly string[] {

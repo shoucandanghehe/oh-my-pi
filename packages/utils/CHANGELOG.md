@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed
