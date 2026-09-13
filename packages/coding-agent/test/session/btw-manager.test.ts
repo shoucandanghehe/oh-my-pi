@@ -1,7 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
-import { BtwManager } from "@oh-my-pi/pi-coding-agent/session/btw-manager";
+import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessage, ImageContent, Model, ModelSpec, Usage } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { BtwManager, type BtwManagerOptions } from "@oh-my-pi/pi-coding-agent/session/btw-manager";
 import {
 	BTW_THREAD_CUSTOM_TYPE,
 	type BtwThreadEvent,
@@ -11,11 +15,12 @@ import {
 import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
-	type EphemeralConversationSideOptions,
 	type EphemeralConversationStatus,
 	type EphemeralTurnResult,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
+import { BTW_SUMMARY_MESSAGE_TYPE, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 const MODEL: BtwThreadModelRef = { provider: "anthropic", id: "claude-sonnet-4-5" };
 const usage: Usage = {
@@ -118,71 +123,52 @@ describe("BtwManager", () => {
 		expect(conversation.status?.latestAssistantMessage?.content).toEqual([{ type: "text", text: "Side answer" }]);
 	});
 
-	it("upgrades one completed QuickAsk into a durable child without changing its identity or duplicating its turn", async () => {
+	it("restores an unprompted thread with its creation-time context and keeps that context across completed turns", async () => {
 		const events: BtwThreadEvent[] = [];
-		const sideOptions: EphemeralConversationSideOptions = { readOnlyTools: true, shareSummaryWithMain: () => {} };
-		const created: Array<{
-			checkpoint: EphemeralConversationCheckpoint | undefined;
-			sideOptions: EphemeralConversationSideOptions | undefined;
-		}> = [];
-		const manager = new BtwManager({
-			entries: [],
-			appendEvent: event => events.push(event),
-			createConversation: (_model, checkpoint, options) => {
-				created.push({ checkpoint, sideOptions: options });
-				return immediateConversation(checkpoint);
-			},
-			nextKey: () => "thread-1",
-			now: () => 100,
-			createSideOptions: () => sideOptions,
-		});
+		const mainMessages: AgentMessage[] = [{ role: "user", content: "Original Main context", timestamp: 1 }];
+		const requests: AgentMessage[][] = [];
+		const restore = () =>
+			new BtwManager({
+				entries: journalEntries(JSON.parse(JSON.stringify(events)) as BtwThreadEvent[]),
+				appendEvent: event => events.push(event),
+				createConversation: (_model, checkpoint) =>
+					new EphemeralConversation({
+						snapshotBaseMessages: () => structuredClone(mainMessages),
+						sideSessionId: checkpoint?.sideSessionId ?? "side-frozen",
+						checkpoint,
+						runTurn: async messages => {
+							requests.push(messages);
+							const text = userText(messages.at(-1));
+							return { replyText: `reply:${text}`, assistantMessage: assistant(`reply:${text}`) };
+						},
+					}),
+				nextKey: () => "thread-frozen",
+				now: () => 100,
+			});
+		const manager = restore();
+		const key = manager.createChild("Why?", "anchor-1", MODEL);
+		mainMessages.push({ role: "user", content: "Later Main context", timestamp: 2 });
 
-		const key = manager.createQuick("Why?", "anchor-1", MODEL);
-		await manager.prompt(key, "Why?");
-		const before = manager.thread(key);
-		expect(before).toMatchObject({ key: "thread-1", kind: "quick", phase: "ready" });
-		expect(before?.turns).toHaveLength(1);
-		expect(events).toEqual([]);
+		const beforeFirstTurn = restore();
+		await beforeFirstTurn.prompt(key, "Why?");
+		expect(requests[0]?.filter(message => message.role === "user").map(userText)).toEqual([
+			"Original Main context",
+			"Why?",
+		]);
 
-		expect(manager.continueQuick(key)).toBe(true);
-		const after = manager.thread(key);
-		expect(after).toBe(before);
-		expect(after).toMatchObject({ key: "thread-1", kind: "child", phase: "ready" });
-		expect(after?.turns).toHaveLength(1);
-		expect(manager.children.map(thread => thread.key)).toEqual(["thread-1"]);
-		expect(events).toHaveLength(1);
-		expect(events[0]).toMatchObject({ op: "create", key: "thread-1", anchorLeafId: "anchor-1" });
-		expect(created).toHaveLength(2);
-		expect(created[0]?.sideOptions).toBeUndefined();
-		expect(created[1]?.sideOptions).toBe(sideOptions);
-		expect(created[1]?.checkpoint?.turns).toHaveLength(1);
-	});
-
-	it("keeps durable side replies unbounded instead of inheriting the IRC flood limit", async () => {
-		let dedupeReply: boolean | undefined;
-		const longReply = "x".repeat(6_000);
-		const manager = new BtwManager({
-			entries: [],
-			appendEvent: () => {},
-			createConversation: () =>
-				new EphemeralConversation({
-					snapshotBaseMessages: () => [],
-					sideSessionId: "side-long",
-					runTurn: async (_messages, options) => {
-						dedupeReply = options.dedupeReply;
-						return { replyText: longReply, assistantMessage: assistant(longReply) };
-					},
-				}),
-			nextKey: () => "thread-long",
-			now: () => 100,
-		});
-		const key = manager.createQuick("Long?", "anchor-1", MODEL);
-
-		const result = await manager.prompt(key, "Long?");
-
-		expect(dedupeReply).toBe(false);
-		expect(result.replyText).toBe(longReply);
-		expect(result.replyText).not.toContain("[...truncated]");
+		const afterFirstTurn = restore();
+		await afterFirstTurn.prompt(key, "Follow up");
+		expect(requests[1]?.filter(message => message.role === "user").map(userText)).toEqual([
+			"Original Main context",
+			"Why?",
+			"Follow up",
+		]);
+		expect(requests[1]?.filter(message => message.role === "assistant").map(message => message.content)).toEqual([
+			[{ type: "text", text: "reply:Why?" }],
+		]);
+		expect(afterFirstTurn.children.map(thread => thread.key)).toEqual([key]);
+		expect(afterFirstTurn.thread(key)?.turns.map(turn => turn.replyText)).toEqual(["reply:Why?", "reply:Follow up"]);
+		expect(mainMessages.map(userText)).toEqual(["Original Main context", "Later Main context"]);
 	});
 
 	it("allows different durable children to run concurrently without crossing phase, draft, turn, or unread state", async () => {
@@ -207,18 +193,19 @@ describe("BtwManager", () => {
 			now: () => sequence * 100,
 		});
 
-		const first = manager.createQuick("First", "anchor-1", MODEL);
+		const first = manager.createChild("First", "anchor-1", MODEL);
+		const second = manager.createChild("Second", "anchor-1", MODEL);
 		const firstInitial = manager.prompt(first, "First");
-		await Promise.resolve();
-		pending.get("First")?.resolve({ replyText: "one", assistantMessage: assistant("one") });
-		await firstInitial;
-		manager.continueQuick(first);
-		const second = manager.createQuick("Second", "anchor-1", MODEL);
 		const secondInitial = manager.prompt(second, "Second");
 		await Promise.resolve();
+		expect(manager.thread(first)?.phase).toBe("running");
+		expect(manager.thread(second)?.phase).toBe("running");
 		pending.get("Second")?.resolve({ replyText: "two", assistantMessage: assistant("two") });
 		await secondInitial;
-		manager.continueQuick(second);
+		expect(manager.thread(first)?.phase).toBe("running");
+		pending.get("First")?.resolve({ replyText: "one", assistantMessage: assistant("one") });
+		await firstInitial;
+		manager.markRead(first);
 		manager.setDraft(first, "draft one");
 		manager.setDraft(second, "draft two");
 
@@ -231,10 +218,13 @@ describe("BtwManager", () => {
 		await secondRun;
 		expect(manager.thread(first)?.phase).toBe("running");
 		expect(manager.thread(second)).toMatchObject({ phase: "ready", unread: 2 });
+		expect(manager.thread(first)?.unread).toBe(0);
 		pending.get("A")?.resolve({ replyText: "aye", assistantMessage: assistant("aye") });
 		await firstRun;
 		expect(manager.thread(first)?.turns.map(turn => turn.replyText)).toEqual(["one", "aye"]);
 		expect(manager.thread(second)?.turns.map(turn => turn.replyText)).toEqual(["two", "bee"]);
+		expect(manager.thread(first)?.unread).toBe(1);
+		expect(manager.thread(second)?.unread).toBe(2);
 	});
 
 	it("restores attachment-only draft edits and replays submitted images without crossing threads or changing Main", async () => {
@@ -308,9 +298,8 @@ describe("BtwManager", () => {
 			nextKey: () => "thread-1",
 			now: () => 100,
 		});
-		const key = manager.createQuick("Promote?", "anchor-1", MODEL);
+		const key = manager.createChild("Promote?", "anchor-1", MODEL);
 		await manager.prompt(key, "Promote?");
-		manager.continueQuick(key);
 		const liveThread = manager.thread(key);
 		const image: ImageContent = { type: "image", data: "ZHJhZnQ=", mimeType: "image/png" };
 		manager.setDraft(key, "", [image], ["local://draft.png"]);
@@ -318,7 +307,7 @@ describe("BtwManager", () => {
 
 		expect(manager.preparePromotion(key)).toBe(true);
 		expect(manager.thread(key)).toBe(liveThread);
-		expect(events.map(event => event.op)).toEqual(["create", "draft", "remove"]);
+		expect(restoreBtwThreads(journalEntries(events))).toEqual([]);
 		expect(manager.rollbackPromotion(key)).toBe(true);
 		expect(manager.thread(key)).toBe(liveThread);
 		expect(restoreBtwThreads(journalEntries(events))[0]).toMatchObject({
@@ -326,79 +315,183 @@ describe("BtwManager", () => {
 			draftImages: [image],
 			draftImageLinks: ["local://draft.png"],
 		});
+		const restored = new BtwManager({
+			entries: journalEntries(events),
+			appendEvent: event => events.push(event),
+			createConversation: (_model, checkpoint) => immediateConversation(checkpoint),
+			nextKey: () => "unused",
+			now: () => 200,
+		});
+		await restored.prompt(key, "Continue after rollback");
+		expect(restored.thread(key)?.turns.map(turn => turn.replyText)).toEqual([
+			"reply:Promote?",
+			"reply:Continue after rollback",
+		]);
 	});
 
 	it("creates a durable child directly, journaling it with a frozen snapshot before the first turn", async () => {
 		const events: BtwThreadEvent[] = [];
-		const frozen: string[] = [];
-		let sequence = 0;
+		const mainMessages: AgentMessage[] = [{ role: "user", content: "Main before creation", timestamp: 1 }];
+		const requests: AgentMessage[][] = [];
 		const manager = new BtwManager({
 			entries: [],
 			appendEvent: event => events.push(event),
 			createConversation: (_model, checkpoint) =>
 				new EphemeralConversation({
-					snapshotBaseMessages: () => {
-						frozen.push("snapshot");
-						return [{ role: "user", content: "main", timestamp: Date.now() }];
-					},
-					sideSessionId: checkpoint?.sideSessionId ?? `side-${++sequence}`,
+					snapshotBaseMessages: () => structuredClone(mainMessages),
+					sideSessionId: checkpoint?.sideSessionId ?? "side-before-prompt",
 					checkpoint,
 					runTurn: async messages => {
+						requests.push(messages);
 						const text = userText(messages.at(-1));
 						return { replyText: `reply:${text}`, assistantMessage: assistant(`reply:${text}`) };
 					},
 				}),
-			nextKey: () => `thread-${++sequence}`,
-			now: () => sequence * 100,
-		});
-
-		const key = manager.createChild("Direct?", "anchor-1", MODEL);
-		expect(manager.thread(key)).toMatchObject({ kind: "child", phase: "ready", title: "Direct?" });
-		expect(manager.children.map(thread => thread.key)).toEqual([key]);
-		expect(manager.activeKey).toBe(key);
-		expect(frozen).toEqual(["snapshot"]);
-		expect(events.map(event => event.op)).toEqual(["create"]);
-		expect(events[0]).toMatchObject({ op: "create", key, anchorLeafId: "anchor-1" });
-
-		await manager.prompt(key, "Direct?");
-		expect(manager.thread(key)?.turns.map(turn => turn.replyText)).toEqual(["reply:Direct?"]);
-		expect(events.map(event => event.op)).toEqual(["create", "request", "turn"]);
-	});
-
-	it("binds side options to every durable thread and streams thinking deltas through prompt", async () => {
-		const sideOptionsSeen: unknown[] = [];
-		const sideSourcesSeen: unknown[] = [];
-		const thinkingDeltas: string[] = [];
-		const manager = new BtwManager({
-			entries: [],
-			appendEvent: () => {},
-			createConversation: (_model, checkpoint, sideOptions) => {
-				sideOptionsSeen.push(sideOptions);
-				return new EphemeralConversation({
-					snapshotBaseMessages: () => [],
-					sideSessionId: checkpoint?.sideSessionId ?? "side-1",
-					checkpoint,
-					runTurn: async (_messages, options) => {
-						options.onThinkingDelta?.("think-");
-						options.onThinkingDelta?.("ing");
-						return { replyText: "Answer", assistantMessage: assistant("Answer") };
-					},
-				});
-			},
-			createSideOptions: source => {
-				sideSourcesSeen.push(source);
-				return { readOnlyTools: true, shareSummaryWithMain: () => {} };
-			},
-			nextKey: () => "thread-1",
+			nextKey: () => "thread-before-prompt",
 			now: () => 100,
 		});
 
-		const key = manager.createChild("Why?", "anchor-1", MODEL);
-		await manager.prompt(key, "Why?", undefined, delta => thinkingDeltas.push(delta));
+		const key = manager.createChild("Direct?", "anchor-1", MODEL);
+		mainMessages.push({ role: "user", content: "Main after creation", timestamp: 2 });
 
-		expect(sideOptionsSeen).toEqual([{ readOnlyTools: true, shareSummaryWithMain: expect.any(Function) }]);
-		expect(sideSourcesSeen).toEqual([{ threadKey: "thread-1", threadTitle: "Why?" }]);
-		expect(thinkingDeltas).toEqual(["think-", "ing"]);
+		await manager.prompt(key, "Direct?");
+		expect(requests[0]?.filter(message => message.role === "user").map(userText)).toEqual([
+			"Main before creation",
+			"Direct?",
+		]);
+		expect(restoreBtwThreads(journalEntries(events))[0]?.turns.map(turn => turn.replyText)).toEqual([
+			"reply:Direct?",
+		]);
+	});
+
+	it("reads and shares an approved summary with Main during its first turn, then restores native tool history", async () => {
+		const model = buildModel({
+			id: "btw-first-turn",
+			name: "BTW First Turn",
+			api: "anthropic-messages",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const summary = "The package is @oh-my-pi/pi-coding-agent.";
+		const events: BtwThreadEvent[] = [];
+		let sideRequests = 0;
+		const sideStreamFn: StreamFn = (_model, context) => {
+			const stream = new AssistantMessageEventStream();
+			const request = ++sideRequests;
+			queueMicrotask(() => {
+				if (request === 1) {
+					const toolCalls = [
+						{ type: "toolCall" as const, id: "read-package", name: "read", arguments: {} },
+						{
+							type: "toolCall" as const,
+							id: "share-package",
+							name: "shareSummaryWithMain",
+							arguments: { summary },
+						},
+					];
+					const message = assistant("");
+					message.content = toolCalls;
+					message.stopReason = "toolUse";
+					for (const [contentIndex, toolCall] of toolCalls.entries()) {
+						stream.push({ type: "toolcall_start", contentIndex, partial: message });
+						stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: message });
+					}
+					stream.push({ type: "done", reason: "toolUse", message });
+					return;
+				}
+				const readResult = context.messages.find(
+					message => message.role === "toolResult" && message.toolCallId === "read-package",
+				);
+				const text = JSON.stringify(readResult?.content).includes("@oh-my-pi/pi-coding-agent")
+					? "Read the package name."
+					: "Package read unavailable.";
+				stream.push({ type: "done", reason: "stop", message: assistant(text) });
+			});
+			return stream;
+		};
+		const readTool: AgentTool = {
+			name: "read",
+			label: "Read Package",
+			description: "Read the package name",
+			parameters: { type: "object", properties: {} },
+			execute: async () => {
+				const manifest = await Bun.file(new URL("../../package.json", import.meta.url)).json();
+				return { content: [{ type: "text", text: manifest.name }], details: {} };
+			},
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [readTool] },
+				streamFn: () => {
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({ type: "done", reason: "stop", message: assistant("Summary received.") });
+					});
+					return stream;
+				},
+				convertToLlm,
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
+			modelRegistry: { getApiKey: async () => "key", resolver: () => async () => "key" } as never,
+			extensionRunner: {
+				clearManagedTimers: () => {},
+				consumeToolCallEmitted: () => false,
+				getUIContext: () => ({ select: async () => "Approve" }),
+				hasHandlers: () => false,
+				hasUI: () => true,
+				runScoped: <T>(run: () => T): T => run(),
+			} as never,
+			sideStreamFn,
+		});
+		try {
+			const options: Omit<BtwManagerOptions, "entries"> = {
+				appendEvent: event => events.push(event),
+				createConversation: (_model, checkpoint, sideOptions) =>
+					session.createEphemeralConversation("side instructions", checkpoint, model, sideOptions),
+				createSideOptions: source => ({
+					readOnlyTools: true,
+					shareSummaryWithMain: sharedSummary => session.publishBtwSummary({ ...source, summary: sharedSummary }),
+				}),
+				nextKey: () => "thread-capabilities",
+				now: () => 100,
+			};
+			const manager = new BtwManager({ ...options, entries: [] });
+			const key = manager.createChild("Identify package", "main-leaf", { provider: model.provider, id: model.id });
+			const result = await manager.prompt(key, "Read the package and share its identity.");
+			await session.waitForIdle();
+
+			expect(result.replyText).toBe("Read the package name.");
+			expect(
+				session.agent.state.messages.find(
+					message => message.role === "custom" && message.customType === BTW_SUMMARY_MESSAGE_TYPE,
+				),
+			).toMatchObject({
+				attribution: "agent",
+				details: {
+					summaries: [{ threadKey: key, threadTitle: "Identify package", summary }],
+				},
+			});
+			const restored = new BtwManager({
+				...options,
+				entries: journalEntries(JSON.parse(JSON.stringify(events)) as BtwThreadEvent[]),
+			});
+			const followup = await restored.prompt(key, "What did you read?");
+			expect(followup.replyText).toBe("Read the package name.");
+			expect(
+				restored.thread(key)?.turns[0]?.intermediateMessages?.filter(message => message.role === "toolResult"),
+			).toMatchObject([
+				{ toolCallId: "read-package", isError: false },
+				{ toolCallId: "share-package", isError: false },
+			]);
+		} finally {
+			await session.dispose();
+		}
 	});
 	it("does not append a late turn after the manager is abandoned", async () => {
 		const deferred = Promise.withResolvers<EphemeralTurnResult>();

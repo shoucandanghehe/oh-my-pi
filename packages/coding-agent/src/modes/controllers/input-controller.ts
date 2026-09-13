@@ -270,7 +270,7 @@ export class InputController {
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
 	#pasteEditors = new WeakSet<CustomEditor>();
-	#btwContinueListenerInstalled = false;
+	#btwOpenThreadListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
 	#globalEditorActionsListenerInstalled = false;
@@ -330,15 +330,15 @@ export class InputController {
 				return { consume: true };
 			});
 		}
-		if (!this.#btwContinueListenerInstalled) {
-			this.#btwContinueListenerInstalled = true;
+		if (!this.#btwOpenThreadListenerInstalled) {
+			this.#btwOpenThreadListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
 				if (!matchesKey(data, "enter")) return undefined;
-				if (!this.ctx.handlesBtwContinueKey()) return undefined;
+				if (!this.ctx.handlesBtwOpenThreadKey()) return undefined;
 				if (this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				if (this.ctx.editor.pendingImages.length > 0) return undefined;
-				void this.ctx.handleBtwContinueKey().catch(() => {});
+				void this.ctx.handleBtwOpenThreadKey().catch(() => {});
 				return { consume: true };
 			});
 		}
