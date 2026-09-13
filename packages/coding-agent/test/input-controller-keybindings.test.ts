@@ -115,11 +115,11 @@ async function createContext() {
 		retry,
 	};
 	const updatePendingMessagesDisplay = vi.fn();
-	const handleBtwContinueKey = vi.fn(async () => true);
+	const handleBtwOpenThreadKey = vi.fn(async () => true);
 	const handleBtwBranchKey = vi.fn(async () => true);
 	const handleBtwCopyKey = vi.fn(async () => true);
 	const canBranchBtw = vi.fn(() => false);
-	const handlesBtwContinueKey = vi.fn(() => false);
+	const handlesBtwOpenThreadKey = vi.fn(() => false);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
 	const handlesBtwCopyKey = vi.fn(() => false);
@@ -235,8 +235,8 @@ async function createContext() {
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
-		handlesBtwContinueKey,
-		handleBtwContinueKey,
+		handlesBtwOpenThreadKey: handlesBtwOpenThreadKey,
+		handleBtwOpenThreadKey: handleBtwOpenThreadKey,
 		hasActiveBtw,
 		handlesBtwBranchKey,
 		handleBtwBranchKey,
@@ -273,8 +273,8 @@ async function createContext() {
 			clearInlineImages,
 			refreshAppearance,
 			resetDisplayAfterAppearanceRefresh,
-			handlesBtwContinueKey,
-			handleBtwContinueKey,
+			handlesBtwOpenThreadKey: handlesBtwOpenThreadKey,
+			handleBtwOpenThreadKey: handleBtwOpenThreadKey,
 			handleBtwBranchKey,
 			addInputListener,
 			canBranchBtw,
@@ -411,16 +411,16 @@ describe("InputController keybinding setup", () => {
 		expect(editor.getText()).toBe("");
 	});
 
-	it("routes Enter to a visible continuable /btw panel", async () => {
+	it("routes Enter to opening the visible inline BTW thread", async () => {
 		const { InputController, ctx, spies } = await createContext();
-		spies.handlesBtwContinueKey.mockReturnValue(true);
+		spies.handlesBtwOpenThreadKey.mockReturnValue(true);
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
 		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\r");
 
 		expect(result).toEqual({ consume: true });
-		expect(spies.handleBtwContinueKey).toHaveBeenCalledTimes(1);
+		expect(spies.handleBtwOpenThreadKey).toHaveBeenCalledTimes(1);
 	});
 
 	it("lets Enter reach the composer when the inline /btw panel is not visible", async () => {
@@ -431,12 +431,12 @@ describe("InputController keybinding setup", () => {
 		const result = dispatchInput(registeredInputListeners(spies.addInputListener), "\r");
 
 		expect(result).toBeUndefined();
-		expect(spies.handleBtwContinueKey).not.toHaveBeenCalled();
+		expect(spies.handleBtwOpenThreadKey).not.toHaveBeenCalled();
 	});
 
 	it("leaves BTW shortcuts to an attachment-only composer", async () => {
 		for (const [data, gate, handler] of [
-			["\r", "handlesBtwContinueKey", "handleBtwContinueKey"],
+			["\r", "handlesBtwOpenThreadKey", "handleBtwOpenThreadKey"],
 			["b", "handlesBtwBranchKey", "handleBtwBranchKey"],
 			["c", "handlesBtwCopyKey", "handleBtwCopyKey"],
 		] as const) {
@@ -555,7 +555,6 @@ describe("InputController keybinding setup", () => {
 		expect(editor.pendingImages).toHaveLength(0);
 		expect(editor.getText()).toBe("");
 	});
-
 
 	it("leaves x as ordinary input while a BTW panel is active", async () => {
 		const { InputController, ctx, spies } = await createContext();

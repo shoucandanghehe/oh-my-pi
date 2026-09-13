@@ -15,7 +15,7 @@ export interface EphemeralTurnOptions {
 
 /** Side-channel capabilities for a conversation: read-only tools and one-way summary sharing with Main. */
 export interface EphemeralConversationSideOptions {
-	/** Allow read-only tools (read/glob/grep) instead of blocking every call. */
+	/** Allow investigation tools and read-only LSP/GitHub operations, directly or through xd://. */
 	readOnlyTools?: boolean;
 	/** Install `shareSummaryWithMain` for a user-approved BTW knowledge summary. */
 	shareSummaryWithMain?: (summary: string) => void | Promise<void>;

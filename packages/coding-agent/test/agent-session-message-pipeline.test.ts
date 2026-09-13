@@ -1128,9 +1128,6 @@ describe("AgentSession message pipeline", () => {
 			sideStreamFn,
 		});
 		sessions.push(session);
-		const mainMessages = agent.state.messages;
-		const mainSnapshot = structuredClone(mainMessages);
-		const journalSnapshot = structuredClone(session.sessionManager.getEntries());
 
 		const conversation = session.createEphemeralConversation("side instructions");
 		const first = await conversation.prompt("Question 1?");
@@ -2171,19 +2168,21 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.openrouterVariant).toBe("nitro");
 	});
 
-	it("snapshots and obfuscates ephemeral history before asynchronous context conversion", async () => {
+	it("obfuscates restored frozen conversations without mutating their journal checkpoint", async () => {
 		const api = "test-ephemeral-secret-redaction";
 		const secret = "EPHEMERAL_SECRET_TOKEN_12345";
 		const conversionStarted = Promise.withResolvers<void>();
 		const continueConversion = Promise.withResolvers<void>();
 		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		let holdConversion = false;
+		let responseText = `previous answer about ${secret}`;
 		let capturedContext: Context | undefined;
 		registerCustomApi(api, (_model, context, _options) => {
 			capturedContext = context;
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
-				const message = createAssistantMessage("Answer");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+				const message = createAssistantMessage(responseText);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: responseText, partial: message });
 				stream.push({ type: "done", reason: "stop", message });
 			});
 			return stream;
@@ -2209,46 +2208,54 @@ describe("AgentSession message pipeline", () => {
 					messages: [],
 					tools: [],
 				},
+				transformProviderContext: context => obfuscateProviderContext(obfuscator, context),
 			}),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: createModelRegistryStub() as never,
 			obfuscator,
 			transformContext: async messages => {
-				conversionStarted.resolve();
-				await continueConversion.promise;
+				if (holdConversion) {
+					conversionStarted.resolve();
+					await continueConversion.promise;
+				}
 				return messages;
 			},
 		});
 		sessions.push(session);
 
-		const questionBlock: TextContent = { type: "text", text: `previous question about ${secret}` };
-		const answerBlock: TextContent = { type: "text", text: `previous answer about ${secret}` };
-		const history: Message[] = [
-			{ role: "user", content: [questionBlock], timestamp: 1 },
-			{ ...createAssistantMessage(""), content: [answerBlock] },
-		];
-		const originalHistory = structuredClone(history);
-		const pendingTurn = session.runEphemeralTurn({ promptText: `question about ${secret}`, history });
-		await conversionStarted.promise;
-		expect(history).toEqual(originalHistory);
-		questionBlock.text = "caller replaced question";
-		answerBlock.text = "caller replaced answer";
-		history.push({ role: "user", content: "caller appended question", timestamp: 2 });
-		const mutatedHistory = structuredClone(history);
-		continueConversion.resolve();
+		const conversation = session.createEphemeralConversation("side instructions");
+		await conversation.prompt(`previous question about ${secret}`);
+		const checkpoint = conversation.checkpoint();
+		const savedCheckpoint = structuredClone(checkpoint);
+		const restored = session.createEphemeralConversation("side instructions", checkpoint);
+		holdConversion = true;
+		responseText = "Answer";
+		const pendingTurn = restored.prompt(`question about ${secret}`);
+		try {
+			await conversionStarted.promise;
+			session.agent.appendMessage({ role: "user", content: "late Main question", timestamp: 2 });
+		} finally {
+			continueConversion.resolve();
+		}
 		const result = await pendingTurn;
 
 		expect(result.replyText).toBe("Answer");
 		const messages = capturedContext!.messages;
-		expect(messages.map(message => message.role)).toEqual(["developer", "user", "assistant", "user"]);
-		expect(getConvertedUserText(messages[1])).toBe(obfuscator.obfuscate(`previous question about ${secret}`));
-		expect(messages[2].content).toEqual([
+		expect(messages.filter(message => message.role === "user").map(getConvertedUserText)).toEqual([
+			obfuscator.obfuscate(`previous question about ${secret}`),
+			obfuscator.obfuscate(`question about ${secret}`),
+		]);
+		expect(messages.find(message => message.role === "assistant")?.content).toEqual([
 			{ type: "text", text: obfuscator.obfuscate(`previous answer about ${secret}`) },
 		]);
-		expect(getConvertedUserText(messages[3])).toBe(obfuscator.obfuscate(`question about ${secret}`));
 		expect(JSON.stringify(capturedContext)).not.toContain(secret);
-		expect(history).toEqual(mutatedHistory);
+		expect(JSON.stringify(capturedContext)).not.toContain("late Main question");
+		expect(checkpoint).toEqual(savedCheckpoint);
+		expect(restored.turns.map(turn => turn.input)).toEqual([
+			`previous question about ${secret}`,
+			`question about ${secret}`,
+		]);
 	});
 
 	it("keeps obfuscated side-channel stable prefix byte-identical to the main turn", async () => {

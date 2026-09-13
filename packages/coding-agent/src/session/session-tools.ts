@@ -13,7 +13,7 @@ import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
-import { type LocalProtocolOptions } from "../internal-urls";
+import { type LocalProtocolOptions, parseXdUrl } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
@@ -22,15 +22,18 @@ import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/conte
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
+import { resolveToolTier } from "../tools/approval";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
+import { unwrapHashlineHeaderPath } from "../tools/plan-mode-guard";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveEditMode } from "../utils/edit-mode";
+import { resolveXdevTool } from "../tools/xdev";
 import {
 	extractPermissionLocations,
 	getPermissionIntent,
@@ -55,6 +58,18 @@ import {
 } from "./settings";
 import { cfgStartupQuiet } from "../modes/settings";
 import { cfgToolsApproval, cfgToolsApprovalMode, cfgToolsXdevDocs, cfgToolsXdevInlineDevices } from "../tools/settings";
+
+// Approval tier "read" also covers session mutations such as todo, retain and
+// resolve. Only investigation tools belong in the side-thread allowlist.
+const SIDE_READ_ONLY_TOOL_NAMES: Record<string, true> = {
+	read: true,
+	glob: true,
+	grep: true,
+	ast_grep: true,
+	web_search: true,
+	recall: true,
+	reflect: true,
+};
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
@@ -546,6 +561,32 @@ export class SessionTools {
 		const direct = this.#toolRegistry.get(name) ?? this.#toolRegistry.get(bareName);
 		if (direct) return direct;
 		return resolveMCPToolAlias(bareName, candidate => this.#toolRegistry.get(candidate));
+	}
+
+	/** Restrict side threads by operation, including tools reached through xd://. */
+	isReadOnlySideToolCall(tool: AgentTool, args: Record<string, unknown>): boolean {
+		if (tool.name === "write") {
+			if (!this.#xdev || typeof args.path !== "string" || typeof args.content !== "string") return false;
+			const target = parseXdUrl(unwrapHashlineHeaderPath(args.path));
+			const device = target?.name ? resolveXdevTool(this.#xdev, target.name) : undefined;
+			if (!device) return false;
+			let decoded: unknown;
+			try {
+				decoded = JSON.parse(args.content);
+			} catch {
+				return false;
+			}
+			if (!isRecord(decoded)) return false;
+			tool = device;
+			args = decoded;
+		}
+		if (Object.hasOwn(SIDE_READ_ONLY_TOOL_NAMES, tool.name)) return true;
+		if (tool.name !== "lsp" && tool.name !== "github") return false;
+		try {
+			return resolveToolTier(tool, args) === "read";
+		} catch {
+			return false;
+		}
 	}
 
 	/** Looks up an enabled tool through the same ACP permission gate as direct calls. */

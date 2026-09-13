@@ -17,7 +17,6 @@ import type {
 import type { BtwSummarySource } from "./messages";
 import type { SessionEntry } from "./session-entries";
 
-export type BtwThreadKind = "quick" | "child";
 export type BtwThreadPhase = "ready" | "running" | "error";
 
 export interface BtwThreadRequest {
@@ -45,7 +44,6 @@ export interface BtwManagerOptions {
 
 interface BtwThreadOptions {
 	key: string;
-	kind: BtwThreadKind;
 	title: string;
 	createdAt: number;
 	anchorLeafId: string;
@@ -67,7 +65,6 @@ export class BtwThread {
 	anchorLeafId: string;
 	readonly model: BtwThreadModelRef;
 	conversation: EphemeralConversation;
-	kind: BtwThreadKind;
 	phase: BtwThreadPhase;
 	error: string | undefined;
 	draft: string;
@@ -80,7 +77,6 @@ export class BtwThread {
 
 	constructor(options: BtwThreadOptions) {
 		this.key = options.key;
-		this.kind = options.kind;
 		this.title = options.title;
 		this.createdAt = options.createdAt;
 		this.anchorLeafId = options.anchorLeafId;
@@ -104,7 +100,7 @@ export class BtwThread {
 	}
 }
 
-/** Owns the singleton QuickAsk slot and every durable BTW child in creation order. */
+/** Owns every durable BTW thread in creation order. */
 export class BtwManager {
 	readonly #appendEvent: BtwManagerOptions["appendEvent"];
 	readonly #createConversation: BtwManagerOptions["createConversation"];
@@ -116,7 +112,6 @@ export class BtwManager {
 	readonly #childKeys: string[] = [];
 	readonly #preparedPromotions = new Set<string>();
 	readonly #dirtyDrafts = new Set<string>();
-	#quickKey: string | undefined;
 	#activeKey: string | undefined;
 
 	constructor(options: BtwManagerOptions) {
@@ -141,58 +136,8 @@ export class BtwManager {
 		return this.#activeKey;
 	}
 
-	get quickKey(): string | undefined {
-		return this.#quickKey;
-	}
-
 	thread(key: string): BtwThread | undefined {
 		return this.#threads.get(key);
-	}
-
-	createQuick(question: string, anchorLeafId: string, model: BtwThreadModelRef): string {
-		if (this.#quickKey) {
-			const previous = this.#threads.get(this.#quickKey);
-			previous?.abortController?.abort();
-			this.#threads.delete(this.#quickKey);
-			this.#dirtyDrafts.delete(this.#quickKey);
-		}
-		const key = this.#nextKey();
-		const title =
-			question
-				.replace(/[\r\n\t ]+/g, " ")
-				.trim()
-				.slice(0, 60) || "BTW";
-		const thread = new BtwThread({
-			key,
-			kind: "quick",
-			title,
-			createdAt: this.#now(),
-			anchorLeafId,
-			model,
-			conversation: this.#createConversation(model, undefined),
-		});
-		this.#threads.set(key, thread);
-		this.#quickKey = key;
-		this.#onChange?.();
-		return key;
-	}
-
-	continueQuick(key: string): boolean {
-		const thread = this.#threads.get(key);
-		if (thread?.kind !== "quick" || thread.phase !== "ready" || thread.turns.length === 0) return false;
-		const sideOptions = this.#createSideOptions?.({ threadKey: thread.key, threadTitle: thread.title });
-		if (sideOptions) {
-			const checkpoint = thread.conversation.checkpoint();
-			thread.conversation = this.#createConversation(thread.model, checkpoint, sideOptions);
-		}
-		thread.kind = "child";
-		this.#quickKey = undefined;
-		this.#childKeys.push(key);
-		this.#activeKey = key;
-		this.#appendEvent(this.#createEvent(thread));
-		this.persistDraft(key);
-		this.#onChange?.();
-		return true;
 	}
 
 	/**
@@ -208,7 +153,6 @@ export class BtwManager {
 				.slice(0, 60) || "BTW";
 		const thread = new BtwThread({
 			key,
-			kind: "child",
 			title,
 			createdAt: this.#now(),
 			anchorLeafId,
@@ -230,7 +174,7 @@ export class BtwManager {
 
 	select(key: string): boolean {
 		const thread = this.#threads.get(key);
-		if (thread?.kind !== "child") return false;
+		if (!thread) return false;
 		this.#activeKey = key;
 		this.#onChange?.();
 		return true;
@@ -256,7 +200,7 @@ export class BtwManager {
 
 	persistDraft(key: string): boolean {
 		const thread = this.#threads.get(key);
-		if (thread?.kind !== "child" || !this.#dirtyDrafts.has(key)) return false;
+		if (!thread || !this.#dirtyDrafts.has(key)) return false;
 		this.#appendEvent({
 			version: 1,
 			op: "draft",
@@ -271,7 +215,7 @@ export class BtwManager {
 
 	markRead(key: string): boolean {
 		const thread = this.#threads.get(key);
-		if (thread?.kind !== "child" || thread.readThrough === thread.turns.length) return false;
+		if (!thread || thread.readThrough === thread.turns.length) return false;
 		thread.readThrough = thread.turns.length;
 		this.#appendEvent({ version: 1, op: "read", key, through: thread.readThrough });
 		this.#onChange?.();
@@ -280,7 +224,7 @@ export class BtwManager {
 
 	preparePromotion(key: string): boolean {
 		const thread = this.#threads.get(key);
-		if (thread?.kind !== "child" || thread.phase === "running" || this.#preparedPromotions.has(key)) {
+		if (!thread || thread.phase === "running" || this.#preparedPromotions.has(key)) {
 			return false;
 		}
 		this.#appendEvent({ version: 1, op: "remove", key, reason: "promoted" });
@@ -309,7 +253,7 @@ export class BtwManager {
 		thread.request = undefined;
 		thread.abortController = undefined;
 		abortController?.abort();
-		if (thread.kind === "child" && !this.#preparedPromotions.has(key)) {
+		if (!this.#preparedPromotions.has(key)) {
 			this.#appendEvent({ version: 1, op: "remove", key, reason });
 		}
 		this.#preparedPromotions.delete(key);
@@ -331,7 +275,7 @@ export class BtwManager {
 		if (!trimmed && !images?.length) throw new Error("BTW input must not be empty");
 		const requestImages = images?.length ? [...images] : undefined;
 		this.setDraft(key, "");
-		if (thread.kind === "child") this.persistDraft(key);
+		this.persistDraft(key);
 		const request: BtwThreadRequest = {
 			input: trimmed,
 			images: requestImages,
@@ -354,16 +298,14 @@ export class BtwManager {
 		thread.abortController = abortController;
 		thread.phase = "running";
 		thread.error = undefined;
-		if (thread.kind === "child") {
-			this.#appendEvent({
-				version: 1,
-				op: "request",
-				key,
-				input: request.input,
-				images: request.images,
-				timestamp: request.timestamp,
-			});
-		}
+		this.#appendEvent({
+			version: 1,
+			op: "request",
+			key,
+			input: request.input,
+			images: request.images,
+			timestamp: request.timestamp,
+		});
 		this.#onChange?.();
 		try {
 			const result = await thread.conversation.prompt(request.input, {
@@ -392,19 +334,15 @@ export class BtwManager {
 			if (thread.request !== request) return result;
 			thread.phase = "ready";
 			thread.error = undefined;
-			if (thread.kind === "child") {
-				const turn = thread.turns.at(-1);
-				if (turn) this.#appendEvent({ version: 1, op: "turn", key, turn });
-			}
+			const turn = thread.turns.at(-1);
+			if (turn) this.#appendEvent({ version: 1, op: "turn", key, turn });
 			return result;
 		} catch (error) {
 			if (thread.request !== request) throw error;
 			const aborted = abortController.signal.aborted;
 			thread.phase = aborted ? "ready" : "error";
 			thread.error = aborted ? undefined : error instanceof Error ? error.message : String(error);
-			if (thread.kind === "child") {
-				this.#appendEvent({ version: 1, op: "terminal", key, error: thread.error });
-			}
+			this.#appendEvent({ version: 1, op: "terminal", key, error: thread.error });
 			throw error;
 		} finally {
 			if (thread.request === request) {
@@ -418,7 +356,6 @@ export class BtwManager {
 	prepareForPausedExit(): void {
 		let changed = false;
 		for (const thread of this.#threads.values()) {
-			if (thread.kind !== "child") continue;
 			this.persistDraft(thread.key);
 			if (!thread.request) continue;
 			thread.pausedRequest = {
@@ -470,7 +407,7 @@ export class BtwManager {
 
 	dispose(): void {
 		for (const thread of this.#threads.values()) {
-			if (thread.kind === "child") this.persistDraft(thread.key);
+			this.persistDraft(thread.key);
 			const abortController = thread.abortController;
 			thread.request = undefined;
 			thread.abortController = undefined;
@@ -489,7 +426,6 @@ export class BtwManager {
 		this.#childKeys.length = 0;
 		this.#preparedPromotions.clear();
 		this.#dirtyDrafts.clear();
-		this.#quickKey = undefined;
 		this.#activeKey = undefined;
 	}
 
@@ -514,7 +450,6 @@ export class BtwManager {
 		this.#dirtyDrafts.delete(key);
 		const childIndex = this.#childKeys.indexOf(key);
 		if (childIndex >= 0) this.#childKeys.splice(childIndex, 1);
-		if (this.#quickKey === key) this.#quickKey = undefined;
 		if (this.#activeKey === key) {
 			this.#activeKey = this.#childKeys.at(Math.min(childIndex, this.#childKeys.length - 1));
 		}
@@ -530,7 +465,6 @@ export class BtwManager {
 		};
 		const thread = new BtwThread({
 			key: restored.key,
-			kind: "child",
 			title: restored.title,
 			createdAt: restored.createdAt,
 			anchorLeafId: restored.anchorLeafId,

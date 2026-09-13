@@ -1,12 +1,10 @@
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import btwConversationPrompt from "../../prompts/system/btw-conversation.md" with { type: "text" };
 import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
-import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
 import type { ContinuePausedAgentsResult } from "../../session/agent-session-types";
 import { BtwManager } from "../../session/btw-manager";
 import { BTW_THREAD_CUSTOM_TYPE, type BtwPromotionLifecycle, type BtwPromotionRequest } from "../../session/btw-thread";
-import { sanitizeEphemeralAssistantForPromotion } from "../../session/messages";
 import { replaceTabs } from "../../tools/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwConversationPane, type BtwThreadView } from "../components/btw-conversation-pane";
@@ -15,24 +13,12 @@ import type { InteractiveModeContext } from "../types";
 
 interface BtwRequest {
 	component: BtwPanelComponent;
-	abortController: AbortController;
-	question: string;
-	leafId: string | null;
-	sessionId: string;
-	timestamp: number;
-	threadKey?: string;
+	threadKey: string;
 }
 
 export class BtwController {
 	#activeRequest: BtwRequest | undefined;
-	#lastQuestion: string | undefined;
-	#lastReplyText: string | undefined;
-	#lastAssistantMessage: AssistantMessage | undefined;
-	#lastLeafId: string | null | undefined;
-	#lastSessionId: string | undefined;
-	#lastTimestamp: number | undefined;
 	#branchInFlight = false;
-	#lastCopyText: string | undefined;
 	#copyInFlight = false;
 	#manager: BtwManager | undefined;
 	#managerSessionId: string | undefined;
@@ -54,72 +40,49 @@ export class BtwController {
 		return this.#activeRequest !== undefined;
 	}
 
-	canContinue(): boolean {
-		if (this.#branchInFlight || this.#managerSessionId !== this.ctx.sessionManager.getSessionId()) return false;
-		const request = this.#activeRequest;
-		if (!request?.threadKey || request.component.isBranchable() !== true) return false;
-		const thread = this.#manager?.thread(request.threadKey);
-		return thread?.kind === "quick" && thread.phase === "ready" && thread.turns.length > 0;
+	canOpenThread(): boolean {
+		if (
+			!this.ctx.workspaceEnabled ||
+			this.#branchInFlight ||
+			this.#managerSessionId !== this.ctx.sessionManager.getSessionId()
+		)
+			return false;
+		const key = this.#activeRequest?.threadKey;
+		return key !== undefined && this.#manager?.thread(key) !== undefined;
 	}
 
-	/** Whether plain `Enter` is currently reserved by the visible inline QuickAsk panel. */
-	handlesContinueKey(): boolean {
+	/** Whether plain `Enter` opens the visible inline thread in the workspace. */
+	handlesOpenThreadKey(): boolean {
 		const request = this.#activeRequest;
-		return request !== undefined && this.ctx.btwContainer.children.includes(request.component) && this.canContinue();
+		return (
+			request !== undefined && this.ctx.btwContainer.children.includes(request.component) && this.canOpenThread()
+		);
 	}
 
 	canBranch(): boolean {
-		if (this.#branchInFlight) return false;
 		const request = this.#activeRequest;
-		if (request?.component.isBranchable() === true) {
-			if (request.threadKey) return this.#canPromoteThread(request.threadKey);
-			return this.#branchUnavailableReason() === undefined;
-		}
-		return this.#canPromoteThread(this.#manager?.activeKey);
+		return (
+			(!request || request.component.isBranchable()) &&
+			this.#canPromoteThread(request?.threadKey ?? this.#manager?.activeKey)
+		);
 	}
 
-	/** Whether plain `b` is currently reserved by the visible inline QuickAsk panel. */
+	/** Whether plain `b` is reserved by the visible inline panel. */
 	handlesBranchKey(): boolean {
 		const request = this.#activeRequest;
 		if (!request || !this.ctx.btwContainer.children.includes(request.component)) return false;
 		if (this.#branchInFlight) return true;
-		return request.component.isBranchable() && (request.threadKey ? this.canBranch() : true);
-	}
-
-	#branchUnavailableReason(): string | undefined {
-		if (this.#branchInFlight) return "a branch is already in progress";
-		if (this.#activeRequest?.component.isBranchable() !== true) return "the answer is not ready";
-		if (
-			!this.#lastQuestion ||
-			!this.#lastReplyText ||
-			!this.#lastAssistantMessage ||
-			this.#lastTimestamp === undefined
-		) {
-			return "the answer is unavailable";
-		}
-		if (!this.#lastLeafId) return "the session has no branch point";
-		if (
-			this.#lastSessionId !== this.ctx.sessionManager.getSessionId() ||
-			this.#lastLeafId !== this.ctx.sessionManager.getLeafId()
-		) {
-			return "the session changed since /btw started";
-		}
-		if (this.ctx.session.isStreaming) return "a turn is still running";
-		return undefined;
+		return request.component.isBranchable() && this.canBranch();
 	}
 
 	canCopy(): boolean {
-		if (this.#copyInFlight) return false;
-		const request = this.#activeRequest;
-		if (request?.component.isCopyable() === true) {
-			return request.threadKey
-				? this.#threadCopyText(request.threadKey) !== undefined
-				: this.#lastCopyText !== undefined;
-		}
-		return this.#threadCopyText(this.#manager?.activeKey) !== undefined;
+		return (
+			!this.#copyInFlight &&
+			this.#threadCopyText(this.#activeRequest?.threadKey ?? this.#manager?.activeKey) !== undefined
+		);
 	}
 
-	/** Whether plain `c` is currently reserved by the visible inline QuickAsk panel. */
+	/** Whether plain `c` is reserved by the visible inline panel. */
 	handlesCopyKey(): boolean {
 		const request = this.#activeRequest;
 		return (
@@ -131,13 +94,7 @@ export class BtwController {
 
 	async handleCopy(threadKey?: string): Promise<boolean> {
 		if (this.#copyInFlight) return false;
-		const copyText = threadKey
-			? this.#threadCopyText(threadKey)
-			: this.#activeRequest?.threadKey
-				? this.#threadCopyText(this.#activeRequest.threadKey)
-				: this.#activeRequest
-					? this.#lastCopyText
-					: this.#threadCopyText(this.#manager?.activeKey);
+		const copyText = this.#threadCopyText(threadKey ?? this.#activeRequest?.threadKey ?? this.#manager?.activeKey);
 		if (copyText === undefined) return false;
 		this.#copyInFlight = true;
 		this.ctx.ui.requestRender();
@@ -154,61 +111,19 @@ export class BtwController {
 		}
 	}
 
-	async handleContinue(): Promise<boolean> {
-		if (!this.canContinue()) return false;
+	async handleOpenThread(): Promise<boolean> {
+		if (!this.canOpenThread()) return false;
 		const request = this.#activeRequest;
 		const manager = this.#manager;
-		if (!request?.threadKey || !manager?.continueQuick(request.threadKey)) return false;
-		this.#detachActiveRequest();
-		this.#clearCompletedState();
+		if (!request || !manager?.select(request.threadKey)) return false;
 		if (!this.#openWorkspacePane(manager)) return false;
-		this.ctx.showStatus("Continued /btw as a durable side thread", { dim: true });
+		this.#detachActiveRequest();
 		return true;
 	}
 
 	async handleBranch(): Promise<boolean> {
-		const request = this.#activeRequest;
-		if (!this.canBranch()) {
-			if (!request?.threadKey) {
-				const unavailableReason = this.#branchUnavailableReason();
-				if (unavailableReason) {
-					this.ctx.showStatus(`/btw branch unavailable: ${unavailableReason}`, { dim: true });
-				}
-			}
-			return false;
-		}
-		if (request?.threadKey) return this.#promoteThread(request.threadKey);
-		if (request) {
-			if (
-				this.#lastQuestion === undefined ||
-				this.#lastReplyText === undefined ||
-				this.#lastAssistantMessage === undefined ||
-				this.#lastTimestamp === undefined ||
-				this.#lastLeafId === null ||
-				this.#lastLeafId === undefined
-			) {
-				return false;
-			}
-			if (this.#lastSessionId === undefined) return false;
-			const promoted = await this.#promote({
-				anchorLeafId: this.#lastLeafId,
-				sessionId: this.#lastSessionId,
-				turns: [
-					{
-						input: this.#lastQuestion,
-						replyText: this.#lastReplyText,
-						assistantMessage: this.#lastAssistantMessage,
-						timestamp: this.#lastTimestamp,
-					},
-				],
-			});
-			if (promoted && this.#activeRequest === request) {
-				this.#closeActiveRequest({ abort: false, removeQuick: false });
-			}
-			return promoted;
-		}
-		const activeKey = this.#manager?.activeKey;
-		return activeKey ? this.#promoteThread(activeKey) : false;
+		if (!this.canBranch()) return false;
+		return this.#promoteThread(this.#activeRequest?.threadKey ?? this.#manager?.activeKey);
 	}
 
 	handleEscape(): boolean {
@@ -217,17 +132,14 @@ export class BtwController {
 			return true;
 		}
 		if (!this.#activeRequest) return false;
-		this.#closeActiveRequest({
-			abort: this.#activeRequest.abortController.signal.aborted === false,
-			removeQuick: true,
-		});
+		this.#closeActiveRequest();
 		return true;
 	}
 
 	dispose(): void {
 		const manager = this.#manager;
 		const sessionMatches = manager !== undefined && this.#managerSessionId === this.ctx.sessionManager.getSessionId();
-		this.#closeActiveRequest({ abort: true, removeQuick: true });
+		this.#closeActiveRequest();
 		if (this.#workspacePane) {
 			if (!sessionMatches) this.#workspacePane.abandon();
 			this.#closeWorkspacePane();
@@ -243,26 +155,21 @@ export class BtwController {
 			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
 			return;
 		}
-		if (!this.ctx.workspaceEnabled) {
-			await this.#startLegacy(question);
-			return;
-		}
-		this.#startWorkspace(question.trim());
-	}
-
-	#startWorkspace(input: string): void {
+		const input = question.trim();
 		const manager = this.#managerForCurrentSession();
 		if (!input) {
-			this.#openWorkspacePane(manager);
+			if (this.ctx.workspaceEnabled) {
+				if (this.#openWorkspacePane(manager)) this.#detachActiveRequest();
+			} else if (manager.activeKey) {
+				this.#showInlineThread(manager, manager.activeKey);
+			} else {
+				this.ctx.showStatus("Usage: /btw <question>");
+			}
 			return;
 		}
 		if (input === "--clear" || input === "clear") {
-			if (!this.#activeRequest) {
-				this.ctx.showStatus("No QuickAsk is open; durable side threads are kept", { dim: true });
-				return;
-			}
-			this.#closeActiveRequest({ abort: true, removeQuick: true });
-			this.ctx.showStatus("Dismissed the current QuickAsk; durable side threads are kept", { dim: true });
+			this.#closeActiveRequest();
+			this.ctx.showStatus("Dismissed the inline BTW panel; the thread is kept", { dim: true });
 			return;
 		}
 		const model = this.ctx.session.model;
@@ -273,41 +180,53 @@ export class BtwController {
 			);
 			return;
 		}
-		this.#closeActiveRequest({ abort: true, removeQuick: true });
-		const threadKey = manager.createQuick(input, leafId, { provider: model.provider, id: model.id });
-		const request: BtwRequest = {
-			component: new BtwPanelComponent({
-				question: input,
-				tui: this.ctx.ui,
-				canBranch: () => this.canBranch(),
-				continueToThread: true,
-			}),
-			abortController: new AbortController(),
-			question: input,
-			leafId,
-			sessionId: this.ctx.sessionManager.getSessionId(),
-			timestamp: Date.now(),
-			threadKey,
-		};
-		this.ctx.btwContainer.clear();
-		this.ctx.btwContainer.addChild(request.component);
-		this.ctx.ui.requestRender();
-		this.#activeRequest = request;
+		this.#closeActiveRequest();
+		const previousKey = manager.activeKey;
+		const threadKey = manager.createChild(input, leafId, { provider: model.provider, id: model.id });
+		if (this.#workspacePane && previousKey) manager.select(previousKey);
+		const request = this.#showInlineThread(manager, threadKey);
+		if (!request) return;
 		this.ctx.terminalActivity.set(request, "working");
-		void this.#runQuickRequest(manager, request);
+		void this.#runInlineRequest(manager, request, input);
 	}
 
-	async #runQuickRequest(manager: BtwManager, request: BtwRequest): Promise<void> {
+	#showInlineThread(manager: BtwManager, threadKey: string): BtwRequest | undefined {
+		const thread = manager.thread(threadKey);
+		if (!thread) return undefined;
+		this.#detachActiveRequest();
+		const turn = thread.turns.at(-1);
+		const request: BtwRequest = {
+			threadKey,
+			component: new BtwPanelComponent({
+				question: thread.request?.input ?? turn?.input ?? thread.title,
+				tui: this.ctx.ui,
+				canBranch: () => this.canBranch(),
+				canOpenThread: this.ctx.workspaceEnabled,
+			}),
+		};
+		if (turn) request.component.setAnswer(turn.replyText);
+		if (thread.phase === "error") request.component.markError(thread.error ?? "BTW request failed");
+		else if (thread.phase === "ready" && turn) request.component.markComplete();
+		else if (thread.phase === "ready") request.component.markAborted();
+		this.#activeRequest = request;
+		this.ctx.btwContainer.addChild(request.component);
+		this.ctx.ui.requestRender();
+		return request;
+	}
+
+	async #runInlineRequest(manager: BtwManager, request: BtwRequest, input: string): Promise<void> {
 		try {
-			const result = await manager.prompt(request.threadKey!, request.question, delta => {
+			request.component.markRunning();
+			const result = await manager.prompt(request.threadKey, input, delta => {
 				if (this.#activeRequest === request) request.component.appendText(delta);
 			});
 			if (this.#activeRequest !== request) return;
 			request.component.setAnswer(result.replyText);
 			request.component.markComplete();
+			manager.markRead(request.threadKey);
 		} catch (error) {
 			if (this.#activeRequest !== request) return;
-			if (manager.thread(request.threadKey!)?.phase === "ready") request.component.markAborted();
+			if (manager.thread(request.threadKey)?.phase === "ready") request.component.markAborted();
 			else request.component.markError(error instanceof Error ? error.message : String(error));
 		} finally {
 			this.ctx.terminalActivity.release(request);
@@ -318,7 +237,7 @@ export class BtwController {
 	#managerForCurrentSession(): BtwManager {
 		const sessionId = this.ctx.sessionManager.getSessionId();
 		if (this.#manager && this.#managerSessionId === sessionId) return this.#manager;
-		this.#closeActiveRequest({ abort: true, removeQuick: true });
+		this.#closeActiveRequest();
 		this.#workspacePane?.abandon();
 		this.#closeWorkspacePane();
 		this.#manager?.abandon();
@@ -394,20 +313,6 @@ export class BtwController {
 	#closeWorkspacePane(): void {
 		if (!this.#workspacePane) return;
 		this.#workspacePane = undefined;
-		const manager = this.#manager;
-		if (manager && this.#managerSessionId === this.ctx.sessionManager.getSessionId()) {
-			for (const thread of manager.children) {
-				if (
-					thread.phase === "ready" &&
-					thread.request === undefined &&
-					thread.turns.length === 0 &&
-					!thread.draft.trim() &&
-					thread.draftImages.length === 0
-				) {
-					manager.remove(thread.key, "deleted");
-				}
-			}
-		}
 		this.ctx.closeBtwWorkspacePane();
 	}
 
@@ -437,13 +342,7 @@ export class BtwController {
 		}
 		const activeKey = manager.activeKey;
 		const active = activeKey ? manager.thread(activeKey) : undefined;
-		if (
-			!input.trim() &&
-			active?.kind === "child" &&
-			active.phase === "ready" &&
-			active.request === undefined &&
-			active.turns.length === 0
-		) {
+		if (!input.trim() && active?.phase === "ready" && active.request === undefined && active.turns.length === 0) {
 			return active.key;
 		}
 		const model = this.ctx.session.model;
@@ -455,7 +354,7 @@ export class BtwController {
 		return manager.createChild(input, leafId, { provider: model.provider, id: model.id });
 	}
 
-	/** Create a durable child from the pane (no QuickAsk hop) and send its first question. */
+	/** Create a durable thread and send its first question. */
 	#createChildAndSend(manager: BtwManager, input: string, images?: ImageContent[]): boolean {
 		const key = this.#createChild(manager, input);
 		if (!key) return false;
@@ -467,7 +366,7 @@ export class BtwController {
 		const manager = this.#manager;
 		const thread = manager?.thread(key);
 		const trimmed = input.trim();
-		if (!manager || !thread || thread.kind !== "child" || (!trimmed && !images?.length)) return false;
+		if (!manager || !thread || (!trimmed && !images?.length)) return false;
 		const commandEnd = trimmed.indexOf(" ");
 		const command = commandEnd < 0 ? trimmed : trimmed.slice(0, commandEnd);
 		const argument = commandEnd < 0 ? "" : trimmed.slice(commandEnd + 1).trim();
@@ -590,19 +489,16 @@ export class BtwController {
 		// into the new session's journal — so persist every unflushed draft now,
 		// before the branch is attempted. No-op when a draft is already stored.
 		for (const candidate of manager.children) {
-			if (candidate.kind === "child") manager.persistDraft(candidate.key);
+			manager.persistDraft(candidate.key);
 		}
-		const lifecycle: BtwPromotionLifecycle | undefined =
-			thread.kind === "child"
-				? {
-						prepare: () => {
-							if (!manager.preparePromotion(key)) throw new Error("BTW thread is no longer promotable");
-						},
-						rollback: () => {
-							manager.rollbackPromotion(key);
-						},
-					}
-				: undefined;
+		const lifecycle: BtwPromotionLifecycle = {
+			prepare: () => {
+				if (!manager.preparePromotion(key)) throw new Error("BTW thread is no longer promotable");
+			},
+			rollback: () => {
+				manager.rollbackPromotion(key);
+			},
+		};
 		const promoted = await this.#promote(
 			{ anchorLeafId: thread.anchorLeafId, sessionId, turns: [...thread.turns] },
 			lifecycle,
@@ -612,8 +508,7 @@ export class BtwController {
 			return promoted;
 		}
 		if (!promoted) return false;
-		if (thread.kind === "child") manager.completePromotion(key);
-		else manager.remove(key, "promoted");
+		manager.completePromotion(key);
 		if (this.#activeRequest?.threadKey === key) this.#detachActiveRequest();
 		manager.abandon();
 		this.#manager = undefined;
@@ -639,101 +534,20 @@ export class BtwController {
 		}
 	}
 
-	async #startLegacy(question: string): Promise<void> {
-		const trimmedQuestion = question.trim();
-		if (!trimmedQuestion) {
-			this.ctx.showStatus("Usage: /btw <question>");
-			return;
-		}
-		if (!this.ctx.session.model) {
-			this.ctx.showError("No active model available for /btw.");
-			return;
-		}
-		const request: BtwRequest = {
-			component: new BtwPanelComponent({
-				question: trimmedQuestion,
-				tui: this.ctx.ui,
-				canBranch: () => this.canBranch(),
-			}),
-			abortController: new AbortController(),
-			question: trimmedQuestion,
-			leafId: this.ctx.sessionManager.getLeafId(),
-			sessionId: this.ctx.sessionManager.getSessionId(),
-			timestamp: Date.now(),
-		};
-		this.ctx.terminalActivity.set(request, "working");
-		this.#closeActiveRequest({ abort: true, removeQuick: true });
-		this.ctx.btwContainer.clear();
-		this.ctx.btwContainer.addChild(request.component);
-		this.ctx.ui.requestRender();
-		this.#activeRequest = request;
-		void this.#runLegacyRequest(request);
-	}
-
-	async #runLegacyRequest(request: BtwRequest): Promise<void> {
-		try {
-			const promptText = prompt.render(btwUserPrompt, { question: request.question });
-			const { replyText, assistantMessage } = await this.ctx.session.runEphemeralTurn({
-				promptText,
-				onTextDelta: delta => {
-					if (this.#activeRequest === request) request.component.appendText(delta);
-				},
-				signal: request.abortController.signal,
-			});
-			if (this.#activeRequest !== request) return;
-			request.component.setAnswer(replyText);
-			request.component.markComplete();
-			const copyText = request.component.getCopyText();
-			if (copyText !== undefined) {
-				this.#lastQuestion = request.question;
-				this.#lastReplyText = replyText;
-				this.#lastCopyText = copyText;
-				this.#lastAssistantMessage = sanitizeEphemeralAssistantForPromotion(assistantMessage, replyText);
-				this.#lastLeafId = request.leafId;
-				this.#lastSessionId = request.sessionId;
-				this.#lastTimestamp = request.timestamp;
-			} else {
-				this.#clearCompletedState();
-			}
-		} catch (error) {
-			if (this.#activeRequest !== request) return;
-			if (request.abortController.signal.aborted) request.component.markAborted();
-			else request.component.markError(error instanceof Error ? error.message : String(error));
-		} finally {
-			this.ctx.terminalActivity.release(request);
-		}
-	}
-
-	#closeActiveRequest(options: { abort: boolean; removeQuick: boolean }): void {
-		const request = this.#activeRequest;
-		if (!request) return;
-		this.#activeRequest = undefined;
-		this.ctx.terminalActivity.release(request);
-		this.#clearCompletedState();
-		if (options.abort) request.abortController.abort();
-		if (options.removeQuick && request.threadKey) this.#manager?.remove(request.threadKey, "deleted");
-		request.component.close();
-		this.ctx.btwContainer.clear();
-		this.ctx.ui.requestRender();
-	}
-
 	#detachActiveRequest(): void {
 		const request = this.#activeRequest;
 		if (!request) return;
 		this.#activeRequest = undefined;
-		this.ctx.terminalActivity.release(request);
 		request.component.close();
 		this.ctx.btwContainer.clear();
 		this.ctx.ui.requestRender();
 	}
 
-	#clearCompletedState(): void {
-		this.#lastQuestion = undefined;
-		this.#lastReplyText = undefined;
-		this.#lastAssistantMessage = undefined;
-		this.#lastCopyText = undefined;
-		this.#lastLeafId = undefined;
-		this.#lastSessionId = undefined;
-		this.#lastTimestamp = undefined;
+	#closeActiveRequest(): void {
+		const request = this.#activeRequest;
+		if (!request) return;
+		this.#manager?.thread(request.threadKey)?.abortController?.abort();
+		this.ctx.terminalActivity.release(request);
+		this.#detachActiveRequest();
 	}
 }

@@ -5,7 +5,7 @@ import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/eve
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
+import { EphemeralConversation, type EphemeralConversationCheckpoint, type EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -28,7 +28,7 @@ import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/setting
  */
 interface LoaderRecoveryContextOptions {
 	terminalProgress?: boolean;
-	runEphemeralTurn?: AgentSession["runEphemeralTurn"];
+	runSideTurn?: () => Promise<EphemeralTurnResult>;
 }
 
 function createContext(options: LoaderRecoveryContextOptions = {}) {
@@ -55,9 +55,16 @@ function createContext(options: LoaderRecoveryContextOptions = {}) {
 			},
 			getToolByName: () => undefined,
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
-			runEphemeralTurn: options.runEphemeralTurn ?? vi.fn(async () => Promise.withResolvers<never>().promise),
+			createEphemeralConversation: (_instructions: string, checkpoint?: EphemeralConversationCheckpoint) =>
+				new EphemeralConversation({
+					snapshotBaseMessages: () => [],
+					sideSessionId: "side-activity",
+					checkpoint,
+					runTurn: options.runSideTurn ?? (() => Promise.withResolvers<never>().promise),
+				}),
 		},
 	});
+	ctx.sessionManager.appendMessage(createAssistantMessage("Main seed"));
 	const { statusContainer } = ctx;
 	const workingLoaders: Loader[] = [];
 	ctx.ensureLoadingAnimation = vi.fn(() => {
@@ -273,7 +280,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		const sideRequest = Promise.withResolvers<never>();
 		const { ctx, streamState, setProgress, setTitleState } = createContext({
 			terminalProgress: true,
-			runEphemeralTurn: () => sideRequest.promise,
+			runSideTurn: () => sideRequest.promise,
 		});
 		const eventController = new EventController(ctx);
 		const btwController = new BtwController(ctx);
@@ -295,7 +302,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		const sideRequest = Promise.withResolvers<EphemeralTurnResult>();
 		const { ctx, streamState, setProgress, setTitleState } = createContext({
 			terminalProgress: true,
-			runEphemeralTurn: () => sideRequest.promise,
+			runSideTurn: () => sideRequest.promise,
 		});
 		const eventController = new EventController(ctx);
 		const btwController = new BtwController(ctx);
@@ -310,8 +317,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 			replyText: "Yes",
 			assistantMessage: createAssistantMessage("Yes"),
 		});
-		await Promise.resolve();
-		await Promise.resolve();
+		for (let i = 0; i < 10; i++) await Promise.resolve();
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
 		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working"]);
 

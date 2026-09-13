@@ -316,6 +316,7 @@ describe("searchCodex model selection", () => {
 	});
 
 	it("uses email-only OAuth credentials without an account header", async () => {
+		delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
 		const result = await searchCodex({
 			...makeSearchParams("email-only Codex search", mockCodexFetch("gpt-5.6-luna")),
 			authStorage: emailOnlyAuthStorage,
@@ -325,7 +326,11 @@ describe("searchCodex model selection", () => {
 		const headers = new Headers(capturedRequest?.headers);
 		expect(headers.get("authorization")).toBe("Bearer email-only-access-token");
 		expect(headers.has("chatgpt-account-id")).toBe(false);
-		expect(result.answer).toBe("Codex answer");
+		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/alpha/search");
+		expect(result.answer).toBe("Example Article (https://example.com/article)\nSearch result snippet.");
+		expect(result.sources).toEqual([
+			{ title: "Example Article", url: "https://example.com/article", snippet: "Search result snippet." },
+		]);
 	});
 
 	it("applies the configured request timeout to Codex search", async () => {

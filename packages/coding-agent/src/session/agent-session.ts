@@ -578,9 +578,6 @@ function createShareSummaryWithMainTool(
 	};
 }
 
-/** Side-thread tool names allowed to execute when read-only tools are enabled. */
-const BTW_READ_ONLY_TOOL_NAMES: Record<string, true> = { read: true, glob: true, grep: true };
-
 export const SHARE_SUMMARY_WITH_MAIN_TOOL_NAME = "shareSummaryWithMain";
 
 /** Internal marker for hook messages queued through the agent loop */
@@ -10186,7 +10183,7 @@ export class AgentSession implements SettingsScope {
 			preferWebsockets: this.#preferWebsockets,
 			serviceTier: this.#models.effectiveServiceTier(model),
 			beforeToolCall: ctx => {
-				if (readOnlyTools && Object.hasOwn(BTW_READ_ONLY_TOOL_NAMES, ctx.toolCall.name)) return undefined;
+				if (readOnlyTools && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args)) return undefined;
 				if (shareSummaryWithMainTool && ctx.toolCall.name === SHARE_SUMMARY_WITH_MAIN_TOOL_NAME) {
 					return this.#extensionRunner
 						? undefined

@@ -467,7 +467,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "btw",
 		icon: "question",
-		description: "Open or continue an ephemeral side conversation using the current session context",
+		description: "Ask in a durable side thread, or reopen the BTW workspace",
 		inlineHint: "[question|--clear]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {

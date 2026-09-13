@@ -24,8 +24,6 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		workspaceCwd: sourceDir,
 		artifactCwd: sourceDir,
 		executedCwds: [] as string[],
-		completedBtwVisible: true,
-		gateHeld: false,
 	};
 	const executeBash = vi.fn(async (command: string): Promise<BashResult> => {
 		state.executedCwds.push(state.cwd);
@@ -75,17 +73,6 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 			expect(state.cwd).toBe(cwd);
 			state.workspaceCwd = cwd;
 			return true;
-		}),
-		withBtwSessionMove: vi.fn(async (operation: () => Promise<boolean>) => {
-			if (state.gateHeld) throw new Error("Nested session move gate");
-			state.gateHeld = true;
-			try {
-				const moved = await operation();
-				if (moved) state.completedBtwVisible = false;
-				return moved;
-			} finally {
-				state.gateHeld = false;
-			}
 		}),
 		shutdown: vi.fn(async () => {}),
 		updateEditorBorderColor: vi.fn(),
@@ -189,7 +176,6 @@ describe("bash shortcut command", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.workspaceCwd).toBe(sourceDir);
 			expect(state.artifactCwd).toBe(sourceDir);
-			expect(state.completedBtwVisible).toBe(false);
 			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(1, childDir);
 			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir, childDir, sourceDir]);
@@ -249,7 +235,6 @@ describe("bash shortcut command", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir]);
 			expect(executeBash).toHaveBeenCalledTimes(1);
-			expect(ctx.withBtwSessionMove).not.toHaveBeenCalled();
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
 			expect(ctx.reloadTodos).not.toHaveBeenCalled();
@@ -361,7 +346,6 @@ describe("bash shortcut command", () => {
 				workingDir: childDir,
 			}));
 			ctx.applyCwdChange = vi.fn(async (cwd: string) => {
-				expect(state.gateHeld).toBe(true);
 				if (cwd === childDir) throw new Error("refresh failed");
 				state.workspaceCwd = cwd;
 				return true;
@@ -376,7 +360,6 @@ describe("bash shortcut command", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.workspaceCwd).toBe(sourceDir);
 			expect(state.artifactCwd).toBe(sourceDir);
-			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("refresh failed"));
 			expect(ctx.shutdown).not.toHaveBeenCalled();
 			await controller.handleBashCommand("pwd");
@@ -384,22 +367,6 @@ describe("bash shortcut command", () => {
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
-	});
-
-	it("does not execute or render a persistent cd when the BTW migration gate refuses", async () => {
-		const { ctx, executeBash, present, state } = createCwdContext("/tmp");
-		ctx.withBtwSessionMove = vi.fn(async () => false);
-
-		await new CommandController(ctx).handleBashCommand("cd /");
-
-		expect(executeBash).not.toHaveBeenCalled();
-		expect(present).not.toHaveBeenCalled();
-		expect(ctx.session.moveSession).not.toHaveBeenCalled();
-		expect(ctx.applyCwdChange).not.toHaveBeenCalled();
-		expect(state.cwd).toBe("/tmp");
-		expect(state.artifactCwd).toBe("/tmp");
-		expect(state.workspaceCwd).toBe("/tmp");
-		expect(state.completedBtwVisible).toBe(true);
 	});
 
 	it("does not execute cd when saving source settings fails", async () => {
@@ -410,9 +377,7 @@ describe("bash shortcut command", () => {
 
 		expect(executeBash).not.toHaveBeenCalled();
 		expect(present).not.toHaveBeenCalled();
-		expect(ctx.withBtwSessionMove).not.toHaveBeenCalled();
 		expect(state.cwd).toBe("/tmp");
-		expect(state.completedBtwVisible).toBe(true);
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("settings write denied"));
 	});
 
@@ -433,14 +398,12 @@ describe("bash shortcut command", () => {
 		await new CommandController(ctx).handleBashCommand("cd / && pwd");
 
 		expect(executeBash).toHaveBeenCalledTimes(1);
-		expect(ctx.withBtwSessionMove).not.toHaveBeenCalled();
 		expect(ctx.session.moveSession).not.toHaveBeenCalled();
 		expect(state.cwd).toBe("/tmp");
-		expect(state.completedBtwVisible).toBe(true);
 	});
 
-	it("holds the same migration gate through shell execution and cwd adoption", async () => {
-		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-gate-"));
+	it("waits for shell execution before relocating and adopting the resulting cwd", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-adoption-"));
 		const childDir = path.join(sourceDir, "child");
 		await fs.mkdir(childDir);
 		const executionStarted = Promise.withResolvers<void>();
@@ -473,22 +436,15 @@ describe("bash shortcut command", () => {
 			});
 			pending = new CommandController(ctx).handleBashCommand("cd child");
 			await executionStarted.promise;
-			expect(state.gateHeld).toBe(true);
 			expect(state.cwd).toBe(sourceDir);
-			expect(state.completedBtwVisible).toBe(true);
 			executionResult.resolve(result);
 			await adoptionStarted.promise;
-			expect(state.gateHeld).toBe(true);
 			expect(state.cwd).toBe(childDir);
 			expect(state.artifactCwd).toBe(childDir);
 			expect(state.workspaceCwd).toBe(sourceDir);
-			expect(state.completedBtwVisible).toBe(true);
 			adoptionResult.resolve();
 			await pending;
-			expect(state.gateHeld).toBe(false);
 			expect(state.workspaceCwd).toBe(childDir);
-			expect(state.completedBtwVisible).toBe(false);
-			expect(ctx.withBtwSessionMove).toHaveBeenCalledTimes(1);
 		} finally {
 			executionResult.resolve(result);
 			adoptionResult.resolve();
@@ -498,7 +454,7 @@ describe("bash shortcut command", () => {
 	});
 
 	it.each(["failed", "cancelled", "unchanged"] as const)(
-		"retains completed BTW and session cwd after a %s standalone cd",
+		"retains the session cwd after a %s standalone cd",
 		async outcome => {
 			const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-not-moved-"));
 			const childDir = path.join(sourceDir, "child");
@@ -523,8 +479,6 @@ describe("bash shortcut command", () => {
 				expect(state.cwd).toBe(sourceDir);
 				expect(state.workspaceCwd).toBe(sourceDir);
 				expect(state.artifactCwd).toBe(sourceDir);
-				expect(state.completedBtwVisible).toBe(true);
-				expect(state.gateHeld).toBe(false);
 				expect(ctx.session.moveSession).not.toHaveBeenCalled();
 				expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			} finally {
@@ -562,7 +516,6 @@ describe("bash shortcut command", () => {
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.artifactCwd).toBe(sourceDir);
 			expect(state.workspaceCwd).toBe(sourceDir);
-			expect(state.completedBtwVisible).toBe(true);
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
 			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("session transition rejected"));
 			const component = present.mock.calls[0]?.[0];

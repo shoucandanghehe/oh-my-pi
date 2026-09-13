@@ -2,7 +2,6 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type RegistryEvent } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
-import { setTerminalTitleState } from "../../utils/title-generator";
 import type { InteractiveModeContext } from "../types";
 
 /**

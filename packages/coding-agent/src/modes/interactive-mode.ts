@@ -6472,7 +6472,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#cancelLoopAutoSubmit();
 
 		// Surface progress before any asynchronous cleanup, including live commands
-		// and BTW history writes, so the user sees a reason for the pause.
+		// and BTW teardown, so the user sees a reason for the pause.
 		this.showStatus(status);
 
 		const stillClosingTimer = setTimeout(() => {
@@ -7212,10 +7212,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleWorktreeCommand(branch);
 	}
 
-	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
-		return this.#btwController.withSessionMove(operation);
-	}
-
 	handleRenameCommand(title: string): Promise<void> {
 		return this.#commandController.handleRenameCommand(title);
 	}
@@ -7532,13 +7528,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleEscape();
 	}
 
-	/** Reserves plain `Enter` only while the inline QuickAsk continue action is visible. */
-	handlesBtwContinueKey(): boolean {
-		return this.#btwController.handlesContinueKey();
+	/** Reserves plain `Enter` while the inline thread can be opened in the workspace. */
+	handlesBtwOpenThreadKey(): boolean {
+		return this.#btwController.handlesOpenThreadKey();
 	}
 
-	handleBtwContinueKey(): Promise<boolean> {
-		return this.#btwController.handleContinue();
+	handleBtwOpenThreadKey(): Promise<boolean> {
+		return this.#btwController.handleOpenThread();
 	}
 
 	canBranchBtw(): boolean {
@@ -7554,7 +7550,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleBranch();
 	}
 
-	/** Reserves plain `c` only while the inline QuickAsk copy action is visible. */
+	/** Reserves plain `c` only while the inline BTW copy action is visible. */
 	handlesBtwCopyKey(): boolean {
 		return this.#btwController.handlesCopyKey();
 	}

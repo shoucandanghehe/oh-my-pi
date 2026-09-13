@@ -214,11 +214,13 @@ conversation; `/new`, which creates a new session identity and transcript file;
 and `/delete`, which attempts to delete the old persisted session before starting
 a new one.
 
-## BTW history
+## BTW threads
 
-`/btw` history is stored alongside session artifacts and remains outside the main
-conversation. See the [BTW command reference](slash-command-internals.md#11-built-in-command-note-btw)
-for keyboard controls, follow-ups, persistence, and migration safety.
+BTW threads are stored as `btw-thread` custom events in the session journal,
+separate from Main's model conversation. Inline questions are durable from creation;
+opening the workspace changes only their presentation. See the
+[BTW command reference](slash-command-internals.md#11-built-in-command-note-btw)
+for follow-ups, persistence, and promotion.
 
 ## Fork
 
