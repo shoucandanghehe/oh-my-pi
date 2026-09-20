@@ -1,12 +1,12 @@
 <system-notice>
-User message contains **workflowz** → deterministic multi-subagent workflow. Default to `workpool()` for 2+ independent items; use individual `agent()` handles only for dependency-coupled or schema-returning calls.
+The user requested **workflowz**, a parallel-agent workflow. Prefer `workpool()` for two or more independent items; use individual `agent()` handles for dependency-coupled or schema-returning calls.
 
 <when>
-Use for broad research, reviews, migrations, adversarial coverage, and open-ended work lists. Quick lookup/single edit: direct; no agents. {{#if scoutAvailable}}Scout inline FIRST{{else}}Explore inline FIRST{{/if}} — scope files, call sites, and contracts before creating the pool.
+Use for broad research, reviews, migrations, adversarial coverage, and open-ended work lists. Handle quick lookups and single edits directly. Inspect the request and relevant code first to establish ownership, dependencies, and acceptance criteria before creating a pool.
 
 Pool-first phases:
-- **Understand**: queue subsystem readers → collect results → synthesize
-- **Review**: queue one item per lens/file → collect results → verify survivors
+- **Understand**: queue subsystem readers → receive results → synthesize
+- **Review**: queue one item per lens/file → receive results → verify findings
 - **Migrate**: discover sites → queue file-disjoint transforms → verify once
 - **Research**: queue modalities/sources → deep-read hits → synthesize
 - **Design**: queue independent proposals/judges → choose and integrate
@@ -16,9 +16,12 @@ Pool-first phases:
 State persists across `eval` calls. Every call provides:
 
 - `workpool(agent=None, *, name=None, context=None{{#if evalTools}}, tools=None{{/if}})`: pool of keep-alive workers bounded by live `task.maxConcurrency`. `.push(*items)` returns item ids; each item goes to the least context-loaded idle worker, a new worker while capacity remains, or a busy worker's round-robin queue. `eval.workpool.freshAgents=true` instead spawns a new agent per item. `.status()` reports counts/workers; `.peek()` returns a non-consuming batch snapshot; `.close()` drops queued work.
+  - JS: `const review = await workpool({ name, context{{#if evalTools}}, tools{{/if}} })`, or `await workpool(agentName, { name, context{{#if evalTools}}, tools{{/if}} })`; await `.push(...)`, `.status()`, `.peek()`, and `.close()`.
   - The pool name is its background job id and label. Push all items while it is active; its first full drain settles and closes that pool job. New phase/wave after drain → create a new named pool.
   - Results auto-deliver. Completely blocked? Leave `eval` and call `wait`; NEVER poll or block the kernel with `pool.wait()`.
 - `agent(prompt, *, agent=None, label=None, schema=None, isolated=None, apply=None, merge=None{{#if evalTools}}, tools=None{{/if}})`: immediate `AgentHandle`; use for a small fixed dependency graph or when the parent needs validated `schema` data. `.wait()` returns text/data; `.handle` is `agent://<id>`. Unwaited results auto-deliver.
+  - JS: `const handle = await agent(prompt, { agent, label, schema, isolated, apply, merge{{#if evalTools}}, tools{{/if}} })`; `await handle.wait()`.
+  - The selected agent's frontmatter and settings choose the model; `agent()` and `workpool()` have no per-call `model` option.
 - `completion(prompt, *, model="default", system=None, schema=None)`: immediate `CompletionHandle` for a tool-free one-shot call. Tiers: `"smol"`, `"default"`, `"slow"`.
 - `await judge(state, questions)`: typed `choice`/`bool`/`score` questions over one state → `{id: answer}` with probabilities. Cheaper than `completion()` for classification.
 - `judge_batch(states, questions, *, concurrency=32, retries=1, min_ok=1, intent=None)`: the same questions over many states, run by the host so it outlives the cell. Set nonempty `intent` for its progress/job label (default `"Judging"`). Returns a `JudgmentBatch` at once; per cell pull a bounded slice with `await b.drain(timeout)` (or `async for k, item in b.drain_iter(timeout)`), read `b.status()`/`b.results()`/`b.failed()`, and `b.close()` when done. Item failures are `item.error`, never exceptions; `b.id` is a background job id (results auto-deliver). Never loop `judge()` over a list.
@@ -29,9 +32,9 @@ State persists across `eval` calls. Every call provides:
 </helpers>
 
 <pool-workflow>
-1. Scope the full independent work list before spawning.
-2. Create ONE explicitly named pool per phase.
-3. Push every known item in one cell; later discoveries MAY be pushed while the pool job is still running.
+1. Scope the first useful wave: ownership, dependencies, and observable acceptance.
+2. Create an explicitly named pool for the wave.
+3. Push the currently known independent items together; later in-scope discoveries may be queued while the pool remains active.
 4. Continue useful local work. Results auto-deliver.
 5. Completely blocked? Leave `eval` and call `wait`; never poll or call `pool.wait()`.
 6. Read every batch result; YOU verify and integrate.
@@ -93,19 +96,19 @@ Fixed independent handles are acceptable when each result must be returned direc
 - **Adversarial verify**: pool one REFUTE task per claim/lens; retain only evidence-backed survivors.
 - **Perspective-diverse review**: distinct correctness/security/perf/reproduction items; NEVER clone one vague prompt.
 - **Judge panel**: pool proposals, then a second named pool scores them after the first pool settles.
-- **Loop-until-dry**: push newly discovered items while the pool remains active; dedup against all SEEN.
-- **Multi-modal sweep**: queue by-container/by-content/by-entity/by-time items.
-- **Completeness critic**: final pool item asks what modality/file/claim remains unchecked.
-- **No silent caps**: if sampling/top-N drops work, `log()` what was omitted.
+- **Further discovery**: push newly discovered in-scope items while the pool remains active; deduplicate completed and queued work.
+- **Multi-modal sweep**: partition by container, content, entity, or time when these are independent dimensions of the request.
+- **Coverage review**: compare results with the requested scope; use another review only when it can resolve a meaningful gap.
+- **Sampling**: disclose sampling and its limits. If it would omit required outcomes, obtain agreement before narrowing the task.
 
-Scale: `"find any bugs"` → small pool. `"thoroughly audit"` → broad pool + a separate adversarial verification pool.
+Scale workers and review depth to the request, risk, and remaining uncertainty.
 </patterns>
 
 <execution>
 - Multi-phase work: capture in `todo`.
 - Each pool item: self-contained target, change/read scope, acceptance.
 - Same-file mutation? One worker owns it; serialize shared boundaries.
-- Pool output is evidence, not truth. Read artifacts, gate findings, run final verification yourself.
-- Continue until closed; a drained pool is a phase boundary, not task completion.
+- Evaluate pool output against source evidence and run the relevant integrated verification. Assign verification ownership to avoid shared-tree races or redundant checks.
+- Continue through phase boundaries while useful authorized work remains. Preserve explicit approval and stopping conditions; report concrete blockers rather than treating a drained pool as completion.
 </execution>
 </system-notice>
