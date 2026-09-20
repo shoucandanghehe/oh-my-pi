@@ -1,34 +1,30 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { KeyId } from "../app-keybindings";
+import type { AutocompleteProvider } from "../autocomplete";
+import type { EditorTopBorder } from "../components/composer";
+import { ScrollView } from "../components/scroll-view";
+import { matchesKey } from "../keys";
+import { type MouseRoutable, routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
+import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "../text-selection";
 import {
 	type AppViewportHoverProvider,
-	type AutocompleteProvider,
 	type Component,
 	componentContains,
-	type EditorTopBorder,
-	extractComponentTextSelection,
 	type Focusable,
-	type MouseRoutable,
-	matchesKey,
-	normalizeTextSelection,
-	routeSgrMouseInput,
-	ScrollView,
-	type SgrMouseEvent,
 	type TargetedRender,
-	type TextSelectionRange,
-	type ViewportHeightAware,
 	type VirtualViewportFrame,
 	type VirtualRowAnchor,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
-import type { KeyId } from "../../config/keybindings";
-import type { SessionMessageEntry } from "../../session/session-entries";
-import { replaceTabs, shortenPath, truncateToWidth } from "../../tools/render-utils";
-import { compactImageMarkers } from "../composer-attachments";
+} from "../tui";
+import { visibleWidth } from "../utils";
+import type { ViewportHeightAware } from "../workspace-layout";
+import type { SessionMessageEntryLike, TranscriptEntryLike } from "./transcript-entry";
+import { replaceTabs, shortenPath, truncateToWidth } from "../render/render-utils";
+import { compactImageMarkers } from "../prompt/composer-attachments";
 import { getEditorTheme, theme } from "../theme/theme";
-import { matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
+import { matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "./chat-transcript-builder";
-import { CustomEditor } from "./custom-editor";
+import { CustomEditor } from "../prompt/custom-editor";
 
 export type ChatTranscriptPaneEditorOptions =
 	| {
@@ -81,6 +77,8 @@ export class ChatTranscriptPane
 	readonly #scrollView = new ScrollView([], { height: 10, scrollbar: "auto", scrollbarStyle: "braille" });
 	#editor: CustomEditor | undefined;
 	readonly #editors = new Map<string | undefined, CustomEditor>();
+	#nextEntryIndex = 0;
+	#lastEntryId: string | null = null;
 
 	#followBottom = true;
 	#textSelectionActive = false;
@@ -259,23 +257,44 @@ export class ChatTranscriptPane
 	}
 
 	rebuild(messages: readonly AgentMessage[]): void {
-		this.#builder.rebuild(messages);
+		this.#nextEntryIndex = 0;
+		this.#lastEntryId = null;
+		this.#builder.rebuild(this.#messageEntries(messages));
 		this.options.builder.requestRender();
 	}
 
 	append(messages: readonly AgentMessage[]): void {
-		this.#builder.append(messages);
+		this.#builder.append(this.#messageEntries(messages));
 		this.options.builder.requestRender();
 	}
 
-	rebuildEntries(entries: readonly SessionMessageEntry[]): void {
-		this.#builder.rebuildEntries(entries);
+	rebuildEntries(entries: readonly TranscriptEntryLike[]): void {
+		this.#nextEntryIndex = entries.length;
+		this.#lastEntryId = entries.at(-1)?.id ?? null;
+		this.#builder.rebuild(entries);
 		this.options.builder.requestRender();
 	}
 
-	appendEntries(entries: readonly SessionMessageEntry[]): void {
-		this.#builder.appendEntries(entries);
+	appendEntries(entries: readonly TranscriptEntryLike[]): void {
+		this.#nextEntryIndex += entries.length;
+		this.#lastEntryId = entries.at(-1)?.id ?? this.#lastEntryId;
+		this.#builder.append(entries);
 		this.options.builder.requestRender();
+	}
+
+	/** Ordinal identities stay stable when raw-message callers rebuild the same transcript. */
+	#messageEntries(messages: readonly AgentMessage[]): SessionMessageEntryLike[] {
+		return messages.map(message => {
+			const entry: SessionMessageEntryLike = {
+				type: "message",
+				id: `pane-message-${this.#nextEntryIndex++}`,
+				parentId: this.#lastEntryId,
+				timestamp: new Date(message.timestamp).toISOString(),
+				message,
+			};
+			this.#lastEntryId = entry.id;
+			return entry;
+		});
 	}
 
 	updateStreamingAssistant(message: Extract<AgentMessage, { role: "assistant" }>): boolean {

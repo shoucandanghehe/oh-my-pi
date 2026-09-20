@@ -7,9 +7,9 @@ import {
 	BtwConversationPane,
 	type BtwThreadView,
 } from "@oh-my-pi/pi-coding-agent/modes/components/btw-conversation-pane";
-import { BtwPanelComponent } from "@oh-my-pi/pi-coding-agent/modes/components/btw-panel";
+import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	type BtwPromotionLifecycle,

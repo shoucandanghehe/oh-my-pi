@@ -22,7 +22,7 @@
  * Run: bun run packages/coding-agent/bench/streaming-throughput.bench.ts
  */
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { BlockUnitCounter, buildDisplayMessage, nextStep } from "../src/modes/controllers/streaming-reveal";
+import { BlockUnitCounter, buildDisplayMessage, nextStep } from "@oh-my-pi/pi-tui/chat/streaming-reveal";
 
 const HIDE_THINKING = false;
 const PROSE_ONLY = true;

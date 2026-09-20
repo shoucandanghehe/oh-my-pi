@@ -1,6 +1,6 @@
 import type { ToolCall } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import type { Component } from "@oh-my-pi/pi-tui";
+import type { Component } from "../tui";
 import { parseStreamingJson, parseStreamingJsonThrottled, STREAMING_JSON_PARSE_MIN_GROWTH } from "@oh-my-pi/pi-utils";
 import { nextStep, STREAMING_REVEAL_FRAME_MS } from "./streaming-reveal";
 
