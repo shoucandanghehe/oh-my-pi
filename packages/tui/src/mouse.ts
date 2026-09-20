@@ -52,8 +52,8 @@ export function parseSgrMouse(data: string): SgrMouseEvent | null {
 	return { button, col, row, release, wheel, motion, leftClick, rightClick };
 }
 
-/** Handler invoked with a decoded SGR event; returning `false` reports unhandled. */
-export type SgrMouseHandler = (event: SgrMouseEvent) => boolean | undefined;
+/** Handler invoked with a decoded SGR event; only `false` reports unhandled. Void handlers consume the event. */
+export type SgrMouseHandler = (event: SgrMouseEvent) => boolean | void;
 
 /**
  * Decode an SGR mouse report and forward it to `handler`. Returns `false` when
@@ -108,6 +108,6 @@ export function routeSelectListMouse(target: SelectListMouseTarget, event: SgrMo
  * rendered lines before forwarding.
  */
 export interface MouseRoutable {
-	/** `line`/`col` are 0-based; return `false` to leave the event unconsumed. */
-	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean | undefined;
+	/** `line`/`col` are 0-based; only `false` leaves the event unconsumed. Void handlers consume it. */
+	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean | void;
 }

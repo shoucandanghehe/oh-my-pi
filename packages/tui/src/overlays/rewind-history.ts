@@ -1,16 +1,17 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { Container, type Component, type VirtualViewportProvider } from "@oh-my-pi/pi-tui";
-import { chatTranscriptDisplayPreferences as displayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
-import type { SessionMessageEntry } from "../../session/session-entries";
-import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "./chat-transcript-builder";
-import { TranscriptContainer } from "./transcript-container";
+import { Container, type Component, type VirtualViewportProvider } from "../tui";
+import { chatTranscriptDisplayPreferences as displayPreferences } from "../chat/display-preferences";
+import type { TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
+import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "../chat/chat-transcript-builder";
+import { TranscriptContainer } from "../chrome/transcript-container";
 import {
 	appendOutlineEntries,
+	isUserTurnEntry,
 	OutlineRowCache,
 	type OutlineTarget,
 	VirtualOutlineColumn,
 	type ViewportOutlineColumn,
-} from "./transcript-outline";
+} from "../chat/transcript-outline";
 
 export interface RewindPoint {
 	chunk: number;
@@ -35,7 +36,7 @@ class RewindChunk {
 	#ranges = new Map<string, TranscriptContainer>();
 
 	constructor(
-		readonly entries: SessionMessageEntry[],
+		readonly entries: TranscriptEntry[],
 		readonly from: number,
 		readonly to: number,
 		private readonly deps: ChatTranscriptBuilderDeps,
@@ -139,7 +140,7 @@ export class RewindHistory {
 		| undefined;
 
 	constructor(
-		readonly entries: SessionMessageEntry[],
+		readonly entries: TranscriptEntry[],
 		deps: ChatTranscriptBuilderDeps,
 		private readonly initial: "first" | "last" = "last",
 	) {
@@ -147,21 +148,28 @@ export class RewindHistory {
 		// result comes later. Unresolved calls without a persisted result don't span a cut.
 		const results = new Map<string, number>();
 		for (let index = 0; index < entries.length; index++) {
-			const message = entries[index]!.message;
-			if (message.role === "toolResult") results.set(message.toolCallId, index);
+			const entry = entries[index]!;
+			if (entry.type === "message" && entry.message.role === "toolResult") {
+				results.set(entry.message.toolCallId, index);
+			}
 		}
 		let start = 0;
 		let callEnd = -1;
 		let previousUsage: Usage | undefined;
 		let chunkUsage: Usage | undefined;
 		for (let index = 0; index < entries.length; index++) {
-			const message = entries[index]!.message;
-			if (index > start && index > callEnd && message.role === "user" && message.attribution !== "agent") {
+			const entry = entries[index]!;
+			const message = entry.type === "message" ? entry.message : undefined;
+			if (
+				index > start &&
+				index > callEnd &&
+				(message?.role === "user" ? message.attribution !== "agent" : isUserTurnEntry(entry))
+			) {
 				this.#chunks.push(new RewindChunk(entries, start, index, deps, chunkUsage));
 				start = index;
 				chunkUsage = previousUsage;
 			}
-			if (message.role !== "assistant") continue;
+			if (message?.role !== "assistant") continue;
 			for (const block of message.content) {
 				if (block.type === "toolCall") callEnd = Math.max(callEnd, results.get(block.id) ?? index);
 			}

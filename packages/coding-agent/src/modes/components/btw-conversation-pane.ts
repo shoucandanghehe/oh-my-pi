@@ -20,17 +20,17 @@ import {
 	type VirtualRowAnchor,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
-import type { KeyId } from "../../config/keybindings";
+import type { KeyId } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { BtwThreadPhase } from "../../session/btw-manager";
 import type { BtwThreadModelRef } from "../../session/btw-thread";
 import type { EphemeralConversationStatus, EphemeralConversationTurn } from "../../session/ephemeral-conversation";
 import { sanitizeAssistantForReparentedHistory } from "../../session/messages";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import { renderWorkspacePaneHeader } from "../shared";
-import { theme } from "../theme/theme";
-import { ChatTranscriptPane } from "./chat-transcript-pane";
-import type { CustomEditor } from "./custom-editor";
-import type { StatusLineComponent } from "./status-line";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
+import { renderWorkspacePaneHeader } from "@oh-my-pi/pi-tui/chrome/shared";
+import { theme } from "@oh-my-pi/pi-tui/theme/theme";
+import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
+import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
 
 export interface BtwThreadView {
 	readonly key: string;

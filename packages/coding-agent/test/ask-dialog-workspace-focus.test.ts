@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	ExtensionAskDialogQuestion,
 	ExtensionAskDialogSubmitResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
+import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { MainSessionPane } from "@oh-my-pi/pi-coding-agent/modes/components/main-session-pane";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme/theme";
 import { Container, setKeybindings, TUI, WorkspaceLayout, WorkspaceModel } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../tui/test/render-stress-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";

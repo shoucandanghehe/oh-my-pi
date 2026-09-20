@@ -580,7 +580,8 @@ export class ScrollView implements Component, MouseRoutable {
 		const rowCount = this.#rowCount();
 		const contentWidth = Math.max(0, safeWidth - (showScrollbar ? 1 : 0));
 		const braille = showScrollbar && this.#scrollbarStyle === "braille";
-		const thumb = showScrollbar && !braille ? scrollbarThumbRange(this.#height, rowCount, this.#scrollOffset) : undefined;
+		const thumb =
+			showScrollbar && !braille ? scrollbarThumbRange(this.#height, rowCount, this.#scrollOffset) : undefined;
 		const trackSample = this.#theme.track(this.#trackChar);
 		const thumbSample = this.#theme.thumb(this.#thumbChar);
 		const widthEpoch = getWidthConfigEpoch();

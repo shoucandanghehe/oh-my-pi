@@ -5,10 +5,10 @@ import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: 
 import type { ContinuePausedAgentsResult } from "../../session/agent-session-types";
 import { BtwManager } from "../../session/btw-manager";
 import { BTW_THREAD_CUSTOM_TYPE, type BtwPromotionLifecycle, type BtwPromotionRequest } from "../../session/btw-thread";
-import { replaceTabs } from "../../tools/render-utils";
+import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwConversationPane, type BtwThreadView } from "../components/btw-conversation-pane";
-import { BtwPanelComponent } from "../components/btw-panel";
+import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import type { InteractiveModeContext } from "../types";
 
 interface BtwRequest {

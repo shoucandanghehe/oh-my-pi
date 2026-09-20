@@ -216,6 +216,7 @@ class SyntheticSummary implements Component {
  */
 export class CollapsedSyntheticMessageComponent implements Component {
 	#disclosure: Disclosure;
+	#bodyExpansionControlled = false;
 
 	readonly #text: string;
 	readonly #imageLinks?: readonly (string | undefined)[];
@@ -236,12 +237,17 @@ export class CollapsedSyntheticMessageComponent implements Component {
 		return this.#disclosure.expanded;
 	}
 
-	/** ctrl+o toggle: reveal/hide the full Markdown body. */
+	/** Follow global expansion unless the viewer explicitly controls this body. */
 	setExpanded(expanded: boolean): void {
-		this.#disclosure.setExpanded(expanded);
+		if (!this.#bodyExpansionControlled) this.#disclosure.setExpanded(expanded);
 	}
 
+	/**
+	 * The builder owns viewport-anchored replay expansion independently of the
+	 * transcript's global setExpanded presentation state.
+	 */
 	setBodyExpanded(expanded: boolean): void {
+		this.#bodyExpansionControlled = true;
 		this.#disclosure.setExpanded(expanded);
 	}
 

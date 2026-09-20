@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChatTranscriptPane } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-pane";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ClipboardImage } from "@oh-my-pi/pi-natives/clipboard";
 import type { TUI } from "@oh-my-pi/pi-tui";

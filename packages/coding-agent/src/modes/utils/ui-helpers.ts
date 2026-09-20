@@ -1,6 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
-import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { logger, waitForImmediate } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
@@ -38,7 +37,7 @@ import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from
 import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
-import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
+import { displayArgsForToolCall } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";

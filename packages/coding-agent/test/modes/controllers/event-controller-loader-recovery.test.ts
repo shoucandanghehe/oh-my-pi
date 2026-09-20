@@ -4,8 +4,12 @@ import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-c
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { EphemeralConversation, type EphemeralConversationCheckpoint, type EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	EphemeralConversation,
+	type EphemeralConversationCheckpoint,
+	type EphemeralTurnResult,
+} from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";

@@ -16,6 +16,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatUsageRow } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -68,6 +69,16 @@ function assistantMessage(overrides: Partial<AssistantFixture> = {}): AssistantF
 
 function userMessage(text = "build it"): AgentMessage {
 	return { role: "user", content: text, timestamp: PROMPT_AT } as unknown as AgentMessage;
+}
+
+function transcriptEntries(messages: AgentMessage[]): TranscriptEntryLike[] {
+	return messages.map((message, index) => ({
+		type: "message",
+		id: `message-${index}`,
+		parentId: index === 0 ? null : `message-${index - 1}`,
+		timestamp: new Date(message.timestamp).toISOString(),
+		message,
+	}));
 }
 
 function renderedText(container: Container): string {
@@ -126,7 +137,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 	it("shows the prompt→yield delta when display.showTurnTime is on", () => {
 		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
-		transcript.rebuild([userMessage(), assistantMessage()]);
+		transcript.rebuild(transcriptEntries([userMessage(), assistantMessage()]));
 		const rendered = renderedText(transcript.container);
 		expect(rendered).toContain(TURN_ELAPSED_LABEL);
 		expect(rendered).toContain(USAGE_LABEL);
@@ -135,14 +146,14 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 	it("hides the delta when display.showTurnTime is off", () => {
 		cfgDisplayShowTurnTime.set(settings, false);
 		const transcript = builder();
-		transcript.rebuild([userMessage(), assistantMessage()]);
+		transcript.rebuild(transcriptEntries([userMessage(), assistantMessage()]));
 		expect(renderedText(transcript.container)).not.toContain(TURN_ELAPSED_LABEL);
 	});
 
 	it("shows no delta when the turn start is unknown (no user message)", () => {
 		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
-		transcript.rebuild([assistantMessage()]);
+		transcript.rebuild(transcriptEntries([assistantMessage()]));
 		expect(renderedText(transcript.container)).not.toContain(TURN_ELAPSED_LABEL);
 	});
 	it("measures the span from the local completion time when the provider omits duration", () => {
@@ -150,14 +161,14 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 		const transcript = builder();
 		// gitlab-duo-style: `timestamp` stamped at request start, no provider
 		// `duration` — the session's `completedAt` stamp still yields the full span.
-		transcript.rebuild([userMessage(), assistantMessage({ duration: undefined })]);
+		transcript.rebuild(transcriptEntries([userMessage(), assistantMessage({ duration: undefined })]));
 		expect(renderedText(transcript.container)).toMatch(/Δ\s*1m\b/);
 	});
 
 	it("shows no delta for a legacy message without the local completion stamp", () => {
 		cfgDisplayShowTurnTime.set(settings, true);
 		const transcript = builder();
-		transcript.rebuild([userMessage(), assistantMessage({ completedAt: undefined })]);
+		transcript.rebuild(transcriptEntries([userMessage(), assistantMessage({ completedAt: undefined })]));
 		expect(renderedText(transcript.container)).not.toContain("Δ");
 	});
 	it("clears the prompt anchor at a developer-initiated synthetic run during replay", () => {
@@ -169,7 +180,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			synthetic: true,
 			timestamp: RESPONSE_CREATED_AT + 5_000,
 		} as unknown as AgentMessage;
-		transcript.rebuild([userMessage(), assistantMessage(), developer, assistantMessage()]);
+		transcript.rebuild(transcriptEntries([userMessage(), assistantMessage(), developer, assistantMessage()]));
 		// Only the user turn's row carries the delta; the auto-continuation run
 		// (developer message, no user prompt) must not inherit the user anchor.
 		const occurrences = renderedText(transcript.container).match(/Δ\s*1m\b/g)?.length ?? 0;
@@ -186,7 +197,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			content: "todo reminder",
 			timestamp: RESPONSE_CREATED_AT + 5_000,
 		} as unknown as AgentMessage;
-		transcript.rebuild([userMessage(), assistantMessage(), reminder, assistantMessage()]);
+		transcript.rebuild(transcriptEntries([userMessage(), assistantMessage(), reminder, assistantMessage()]));
 		const occurrences = renderedText(transcript.container).match(/Δ\s*1m\b/g)?.length ?? 0;
 		expect(occurrences).toBe(2);
 	});
@@ -203,7 +214,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			userInitiated: true,
 			timestamp: PROMPT_AT,
 		} as unknown as AgentMessage;
-		transcript.rebuild([continuePrompt, assistantMessage()]);
+		transcript.rebuild(transcriptEntries([continuePrompt, assistantMessage()]));
 		expect(renderedText(transcript.container)).toMatch(/Δ\s*1m\b/);
 	});
 
@@ -218,7 +229,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			display: false,
 			timestamp: PROMPT_AT,
 		} as unknown as AgentMessage;
-		transcript.rebuild([skill, assistantMessage()]);
+		transcript.rebuild(transcriptEntries([skill, assistantMessage()]));
 		expect(renderedText(transcript.container)).toContain(TURN_ELAPSED_LABEL);
 	});
 	it("seeds the prompt→yield delta from a writable-collab peer prompt", () => {
@@ -232,7 +243,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			display: true,
 			timestamp: PROMPT_AT,
 		} as unknown as AgentMessage;
-		transcript.rebuild([collabPrompt, assistantMessage()]);
+		transcript.rebuild(transcriptEntries([collabPrompt, assistantMessage()]));
 		expect(renderedText(transcript.container)).toContain(TURN_ELAPSED_LABEL);
 	});
 	it("ignores an agent-attributed user message as a turn start", () => {
@@ -247,7 +258,7 @@ describe("ChatTranscriptBuilder turn elapsed", () => {
 			attribution: "agent",
 			timestamp: RESPONSE_CREATED_AT + 5_000,
 		} as unknown as AgentMessage;
-		transcript.rebuild([userMessage(), assistantMessage(), redirect, assistantMessage()]);
+		transcript.rebuild(transcriptEntries([userMessage(), assistantMessage(), redirect, assistantMessage()]));
 		// The real user prompt anchors both turns; the redirect adds no reset, so
 		// the second assistant row still measures from the initiating prompt.
 		const occurrences = renderedText(transcript.container).match(/Δ 1m/g)?.length ?? 0;

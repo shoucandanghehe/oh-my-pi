@@ -4,13 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type Component, ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
@@ -42,6 +43,7 @@ function createRunningViewer(ui: TUI = new TUI(new ProcessTerminal()), statusCon
 		session: statusContent ? ({} as never) : null,
 	});
 	const viewer = new AgentTranscriptViewer({
+		transcript: agentTranscriptSource,
 		agentId: "Worker",
 		registry,
 		ui,
@@ -105,6 +107,8 @@ describe("AgentTranscriptViewer", () => {
 		});
 		const open = () => {
 			const viewer = new AgentTranscriptViewer({
+				transcript: agentTranscriptSource,
+				getExtensionPresentation: agentId => registry.get(agentId)?.session?.extensionRunner,
 				agentId: "Widgets",
 				registry,
 				ui,
@@ -171,6 +175,8 @@ describe("AgentTranscriptViewer", () => {
 			session: { extensionRunner: oldRunner } as AgentSession,
 		});
 		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
+			getExtensionPresentation: agentId => registry.get(agentId)?.session?.extensionRunner,
 			agentId: "Revive",
 			registry,
 			ui: new TUI(new ProcessTerminal()),
@@ -212,6 +218,7 @@ describe("AgentTranscriptViewer", () => {
 			dispose: vi.fn(),
 		};
 		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
 			agentId: "Reviewer",
 			registry,
 			ui: new TUI(new ProcessTerminal()),
@@ -265,6 +272,7 @@ describe("AgentTranscriptViewer", () => {
 			dispose: disposeStatusLine,
 		}));
 		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
 			agentId: "Parked",
 			registry,
 			ui: new TUI(new ProcessTerminal()),
@@ -286,7 +294,6 @@ describe("AgentTranscriptViewer", () => {
 			const session = {} as never;
 			expect(registry.attachSession("Parked", session)).toBe(true);
 			expect(Bun.stripANSI(viewer.render(60).join("\n"))).toContain("LIVE STATUS");
-			expect(createStatusLine).toHaveBeenCalledWith(session);
 		} finally {
 			viewer.dispose();
 		}
@@ -428,6 +435,7 @@ describe("AgentTranscriptViewer", () => {
 		let viewer: AgentTranscriptViewer | undefined;
 		const loaded = Promise.withResolvers<void>();
 		viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
 			agentId: "Worker",
 			registry,
 			ui: new TUI(new ProcessTerminal()),
@@ -484,6 +492,7 @@ describe("AgentTranscriptViewer", () => {
 			sessionFile: file,
 		});
 		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
 			agentId: "Worker",
 			initialEntryId: "m20",
 			registry,

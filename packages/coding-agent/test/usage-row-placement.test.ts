@@ -8,6 +8,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -28,6 +29,16 @@ const USAGE_TS = new Date(2026, 0, 2, 3, 4, 5).getTime();
 const USAGE_TS_LABEL = "2026-01-02 03:04:05";
 const SECOND_USAGE_TS = new Date(2026, 0, 2, 3, 4, 6).getTime();
 const SECOND_USAGE_TS_LABEL = "2026-01-02 03:04:06";
+
+function transcriptEntries(messages: AgentMessage[]): TranscriptEntryLike[] {
+	return messages.map((message, index) => ({
+		type: "message",
+		id: `message-${index}`,
+		parentId: index === 0 ? null : `message-${index - 1}`,
+		timestamp: new Date(message.timestamp).toISOString(),
+		message,
+	}));
+}
 
 function readTurn(
 	toolCallId = "r1",
@@ -172,7 +183,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 			},
 			timestamp: USAGE_TS,
 		} as unknown as AgentMessage;
-		builder.rebuild([message]);
+		builder.rebuild(transcriptEntries([message]));
 		const children = builder.container.children;
 		const last = children[children.length - 1]!;
 		const rendered = last.render(120).join("\n");
@@ -203,7 +214,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 			},
 			timestamp: 1_000,
 		};
-		builder.rebuildEntries([
+		builder.rebuild([
 			{ type: "message", id: "tool-entry", parentId: null, timestamp: new Date(0).toISOString(), message },
 		]);
 
@@ -218,7 +229,7 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 			cwd: process.cwd(),
 			requestRender: () => {},
 		});
-		builder.rebuild([...readTurn(), ...readTurn("r2", "src/bar.ts", 2121, SECOND_USAGE_TS)]);
+		builder.rebuild(transcriptEntries([...readTurn(), ...readTurn("r2", "src/bar.ts", 2121, SECOND_USAGE_TS)]));
 
 		const groups = builder.container.children.filter(
 			(component): component is ReadToolGroupComponent => component instanceof ReadToolGroupComponent,

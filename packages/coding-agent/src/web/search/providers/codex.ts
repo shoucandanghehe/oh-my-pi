@@ -397,9 +397,10 @@ async function resolveCodexSearchTransport(
 	}
 
 	const hostedUrl = resolveCodexResponsesUrl(baseUrl);
-	const headers = modelRegistry && registryModel
-		? await modelRegistry.resolveModelHeaders(registryModel)
-		: await modelRegistry?.getProviderHeaders("openai-codex");
+	const headers =
+		modelRegistry && registryModel
+			? await modelRegistry.resolveModelHeaders(registryModel)
+			: await modelRegistry?.getProviderHeaders("openai-codex");
 	return {
 		baseUrl,
 		hostedUrl,
@@ -574,7 +575,7 @@ async function callCodexHostedSearch(
 ): Promise<CodexSearchResult> {
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
-	const requestedModel = options.modelId;
+	const requestedModel = options.model.modelId;
 
 	const body: Record<string, unknown> = {
 		model: requestedModel,
@@ -844,14 +845,13 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		result = await withAuth(
 			keyOrResolver,
 			async accessToken => {
-				const requestTransport = await resolveCodexSearchTransport(params);
-				return callCodexSearch({ accessToken }, query, {
-					signal: params.signal,
-					timeoutMs: params.timeoutMs,
-					systemPrompt: params.systemPrompt,
-					searchContextSize: "high",
-					modelId: params.model.id,
-					fetch: params.fetch,
+				const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
+				return runCodexSearchCandidates({
+					auth: { accessToken },
+					params,
+					query,
+					modelCandidates,
+					modelWasConfigured: configuredModel !== undefined,
 					transport: requestTransport,
 				});
 			},
@@ -875,14 +875,13 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 				// A refreshed/rotated credential can carry a different bearer and
 				// ChatGPT account id than the seed used to select the first attempt.
 				const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
-				const requestTransport = await resolveCodexSearchTransport(params);
-				return callCodexSearch({ accessToken: access.accessToken, accountId }, query, {
-					signal: params.signal,
-					timeoutMs: params.timeoutMs,
-					systemPrompt: params.systemPrompt,
-					searchContextSize: "high",
-					modelId: params.model.id,
-					fetch: params.fetch,
+				const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
+				return runCodexSearchCandidates({
+					auth: { accessToken: access.accessToken, accountId },
+					params,
+					query,
+					modelCandidates,
+					modelWasConfigured: configuredModel !== undefined,
 					transport: requestTransport,
 				});
 			},

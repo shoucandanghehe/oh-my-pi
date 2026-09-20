@@ -136,6 +136,7 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.schemaMode).toBeDefined();
 	});
 
+
 	it("hides effort by default and exposes it when task.enableEffort is enabled", async () => {
 		mockDiscovery();
 

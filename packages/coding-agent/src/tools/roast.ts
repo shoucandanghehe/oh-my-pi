@@ -5,7 +5,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getRoastDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import roastPrompt from "../prompts/tools/roast.md" with { type: "text" };
 import type { ToolSession } from "./index";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { XdevDispatch } from "./xdev";
 
 export const ROAST_DEVICE_NAME = "roast";

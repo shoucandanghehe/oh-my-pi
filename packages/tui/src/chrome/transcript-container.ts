@@ -10,11 +10,7 @@ import {
 	type VirtualViewportProvider,
 	type VirtualViewportRequest,
 } from "../tui";
-import {
-	extractComponentTextSelection,
-	normalizeTextSelection,
-	type TextSelectionRange,
-} from "../text-selection";
+import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "../text-selection";
 import { measureComponentRows } from "../tui";
 import { getPaddingX, getWidthConfigEpoch } from "../utils";
 import { TERMINAL } from "../terminal-capabilities";

@@ -25,7 +25,7 @@ Before changes in these directories, MUST read:
 {{/if}}
 
 {{#ifAny contextFiles.length agentsMdSearch.files.length}}
-Context files above auto-loaded. NEVER `grep`/`glob` for `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, or similar agent/context files: relevant files already in context; others noise.
+Reuse the context already loaded above. Read any listed directory-specific rules before changing those paths; investigate further only when relevant context is missing, stale, or explicitly part of the user's request.
 {{/ifAny}}
 
 {{#if includeWorkspaceTree}}
@@ -49,9 +49,9 @@ Additional workspace directories. This CURRENT workspace state supersedes worksp
 {{/if}}
 
 <critical>
-- Each response MUST advance the task; completion only stopping condition.
-- MUST default to informed action; do not ask for confirmation when tools or repo context can answer.
-- Before yielding, MUST verify significant behavioral changes: run the specific test, command, or scenario covering the change.
+- Apply these project rules within their stated scope while advancing the user's requested outcome.
+- Resolve routine factual questions from available context; pause dependent work for required decisions, approvals, or concrete blockers.
+- Verify changed behavior at the relevant boundary and report the result and any remaining limits.
 </critical>
 
 {{#if appendPrompt}}

@@ -12,18 +12,11 @@ import {
 	type ExtensionUiComponent,
 	type ExtensionUiComponentFactory,
 	type ExtensionWidgetContent,
+	type ExtensionWidgetOptions,
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
-export {
-	type ExtensionUiComponent,
-	type ExtensionUiComponentFactory,
-	type ExtensionWidgetContent,
-	type MessageRenderOptions,
-	type MessageRenderer,
-	type AssistantThinkingRenderContext,
-	type AssistantThinkingRenderer,
-} from "@oh-my-pi/pi-tui/chat/extension-types";
+export * from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
@@ -39,7 +32,6 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type {
 	Api,
-	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -53,7 +45,6 @@ import type {
 	SimpleStreamOptions,
 	Static,
 	TextContent,
-	ThinkingContent,
 	TSchema,
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
@@ -203,12 +194,6 @@ export interface ExtensionUIDialogOptions {
 
 /** Raw terminal input listener for extensions. */
 export type TerminalInputHandler = (data: string) => { consume?: boolean; data?: string } | undefined;
-
-export type WidgetPlacement = "aboveEditor" | "belowEditor";
-
-export interface ExtensionWidgetOptions {
-	placement?: WidgetPlacement;
-}
 
 /** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
 export interface ExtensionCustomOptions {
@@ -1240,7 +1225,6 @@ export type {
 // ============================================================================
 // Message Rendering
 // ============================================================================
-
 
 // ============================================================================
 // Command Registration

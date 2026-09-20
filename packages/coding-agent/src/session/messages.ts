@@ -49,20 +49,8 @@ import {
 	invalidateMessageCache,
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
-import {
-	type BranchSummaryMessage,
-	type CompactionSummaryMessage,
-	convertMessageToLlm,
-} from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type {
-	AssistantMessage,
-	ImageContent,
-	Message,
-	MessageAttribution,
-	TextContent,
-	UserMessage,
-} from "@oh-my-pi/pi-ai";
-import * as AIError from "@oh-my-pi/pi-ai/error";
+import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
+import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { escapeXmlAttribute, escapeXmlText, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
@@ -78,7 +66,7 @@ export {
 	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
-import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
 
 export const BTW_SUMMARY_MESSAGE_TYPE = "btw:summary";

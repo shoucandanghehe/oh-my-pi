@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { AnchoredLiveContainer } from "@oh-my-pi/pi-coding-agent/modes/components/anchored-live-container";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { type Component, Text, TUI } from "@oh-my-pi/pi-tui";
 import { StressRenderScheduler } from "../../../../tui/test/render-stress-scheduler";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal";

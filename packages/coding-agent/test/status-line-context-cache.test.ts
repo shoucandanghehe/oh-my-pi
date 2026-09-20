@@ -664,7 +664,7 @@ describe("StatusLineComponent context breakdown", () => {
 			messages: [userMessage("main")],
 			usage: { tokens: 5000, contextWindow: 200_000, percent: 2.5 },
 		});
-		const comp = statusLines.track(new StatusLineComponent(session));
+		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		comp.updateSettings({
 			preset: "custom",
 			leftSegments: ["model", "context_pct"],

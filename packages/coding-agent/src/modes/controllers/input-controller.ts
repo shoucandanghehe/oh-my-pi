@@ -2216,7 +2216,10 @@ export class InputController {
 			// image representation. Without an atomic snapshot, read text and image
 			// concurrently while preserving image precedence.
 			const textPromise = content ? Promise.resolve(content.text) : this.clipboard.readText();
-			textPromise.then(() => {}, () => {});
+			textPromise.then(
+				() => {},
+				() => {},
+			);
 			const image = content ? content.image : await this.clipboard.readImage();
 			if (image) {
 				if (!editor) {

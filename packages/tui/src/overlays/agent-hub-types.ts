@@ -1,5 +1,5 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 
 /** Identity of the ambient main session in the agent roster. */
 export const MAIN_AGENT_ID = "Main";
@@ -65,7 +65,9 @@ export interface AgentHubRegistry<TRecord extends AgentRecordLike = AgentRecordL
 }
 /** Lifecycle actions exposed by the host. */
 export interface AgentLifecycleLike<TRecord extends AgentRecordLike = AgentRecordLike> {
-	ensureLive(id: string): Promise<{ prompt(text: string, options: { streamingBehavior: "steer" }): Promise<unknown> }>;
+	ensureLive(id: string): Promise<{
+		prompt(text: string, options: { streamingBehavior: "steer"; images?: ImageContent[] }): Promise<unknown>;
+	}>;
 	release(id: string, expected: TRecord, options: { tombstone: true }): Promise<boolean>;
 }
 /** Unread-message counts supplied by the host IRC bus. */

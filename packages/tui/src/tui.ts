@@ -49,7 +49,6 @@ import {
 	Ellipsis,
 	extractSegments,
 	getWidthConfigEpoch,
-	isOsc66Line,
 	getWordNavKind,
 	isOsc66Line,
 	isWordNavJoiner,
@@ -1622,6 +1621,7 @@ export class TUI extends Container {
 	#appViewportPixelMouseActive = false;
 	#appViewportHoverMouseActive = false;
 	#appViewportPreviousLines: string[] = [];
+	#appViewportPreparedRows: PreparedLine[] = [];
 	#appViewportPreviousSixelRows: boolean[] = [];
 	#appViewportPreviousScrollbarGlyphs: string[] = [];
 	#appViewportPreviousWidth = 0;
@@ -1633,6 +1633,7 @@ export class TUI extends Container {
 	#appViewportScrollbarMetrics: AppViewportScrollbarMetrics | null = null;
 	#appViewportVisibleSourceRows: number[] = [];
 	#appViewportFrameLines: string[] = [];
+	#appViewportFramePreparedRows: PreparedLine[] = [];
 	/**
 	 * Set by any render request that may have changed component content (i.e.
 	 * every request not marked `viewportOnly`); cleared after a successful full
@@ -2847,6 +2848,7 @@ export class TUI extends Container {
 		this.#appViewportPixelMouseActive = pixelMouse;
 		this.#appViewportHoverMouseActive = hoverMouse;
 		this.#appViewportPreviousLines = [];
+		this.#appViewportPreparedRows = [];
 		this.#appViewportPreviousSixelRows = [];
 		this.#appViewportPreviousScrollbarGlyphs = [];
 		this.#appViewportPreviousWidth = 0;
@@ -2854,6 +2856,7 @@ export class TUI extends Container {
 		this.#appViewportScrollbarDrag = null;
 		this.#appViewportVisibleSourceRows = [];
 		this.#appViewportFrameLines = [];
+		this.#appViewportFramePreparedRows = [];
 		this.#appViewportComposeStale = true;
 		this.#appViewportFrameCursorPos = null;
 		this.#appViewportPreviousScrollRegionEnd = undefined;
@@ -2886,6 +2889,7 @@ export class TUI extends Container {
 			this.#appViewportHoverMouseActive = false;
 			this.#appViewportVisibleSourceRows = [];
 			this.#appViewportFrameLines = [];
+			this.#appViewportFramePreparedRows = [];
 			this.#appViewportComposeStale = true;
 			this.#appViewportFrameCursorPos = null;
 			this.#appViewportPreviousScrollRegionEnd = undefined;
@@ -2894,6 +2898,7 @@ export class TUI extends Container {
 			this.#stopAppViewportSelectionAutoScroll();
 			this.#appViewportLastClick = null;
 			this.#appViewportPreviousLines = [];
+			this.#appViewportPreparedRows = [];
 			this.#appViewportPreviousSixelRows = [];
 			this.#appViewportPreviousScrollbarGlyphs = [];
 			this.#appViewportPreviousWidth = 0;
@@ -4742,7 +4747,12 @@ export class TUI extends Container {
 			// produce byte-identical rows. Skip the compose (O(transcript)) and
 			// re-emit the cached frame at the new viewport offset (O(viewport)).
 			if (!this.#appViewportComposeStale && this.#canReuseAppViewportFrame(width, height)) {
-				this.#emitAppViewportFrame(this.#appViewportFrameLines, width, height, this.#appViewportFrameCursorPos);
+				this.#emitAppViewportFrame(
+					{ lines: this.#appViewportFrameLines, rows: this.#appViewportFramePreparedRows },
+					width,
+					height,
+					this.#appViewportFrameCursorPos,
+				);
 				return;
 			}
 			this.#renderAppViewportFrame(width, height);
@@ -5308,7 +5318,7 @@ export class TUI extends Container {
 
 		const cursorMarkers = this.#extractCursorMarkers(rawFrame);
 		const cursorPos = cursorMarkers[0] ?? plan?.cursor ?? null;
-		const frame = this.#prepareLinesArray(rawFrame, contentWidth);
+		const frame = this.#prepareLinesArray(rawFrame, contentWidth, this.#appViewportFramePreparedRows);
 		this.#emitAppViewportFrame(frame, width, height, cursorPos);
 		this.#appViewportFrameCursorPos = cursorPos;
 		this.#appViewportComposeStale = false;
@@ -5330,16 +5340,19 @@ export class TUI extends Container {
 			!this.#clearScrollbackOnNextRender &&
 			this.#imageBudget.quiescent &&
 			width === this.#appViewportPreviousWidth &&
-			this.#appViewportPreviousLines.length === height
+			this.#appViewportPreviousLines.length === height &&
+			this.#appViewportFramePreparedRows[0]?.widthEpoch === getWidthConfigEpoch() &&
+			this.#appViewportFramePreparedRows[0]?.imageProtocol === TERMINAL.imageProtocol
 		);
 	}
 
 	#emitAppViewportFrame(
-		lines: string[],
+		frame: PreparedLines,
 		width: number,
 		height: number,
 		cursorPos: { row: number; col: number } | null,
 	): void {
+		const lines = frame.lines;
 		const geometryForcesFullRepaint =
 			this.#forceViewportRepaintOnNextRender ||
 			this.#clearScrollbackOnNextRender ||
@@ -5347,6 +5360,7 @@ export class TUI extends Container {
 			(this.#appViewportPreviousLines.length > 0 && this.#appViewportPreviousLines.length !== height);
 		const previousScrollEnd = this.#appViewportPreviousScrollRegionEnd;
 		this.#appViewportFrameLines = lines;
+		this.#appViewportFramePreparedRows = frame.rows;
 		this.#syncAppViewportSelectionScroll(this.#findAppViewportInputOwner());
 		this.#remapAppViewportSelectionForScrollRegionShift(previousScrollEnd);
 		this.#clampAppViewportSelectionToFrame();
@@ -5367,11 +5381,37 @@ export class TUI extends Container {
 			fitted = this.#compositeOverlaysIntoWindow(fitted, width, height);
 			const overlayMarkers = this.#extractCursorMarkers(fitted);
 			if (overlayMarkers.length > 0) fittedCursorPos = overlayMarkers[0]!;
-			fitted = this.#prepareLinesArray(fitted, width);
+		}
+		// Reuse prepared source rows through scrolling and selection-only paints.
+		// Only transformed rows need preparation again; overlays own the full width.
+		const preparedWidth = hasVisibleOverlay ? width : Math.max(1, width - 1);
+		const widthEpoch = getWidthConfigEpoch();
+		const imageProtocol = TERMINAL.imageProtocol;
+		// oxlint-disable-next-line unicorn/no-new-array -- render-frame sidecar preallocation
+		const preparedRows: PreparedLine[] = new Array(height);
+		for (let row = 0; row < height; row++) {
+			const raw = fitted[row] ?? "";
+			const source = frame.rows[this.#appViewportVisibleSourceRows[row] ?? -1];
+			const previous = this.#appViewportPreparedRows[row];
+			const cached =
+				source?.line === raw && source.width === preparedWidth
+					? source
+					: previous?.raw === raw
+						? previous
+						: undefined;
+			const prepared =
+				cached !== undefined &&
+				cached.width === preparedWidth &&
+				cached.widthEpoch === widthEpoch &&
+				cached.imageProtocol === imageProtocol
+					? cached
+					: this.#prepareLine(raw, preparedWidth, widthEpoch, imageProtocol);
+			fitted[row] = prepared.line;
+			preparedRows[row] = prepared;
 		}
 		const currentSixelRows =
 			TERMINAL.imageProtocol === ImageProtocol.Sixel
-				? fitted.map(line => TERMINAL.isImageLine(line))
+				? preparedRows.map(line => line.isImage)
 				: // oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 					new Array<boolean>(height).fill(false);
 		let kittyCleanup = "";
@@ -5395,6 +5435,9 @@ export class TUI extends Container {
 			for (let r = 0; r < height; r++) {
 				if (
 					fitted[r] !== this.#appViewportPreviousLines[r] ||
+					preparedRows[r]!.width !== this.#appViewportPreparedRows[r]?.width ||
+					preparedRows[r]!.widthEpoch !== this.#appViewportPreparedRows[r]?.widthEpoch ||
+					preparedRows[r]!.imageProtocol !== this.#appViewportPreparedRows[r]?.imageProtocol ||
 					currentSixelRows[r] !== (this.#appViewportPreviousSixelRows[r] ?? false) ||
 					(scrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK) !==
 						(this.#appViewportPreviousScrollbarGlyphs[r] ?? APP_VIEWPORT_SCROLLBAR_BLANK)
@@ -5404,6 +5447,7 @@ export class TUI extends Container {
 				}
 			}
 			if (same) {
+				this.#appViewportPreparedRows = preparedRows;
 				if (kittyCleanup) this.terminal.write(this.#paintBeginSequence + kittyCleanup + this.#paintEndSequence);
 				this.#writeAppViewportCursor(fittedCursorPos, height);
 				return;
@@ -5437,12 +5481,19 @@ export class TUI extends Container {
 		// DECSED covers terminals that expose selective image erasure. Use both
 		// before replay so pixels outside a narrowed footprint cannot survive.
 		if (sixelNeedsFullRepaint) buffer += "\x1b[2J\x1b[?2J\x1b[H";
-		buffer += this.#appViewportPaintRows(fitted, scrollbarGlyphs, width, height, forceFullRepaint);
+		buffer += this.#appViewportPaintRows(
+			{ lines: fitted, rows: preparedRows },
+			scrollbarGlyphs,
+			width,
+			height,
+			forceFullRepaint,
+		);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#appViewportPreviousLines = fitted;
+		this.#appViewportPreparedRows = preparedRows;
 		this.#appViewportPreviousSixelRows = currentSixelRows;
 		this.#appViewportPreviousScrollbarGlyphs = scrollbarGlyphs;
 		this.#appViewportPreviousWidth = width;
@@ -5451,27 +5502,38 @@ export class TUI extends Container {
 	}
 
 	#appViewportPaintRows(
-		lines: string[],
+		prepared: PreparedLines,
 		scrollbarGlyphs: string[],
 		width: number,
 		height: number,
 		forceFullRepaint: boolean,
 	): string {
+		const lines = prepared.lines;
 		let buffer = "";
 		const contentWidth = Math.max(1, width - 1);
 		const widthChanged = this.#appViewportPreviousWidth !== width;
 		const previousLines = this.#appViewportPreviousLines;
 		const previousScrollbarGlyphs = this.#appViewportPreviousScrollbarGlyphs;
 		for (let row = 0; row < height; row++) {
-			const line = lines[row] ?? "";
+			const current = prepared.rows[row]!;
+			const line = current.line;
 			const previousLine = previousLines[row] ?? "";
-			if (forceFullRepaint || line !== previousLine || (widthChanged && line !== "")) {
-				if (forceFullRepaint || line !== "" || previousLine !== "") {
+			const previous = this.#appViewportPreparedRows[row];
+			const preparationChanged =
+				previous === undefined ||
+				previous.width !== current.width ||
+				previous.widthEpoch !== current.widthEpoch ||
+				previous.imageProtocol !== current.imageProtocol;
+			const spacerGlyphWidth = this.#osc66SpacerGlyphWidth(lines, row);
+			const spacerChanged = spacerGlyphWidth !== this.#osc66SpacerGlyphWidth(previousLines, row);
+			if (forceFullRepaint || line !== previousLine || preparationChanged || spacerChanged) {
+				if (forceFullRepaint || line !== "" || previousLine !== "" || spacerChanged) {
 					buffer += `\x1b[${row + 1};1H${this.#appViewportContentRewriteSequence(
-						line,
+						current,
 						contentWidth,
 						row,
 						this.#appViewportVisibleSourceRows[row] ?? -1,
+						spacerGlyphWidth,
 					)}`;
 				}
 			}
@@ -5493,10 +5555,10 @@ export class TUI extends Container {
 				line !== previousLine &&
 				glyph === APP_VIEWPORT_SCROLLBAR_BLANK &&
 				previousGlyph === APP_VIEWPORT_SCROLLBAR_BLANK &&
-				!TERMINAL.isImageLine(previousLine) &&
-				visibleWidth(previousLine) > contentWidth &&
-				!TERMINAL.isImageLine(line) &&
-				visibleWidth(line) <= contentWidth
+				!previous?.isImage &&
+				(previous?.asciiWidth ?? visibleWidth(previousLine)) > contentWidth &&
+				!current.isImage &&
+				(current.asciiWidth ?? visibleWidth(line)) <= contentWidth
 			) {
 				buffer += `\x1b[${row + 1};${width}H${APP_VIEWPORT_SCROLLBAR_BLANK}`;
 			}
@@ -5513,13 +5575,33 @@ export class TUI extends Container {
 		return buffer;
 	}
 
-	#appViewportContentRewriteSequence(line: string, width: number, screenRow: number, frameRow: number): string {
-		if (TERMINAL.isImageLine(line)) return ERASE_LINE + this.#terminalLine(line, screenRow, frameRow);
-		const terminalLine = this.#terminalLine(line);
-		const asciiWidth = this.#ansiAsciiLineWidth(line, width);
-		const lineWidth = asciiWidth ?? visibleWidth(line);
-		const clearCells = Math.max(0, width - lineWidth);
-		return clearCells > 0 ? `${terminalLine}\x1b[${clearCells}X` : terminalLine;
+	#appViewportContentRewriteSequence(
+		line: PreparedLine,
+		width: number,
+		screenRow: number,
+		frameRow: number,
+		spacerGlyphWidth: number,
+	): string {
+		let rewrite: string;
+		if (spacerGlyphWidth >= 0) {
+			rewrite =
+				spacerGlyphWidth >= width
+					? ""
+					: `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C\x1b[${width - spacerGlyphWidth}X`;
+		} else if (line.isImage) {
+			rewrite = ERASE_LINE + this.#imageLineSequence(line.line, screenRow, frameRow, -1);
+		} else {
+			const terminalLine = this.#terminalLine(line);
+			if (line.asciiWidth === undefined) {
+				// A measured-full combining row can paint short. Erase first,
+				// bounded to the content area so the scrollbar stays untouched.
+				rewrite = `${SEGMENT_RESET}\x1b[${width}X${terminalLine}`;
+			} else {
+				const clearCells = Math.max(0, width - line.asciiWidth);
+				rewrite = clearCells > 0 ? `${terminalLine}\x1b[${clearCells}X` : terminalLine;
+			}
+		}
+		return `${rewrite}\r`;
 	}
 
 	#appViewportCursorControlSequence(

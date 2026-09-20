@@ -11,6 +11,7 @@ import {
 	matchesKey,
 	padding,
 	routeSgrMouseInput,
+	ScrollView,
 	sliceByColumn,
 	type TUI,
 	truncateToWidth,
@@ -552,7 +553,8 @@ export class RewindSelectorComponent implements Component {
 						for (const column of visible) {
 							const source = padToWidth(column.rows[row - start] ?? "", colWidth);
 							const clipped = sliceByColumn(source, column.left - column.x0, column.right - column.left, true);
-							line += padding(Math.max(0, column.left - filled)) + padToWidth(clipped, column.right - column.left);
+							line +=
+								padding(Math.max(0, column.left - filled)) + padToWidth(clipped, column.right - column.left);
 							filled = column.right;
 						}
 						lines.push(line);

@@ -2560,7 +2560,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const leftSegments = effectiveSettings.leftSegments;
 		const rightSegments = effectiveSettings.rightSegments;
 		const meter = this.#meter();
-		if ((this.#runtimeStatus ? this.#runtimeStatus.isStreaming : meter.activeStartedAt !== null) || this.#brandFade !== null) {
+		if (
+			(this.#runtimeStatus ? this.#runtimeStatus.isStreaming : meter.activeStartedAt !== null) ||
+			this.#brandFade !== null
+		) {
 			return Math.floor(nowMs / SPINNER_ADVANCE_MS);
 		}
 		const includesTime = leftSegments.includes("time") || rightSegments.includes("time");

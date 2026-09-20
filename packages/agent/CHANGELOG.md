@@ -46,6 +46,15 @@
 - Fixed stream finalization when a provider ends without emitting a completion or error event, ensuring the final assistant message is preserved and corresponding message lifecycle events are emitted.
 - Fixed tool execution being incorrectly skipped when host steering callbacks reject during a tool batch.
 - Fixed stream hangs and preserved the original error when host aside-commit or discard callbacks fail.
+### Added
+
+- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
+- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
+- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
+
+### Changed
+
+- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
 
 ## [18.2.5] - 2026-09-17
 
@@ -146,15 +155,6 @@
 ### Fixed
 
 - Fixed `/shake elide` handling of mixed tool results so images are preserved and token savings are reported accurately.
-### Added
-
-- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
-- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
-- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
-
-### Changed
-
-- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
 
 ## [18.0.7] - 2026-08-26
 

@@ -4,6 +4,7 @@
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
+import { displayArgsForToolCall } from "./tool-args-reveal";
 import { type Component, type TUI } from "../tui";
 import type { AdvisorMessageDetails } from "./messages";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "./messages";
@@ -107,14 +108,14 @@ export class ChatTranscriptBuilder {
 	}
 
 	/** Discard all components and rebuild the whole transcript from `entries`. */
-	rebuild(entries: TranscriptEntry[]): void {
+	rebuild(entries: readonly TranscriptEntry[]): void {
 		this.reset();
 		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
-	append(entries: TranscriptEntry[]): void {
+	append(entries: readonly TranscriptEntry[]): void {
 		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
@@ -143,6 +144,7 @@ export class ChatTranscriptBuilder {
 	/** Set global expansion across normal blocks and synthetic replay bodies. */
 	setExpanded(expanded: boolean): void {
 		this.#expanded = expanded;
+		this.container.setExpanded(expanded);
 		for (const component of this.#expandables) component.setExpanded(expanded);
 		for (const component of this.#syntheticExpandables) component.setBodyExpanded(expanded);
 	}
@@ -158,6 +160,7 @@ export class ChatTranscriptBuilder {
 		const target = preferLast ? visibleSynthetic[visibleSynthetic.length - 1] : visibleSynthetic[0];
 		const expanded = target ? !target.expanded : !this.#expanded;
 		this.#expanded = expanded;
+		this.container.setExpanded(expanded);
 		for (const component of this.#expandables) component.setExpanded(expanded);
 		for (const component of this.#syntheticExpandables) {
 			component.setBodyExpanded(expanded && component === target);
@@ -349,7 +352,8 @@ export class ChatTranscriptBuilder {
 					// replay as Markdown instead of every historical copy at once.
 					if (isSynthetic) {
 						const collapsed = new CollapsedSyntheticMessageComponent(userText);
-						this.#trackExpandable(collapsed);
+						collapsed.setBodyExpanded(this.#expanded);
+						this.#syntheticExpandables.push(collapsed);
 						this.container.addChild(collapsed);
 					} else {
 						this.container.addChild(

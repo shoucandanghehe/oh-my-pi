@@ -1,6 +1,6 @@
 import type { WorkspaceEdge, WorkspaceLayout } from "@oh-my-pi/pi-tui";
 import type { RegistryEvent } from "../../registry/agent-registry";
-import type { AgentTranscriptViewer } from "../components/agent-transcript-viewer";
+import type { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import type { WorkspacePaneController } from "./workspace-pane-controller";
 
 const MAIN_PANE_ID = "main";

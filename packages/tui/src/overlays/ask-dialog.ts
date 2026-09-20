@@ -29,6 +29,8 @@ export interface ExtensionAskDialogQuestion {
 	question: string;
 	header?: string;
 	options: ExtensionAskDialogOption[];
+	/** Show an "Other (type your own)" answer. Defaults to true. */
+	allowCustomInput?: boolean;
 	multi?: boolean;
 	recommended?: number;
 }

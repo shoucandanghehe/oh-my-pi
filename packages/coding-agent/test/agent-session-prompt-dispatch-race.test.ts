@@ -108,12 +108,18 @@ describe("AgentSession concurrent prompt dispatch", () => {
 					await releaseFlush.promise;
 					await flush();
 				});
-				btwBranch = session.branchFromBtw(
-					"Side question",
-					assistantMsg("Side answer"),
-					abandoned,
-					manager.getSessionId(),
-				);
+				btwBranch = session.branchFromBtw({
+					anchorLeafId: abandoned,
+					sessionId: manager.getSessionId(),
+					turns: [
+						{
+							input: "Side question",
+							assistantMessage: assistantMsg("Side answer"),
+							replyText: "Side answer",
+							timestamp: Date.now(),
+						},
+					],
+				});
 				await reachedFlush.promise;
 			}
 			const pending = session.promptCustomMessage({

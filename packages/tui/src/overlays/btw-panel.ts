@@ -33,7 +33,6 @@ export class BtwPanelComponent extends OverlayPanel {
 		this.#baseTitle = baseTitle;
 		this.#tui = options.tui;
 		this.#canBranch = options.canBranch;
-		this.#canFollowUp = options.canFollowUp;
 		this.#content = new StreamingPanelContent(() => ({
 			sections: [this.#contentComponent()],
 			footer: () => this.#footerLine(),
@@ -145,10 +144,10 @@ export class BtwPanelComponent extends OverlayPanel {
 				const actions: string[] = [];
 				if (this.#canOpenThread) actions.push("Enter open thread");
 				if (this.isCopyable()) actions.push(this.#copied ? "c to copy again" : "c copy");
-				if (this.#canFollowUp?.()) actions.push("f to follow up");
 				if (this.#canBranch?.() ?? this.isBranchable()) actions.push("b promote to chat");
 				actions.push("Esc dismiss");
-				if (this.#copied) return `${theme.fg("success", "✓ Copied to clipboard")}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
+				if (this.#copied)
+					return `${theme.fg("success", "✓ Copied to clipboard")}${theme.fg("muted", actions.length > 0 ? ` · ${actions.join(" · ")}` : "")}`;
 				return theme.fg("muted", actions.join(" · "));
 			}
 			case "branching":

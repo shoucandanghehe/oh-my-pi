@@ -1,10 +1,7 @@
-import { Container, Text, type TUI } from "@oh-my-pi/pi-tui";
-import type {
-	ExtensionUiComponent,
-	ExtensionWidgetContent,
-	ExtensionWidgetOptions,
-} from "../../extensibility/extensions/types";
-import { replaceTabs } from "../../tools/render-utils";
+import { Text } from "../components/text";
+import { Container, type TUI } from "../tui";
+import type { ExtensionUiComponent, ExtensionWidgetContent, ExtensionWidgetOptions } from "../chat/extension-types";
+import { replaceTabs } from "../render/render-utils";
 import { theme } from "../theme/theme";
 
 const MAX_WIDGET_LINES = 10;

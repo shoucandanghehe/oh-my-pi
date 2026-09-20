@@ -1,3 +1,4 @@
+import { AgentRegistry } from "../../registry/agent-registry";
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, UsageReport } from "@oh-my-pi/pi-ai";
@@ -2190,7 +2191,12 @@ export class SelectorController {
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
-			createStatusLine: session => this.ctx.statusLine.createPeer(session),
+			createStatusLine: id => {
+				const session = AgentRegistry.global().get(id)?.session;
+				return session ? this.ctx.statusLine.createPeer(session) : undefined;
+			},
+			getStatusLineTransparent: () => this.ctx.settings.get("statusLine.transparent"),
+			getExtensionPresentation: id => AgentRegistry.global().get(id)?.session?.extensionRunner,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			openAgent: this.ctx.workspaceEnabled ? id => this.ctx.openAgentWorkspacePane(id) : undefined,
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,

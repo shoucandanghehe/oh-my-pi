@@ -90,7 +90,7 @@ function makeComponent(statusLineSettings: StatusLineSettings): StatusLineCompon
 describe("StatusLineComponent effective settings cache", () => {
 	it("keeps extension statuses session-local while mirroring the same session", () => {
 		const session = makeSession("Main");
-		const main = statusLines.track(new StatusLineComponent(session));
+		const main = statusLines.track(new StatusLineComponent(session, statusLineHost));
 		main.updateSettings({ preset: "custom", leftSegments: ["status"], rightSegments: [], showHookStatus: false });
 		main.setHookStatus("rate", "main-only-rate");
 		const other = statusLines.track(main.createPeer(makeSession("Child")));
@@ -172,7 +172,7 @@ describe("StatusLineComponent effective settings cache", () => {
 
 	it("creates a peer with byte-identical rendering and live settings", () => {
 		const session = makeSession("Peer Session");
-		const component = new StatusLineComponent(session);
+		const component = new StatusLineComponent(session, statusLineHost);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["pi", "model", "context_pct", "path"],

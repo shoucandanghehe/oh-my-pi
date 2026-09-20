@@ -109,7 +109,7 @@ export function appendOutlineEntries(builder: ChatTranscriptBuilder, entries: Tr
 	for (const entry of entries) {
 		const children = builder.container.children;
 		const before = children.length;
-		builder.appendEntries([entry]);
+		builder.append([entry]);
 		const after = children.length;
 		let start = before;
 		while (start < after && isUsageRowBlock(children[start]!)) {
@@ -330,7 +330,9 @@ export class VirtualOutlineColumn implements ViewportOutlineColumn {
 			});
 			const vertical = theme.fg("accent", theme.boxDotted.vertical);
 			for (const text of stripPromptZones(frame.lines)) {
-				lines.push(insideOutline ? `${vertical} ${fit(text, this.#inner)} ${vertical}` : text ? `  ${text}` : "");
+				lines.push(
+					insideOutline ? `${vertical} ${padToWidth(text, this.#inner)} ${vertical}` : text ? `  ${text}` : "",
+				);
 			}
 			row = segmentEnd;
 		}

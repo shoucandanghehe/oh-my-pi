@@ -10,7 +10,6 @@ import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
 import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";

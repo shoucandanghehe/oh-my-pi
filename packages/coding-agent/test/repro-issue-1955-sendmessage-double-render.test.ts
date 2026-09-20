@@ -8,7 +8,7 @@ import type {
 	ExtensionContextActions,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";

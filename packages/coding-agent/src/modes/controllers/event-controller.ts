@@ -39,7 +39,6 @@ import { nextActionableTask } from "../../tools/todo";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
-import { setTerminalTitleState } from "../../utils/title-generator";
 import {
 	assistantMessageLinkTargets,
 	createAssistantMessageComponent,
@@ -51,8 +50,8 @@ import {
 	splitAssistantMessageToolTimeline,
 } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { isWarpCliAgentProtocolActive } from "../warp-events";
-import { StreamingRevealController } from "./streaming-reveal";
-import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
+import { StreamingRevealController } from "@oh-my-pi/pi-tui/chat/streaming-reveal";
+import { streamingStringKeysForTool, ToolArgsRevealController } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 
 import {
 	cfgCompletionNotify,

@@ -1,5 +1,5 @@
 import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
-import { previewLine, TRUNCATE_LENGTHS } from "../tools/render-utils";
+import { previewLine, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";

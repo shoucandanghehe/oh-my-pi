@@ -104,6 +104,56 @@
 ### Fixed
 
 - Prevented magic keywords from triggering spelling autocorrect and underlining
+### Fixed
+
+- Workspace header clicks no longer initiate a pane drag from sub-cell pointer jitter.
+- Markdown-heavy views resize faster by reusing exact layout measurements.
+- App-viewport updates no longer wait for a fixed 30 FPS cadence; slow-frame and terminal-output backpressure remain in effect.
+- Consecutive workspace splits now use current layout geometry without requiring an intermediate render; background splits no longer briefly steal focus.
+- Text and Markdown components now measure offscreen row counts without building styled or selection-mapped render output.
+- Virtualized hosts can now measure exact component and Markdown row counts without painting syntax-highlighted offscreen content.
+- Fixed Loader-synchronized component animations stalling when expensive frames trigger spinner backpressure.
+- Fixed app-viewport selections drifting when content repaints between mouse press and drag.
+- Fixed component-scoped app-viewport repaints overriding a pending full-frame compose.
+- Fixed nested virtual viewports clamping scroll offsets before trailing sibling components.
+- Fixed app-viewport selection bounds excluding column-zero fenced-code rows when the surrounding Markdown message uses horizontal padding.
+- Fixed repeated focus requests briefly blurring and refocusing the unchanged component.
+- Fixed app-viewport right-click treating focused input selections as empty when the hardware-cursor marker preceded recalled history text, which incorrectly fell through to paste.
+- Fixed app-viewport workspace sash dragging fully rendering tall component-owned panes instead of using their visible-tail render path.
+- Fixed truncated OSC 8 hyperlinks and SGR styles leaking from one horizontal app-viewport workspace pane into its sibling.
+- Fixed workspace pane drop previews inheriting the foreground color of the content they cover.
+- Fixed dragged-pane ghost content shifting one row and one column inside its destination frame.
+- Fixed app-viewport pane focus transitions targeting stale components after a pane swapped its active input widget.
+- Fixed app-viewport drag-to-copy selections crossing workspace pane boundaries or copying visual wrapping, padding, and pane scrollbars instead of logical text, while preserving content that legitimately starts in column zero.
+- Fixed active app-viewport workspace selections staying on stale screen rows, failing to follow a stationary pointer during pane-local wheel scrolling, being cleared when a drag anchor moved offscreen, or highlighting sticky rows outside the origin scroll region.
+- Fixed Windows app-viewport resizes leaving stale or duplicated rows after the terminal grid reflowed.
+- Fixed app-viewport scrolling recomposing the entire transcript per wheel tick: scroll/selection-only frames now reuse the last composed frame and only re-emit the viewport window, making scroll frames O(viewport) instead of O(transcript) on long sessions.
+- Fixed app-viewport sticky chrome selection (status/editor bottom bar) jumping upward when the transcript grows under follow-to-tail streaming: selection anchors/focuses on sticky rows now remap with the scroll-region shift.
+- Fixed app-viewport component-scoped frames bypassing partial composition and retaining consumed render targets, avoiding full-tree animation walks and stale component retention.
+- Fixed app-viewport text selection continuing under the pointer when the mouse wheel scrolls during a drag, instead of cancelling the drag and leaving a stale range.
+- Fixed app-viewport selection highlighting and copy for sticky chrome (status powerline / editor), so chrome backgrounds no longer hide the selection fill and editor rows stay selectable without edge auto-scroll.
+- Fixed app-viewport multi-line copy keeping right-padded trailing spaces from rendered rows instead of emitting clean line breaks.
+- Fixed the mid-prompt `/` autocomplete popup lingering until Esc on tokens that are neither a path nor skill-shaped. Skill suggestions previously stayed alive through fuzzy subsequence matches against long skill descriptions, so nearly any prose token kept the popup hovering; matching is now gated to the `skill:` namespace (bare `/`, `s`, `sk`, …), explicit `skill:` queries (fuzzy search retained), and bare skill-name prefixes (`/hum` → `skill:humanizer`). Everything else falls through to path completion or dismisses the popup, and the Tab/Enter staleness guard shares the same gate so a stale popup can no longer rewrite tokens like `/scan` into `/skill:…`.
+- Fixed app viewport drag selection temporarily dropping wide Unicode graphemes when the pointer crossed their first display cell.
+- Fixed app viewport right-click copy retaining the selection; the next right click now requests paste.
+- Fixed `/resume` leaving the session picker scrollbar visible after selecting a session in the app viewport renderer.
+- Fixed emergency exits leaving app-viewport mouse reporting enabled, restoring native terminal drag selection.
+- Fixed app viewport treating near-origin pixel mouse reports as terminal-cell coordinates, preserving wide-character selections during repaint.
+
+### Added
+
+- Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
+- Workspace panes can retain their layout while hidden on small terminals, and nested panes support independent text selection and drag capture.
+- Added estimated-height virtual viewport providers for tall component trees.
+- Added app-viewport workspace primitives for recursively nested panes, weighted minimum-size layout, pane-local focus and scrolling, draggable split sashes, and drag-to-dock pane reordering.
+- Added a reusable draggable Braille scrollbar mode to `ScrollView`.
+- Added live dragged-pane content ghosts with accent drop frames to app-viewport workspaces.
+- Added inline placeholder hints to `Editor`.
+- Added per-pane workspace headers, themed split sashes, and automatic any-motion mouse reporting for hover-aware app-viewport panes, including transient hover cleanup when the pointer leaves a pane.
+
+### Changed
+
+- Made the app viewport scrollbar thumb denser while retaining its four subrow scroll-position slots.
 
 ## [18.2.5] - 2026-09-17
 
@@ -198,15 +248,6 @@
 ### Changed
 
 - The software cursor now reflects the Vim mode: a reverse-video block in Normal/Visual and an underline in Insert. Both occupy one cell, so layout is unchanged, and non-modal editors keep the reverse-video block they always had.
-### Fixed
-
-- Workspace header clicks no longer initiate a pane drag from sub-cell pointer jitter.
-- Markdown-heavy views resize faster by reusing exact layout measurements.
-- App-viewport updates no longer wait for a fixed 30 FPS cadence; slow-frame and terminal-output backpressure remain in effect.
-
-### Added
-
-- Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
 
 ## [18.1.15] - 2026-09-08
 
@@ -232,13 +273,6 @@
 
 - Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.
 - Horizontal wheel reports (the sideways drift of a two-finger trackpad scroll) no longer decode as a vertical wheel direction, so fullscreen selectors such as `/copy` and the rewind picker stop jumping up and back down at the end of a scroll gesture.
-### Added
-
-- Workspace panes can retain their layout while hidden on small terminals, and nested panes support independent text selection and drag capture.
-
-### Fixed
-
-- Consecutive workspace splits now use current layout geometry without requiring an intermediate render; background splits no longer briefly steal focus.
 
 ## [18.1.9] - 2026-09-04
 
@@ -264,9 +298,6 @@
 ### Fixed
 
 - Fixed the TUI tearing in Herdr panes so the live viewport updates as one frame instead of leaving the top frozen while only the bottom refreshed. Pane identity vars (`HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`) also count as inside Herdr, not only `HERDR_ENV=1`. A DECRPM “unrecognized” report keeps synchronized output on; a “permanently reset” report, or a custom terminal that omits the DECRPM status, still turns it off.
-### Fixed
-
-- Text and Markdown components now measure offscreen row counts without building styled or selection-mapped render output.
 
 ## [18.1.0] - 2026-09-01
 
@@ -277,9 +308,6 @@
 - Fixed the TUI crashing on reference-style Markdown links whose labels match JavaScript built-in names; these links now render safely as plain text.
 - Fixed fatal cleanup leaving the cursor inside a focused input before error output is displayed.
 - Fixed resumed sessions showing stale background bands until the next keypress in WSL and Windows Terminal.
-### Fixed
-
-- Virtualized hosts can now measure exact component and Markdown row counts without painting syntax-highlighted offscreen content.
 
 ## [18.0.11] - 2026-08-29
 
@@ -290,10 +318,6 @@
 ### Fixed
 
 - Fixed inline color swatches appearing for words with hex-like prefixes, such as `#each`; swatches now appear only when the entire word is a valid color.
-### Fixed
-
-- Fixed Loader-synchronized component animations stalling when expensive frames trigger spinner backpressure.
-- Fixed app-viewport selections drifting when content repaints between mouse press and drag.
 
 ## [18.0.10] - 2026-08-28
 
@@ -326,46 +350,11 @@
 ### Added
 
 - `ProcessTerminal` accepts a `conpty` option to force ConPTY-hosted behavior on or off, keeping terminal tests hermetic on WSL where live env detection would otherwise flip kitty-keyboard flags and write chunking ([#9887](https://github.com/can1357/oh-my-pi/issues/9887)).
-- Added estimated-height virtual viewport providers for tall component trees.
-- Added app-viewport workspace primitives for recursively nested panes, weighted minimum-size layout, pane-local focus and scrolling, draggable split sashes, and drag-to-dock pane reordering.
-- Added a reusable draggable Braille scrollbar mode to `ScrollView`.
-- Added live dragged-pane content ghosts with accent drop frames to app-viewport workspaces.
-- Added inline placeholder hints to `Editor`.
-- Added per-pane workspace headers, themed split sashes, and automatic any-motion mouse reporting for hover-aware app-viewport panes, including transient hover cleanup when the pointer leaves a pane.
-
-### Changed
-
-- Made the app viewport scrollbar thumb denser while retaining its four subrow scroll-position slots.
 
 ### Fixed
 
 - Fixed pending-work animations repeatedly composing expensive frames without applying their full render cost to CPU backpressure.
 - Fixed unfinished live viewport rows entering tmux pane history and duplicating streamed output ([#9780](https://github.com/can1357/oh-my-pi/issues/9780)).
-- Fixed component-scoped app-viewport repaints overriding a pending full-frame compose.
-- Fixed nested virtual viewports clamping scroll offsets before trailing sibling components.
-- Fixed app-viewport selection bounds excluding column-zero fenced-code rows when the surrounding Markdown message uses horizontal padding.
-- Fixed repeated focus requests briefly blurring and refocusing the unchanged component.
-- Fixed app-viewport right-click treating focused input selections as empty when the hardware-cursor marker preceded recalled history text, which incorrectly fell through to paste.
-- Fixed app-viewport workspace sash dragging fully rendering tall component-owned panes instead of using their visible-tail render path.
-- Fixed truncated OSC 8 hyperlinks and SGR styles leaking from one horizontal app-viewport workspace pane into its sibling.
-- Fixed workspace pane drop previews inheriting the foreground color of the content they cover.
-- Fixed dragged-pane ghost content shifting one row and one column inside its destination frame.
-- Fixed app-viewport pane focus transitions targeting stale components after a pane swapped its active input widget.
-- Fixed app-viewport drag-to-copy selections crossing workspace pane boundaries or copying visual wrapping, padding, and pane scrollbars instead of logical text, while preserving content that legitimately starts in column zero.
-- Fixed active app-viewport workspace selections staying on stale screen rows, failing to follow a stationary pointer during pane-local wheel scrolling, being cleared when a drag anchor moved offscreen, or highlighting sticky rows outside the origin scroll region.
-- Fixed Windows app-viewport resizes leaving stale or duplicated rows after the terminal grid reflowed.
-- Fixed app-viewport scrolling recomposing the entire transcript per wheel tick: scroll/selection-only frames now reuse the last composed frame and only re-emit the viewport window, making scroll frames O(viewport) instead of O(transcript) on long sessions.
-- Fixed app-viewport sticky chrome selection (status/editor bottom bar) jumping upward when the transcript grows under follow-to-tail streaming: selection anchors/focuses on sticky rows now remap with the scroll-region shift.
-- Fixed app-viewport component-scoped frames bypassing partial composition and retaining consumed render targets, avoiding full-tree animation walks and stale component retention.
-- Fixed app-viewport text selection continuing under the pointer when the mouse wheel scrolls during a drag, instead of cancelling the drag and leaving a stale range.
-- Fixed app-viewport selection highlighting and copy for sticky chrome (status powerline / editor), so chrome backgrounds no longer hide the selection fill and editor rows stay selectable without edge auto-scroll.
-- Fixed app-viewport multi-line copy keeping right-padded trailing spaces from rendered rows instead of emitting clean line breaks.
-- Fixed the mid-prompt `/` autocomplete popup lingering until Esc on tokens that are neither a path nor skill-shaped. Skill suggestions previously stayed alive through fuzzy subsequence matches against long skill descriptions, so nearly any prose token kept the popup hovering; matching is now gated to the `skill:` namespace (bare `/`, `s`, `sk`, …), explicit `skill:` queries (fuzzy search retained), and bare skill-name prefixes (`/hum` → `skill:humanizer`). Everything else falls through to path completion or dismisses the popup, and the Tab/Enter staleness guard shares the same gate so a stale popup can no longer rewrite tokens like `/scan` into `/skill:…`.
-- Fixed app viewport drag selection temporarily dropping wide Unicode graphemes when the pointer crossed their first display cell.
-- Fixed app viewport right-click copy retaining the selection; the next right click now requests paste.
-- Fixed `/resume` leaving the session picker scrollbar visible after selecting a session in the app viewport renderer.
-- Fixed emergency exits leaving app-viewport mouse reporting enabled, restoring native terminal drag selection.
-- Fixed app viewport treating near-origin pixel mouse reports as terminal-cell coordinates, preserving wide-character selections during repaint.
 
 ## [18.0.7] - 2026-08-26
 

@@ -240,7 +240,7 @@ import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint"
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { replaceTabs } from "../tools/render-utils";
+import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,

@@ -182,7 +182,6 @@ import { formatStartupChangelogSummary, type StartupChangelogSelection } from ".
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
-import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -226,7 +225,7 @@ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import type { LspServerInfo as WelcomeLspServerInfo } from "@oh-my-pi/pi-tui/prompt/welcome";
+import { WelcomeComponent, type LspServerInfo as WelcomeLspServerInfo } from "@oh-my-pi/pi-tui/prompt/welcome";
 import {
 	Composer,
 	type ComposerPreferences,
@@ -258,7 +257,6 @@ import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
 import { WorkspacePaneController } from "./controllers/workspace-pane-controller";
-import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -281,7 +279,7 @@ import {
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { renderWorkspacePaneHeader, sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
-import { runProviderSetupWizard } from "./setup-wizard/lazy";
+import { agentTranscriptSource } from "./agent-hub-runtime";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
@@ -1663,6 +1661,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		viewer = new AgentTranscriptViewer({
 			agentId,
 			registry: registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+			transcript: agentTranscriptSource,
 			remote,
 			lifecycle,
 			ui: this.ui,
@@ -1673,7 +1672,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			proseOnlyThinking: () => this.proseOnlyThinking,
 			expandKeys: this.keybindings.getKeys("app.tools.expand"),
 			hubKeys: [...this.keybindings.getKeys("app.agents.hub"), ...this.keybindings.getKeys("app.session.observe")],
-			createStatusLine: session => this.statusLine.createPeer(session),
+			createStatusLine: id => {
+				const session = (registryOverride ?? AgentRegistry.global()).get(id)?.session;
+				return session ? this.statusLine.createPeer(session) : undefined;
+			},
+			getStatusLineTransparent: () => this.settings.get("statusLine.transparent"),
+			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
 			requestRender: () => {
 				if (viewer) this.ui.requestComponentRender(viewer);
 				else this.ui.requestRender();

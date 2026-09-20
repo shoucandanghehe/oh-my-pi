@@ -4,10 +4,10 @@ import {
 	BtwConversationPane,
 	type BtwThreadView,
 } from "@oh-my-pi/pi-coding-agent/modes/components/btw-conversation-pane";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { MainSessionPane } from "@oh-my-pi/pi-coding-agent/modes/components/main-session-pane";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import {
 	type Component,
 	Container,
