@@ -19,7 +19,9 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	readonly approval = "read" as const;
 	readonly label = "Recall";
 	get description(): string {
-		return prompt.render(recallDescription);
+		return prompt.render(recallDescription, {
+			memoryEditAvailable: cfgMemoryBackend.get(this.session.settings) === "mnemopi",
+		});
 	}
 	readonly parameters = memoryRecallSchema;
 	readonly strict = true;

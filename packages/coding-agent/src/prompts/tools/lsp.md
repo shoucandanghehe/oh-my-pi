@@ -1,13 +1,13 @@
 Symbol-aware code intelligence from language servers — navigation, refactors, and diagnostics where text tools miss callsites.
 
 <operations>
-- Position-based: `file` + `line` + `symbol` (substring; `#N` for Nth match). `line` is 1-indexed.
-- `rename` — applies by default; `apply: false` previews. Project-aware lookups ERROR without `symbol` — no silent fallback on missing/ambiguous matches.
+- Position-based: `file` + `line` + `symbol` (bare identifiers match whole tokens; other text matches substrings; first match by default, `#N` selects Nth). `line` is 1-indexed.
+- `rename` — applies by default; `apply: false` previews. Project-aware lookups ERROR without `symbol` — missing matches or out-of-range occurrences error.
 - `code_actions` — lists by default; apply ONE with `apply: true` + `query` (title substring or index).
-- `rename_file` — moves file AND rewrites all imports/references; applies by default.
+- `rename_file` — moves the path and applies server-returned import/reference edits; may move without reference updates if servers are unavailable or do not support the operation. Applies by default.
 - `diagnostics` — path, glob (`src/**/*.ts`), or `file: "*"` for workspace.
 - `symbols` — `file` lists file symbols; `file: "*"` + `query` searches workspace.
-- `reload` — restart one server (`file`) or all (`*`); `reload *` re-reads LSP config.
+- `reload` — refresh one server (`file`) or all (`*`), normally without restarting its process. Rust reloads the workspace; generic reload also refreshes open files. `reload *` re-reads LSP config.
 - `request` — raw: `query` = method, `payload` = JSON params (else auto-built).
 </operations>
 

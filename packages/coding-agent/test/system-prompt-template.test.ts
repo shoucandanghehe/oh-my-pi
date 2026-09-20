@@ -209,14 +209,13 @@ describe("system prompt Handlebars templates", () => {
 		});
 	});
 
-	it("warns on a malformed discovered template and falls back to the bundled prompt", async () => {
+	it("uses the bundled prompt when discovery finds a malformed template", async () => {
 		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
+			const fallback = await buildSystemPrompt(options(cwd));
 			await Bun.write(path.join(projectConfig, "SYSTEM_TEMPLATE.md"), "{{#if eagerTasks}}");
 
 			const result = await buildSystemPrompt(options(cwd));
-			const text = result.systemPrompt.join("\n\n");
-			expect(text).not.toContain("TASK_BRANCH=");
-			expect(text).toContain("⁂ Tool Policy");
+			expect(result.systemPrompt).toEqual(fallback.systemPrompt);
 		});
 	});
 
