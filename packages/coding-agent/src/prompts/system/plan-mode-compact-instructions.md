@@ -2,7 +2,7 @@ Prepare to execute approved plan.
 
 MUST distill plan-mode discussion.
 Preserve:
-- Plan rationale; explicitly rejected alternatives.
+- Plan rationale; rejected alternatives that constrain implementation or explain a settled choice.
 - Key decisions; driving constraints.
 - Discovered files, symbols, code paths executor needs.
 - User preferences expressed during planning.

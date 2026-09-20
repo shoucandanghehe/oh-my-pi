@@ -6,5 +6,5 @@ OMP-native repository security scans: plan, start, inspect, cancel, validate.
 `cloud_start`: creates/enables configuration using `repository_id`, `repository_url`, `environment_id`; consumes account's separate Codex Security cloud allowance; NEVER native-scan fallback.
 `cloud_status`: cloud progress.
 `cloud_pull`: cloud findings → canonical OMP security store, available through `security://`.
-Cloud actions: `cloud_configuration_id` required; `credential_id` MAY pin account.
+`cloud_status`/`cloud_pull`: `cloud_configuration_id` required. `cloud_scans` needs no configuration ID; `cloud_start` creates one from the repository/environment fields. All cloud actions MAY pin the account with `credential_id`.
 Security MUST be enabled in settings.

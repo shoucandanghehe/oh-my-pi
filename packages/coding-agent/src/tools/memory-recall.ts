@@ -22,6 +22,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	get description(): string {
 		return prompt.render(recallDescription, {
 			toolRefs: sessionMemoryToolRefs(this.session),
+			memoryEditAvailable: cfgMemoryBackend.get(this.session.settings) === "mnemopi",
 		});
 	}
 	readonly parameters = memoryRecallSchema;

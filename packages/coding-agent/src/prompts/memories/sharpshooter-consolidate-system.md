@@ -37,7 +37,7 @@ Each decision lives in exactly one file:
 - Merge same-topic deltas across sessions into one bullet; repeated touches strengthen admission, not length.
 - Preserve still-valid existing bullets; you are curating a living document, not regenerating it from scratch.
 - Group bullets under short `##` domain sections. One line per bullet where possible.
-- Hard budget: at most {{maxFileLines}} lines per file. Ceilings, not targets — a nearly empty or empty file is an honest, acceptable result.
+- Hard budget: at most {{maxFileLines}} lines per file. Ceilings, not targets. Individual files may be empty; an all-empty rewrite is accepted only when all current files are already empty.
 - Statelessness: every bullet a timeless normative statement. Never "the user wants", "currently", "now", "fixed", "regressed", "recently".
 
 A terse friction marker like "(recurrently regressed)" MAY close a bullet where it strengthens the instruction; keep it rare.

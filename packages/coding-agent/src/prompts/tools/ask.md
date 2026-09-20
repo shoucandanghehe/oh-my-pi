@@ -1,8 +1,8 @@
 Ask the user to fill in one HTML form; blocks until they submit or cancel.
 
-Ask only for materially different tradeoffs the user must decide.
-Default: act using code/config/docs/history and conventions.
-Several viable choices: pick conservative/standard, proceed, state choice.
+<conditions>
+- Missing information or a choice materially affects correctness, scope, compatibility, or risk and cannot be resolved from available context.
+</conditions>
 
 <instruction>
 - `html`: one <form> of plain semantic HTML, rendered natively in the user's terminal.
@@ -37,3 +37,14 @@ Several viable choices: pick conservative/standard, proceed, state choice.
 </form>
 ```
 </instruction>
+
+<caution>
+- Provide 2-5 concise, distinct options.
+</caution>
+
+<critical>
+- Investigate factual questions through the relevant available sources. Use project conventions and reasonable defaults for routine choices; ask when the remaining uncertainty needs the user's decision.
+- Explain what the answer enables and recommend an option when useful. Continue independent, authorized work while waiting; keep dependent work paused when the answer is required.
+- Use the designated approval mechanism for permission requests. Technical facts and unanswered questions do not supply authorization.
+- Do NOT include "Other"; UI automatically adds "Other (type your own)" to every question.
+</critical>

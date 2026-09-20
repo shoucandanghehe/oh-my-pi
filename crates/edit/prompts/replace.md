@@ -14,7 +14,7 @@ Failure — e.g., `old_string` absent or multiple matches without `replace_all: 
 </output>
 
 <critical>
-- MUST read file at least once in conversation before editing. Tool errors on edit before read.
+- MUST read the file before editing. This is your responsibility; replace mode does not enforce a prior read.
 </critical>
 
 <bash-alternatives>

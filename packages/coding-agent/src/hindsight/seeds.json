@@ -4,7 +4,7 @@
 		{
 			"id": "user-preferences",
 			"name": "User Preferences",
-			"source_query": "What does the user prefer in coding style, tooling, communication, and review? Capture only durable preferences expressed across sessions, not one-off requests.",
+			"source_query": "What durable preferences has the user expressed across sessions about collaboration, communication, tooling, and code style? Skip anything the user already wrote into AGENTS.md, CLAUDE.md, skill files, or other instruction files, because the agent loads those directly. Skip one-off requests, task progress, and approvals or caveats tied to a single action.",
 			"scopes": ["global", "per-project", "per-project-tagged"],
 			"projectTagged": false,
 			"max_tokens": 600,
@@ -13,7 +13,7 @@
 		{
 			"id": "project-conventions",
 			"name": "Project Conventions",
-			"source_query": "What are this project's conventions for code style, build, testing, release, and pull-request review? Only include conventions that are explicit in the project (settings, scripts, contributor docs, repeatedly enforced in review).",
+			"source_query": "What conventions does this project follow for code style, build, testing, release, and review that are not already stated in its AGENTS.md, CLAUDE.md, CONTRIBUTING, or other rule files the agent loads directly? Prefer concrete commands, paths, and tool versions. Skip task progress and one-off approvals.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
 			"max_tokens": 800,
@@ -22,7 +22,7 @@
 		{
 			"id": "project-decisions",
 			"name": "Project Decisions",
-			"source_query": "What durable architectural or product decisions have been made for this project, and what rationale or trade-offs were recorded? Include only decisions that are stable across sessions; exclude transient plans, unresolved ideas, and active task state.",
+			"source_query": "What durable architectural or product decisions have been made for this project, and what rationale or trade-offs were recorded? Exclude decisions already written in the project's rule files, transient plans, unresolved ideas, active task state, and per-action approvals.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
 			"max_tokens": 800,
