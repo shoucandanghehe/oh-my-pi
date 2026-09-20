@@ -80,7 +80,11 @@ import {
 	treeMetadataIndent,
 } from "./agent-hub-renderer";
 import { sanitizeDisplaySingleLine } from "./extensions/display-text";
-import { AgentTranscriptViewer, type AgentTranscriptSource, type AgentTranscriptViewerDeps } from "./agent-transcript-viewer";
+import {
+	AgentTranscriptViewer,
+	type AgentTranscriptSource,
+	type AgentTranscriptViewerDeps,
+} from "./agent-transcript-viewer";
 import type { AgentRoleDisplay } from "./agent-hub-renderer";
 import { fuzzyMatch } from "../fuzzy";
 import { bottomBorder, divider, dividerSplit, PanelRows, row, topBorder, topBorderSplit } from "../chrome/overlay-box";
@@ -303,6 +307,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	expandKeys?: KeyId[];
 	/** Creates the same StatusLineComponent used by Main for transcript chat panes. Required by openChat. */
 	createStatusLine?: AgentTranscriptViewerDeps["createStatusLine"];
+	getStatusLineTransparent?: AgentTranscriptViewerDeps["getStatusLineTransparent"];
+	getExtensionPresentation?: AgentTranscriptViewerDeps["getExtensionPresentation"];
 	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
 	focusAgent?: (id: string) => Promise<void>;
 	/** Open this agent in an app-viewport workspace pane instead of replacing the main session view. */
@@ -450,6 +456,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#proseOnlyThinking: (() => boolean) | undefined;
 	#expandKeys: KeyId[];
 	#createStatusLine: AgentTranscriptViewerDeps["createStatusLine"] | undefined;
+	#getStatusLineTransparent: AgentTranscriptViewerDeps["getStatusLineTransparent"];
+	#getExtensionPresentation: AgentTranscriptViewerDeps["getExtensionPresentation"];
 	#focusAgent: ((id: string) => Promise<void>) | undefined;
 	#openAgent: ((id: string) => Promise<void>) | undefined;
 
@@ -497,6 +505,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
 		this.#expandKeys = deps.expandKeys ?? ["ctrl+o"];
 		this.#createStatusLine = deps.createStatusLine;
+		this.#getStatusLineTransparent = deps.getStatusLineTransparent;
+		this.#getExtensionPresentation = deps.getExtensionPresentation;
 		this.#focusAgent = deps.focusAgent;
 		this.#openAgent = deps.openAgent;
 
@@ -648,6 +658,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			proseOnlyThinking: this.#proseOnlyThinking,
 			expandKeys: this.#expandKeys,
 			createStatusLine: this.#createStatusLine,
+			getStatusLineTransparent: this.#getStatusLineTransparent,
+			getExtensionPresentation: this.#getExtensionPresentation,
 			hubKeys: this.#hubKeys,
 			requestRender: this.#requestRender,
 			onClose: () => this.#closeTranscriptOverlay(viewer),

@@ -9,6 +9,23 @@ export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionU
 
 export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
 
+export type WidgetPlacement = "aboveEditor" | "belowEditor";
+
+export interface ExtensionWidgetOptions {
+	placement?: WidgetPlacement;
+}
+
+/** A mounted view's presentation callbacks, without an interactive extension host. */
+export interface ExtensionPresentationObserver {
+	setWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
+	setStatus(key: string, text: string | undefined): void;
+}
+
+/** Replays current presentation and follows changes until the observer detaches. */
+export interface ExtensionPresentationSource {
+	observePresentation(observer: ExtensionPresentationObserver): () => void;
+}
+
 export interface MessageRenderOptions {
 	expanded: boolean;
 }

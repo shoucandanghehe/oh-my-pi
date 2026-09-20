@@ -22,7 +22,7 @@ import {
 	type VirtualViewportProvider,
 	type VirtualRowAnchor,
 } from "@oh-my-pi/pi-tui";
-import { theme } from "../theme/theme";
+import { theme } from "@oh-my-pi/pi-tui/theme/theme";
 
 export interface MainSessionPaneOptions {
 	scrollRoot: Component;

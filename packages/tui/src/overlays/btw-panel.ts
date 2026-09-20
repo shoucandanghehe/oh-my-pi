@@ -43,7 +43,6 @@ export class BtwPanelComponent extends OverlayPanel {
 		this.#question = replaceTabs(options.question);
 		this.#tui = options.tui;
 		this.#canBranch = options.canBranch;
-		this.#canFollowUp = options.canFollowUp;
 		this.#content = new StreamingPanelContent(() => ({
 			sections: [this.#contentComponent()],
 			footer: () => this.#footerLine(),

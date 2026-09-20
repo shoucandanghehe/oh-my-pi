@@ -350,8 +350,8 @@ class SyntheticSummary implements Component {
  */
 export class CollapsedSyntheticMessageComponent implements Component {
 	#disclosure: Disclosure;
-	#expanded = false;
 	readonly #native = new Memo();
+	#bodyExpansionControlled = false;
 
 	readonly #text: string;
 	readonly #imageLinks?: readonly (string | undefined)[];
@@ -372,10 +372,9 @@ export class CollapsedSyntheticMessageComponent implements Component {
 		return this.#disclosure.expanded;
 	}
 
-	/** ctrl+o toggle: reveal/hide the full Markdown body. */
+	/** Follow global expansion unless the viewer explicitly controls this body. */
 	setExpanded(expanded: boolean): void {
-		this.#expanded = expanded;
-		this.#disclosure.setExpanded(expanded);
+		if (!this.#bodyExpansionControlled) this.#disclosure.setExpanded(expanded);
 	}
 
 	/**
@@ -385,26 +384,31 @@ export class CollapsedSyntheticMessageComponent implements Component {
 	 * expands it through {@link handleNativeEvent}.
 	 */
 	describe(): NativeNode {
-		return this.#native.get([this.#expanded], () =>
+		return this.#native.get([this.expanded], () =>
 			card(
 				{
 					role: "omp.user.synthetic",
 					tone: "muted",
 					head: [span(summarizeSyntheticInput(this.#text), "dim")],
 					collapsible: true,
-					collapsed: !this.#expanded,
+					collapsed: !this.expanded,
 				},
-				this.#expanded ? [md(this.#text)] : [],
+				this.expanded ? [md(this.#text)] : [],
 			),
 		);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
-		if (expanded !== undefined) this.setExpanded(expanded);
+		if (expanded !== undefined) this.setBodyExpanded(expanded);
 	}
 
+	/**
+	 * The builder owns viewport-anchored replay expansion independently of the
+	 * transcript's global setExpanded presentation state.
+	 */
 	setBodyExpanded(expanded: boolean): void {
+		this.#bodyExpansionControlled = true;
 		this.#disclosure.setExpanded(expanded);
 	}
 

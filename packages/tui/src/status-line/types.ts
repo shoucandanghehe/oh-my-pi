@@ -36,7 +36,6 @@ export interface StatusLineRuntimeStatus {
 	};
 }
 
-
 /** Debounced footer snapshot a collab host broadcasts to guests. */
 export type CollabSessionState = SessionState & {
 	/**

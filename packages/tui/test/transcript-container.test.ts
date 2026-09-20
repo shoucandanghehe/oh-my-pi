@@ -9,7 +9,7 @@ import {
 import { highlightCode, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
 import { waitForImmediate } from "@oh-my-pi/pi-utils";
-import { createAssistantMessage } from "../../helpers/agent-session-setup";
+import { createAssistantMessage } from "../../coding-agent/test/helpers/agent-session-setup";
 
 class Block implements Component {
 	#rows: string[];
