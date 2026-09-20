@@ -1,11 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	ChatTranscriptPane,
-	type ChatTranscriptPaneEditorOptions,
-} from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-pane";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { ChatTranscriptPane, type ChatTranscriptPaneEditorOptions } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { type Component, ProcessTerminal, type SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {

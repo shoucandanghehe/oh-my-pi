@@ -1,7 +1,6 @@
 import type { TabBarTheme } from "../components/tab-bar";
 import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { theme } from "../theme/index";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { truncateToWidth } from "../render/render-utils";
 // ═══════════════════════════════════════════════════════════════════════════
 // Text Sanitization
