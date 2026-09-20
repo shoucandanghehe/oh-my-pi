@@ -2,12 +2,12 @@
 
 <instruction>
 Select via `op`.
-- `repo`: `[host/]owner/repo`; qualify the host for a repo outside the checkout's own GitHub instance.
+- `repo`: `[host/]owner/repo`; omitted host uses `GH_HOST` (otherwise github.com), not necessarily the checkout's host. Qualify targets on another host.
 - `repo_view`: omit `repo` → current checkout.
 - `file_read`: read `path` from `repo`; omit `repo` → current checkout, `branch` → default branch.
 - `pr_create`: `head` defaults current branch.
 - `pr_checkout`: PR(s) → dedicated git worktrees, never working tree; array `pr` batches multiple in one call.
-- `pr_push`: requires prior `op: pr_checkout`.
+- `pr_push`: requires prior `pr_checkout`; pass its returned local `branch`. Omitted `branch` uses the current branch in session cwd; `pr` does not select the push target.
 - `search_issues`/`search_prs`/`search_commits`/`search_repos`: `query` optional with `since`/`until`; omit for date-only filter. `search_code`: `query` required; rejects `since`/`until`.
 - `search_*`: `repo` defaults current checkout's `owner/repo`; search elsewhere with `repo:`/`org:`/`user:` in `query`. `search_repos`: ignores `repo`; scope via `org:`/`language:` in `query`.
 - Boolean `AND`/`OR`/`NOT` combine text terms, not qualifiers; never place them between qualifiers.

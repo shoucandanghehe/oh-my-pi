@@ -3,9 +3,10 @@ Hashline patches existing files; new files: `write`. Each file: `[PATH#TAG]`, `T
 <ops>
 `PUT N.=M:` replace inclusive N–M with `+` body (`N.=N` for one line); `PUT N*:` replace block N.
 `PUT <N:`/`PUT >N:` insert before/after N (`<1` head, `>$` tail). `PUT >N*:` insert after block N at sibling depth; inside, use `PUT >M:` at closer.
+Plain `PUT >N:` may move past following structural closers when its body is indented shallower than the anchor. To insert inside the block, match its in-block indentation.
 `CUT N.=M`/`CUT N*` delete and capture, optionally as `@name`.
 `PUT <N @name`/`PUT >N @name` paste at gap (omit name for anonymous CUT); `PUT N.=M @name`/`PUT N* @name` paste over range/block (name REQUIRED). Register pastes have NO body; named registers persist across calls.
-`REM` delete file; `MV DEST` rename after prior edits (quote spaced paths).
+`REM` deletes the file and MUST be the section's only operation. `MV DEST` renames after prior line edits (quote spaced paths).
 </ops>
 
 <rules>
@@ -13,7 +14,7 @@ Hashline patches existing files; new files: `write`. Each file: `[PATH#TAG]`, `T
 - Touch displayed changed lines only; `…`, `..`, collapsed `N-M:` and out-of-window lines UNSEEN. Re-read first. Tight ranges: split nonadjacent changes; NEVER include keepers or start/end mid-expression/block. Pure addition uses gap PUT.
 - `*` requires multi-line opener, NEVER closer/last/inner statement; use range/gap for one statement. Anchor first decorator/attribute/doc-comment to include it; standalone comments need explicit range.
 - Markdown heading blocks run through deeper headings until next same/higher; after section `PUT >N*:`, end body with blank line.
-- NEVER restyle unrelated code. After EVERY edit tag/numbers change: use edit response or fresh `read`; stale tag/surprise → STOP, re-read.
+- NEVER restyle unrelated code. After every edit, use the header and line numbers from its response or a fresh `read`; tags and line numbers may remain unchanged. Stale tag/surprise → STOP, re-read.
 </rules>
 
 <example>

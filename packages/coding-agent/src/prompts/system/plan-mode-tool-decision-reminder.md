@@ -1,9 +1,9 @@
 <system-reminder>
 Plan mode turn ended without a required tool call.
 
-You MUST choose exactly one next action now:
-1. Call `{{askToolName}}` to gather required clarification, OR
-2. Write the plan slug/title (`<slug>`, matching `local://<slug>-plan.md`) as plain text to `xd://propose` with `{{writeToolName}}` to finish planning and request approval
+Choose the decision tool appropriate to the plan's state:
+1. Call `{{askToolName}}` for a material unresolved requirement, preference, or blocker needing user input; or
+2. Use `write` to submit the finalized plan slug/title to `xd://propose`. The slug must match `local://<slug>-plan.md`.
 
-You NEVER output plain text in this turn.
+Use the selected tool now. Prose alone does not satisfy this plan-mode decision step; this reminder supplies no new authorization.
 </system-reminder>
