@@ -1,7 +1,7 @@
-Before task complete, verify:
+Before claiming completion, check the result against the request:
 
-- Consistency: If a pattern, signature, or check changed in one place, grep every other call site or duplicate copy needing identical change. A fix at only some matching sites fails.
-- Scope: If diff exceeds the minimal issue-resolving change, confirm behavior unchanged outside the reported issue. Prefer the smallest correct diff over a broader rewrite.
-- Verification: Run the issue's full test module or file, not only the expected-to-flip test. A sibling-test-breaking change fails.
+- Consistency: identify affected consumers and update the paths that depend on the changed contract.
+- Scope: include necessary supporting changes while preserving unrelated behavior and user work.
+- Verification: run relevant checks that can expose the failure, including neighboring behavior when it shares the affected boundary. Broaden checks when evidence warrants it.
 
-Do not claim task complete until all three checks done.
+Reuse verification already performed on unchanged state. Report unavailable checks or blockers explicitly rather than treating them as success.

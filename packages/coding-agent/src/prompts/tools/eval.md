@@ -2,7 +2,7 @@ One cell per call; top-level state persists, including across compaction.{{#if s
 {{#if spawns}}{{#if eagerDelegation}}For 2+ independent items, use a named `workpool()`; results auto-deliver.{{#if waitTool}} If blocked, leave `eval` and call `wait`.{{/if}}{{/if}}{{/if}}
 {{#if py}}Python: plain Python subprocess, not IPython (no `get_ipython()`, `obj?`, or `%matplotlib`). Magics like `%pip`, `%load`, `%time` and `!cmd` are rewritten to Python. Top-level `await` works; `asyncio.run(…)` fails.{{/if}}
 {{#if js}}JS: Bun (`Bun.file`, `Bun.write`, `Bun.$`); top-level `await`/`return` work.{{/if}}
-On error, retry only the failed step; earlier steps may have taken effect.
+After an error, earlier steps may already have taken effect; if you rerun, rerun only what failed.
 Cell deadline: nonzero `timeout` values clamp to {{timeoutMin}}–{{timeoutMax}} seconds{{#if configuredMaxTimeout}}, with configured `tools.maxTimeout: {{configuredMaxTimeout}}` (effective ceiling {{timeoutCeiling}}s){{/if}}; `0` disables the deadline. A changed supplied deadline is disclosed before execution.
 Printing an image{{#if py}} or figure{{/if}} attaches it.
 
