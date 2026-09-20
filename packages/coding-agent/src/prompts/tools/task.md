@@ -8,11 +8,13 @@
 {{asyncGuidance}}
 {{/if}}
 
-# Delegation
-Use most specific agent.{{#if scoutAvailable}} Read-only research MUST use `scout` only when files unknown.{{/if}} Prefer one agent to investigate + edit. Omit `agent` only for default (`{{defaultAgent}}`); NEVER specify it.
+# Task Design
+- **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Use `scout` (faster model) for read-only research.{{/if}} Omit `agent` only when the spawn-policy default (`{{defaultAgent}}`) fits; otherwise pass the specialist explicitly. NEVER name the default explicitly.
 {{#if batchEnabled}}Specialist `agent` selectors belong inside each `tasks[]` item; NEVER put `agent` at the top level.
 {{/if}}
-Shared edits need one integration owner{{#if ircEnabled}}; siblings coordinate via `write agent://<id>`{{/if}}. Set interfaces in {{#if batchEnabled}}`context`{{else}}the task{{/if}}. Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
+- **Verification ownership:** State who verifies each assignment. In a shared working tree, defer builds, linters, and formatters until concurrent edits settle; the integration owner runs the required combined checks. Isolated assignments may run scoped checks when explicitly assigned and safe for shared resources.
+- **One-pass:** For implementation work, prefer an agent that investigates and edits its assigned scope.{{#if scoutAvailable}} Use a read-only scout for research or review that should not change files.{{/if}}
+- **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Coordinate shared-file edits through `write agent://<id>`.{{/if}} Name one integration owner and state cross-task contracts in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}} before dispatch. Sequence dependent mutations and follow the project's isolation rules.
 
 # Inputs
 `name`: CamelCase ≤32, auto-generated if omitted; address agent by name.{{#if structured}} `outputSchema` overrides agent/session schemas.{{/if}}

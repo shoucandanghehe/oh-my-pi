@@ -424,7 +424,7 @@ describe("hindsightBackend first-turn injection", () => {
 		});
 
 		const prompt = await hindsightBackend.buildDeveloperInstructions("/tmp", "/tmp", settings, session as never);
-		expect(prompt).toContain("Use `xd://recall` proactively");
+		expect(prompt).toContain("Use `xd://recall` when");
 		expect(prompt).toContain("Use `retain` to store");
 	});
 

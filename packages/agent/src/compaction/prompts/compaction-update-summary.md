@@ -1,11 +1,12 @@
 Update existing handoff summary in <previous-summary> tags from new messages above for another LLM to resume.
 
 MUST:
-- preserve all previous-summary information; add new progress, decisions, context.
+- carry forward previous-summary information that still holds; add new progress, decisions, context.
+- latest user instruction wins: drop goals, steps, and constraints the user cancelled or replaced.
 - Progress: move completed "In Progress" items to "Done".
 - update "Next Steps" for completed work.
 - preserve exact file paths, function names, error messages.
-- MAY remove irrelevant content.
+- remove content that no longer matters for resuming.
 - If new messages end with an unanswered user question/request: add it to Critical Context; replace any previous pending question if answered.
 - output only the structured summary; NEVER extra text.
 - keep sections concise.
@@ -15,10 +16,10 @@ MUST:
 Format (omit inapplicable sections):
 
 ## Goal
-[Preserve existing goals; add new ones if task expanded]
+[Current goals; drop goals the user replaced or cancelled]
 
 ## Constraints & Preferences
-- [Preserve existing; add new ones discovered]
+- [Still-active constraints; add new ones discovered]
 
 ## Progress
 
@@ -32,13 +33,13 @@ Format (omit inapplicable sections):
 - [Current blockers—remove if resolved]
 
 ## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+- **[Decision]**: [Brief rationale] (keep decisions still in force, add new)
 
 ## Next Steps
 1. [Update based on current state]
 
 ## Critical Context
-- [Preserve important context; add new if needed]
+- [Context still needed to resume; add new if needed]
 
 ## Additional Notes
 [Other important info not fitting above]
