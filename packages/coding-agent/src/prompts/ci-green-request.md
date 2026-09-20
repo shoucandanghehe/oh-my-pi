@@ -12,7 +12,7 @@ Workflow runs for current HEAD: source of truth after each push.
 2. Failed run → inspect failing job output and logs.
 3. Identify root cause; make minimal correct fix.
 4. Run local verification if it reduces chance of another failed push.
-{{#if headTag}}5. Push branch and tag `{{headTag}}` atomically: `git push --atomic "{{remote}}" "{{branch}}" "+refs/tags/{{headTag}}"`.{{else}}5. Push branch.{{/if}}
+{{#if headTag}}5. Move local tag `{{headTag}}` to corrected HEAD before pushing. Push branch and tag `{{headTag}}` atomically: `git push --atomic "{{remote}}" "{{branch}}" "+refs/tags/{{headTag}}"`.{{else}}5. Push branch.{{/if}}
 6. Watch workflow runs for new HEAD commit.
 7. Repeat until workflow runs for latest HEAD commit succeed.
 </procedure>
@@ -24,7 +24,7 @@ Insufficient watcher output → inspect underlying workflow or job context befor
 
 {{#if headTag}}
 <instruction>
-Push branch/tag together: tag NEVER points at un-pushed or non-green commit. `--atomic`: branch/tag updates succeed or fail as one ref transaction; `+refs/tags/{{headTag}}`: force-moves tag to new HEAD. NEVER push branch first and retag later.
+Push branch/tag together: tag NEVER points at un-pushed or non-green commit. `--atomic`: branch/tag updates succeed or fail as one ref transaction; `+refs/tags/{{headTag}}`: force-updates the remote tag from the existing local tag; it does not retag HEAD. NEVER push branch first and retag later.
 </instruction>
 {{/if}}
 

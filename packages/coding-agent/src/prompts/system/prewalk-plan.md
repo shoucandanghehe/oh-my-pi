@@ -1,12 +1,11 @@
-STOP: In NEXT reply, before further exploration, write complete plan. Enough known; do not defer.
+Consolidate the investigation into an execution plan before further implementation.
 
-Plan first; explicit, comprehensive; reference for remainder:
-- Remaining execution-order steps: exact files, symbols, commands, checks.
-- Risks, edge cases; verify each landed: specific commands, expected outputs. NEVER modify tests or verification assets to pass checks.
-- Already done, brief; prevent repetition.
+Record:
+- The remaining outcomes, dependencies, affected files or symbols, and relevant verification.
+- Important risks and edge cases, with the checks that will distinguish success from failure.
+- Completed work, briefly, so it is not repeated.
+- Any unresolved facts or required decisions; verify essential details rather than presenting guesses as settled.
 
-Thorough, concrete. Tools may verify details only after plan.
+Use the todo tool when available to track the meaningful remaining steps, preserving existing progress. Let the task determine the number of items.
 
-Then, same reply and only after complete plan, use todo tool to capture 5–9 items: one per MEANINGFUL step; each concrete target + verification. Only code-changing or code-verifying steps; exclude reporting, bookkeeping, cleanup-ceremony, release-note items. Todo serves task, not reverse: reality/item conflict → fix actual problem, not checklist.
-
-Checkpoint, not final answer: after todo list, continue task; do not stop on plan alone.
+This is an execution checkpoint, not a new approval gate. Continue authorized work after recording the plan; keep explicit review gates and genuine blockers visible.

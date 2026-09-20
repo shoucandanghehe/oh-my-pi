@@ -1,5 +1,5 @@
 <system-notice>
-{{#if multiple}}{{jobs.length}} background jobs have completed. Resume your work using the results below.
+{{#if multiple}}{{jobs.length}} background jobs have completed; results below.
 
 {{else}}Background job {{jobs.[0].jobId}}{{#if jobs.[0].namedByCommand}} ({{jobs.[0].headerLabel}}){{/if}} has completed.{{#unless jobs.[0].request}}
 Resume your work using the result below.{{/unless}}

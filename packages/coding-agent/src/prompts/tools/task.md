@@ -24,6 +24,7 @@ Run one agent synchronously.
 {{asyncGuidance}}
 {{/if}}
 
+
 # Inputs
 - `agent`: most specific{{#if batchEnabled}}, inside each `tasks[]` item, NEVER at the top level{{/if}}.
   - Omit only for the default (`{{defaultAgent}}`); NEVER name it.
@@ -87,6 +88,7 @@ Run one agent synchronously.
 - `isolated`: worktree; changes retained, not applied.
 {{/if}}
 {{/if}}
+
 
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
 Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.

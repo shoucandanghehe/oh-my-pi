@@ -209,12 +209,8 @@ await win.click(120, 48, button="right")
   In a run, use `wait(predicate, {timeout, interval})` for a specific state rather than assuming a fixed sleep means success.
 - Desktop-root pointer helpers (`computer.click`, `computer.move`, …) drive the user's real pointer; act through window handles.
 - Wayland: per-window native input and `.raise()` are unavailable; use AX, or desktop input after focusing the target yourself.
-- macOS `screenLocked` (in `capabilities()`, a screenshot result, or a run's leading `Note:`):
-  - A display capture shows the lock screen and a window capture that window's last frame.
-  - Keystrokes, takeover and AX fail until someone unlocks, while background clicks still reach the app.
-  - Report the lock rather than retrying keys.
-- A screenshot's `path` holds the delivered PNG (`width`×`height`, downscaled when needed to fit the capture caps), not a separate uncapped original;
-  for detail, `zoom` instead of cropping that file. Use `{ silent: true }` in loops.
+- macOS `screenLocked` (in `capabilities()`, a screenshot result, or a run's leading `Note:`): while the display is on, a display capture shows the lock screen, a window capture shows that window's last frame, and background clicks still reach the app. If `displayAsleep` is also true, captures and clicks fail until the display wakes. Keystrokes, takeover and AX fail until unlock. Report the lock rather than retrying keys.
+- A screenshot's `path` holds the delivered PNG (`width`×`height`, downscaled when needed to fit the capture caps), not a separate uncapped original; for detail, `zoom` instead of cropping that file. Use `{ silent: true }` in loops.
 </rules>
 
 <critical>
