@@ -13,7 +13,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import { AgentTranscriptViewer, type AgentTranscriptViewerDeps } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import {
+	AgentTranscriptViewer,
+	type AgentTranscriptViewerDeps,
+} from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";

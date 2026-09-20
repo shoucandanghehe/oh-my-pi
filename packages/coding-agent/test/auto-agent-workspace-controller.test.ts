@@ -1,9 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
+import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
+import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { AutoAgentWorkspaceController } from "@oh-my-pi/pi-coding-agent/modes/controllers/auto-agent-workspace-controller";
 import { WorkspacePaneController } from "@oh-my-pi/pi-coding-agent/modes/controllers/workspace-pane-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
 	type Component,
@@ -50,6 +51,7 @@ function createWorkspace(width = 120, initialHeight = 40) {
 		panes,
 		createViewer: (id, onClose) => {
 			const viewer = new AgentTranscriptViewer({
+				transcript: agentTranscriptSource,
 				agentId: id,
 				registry,
 				ui,

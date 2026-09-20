@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { FooterComponent } from "@oh-my-pi/pi-coding-agent/modes/components/footer";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { FooterComponent } from "@oh-my-pi/pi-tui/status-line/footer";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 beforeAll(async () => {
@@ -38,7 +39,7 @@ describe("FooterComponent long-session rendering", () => {
 			},
 		} as unknown as AgentSession;
 
-		const lines = new FooterComponent(session).render(120);
+		const lines = new FooterComponent(session, statusLineHost).render(120);
 
 		expect(getAssistantUsageStatistics).toHaveBeenCalledTimes(1);
 		expect(Bun.stripANSI(lines.join("\n"))).toContain("↑1K ↓500");

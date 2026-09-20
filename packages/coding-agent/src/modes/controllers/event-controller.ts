@@ -55,8 +55,8 @@ import {
 	splitAssistantMessageToolTimeline,
 } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { isWarpCliAgentProtocolActive } from "../warp-events";
-import { StreamingRevealController } from "./streaming-reveal";
-import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
+import { StreamingRevealController } from "@oh-my-pi/pi-tui/chat/streaming-reveal";
+import { streamingStringKeysForTool, ToolArgsRevealController } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 
 import {
 	cfgCompletionNotify,

@@ -16,7 +16,7 @@ import {
 	type BtwThreadView,
 } from "@oh-my-pi/pi-coding-agent/modes/components/btw-conversation-pane";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	type BtwPromotionLifecycle,
