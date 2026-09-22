@@ -84,9 +84,12 @@ class "glm" {
 			}
 		}
 	}
-	// GLM-5.3 Flash and FlashX accept native image input on their coding routes.
+	// Native video input is documented for Flash; FlashX keeps its image contract.
 	on "zai" "zhipu-coding-plan" {
-		models "glm-5.3-flash" "glm-5.3-flashx" {
+		models "glm-5.3-flash" {
+			input-modalities "text" "image" "video"
+		}
+		models "glm-5.3-flashx" {
 			input-modalities "text" "image"
 		}
 	}

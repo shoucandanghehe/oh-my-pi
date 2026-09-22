@@ -200,6 +200,7 @@ import type {
 	CursorTodoSyncHandler,
 	CursorToolResultHandler,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ProviderSessionState,
@@ -4099,7 +4100,15 @@ async function applyToolResultHandler(
 }
 
 function toolResultToText(toolResult: ToolResultMessage): string {
-	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return toolResult.content
+		.map(item => {
+			if (item.type === "text") return item.text;
+			if (item.type === "image") return `[${item.mimeType} image]`;
+			throw new AIError.ValidationError(
+				`Cursor tool results cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		})
+		.join("\n");
 }
 
 /**
@@ -5402,6 +5411,11 @@ function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolR
 				},
 			});
 		}
+		if (item.type !== "text") {
+			throw new AIError.ValidationError(
+				`Cursor MCP results cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		}
 		return create(McpToolResultContentItemSchema, {
 			content: {
 				case: "text",
@@ -6389,7 +6403,7 @@ function hasUserMessageImages(msg: Message): boolean {
 
 type CursorRootPromptContentPart = { type: "text"; text: string } | { type: "image"; image: string; mediaType: string };
 
-function buildCursorRootPromptContent(content: string | (TextContent | ImageContent)[]): CursorRootPromptContentPart[] {
+function buildCursorRootPromptContent(content: string | (TextContent | MediaContent)[]): CursorRootPromptContentPart[] {
 	if (typeof content === "string") {
 		const text = content.trim();
 		return text ? [{ type: "text", text }] : [];
@@ -6401,14 +6415,18 @@ function buildCursorRootPromptContent(content: string | (TextContent | ImageCont
 			if (text) {
 				parts.push({ type: "text", text });
 			}
-		} else {
+		} else if (item.type === "image") {
 			parts.push({ type: "image", image: `data:${item.mimeType};base64,${item.data}`, mediaType: item.mimeType });
+		} else {
+			throw new AIError.ValidationError(
+				`Cursor root prompts cannot encode ${item.type}; routed media preflight must reject it`,
+			);
 		}
 	}
 	return parts;
 }
 
-function cursorUserContentKey(content: string | (TextContent | ImageContent)[]): string {
+function cursorUserContentKey(content: string | (TextContent | MediaContent)[]): string {
 	if (typeof content === "string") {
 		return content.trim();
 	}
@@ -6976,7 +6994,7 @@ export function buildCursorHistoryForTest(
 	return { rootPromptMessagesJson, turnUserMessagesJson, turnStepMessagesJson };
 }
 function createCursorUserMessage(
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | MediaContent)[],
 	text: string,
 	messageId = crypto.randomUUID(),
 ) {
@@ -6994,7 +7012,7 @@ function createCursorUserMessage(
 	});
 }
 
-function extractImages(content: (TextContent | ImageContent)[]) {
+function extractImages(content: (TextContent | MediaContent)[]) {
 	return content
 		.filter((item): item is ImageContent => item.type === "image")
 		.map(image =>
@@ -7164,7 +7182,7 @@ async function buildGrpcRequestForWireMode(
 	const activeUserMessage =
 		!state.resume && (lastMessage?.role === "user" || lastMessage?.role === "developer") ? lastMessage : undefined;
 	const historyEndIndex = activeUserMessage ? context.messages.length - 1 : -1;
-	let userContent: string | (TextContent | ImageContent)[] | undefined;
+	let userContent: string | (TextContent | MediaContent)[] | undefined;
 	let userText = "";
 	let hasUserImages = false;
 	if (activeUserMessage) {
@@ -7412,12 +7430,18 @@ export async function buildGrpcRequest(
 	return buildGrpcRequestForWireMode(model, context, options, state, "normalized");
 }
 
-function hasImages(content: (TextContent | ImageContent)[]): boolean {
+function hasImages(content: (TextContent | MediaContent)[]): boolean {
 	return content.some(item => item.type === "image");
 }
-function extractText(content: (TextContent | ImageContent)[]): string {
+function extractText(content: (TextContent | MediaContent)[]): string {
 	return content
-		.filter((c): c is TextContent => c.type === "text")
-		.map(c => c.text)
+		.map(item => {
+			if (item.type === "text") return item.text;
+			if (item.type === "image") return "";
+			throw new AIError.ValidationError(
+				`Cursor transport cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		})
+		.filter(Boolean)
 		.join("\n");
 }

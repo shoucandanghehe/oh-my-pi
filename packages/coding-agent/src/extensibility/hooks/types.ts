@@ -3,7 +3,7 @@ export { type HookMessageRenderOptions, type HookMessageRenderer } from "@oh-my-
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
-import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -288,6 +288,8 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Any images attached to the prompt */
 	images?: ImageContent[];
+	/** Audio/video attachments forwarded without image normalization. */
+	attachments?: MediaContent[];
 }
 
 export type {
@@ -327,7 +329,7 @@ interface ToolResultEventBase {
 	/** Tool input parameters */
 	input: Record<string, unknown>;
 	/** Full content array (text and images) */
-	content: (TextContent | ImageContent)[];
+	content: (TextContent | MediaContent)[];
 	/** Whether the tool execution was an error */
 	isError?: boolean;
 }

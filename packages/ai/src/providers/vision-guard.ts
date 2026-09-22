@@ -1,9 +1,9 @@
 import { $env } from "@oh-my-pi/pi-utils";
-import type { Api, ImageContent, Model, TextContent } from "../types";
+import type { Api, ImageContent, MediaContent, Model, TextContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
 export function partitionVisionContent(
-	content: ReadonlyArray<TextContent | ImageContent>,
+	content: ReadonlyArray<TextContent | MediaContent>,
 	supportsImages: boolean,
 ): {
 	textBlocks: TextContent[];

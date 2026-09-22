@@ -24,7 +24,9 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import {
+	type InputModality,
 	type KindApiKind,
 	type ModelKind,
 	type ModelSpec,
@@ -234,7 +236,7 @@ type LlamaCppDiscoveredServerMetadata = {
 type DiscoveredModelRuntimeMetadata = {
 	contextWindow?: number;
 	maxTokens?: number;
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 };
 
 type LlamaCppModelListEntry = {
@@ -864,7 +866,7 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	input_modalities?: unknown;
 	architecture?: unknown;
 	metadata?: unknown;
-}): ("text" | "image")[] | undefined {
+}): InputModality[] | undefined {
 	const architecture = isRecord(item.architecture) ? item.architecture : undefined;
 	const metadata = isRecord(item.metadata) ? item.metadata : undefined;
 	const modalities = collectModalities([
@@ -874,7 +876,7 @@ function extractOpenAIModelsListInputCapabilities(item: {
 		metadata?.input_modalities,
 	]);
 	if (modalities.size === 0) return undefined;
-	return modalities.has("image") ? ["text", "image"] : ["text"];
+	return (["text", "image", "audio", "video"] as const).filter(modality => modalities.has(modality));
 }
 
 /**

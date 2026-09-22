@@ -1,7 +1,9 @@
 import type {
+	AssistantMessage,
 	Context,
 	DeveloperMessage,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ProviderPayload,
@@ -133,10 +135,10 @@ function needsImageDrop(state: ImageBudgetState): boolean {
 }
 
 function clampContent(
-	content: readonly (TextContent | ImageContent)[],
+	content: readonly (TextContent | MediaContent)[],
 	state: ImageBudgetState,
-): (TextContent | ImageContent)[] | undefined {
-	let clamped: (TextContent | ImageContent)[] | undefined;
+): (TextContent | MediaContent)[] | undefined {
+	let clamped: (TextContent | MediaContent)[] | undefined;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type === "image" && needsImageDrop(state)) {
@@ -281,7 +283,10 @@ function newestImageMessages(
  * `stringArguments` (the Responses and Chat Completions wires), each tool call's arguments as the JSON string that
  * wire sends, whose quotes and backslashes the body escapes again. The Anthropic and Gemini wires send an object.
  */
-function measuredContent<T extends { type: string }>(content: readonly T[], stringArguments: boolean): readonly T[] {
+function measuredContent(
+	content: readonly (AssistantMessage["content"][number] | MediaContent)[],
+	stringArguments: boolean,
+) {
 	if (!content.some(part => part.type === "image" || (stringArguments && part.type === "toolCall"))) return content;
 	return content.map(part => {
 		if (part.type === "image") return { ...part, data: "" };
@@ -527,10 +532,10 @@ function inlineImageFromDataUri(imageUrl: unknown): ImageContent | undefined {
 
 /** `undefined` when every image decodes, so callers can keep the original array. */
 async function replaceUnreadableContent(
-	content: readonly (TextContent | ImageContent)[],
+	content: readonly (TextContent | MediaContent)[],
 	model: Model,
-): Promise<(TextContent | ImageContent)[] | undefined> {
-	let replaced: (TextContent | ImageContent)[] | undefined;
+): Promise<(TextContent | MediaContent)[] | undefined> {
+	let replaced: (TextContent | MediaContent)[] | undefined;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type !== "image" || !sendsInlineImageBytes(part, model)) continue;

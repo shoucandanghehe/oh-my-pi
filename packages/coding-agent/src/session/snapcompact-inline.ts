@@ -15,7 +15,7 @@
  */
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { Context, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, MediaContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import {
 	HL_FILE_HASH_LENGTH,
@@ -241,7 +241,7 @@ export interface InlineToolResultCandidate {
 	 * shared note (its header and bracket legend).
 	 */
 	textTokens: number;
-	/** Frames needed to render the joined text (0 = empty or below floor). */
+	/** Frames needed to render the joined text (0 for empty, below floor, or audio/video media). */
 	frames: number;
 	/** Error tool results must stay text-only for provider API validation. */
 	isError?: boolean;
@@ -466,7 +466,7 @@ interface BuiltInlineToolResultCandidate {
 
 /**
  * Build the exact same frame payload and planning candidate for estimation and
- * live transformation. Image blocks do not suppress co-resident text. Frames
+ * live transformation. Media blocks do not suppress co-resident text. Frames
  * are counted on the payload the swap renders; `textTokens` is the text the
  * swap removes, so the savings gate and journal see the net trade.
  */
@@ -484,12 +484,18 @@ function buildInlineToolResultCandidate(
 	const blocks: BlockViews = Array.isArray(content) ? (content as BlockViews) : [];
 	const textBlocks: string[] = [];
 	let sourceImageIndex = 0;
+	let sourceMediaIndex = 0;
+	let hasAudioOrVideo = false;
 	for (const block of blocks) {
 		if (block.type === "text" && typeof block.text === "string") {
 			textBlocks.push(block.text);
 		} else if (block.type === "image") {
 			sourceImageIndex++;
 			textBlocks.push(`[Source image ${sourceImageIndex} was attached here in the original tool result.]`);
+		} else if (block.type === "audio" || block.type === "video") {
+			sourceMediaIndex++;
+			hasAudioOrVideo = true;
+			textBlocks.push(`[Source ${block.type} ${sourceMediaIndex} was attached here in the original tool result.]`);
 		}
 	}
 	const text = textBlocks.join("\n");
@@ -499,7 +505,7 @@ function buildInlineToolResultCandidate(
 	// A delimited multi-path read nests several headers and row modes under one
 	// notice; no single encoding fits it, so it stays text.
 	const composite = toolName === "read" && (readDetails?.displayReadTargets?.length ?? 0) > 0;
-	const eligible = !isError && !composite && textTokens >= MIN_TOOL_RESULT_TOKENS;
+	const eligible = !isError && !hasAudioOrVideo && !composite && textTokens >= MIN_TOOL_RESULT_TOKENS;
 	// The planner keeps `read` as text for a reader that has not opted in; skip encoding it.
 	const read =
 		eligible && toolName === "read" && imageReadResults
@@ -805,16 +811,25 @@ export class SnapcompactInlineTransformer {
 			if (message.role !== "toolResult") continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.frameText, shape, shapeKey);
 			const note = target.read?.note ?? toolResultNote;
-			const content: (TextContent | ImageContent)[] = [{ type: "text", text: note }, ...frames];
+			const content: (TextContent | MediaContent)[] = [{ type: "text", text: note }, ...frames];
 			let sourceImageIndex = 0;
+			let sourceMediaIndex = 0;
 			for (const block of message.content) {
-				if (block.type !== "image") continue;
-				sourceImageIndex++;
-				content.push({
-					type: "text",
-					text: `[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
-				});
-				content.push(block);
+				if (block.type === "image") {
+					sourceImageIndex++;
+					content.push({
+						type: "text",
+						text: `[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
+					});
+					content.push(block);
+				} else if (block.type === "audio" || block.type === "video") {
+					sourceMediaIndex++;
+					content.push({
+						type: "text",
+						text: `[Original source ${block.type} ${sourceMediaIndex}; corresponds to its marker in the compacted text.]`,
+					});
+					content.push(block);
+				}
 			}
 			messages[target.index] = { ...message, content };
 			changed = true;
@@ -853,7 +868,7 @@ export class SnapcompactInlineTransformer {
 			}
 			const frames = cached.frames;
 			const original = messages[userIndex] as UserMessage;
-			const originalContent: (TextContent | ImageContent)[] =
+			const originalContent: (TextContent | MediaContent)[] =
 				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
 			messages[userIndex] = {
 				...original,
