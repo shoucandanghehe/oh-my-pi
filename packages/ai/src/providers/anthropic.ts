@@ -42,6 +42,7 @@ import type {
 	DeveloperMessage,
 	FetchImpl,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ProviderInputTransformation,
@@ -999,7 +1000,7 @@ type AnthropicToolResultContent =
  * Convert content blocks to Anthropic API format
  */
 function convertContentBlocks(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	supportsImages = true,
 ): AnthropicToolResultContent {
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
@@ -1013,6 +1014,12 @@ function convertContentBlocks(
 			sawText = true;
 			blocks.push({ type: "text", text });
 			continue;
+		}
+
+		if (block.type === "audio" || block.type === "video") {
+			throw new AIError.ValidationError(
+				`Anthropic Messages cannot encode ${block.type}; routed media preflight must reject it`,
+			);
 		}
 
 		if (!supportsImages) {

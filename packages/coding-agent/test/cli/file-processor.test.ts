@@ -1,8 +1,7 @@
 /**
- * CLI `@file` video attachments become a compact PNG preview grid rather than
- * reading the whole container into memory. The fixture is deliberately over
- * the normal text-file limit: a normal video commonly exceeds 5 MiB, and the
- * processor must still seek frames through ffmpeg instead of skipping it.
+ * CLI `@file` MP4 attachments retain native video bytes. Other video formats
+ * keep the compact PNG preview path, including containers larger than the
+ * normal text-file limit.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -44,8 +43,21 @@ describe.skipIf(!hasFfmpeg)("processFileArguments video attachments", () => {
 		await removeWithRetries(testDir);
 	});
 
-	it("attaches a preview image for a video larger than the text-file limit", async () => {
+	it("attaches native MP4 bytes rather than silently substituting a contact sheet", async () => {
 		const processed = await processFileArguments([videoPath], { autoResizeImages: false });
+
+		expect(processed.images).toHaveLength(1);
+		const attachment = processed.images[0];
+		expect(attachment?.type).toBe("video");
+		expect(attachment?.mimeType).toBe("video/mp4");
+		expect(Buffer.from(attachment.data, "base64")).toEqual(await fs.readFile(videoPath));
+		expect(processed.text).not.toContain("Preview grid:");
+	});
+
+	it("attaches a preview for non-native video formats larger than the text-file limit", async () => {
+		const previewPath = path.join(testDir, "clip.mov");
+		await fs.copyFile(videoPath, previewPath);
+		const processed = await processFileArguments([previewPath], { autoResizeImages: false });
 
 		expect(processed.images).toHaveLength(1);
 		expect(processed.images[0]?.mimeType).toBe("image/png");

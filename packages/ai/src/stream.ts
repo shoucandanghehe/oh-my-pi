@@ -22,6 +22,7 @@ import type { OAuthRequestIdentity } from "./auth/types";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
+import { validateContextMedia } from "./media-input";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -883,9 +884,24 @@ export function stream<TApi extends Api>(
 	if (model.resolveHeaders) {
 		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}
-	if (!model.requiresGlyphTokenization) {
-		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, context, opts, limited)),
+	const directOptions = options as
+		| {
+				effort?: Effort;
+				reasoning?: Effort;
+				requestModelId?: string;
+				chatModelUid?: string;
+				wireModelId?: string;
+		  }
+		| undefined;
+	const routedModel = validateContextMedia(
+		model,
+		context,
+		directOptions?.effort ?? directOptions?.reasoning,
+		directOptions?.requestModelId ?? directOptions?.chatModelUid ?? directOptions?.wireModelId,
+	);
+	if (!routedModel.requiresGlyphTokenization) {
+		return withThinkingLoopGuard(routedModel, options, opts =>
+			withProviderInFlightLimit(routedModel, opts, limited => streamDispatch(routedModel, context, opts, limited)),
 		);
 	}
 	const codec = applyGlyphCodec(context);
@@ -893,8 +909,8 @@ export function stream<TApi extends Api>(
 	const wireOptions: OptionsForApi<TApi> | undefined =
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
-		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, codec.context, opts, limited)),
+		withThinkingLoopGuard(routedModel, wireOptions, opts =>
+			withProviderInFlightLimit(routedModel, opts, limited => streamDispatch(routedModel, codec.context, opts, limited)),
 		),
 	);
 }
@@ -1226,8 +1242,25 @@ export function streamSimple<TApi extends Api>(
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
 	if (!effortRequested) model = withoutUnverifiedThinking(model);
-	if (!model.requiresGlyphTokenization) {
-		return streamSimpleRequest(model, context, sessionOptions);
+	const directOptions = sessionOptions as
+		| {
+				effort?: Effort;
+				reasoning?: Effort;
+				requestModelId?: string;
+				chatModelUid?: string;
+				wireModelId?: string;
+		  }
+		| undefined;
+	const routedModel = validateContextMedia(
+		model,
+		context,
+		sessionOptions.disableReasoning || sessionOptions.forceReasoningOff
+			? undefined
+			: (directOptions?.effort ?? directOptions?.reasoning),
+		directOptions?.requestModelId ?? directOptions?.chatModelUid ?? directOptions?.wireModelId,
+	);
+	if (!routedModel.requiresGlyphTokenization) {
+		return streamSimpleRequest(routedModel, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1240,7 +1273,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleRequest(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleRequest(routedModel, codec.context, wireOptions));
 }
 
 /**
