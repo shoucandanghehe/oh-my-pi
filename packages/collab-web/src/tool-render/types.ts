@@ -26,7 +26,13 @@ export interface ToolResultImage {
 	mimeType: string;
 }
 
-export type ToolResultBlock = ToolResultText | ToolResultImage | { type: string };
+export interface ToolResultAV {
+	type: "audio" | "video";
+	data: string;
+	mimeType: string;
+}
+
+export type ToolResultBlock = ToolResultText | ToolResultImage | ToolResultAV | { type: string };
 
 export interface ToolResultLike {
 	content: readonly ToolResultBlock[];

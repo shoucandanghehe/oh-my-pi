@@ -1,7 +1,7 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
  * Files a prompt's `@path` mentions auto-read (a `fileMention` message): one
- * `└─ Read dir/name (N lines)` row per file — `image`, `unknown lines`, or
+ * `└─ Read dir/name (N lines)` row per file — media type, `unknown lines`, or
  * why it was skipped (`skipped: 5MB`, `skipped: binary, 2KB`) in the
  * parentheses; natively a `read` notice row each.
  *
@@ -24,7 +24,7 @@ function mentionDetail(file: MentionedFile): string {
 		const size = typeof file.byteSize === "number" ? formatBytes(file.byteSize) : "unknown size";
 		return file.skippedReason === "binary" ? `skipped: binary, ${size}` : `skipped: ${size}`;
 	}
-	if (file.image) return "image";
+	if (file.image) return file.image.type;
 	return file.lineCount === undefined ? "unknown lines" : formatCount("line", file.lineCount);
 }
 

@@ -29,7 +29,7 @@ import {
 	type AsyncNotifyDetails,
 	type CustomMessage,
 } from "../../session/transcript/messages";
-import { imageContent, textContent } from "../../session/transcript/transcript-entry";
+import { imageContent, userMessageDisplayText } from "../../session/transcript/transcript-entry";
 import { extensionTheme, isCompactOutput, renderExtension } from "../../ui/extensions/render-output";
 import { CollabPrompt } from "../../ui/transcript/figures/collab";
 import { AdvisorMessage } from "../../ui/transcript/messages/advisor-message";
@@ -273,7 +273,7 @@ function promptFace(
 			face: () => <ParentIrcMessage parentIrc={parentIrc} timestamp={message.timestamp} expanded={env.expanded} />,
 		};
 	}
-	const text = message.role === "user" ? textContent(message.content) : "";
+	const text = message.role === "user" ? userMessageDisplayText(message.content) : "";
 	if (!text) return undefined;
 	const images = imageContent(message.content);
 	const imageLinks = options?.imageLinks ?? env.imageLinks(message, images);

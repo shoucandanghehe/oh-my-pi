@@ -264,6 +264,40 @@ describe("extension transcript presenters", () => {
 		expect(copied).toHaveBeenCalledWith("Checking the config\n\nThe config is valid.");
 	});
 
+	it("renders attachment-only prompts and keeps a saved device tool's output in the reactive transcript", async () => {
+		session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" }],
+			timestamp: 1,
+		});
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "device", name: "write", arguments: { path: "xd://media" } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: USAGE,
+			timestamp: 2,
+		});
+		session.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "device",
+			toolName: "write",
+			content: [
+				{ type: "text", text: "Retired device output" },
+				{ type: "video", mimeType: "video/mp4", data: "AAAA" },
+			],
+			details: { xdev: { tool: "media" } },
+			isError: false,
+			timestamp: 3,
+		});
+		await mode.renderInitialMessages();
+		expect(chat()).toContain("[audio attachment]");
+		expect(chat()).toContain("Retired device output");
+		expect(chat()).toContain("[video attachment: video/mp4]");
+	});
+
 	it("opens and folds a settled skill’s lazy prompt via its published native disclosure", async () => {
 		mode.presentMessage({
 			role: "custom",

@@ -1124,6 +1124,15 @@
         </button>`;
       }
 
+      function renderInlineAV(block) {
+        if (block.type !== 'audio' && block.type !== 'video') return '';
+        if (typeof block.mimeType !== 'string' || !block.mimeType.startsWith(`${block.type}/`) ||
+            !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(block.mimeType) ||
+            typeof block.data !== 'string' || /[^a-z0-9+/=]/i.test(block.data)) return '';
+        const className = block.type === 'video' ? ' class="message-image"' : '';
+        return `<${block.type}${className} controls preload="none" src="data:${block.mimeType};base64,${block.data}"></${block.type}>`;
+      }
+
       function renderEntry(entry, sctx) {
         const ts = formatTimestamp(entry.timestamp);
         const tsHtml = ts ? `<div class="message-timestamp">${ts}</div>` : '';
@@ -1147,6 +1156,7 @@
                 }
                 html += '</div>';
               }
+              for (const block of content) html += renderInlineAV(block);
             }
 
             const text = typeof content === 'string' ? content : 
@@ -1161,6 +1171,7 @@
           if (msg.role === 'developer') {
             let html = `<div class="user-message developer-message" id="${entryId}">${copyBtnHtml}${tsHtml}`;
             const content = msg.content;
+            if (Array.isArray(content)) for (const block of content) html += renderInlineAV(block);
             const text = typeof content === 'string' ? content :
               content.filter(c => c.type === 'text').map(c => c.text).join('\n');
             if (text.trim()) {
@@ -1193,6 +1204,8 @@
                 </div>`;
               } else if (block.type === 'image') {
                 html += `<div class="message-images" id="${blockId}"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
+              } else if (block.type === 'audio' || block.type === 'video') {
+                html += renderInlineAV(block);
               } else if (block.type === 'toolCall') {
                 html += renderToolCall(block, sctx, blockId);
               }

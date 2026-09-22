@@ -2,7 +2,15 @@
 
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	MediaContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
@@ -30,7 +38,7 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "./settings";
 
-type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent;
+type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | MediaContent;
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionProviderBoundaryHost {
@@ -38,6 +46,7 @@ export interface SessionProviderBoundaryHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	model(): Model | undefined;
+	activeRouteModel(): Model | undefined;
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Input-image descriptions for models that cannot see images; side requests carrying history as text use them. */
 	imageDescriptions: ImageDescriptions | undefined;
@@ -323,7 +332,7 @@ export class SessionProviderBoundary {
 
 	/** Normalizes image payloads for the active model. */
 	normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
-		return normalizeModelContextImages(images, { model: this.#host.model() });
+		return normalizeModelContextImages(images, { model: this.#host.activeRouteModel() ?? this.#host.model() });
 	}
 
 	/** Normalizes every image embedded in an agent message. */

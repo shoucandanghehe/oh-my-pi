@@ -10,6 +10,7 @@ import {
 	type ToolCommandState,
 } from "../tools/tool-commands";
 import { throwIfAborted } from "../tools/tool-errors";
+import { saveMediaToTemp } from "../utils/image-temp";
 import { encodeTerminalImage } from "../utils/terminal-graphics";
 import { runToolCli, type ToolCliHost } from "./tool-cli";
 
@@ -44,13 +45,17 @@ function appendLine(output: string, text: string): string {
 	return output + text + (text.endsWith("\n") ? "" : "\n");
 }
 
-/** Shell view of a tool result: text to stdout (stderr with exit 1 on error), images as terminal graphics on stdout. */
+/** Shell view: text and audio/video paths on stdout (stderr on error), images as terminal graphics. */
 async function renderToolResult(result: AgentToolResult<unknown>): Promise<ShellCommandResult> {
 	let text = "";
 	let images = "";
 	for (const block of result.content) {
 		if (block.type === "text") text = appendLine(text, block.text);
-		else images = appendLine(images, await encodeTerminalImage(block));
+		else if (block.type === "image") images = appendLine(images, await encodeTerminalImage(block));
+		else {
+			const [filepath] = await saveMediaToTemp([block]);
+			text = appendLine(text, `${block.type === "audio" ? "Audio" : "Video"} saved: ${filepath}`);
+		}
 	}
 	if (result.isError) return { stdout: images, stderr: text, exitCode: 1 };
 	return { stdout: text + images, stderr: "", exitCode: 0 };

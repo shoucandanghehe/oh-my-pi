@@ -36,6 +36,18 @@ export interface ImageContent {
 	providerFile?: Record<string, unknown>;
 }
 
+export interface AudioContent {
+	type: "audio";
+	data: string;
+	mimeType: string;
+}
+
+export interface VideoContent {
+	type: "video";
+	data: string;
+	mimeType: string;
+}
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
@@ -60,7 +72,7 @@ export interface AnthropicServerToolContent {
 	block: Record<string, unknown>;
 }
 
-export type UserContent = TextContent | ImageContent;
+export type UserContent = TextContent | ImageContent | AudioContent | VideoContent;
 
 /** Message content: plain text or content blocks. */
 export type MessageContent = string | UserContent[];
@@ -674,6 +686,8 @@ export interface PromoteQueuedMessageResult {
 export interface RestoredQueuedMessage {
 	text: string;
 	images?: ImageContent[];
+	audio?: AudioContent[];
+	video?: VideoContent[];
 }
 
 /** User-authored queued input withdrawn before the abort, oldest first. */
@@ -682,7 +696,7 @@ export interface AbortAndRestoreQueueResult {
 	followUp: RestoredQueuedMessage[];
 	/** Only ever `true`: the full result exceeded the transport limit and every `images` was omitted. */
 	imagesDropped?: boolean;
-	/** Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed. */
+	/** Only ever `true`: the remaining result exceeded the limit, so only an oldest-first prefix is listed. */
 	truncated?: boolean;
 }
 

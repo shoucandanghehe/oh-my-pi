@@ -23,7 +23,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
 import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
-import { saveImagesToTemp } from "../utils/image-temp";
+import { saveMediaToTemp } from "../utils/image-temp";
 import { resolveReadPath, specialFileKind } from "./path-utils";
 
 const IMAGE_TIMEOUT = 3 * 60 * 1000;
@@ -209,7 +209,7 @@ async function buildToolResult(
 		...generated,
 		images: await Promise.all(generated.images.map(image => atRequestedSize(image, requestedSize))),
 	};
-	const imagePaths = await saveImagesToTemp(result.images);
+	const imagePaths = await saveMediaToTemp(result.images);
 	const modelLine =
 		ranModel === model.id ? `Model: ${ranModel}` : `Model: ${ranModel} (catalog entry ${model.provider}/${model.id})`;
 	const lines = [`Provider: ${model.provider}`, modelLine, `Generated ${imagePaths.length} image(s):`];

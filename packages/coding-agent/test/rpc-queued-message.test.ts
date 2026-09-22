@@ -402,8 +402,12 @@ describe("RPC queued-message editing", () => {
 			}
 		}, 30_000);
 
-		test("keeps an oldest-first prefix flagged truncated when even the texts exceed the limit", () => {
-			const first = { text: "a".repeat(100) };
+		test("drops images before trimming the queue, keeping audio/video on the remaining oldest entry", () => {
+			const first = {
+				text: "a".repeat(100),
+				audio: [{ type: "audio" as const, mimeType: "audio/wav", data: "UklGRg==" }],
+				video: [{ type: "video" as const, mimeType: "video/mp4", data: "AAAA" }],
+			};
 			const restored = {
 				steering: [{ ...first, images: [{ type: "image" as const, mimeType: "image/png", data: "AAAA" }] }],
 				followUp: [{ text: "b".repeat(100) }, { text: "c" }],

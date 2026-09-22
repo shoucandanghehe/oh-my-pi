@@ -18,7 +18,7 @@ import {
 	untrack,
 } from "@oh-my-pi/pi-tui";
 import { readArgsCollapseIntoGroup } from "../../../session/transcript/read-tool-group";
-import { textContent } from "../../../session/transcript/transcript-entry";
+import { userMessageDisplayText } from "../../../session/transcript/transcript-entry";
 import "../../tools";
 import { AssistantMessageBlock } from "../../transcript/messages/assistant-message";
 import { UserMessage } from "../../transcript/messages/user-message";
@@ -39,7 +39,7 @@ function TurnBlocks(props: {
 }): JSXNode {
 	const [message, ...results] = props.messages;
 	if (message?.role === "user") {
-		const text = typeof message.content === "string" ? message.content : textContent(message.content, "\n");
+		const text = userMessageDisplayText(message.content, "\n");
 		return <UserMessage model={{ text, promptZones: false }} />;
 	}
 	if (message?.role !== "assistant") return null;

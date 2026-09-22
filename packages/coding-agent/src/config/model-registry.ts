@@ -5437,7 +5437,7 @@ export interface ProviderConfigInput {
 		/** Reviewed capability; omitted when request-time discovery should determine support. */
 		reasoning?: boolean;
 		thinking?: ThinkingConfig;
-		input: ("text" | "image")[];
+		input: Model["input"];
 		supportsTools?: boolean;
 		/** Snapcompact frame shape, replacing the model line's default (see `Model.snapcompactShape`). */
 		snapcompactShape?: Model<Api>["snapcompactShape"];

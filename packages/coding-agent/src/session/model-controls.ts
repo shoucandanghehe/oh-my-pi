@@ -16,6 +16,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual, routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
+import { resolveModelRoute, withResolvedModelRoute } from "@oh-my-pi/pi-catalog/media-capabilities";
 import { classifyDifficulty } from "../auto-thinking/classifier";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
@@ -210,6 +211,14 @@ export class ModelControls {
 	/** Effective metadata-clamped thinking level applied to the agent. */
 	get thinkingLevel(): ThinkingLevel | undefined {
 		return this.#thinkingLevel;
+	}
+
+	/** Model capabilities at the currently selected effort. */
+	get activeRouteModel(): Model | undefined {
+		const model = this.#model;
+		if (!model) return undefined;
+		const effort = this.#autoResolvedLevel ?? toReasoningEffort(this.#thinkingLevel);
+		return withResolvedModelRoute(model, resolveModelRoute(model, effort));
 	}
 
 	/** Hard per-session effort ceiling every thinking-level change is clamped to. */

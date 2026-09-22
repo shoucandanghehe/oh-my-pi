@@ -21,7 +21,7 @@ import type {
 	AgentTranscriptSource,
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
-import { imageContent, type SessionMessageEntryLike, textContent } from "../../../session/transcript/transcript-entry";
+import { imageContent, type SessionMessageEntryLike, userMessageDisplayText } from "../../../session/transcript/transcript-entry";
 import { resolveEditToolMode } from "../../../utils/edit-mode";
 import { ToolCall, type ToolCallOptions, type ToolCallResult } from "../../transcript/tool-block";
 import type { LineValue } from "./common";
@@ -529,7 +529,7 @@ export class AgentTranscriptViewerModel {
 						});
 						break;
 					}
-					const text = textContent(message.content);
+					const text = userMessageDisplayText(message.content);
 					if (!text) break;
 					added.push({
 						kind: "user",

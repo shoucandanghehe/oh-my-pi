@@ -28,6 +28,15 @@ export interface ImageContent {
 	mimeType: string;
 }
 
+export interface InlineAVContent {
+	type: "audio" | "video";
+	/** Base64-encoded media data. */
+	data: string;
+	mimeType: string;
+}
+
+export type MessageContentBlock = TextContent | ImageContent | InlineAVContent;
+
 export interface ThinkingContent {
 	type: "thinking";
 	thinking: string;
@@ -65,7 +74,7 @@ export interface WireUsage {
 
 export interface UserMessage {
 	role: "user";
-	content: string | (TextContent | ImageContent)[];
+	content: string | MessageContentBlock[];
 	/** True if the message was injected by the system (e.g. auto-continue). */
 	synthetic?: boolean;
 	/** Unix timestamp in milliseconds. */
@@ -74,7 +83,7 @@ export interface UserMessage {
 
 export interface DeveloperMessage {
 	role: "developer";
-	content: string | (TextContent | ImageContent)[];
+	content: string | MessageContentBlock[];
 	timestamp: number;
 }
 
@@ -92,7 +101,7 @@ export interface ToolResultMessage {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
-	content: (TextContent | ImageContent)[];
+	content: MessageContentBlock[];
 	details?: unknown;
 	isError: boolean;
 	timestamp: number;
@@ -127,7 +136,7 @@ export interface MessageEntry extends EntryBase {
 export interface CustomMessageEntry extends EntryBase {
 	type: "custom_message";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | MessageContentBlock[];
 	details?: unknown;
 	display: boolean;
 }

@@ -277,7 +277,7 @@ export const stateDefs = {
 	},
 	PromoteQueuedMessageResult: { promoted: "boolean" },
 	RestoredQueuedMessage: doc(
-		{ text: "string", "images?": "ImageContent[]" },
+		{ text: "string", "images?": "ImageContent[]", "audio?": "AudioContent[]", "video?": "VideoContent[]" },
 		"Queued user content withdrawn from the queue, as the editor would restore it.",
 	),
 	AbortAndRestoreQueueResult: doc(
@@ -290,7 +290,7 @@ export const stateDefs = {
 			),
 			"truncated?": doc(
 				"boolean",
-				"Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed.",
+				"Only ever `true`: the remaining result exceeded the limit, so only an oldest-first prefix is listed.",
 			),
 		},
 		"User-authored queued input withdrawn before the abort, oldest first.",

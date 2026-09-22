@@ -9,7 +9,7 @@
  * as one-liners. No system prompt, no tool catalog, no config sections.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, MediaContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { countNewlines, escapeXmlText, isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
@@ -153,13 +153,13 @@ export function formatExecutionSourcePreview(source: string, transform?: ToolIOT
 	return previewLine(source, transform);
 }
 
-/** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
-export function contentToText(content: string | readonly (TextContent | ImageContent)[]): string {
+/** Join the text blocks of a string-or-blocks content field and mark attached media by modality. */
+export function contentToText(content: string | readonly (TextContent | MediaContent)[]): string {
 	if (typeof content === "string") return content;
 	const parts: string[] = [];
 	for (const block of content) {
 		if (block.type === "text") parts.push(block.text);
-		else parts.push("[image]");
+		else parts.push(`[${block.type}]`);
 	}
 	return parts.join("\n");
 }
@@ -242,7 +242,7 @@ export function formatToolCallIntentPreview(
 	return typeof intent === "string" && intent.trim() ? previewLine(intent, transform, 80) : undefined;
 }
 
-export function formatToolResultErrorPreview(content: string | readonly (TextContent | ImageContent)[]): string {
+export function formatToolResultErrorPreview(content: string | readonly (TextContent | MediaContent)[]): string {
 	return oneLine(contentToText(content).split("\n", 1)[0] ?? "");
 }
 

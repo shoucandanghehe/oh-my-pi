@@ -577,7 +577,16 @@ describe("ModelBrowser native model metadata", () => {
 
 		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
 		// Tabs and newlines are flattened so the blurb stays one detail row.
-		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
+		expect(detail).toMatch(/Fast {2,}agentic coder$/);
+	});
+
+	test("shows effective media separately for user messages and tool results", () => {
+		const detail = renderDetail({
+			...makeModel("fixture", "media-model"),
+			input: ["text", "image", "audio", "video"],
+			toolResultInput: ["text", "image"],
+		});
+		expect(detail).toContain("user: text/image/audio/video · tools: text/image");
 	});
 
 	test("models without upstream metadata render the plain detail line", () => {
@@ -760,9 +769,10 @@ describe("Factory Droid credits badge", () => {
 			const row = rows.find(line => line.includes("gpt-5.6-sol"));
 			expect(row).toContain("$1.25/10 1.6×");
 			expect(row).not.toContain("from 2099-11-22");
-			expect(rows.some(line => line.includes("reasoning · vision"))).toBe(true);
+			expect(rows.some(line => line.includes("reasoning"))).toBe(true);
 		}
 		const wide = renderLines(makeBrowser([promoted], []), 160);
+		expect(wide.some(line => line.includes("user: text/image"))).toBe(true);
 		expect(wide.some(line => line.includes("· 2× from 2099-11-22"))).toBe(true);
 		const ended = {
 			...promoted,

@@ -50,10 +50,11 @@ export const defaultPresenter: ToolPresenter = {
 		const skipped = details?.skipped === true || details?.source === "interrupt_skipped";
 		const tone: TspTone | undefined = skipped ? "info" : result.isError ? "error" : undefined;
 		const output = resultText(result).trimEnd();
+		const hasMedia = result.content.some(block => block.type === "audio" || block.type === "video");
 		return {
 			head: defaultHead(args, state),
 			...(tone ? { tone } : {}),
-			body: output ? <ansi text={output} /> : <text spans={[{ t: "(no output)", s: "muted" }]} wrap="word" />,
+			body: output ? <ansi text={output} /> : hasMedia ? undefined : <text spans={[{ t: "(no output)", s: "muted" }]} wrap="word" />,
 			term: { look: "default" },
 		};
 	},

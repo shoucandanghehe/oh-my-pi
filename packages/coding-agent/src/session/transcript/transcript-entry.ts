@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { ImageContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, MessageAttribution, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import {
 	type CustomMessage,
 	type CustomMessageContent,
@@ -102,7 +102,7 @@ export function isUserTurnEntry(entry: TranscriptEntryLike): boolean {
 		const content = entry.message.content;
 		return typeof content === "string"
 			? content.trim().length > 0
-			: content.some(block => block.type === "text" && block.text.trim().length > 0);
+			: content.some(block => block.type === "text" ? block.text.trim().length > 0 : block.type === "audio" || block.type === "video");
 	}
 	return isUserRequestEntry(entry);
 }
@@ -111,7 +111,7 @@ export function isUserTurnEntry(entry: TranscriptEntryLike): boolean {
 export function userTurnLabel(entry: TranscriptEntryLike): string | undefined {
 	const draft =
 		entry.type === "message" && entry.message.role === "user"
-			? textContent(entry.message.content, " ")
+			? userMessageDisplayText(entry.message.content, " ")
 			: userTurnDraft(entry);
 	return draft?.replace(/\s+/g, " ").trim();
 }
@@ -138,8 +138,19 @@ export function textContent(content: string | ReadonlyArray<{ type: string; text
 	return text;
 }
 
+/** Visible prompt text, with a marker when the turn consists solely of audio/video. */
+export function userMessageDisplayText(content: UserMessage["content"], separator = ""): string {
+	const text = textContent(content, separator);
+	if (text || typeof content === "string") return text;
+	const hasAudio = content.some(block => block.type === "audio");
+	const hasVideo = content.some(block => block.type === "video");
+	if (hasAudio && hasVideo) return "[audio and video attachments]";
+	if (hasAudio) return "[audio attachment]";
+	return hasVideo ? "[video attachment]" : "";
+}
+
 /** Well-formed image blocks in order: a `[Image #N]` marker in the text names the Nth. */
-export function imageContent(content: string | ReadonlyArray<TextContent | ImageContent>): ImageContent[] {
+export function imageContent(content: string | readonly (TextContent | MediaContent)[]): ImageContent[] {
 	if (typeof content === "string") return [];
 	return content.filter(
 		(block): block is ImageContent =>

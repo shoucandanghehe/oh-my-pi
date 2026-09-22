@@ -6,9 +6,9 @@
  * so the agent doesn't need to read them manually.
  */
 import * as fs from "node:fs/promises";
-import path from "node:path";
+import * as path from "node:path";
 import type { EditStore } from "@oh-my-pi/pi-natives";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent } from "@oh-my-pi/pi-ai";
 import { countNewlines, formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
 import { formatHashlineHeader, formatNumberedLines, splitAddressableFileLines } from "../tools/hashline-format";
 import { normalizeToLF } from "../edit/normalize";
@@ -35,7 +35,7 @@ const DEFAULT_DIR_LIMIT = 500;
 // Avoid OOM when users @mention very large files. Above these limits we skip
 // auto-reading and only include the path in the message.
 const MAX_AUTO_READ_TEXT_BYTES = 5 * 1024 * 1024; // 5MB
-const MAX_AUTO_READ_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB
+const MAX_AUTO_READ_MEDIA_BYTES = 25 * 1024 * 1024; // 25MB
 
 function isMentionBoundary(text: string, index: number): boolean {
 	if (index === 0) return true;
@@ -230,8 +230,11 @@ export async function generateFileMentionMessages(
 
 			const imageMetadata = await readImageMetadata(absolutePath);
 			const mimeType = imageMetadata?.mimeType;
+			const ext = path.extname(absolutePath).toLowerCase();
+			const mediaMimeType =
+				ext === ".wav" ? "audio/wav" : ext === ".mp3" ? "audio/mpeg" : ext === ".mp4" ? "video/mp4" : undefined;
 			if (mimeType) {
-				if (stat.size > MAX_AUTO_READ_IMAGE_BYTES) {
+				if (stat.size > MAX_AUTO_READ_MEDIA_BYTES) {
 					files.push({
 						path: resolvedPath,
 						content: `(skipped auto-read: too large, ${formatBytes(stat.size)})`,
@@ -264,6 +267,30 @@ export async function generateFileMentionMessages(
 				}
 
 				files.push({ path: resolvedPath, content: dimensionNote ?? "", image });
+				continue;
+			}
+
+			if (mediaMimeType) {
+				if (stat.size > MAX_AUTO_READ_MEDIA_BYTES) {
+					files.push({
+						path: resolvedPath,
+						content: `(skipped auto-read: too large, ${formatBytes(stat.size)})`,
+						byteSize: stat.size,
+						skippedReason: "tooLarge",
+					});
+					continue;
+				}
+				const buffer = await fs.readFile(absolutePath);
+				if (buffer.length === 0) {
+					continue;
+				}
+
+				const media: MediaContent = {
+					type: mediaMimeType.startsWith("audio/") ? "audio" : "video",
+					mimeType: mediaMimeType,
+					data: buffer.toBase64(),
+				};
+				files.push({ path: resolvedPath, content: "", image: media });
 				continue;
 			}
 
@@ -309,7 +336,6 @@ export async function generateFileMentionMessages(
 				});
 				continue;
 			}
-			const ext = path.extname(absolutePath).toLowerCase();
 			if (CONVERTIBLE_EXTENSIONS.has(ext)) {
 				const result = await convertFileWithMarkit(absolutePath, options?.signal);
 				if (options?.signal?.aborted) {

@@ -1,10 +1,11 @@
-import type { AssistantMessage, ImageContent, SessionEntry, TextContent, ToolResultMessage } from "@oh-my-pi/pi-wire";
+import type { AssistantMessage, MessageContentBlock, SessionEntry, ToolResultMessage } from "@oh-my-pi/pi-wire";
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ActiveTool, ConnectionPhase } from "../../lib/client";
 import { fmtTokens } from "../../lib/format";
 import type { ToolRenderHost } from "../../tool-render";
+import { MediaAttachment } from "../MediaAttachment";
 import { Markdown, StreamingMarkdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
 import "./transcript.css";
@@ -77,8 +78,8 @@ function ThinkingBlock({ text, redacted }: { text: string; redacted?: boolean })
 	);
 }
 
-/** Markdown + image thumbnails for user / custom message content. */
-function MsgContent({ content }: { content: string | readonly (TextContent | ImageContent)[] }): ReactNode {
+/** Markdown, image thumbnails and playback controls for message attachments. */
+function MsgContent({ content }: { content: string | readonly MessageContentBlock[] }): ReactNode {
 	if (typeof content === "string") return <Markdown text={content} />;
 	return (
 		<>
@@ -95,6 +96,9 @@ function MsgContent({ content }: { content: string | readonly (TextContent | Ima
 								alt="attachment"
 							/>
 						);
+					case "audio":
+					case "video":
+						return <MediaAttachment key={i} block={block} />;
 					default:
 						return null;
 				}

@@ -657,7 +657,6 @@ export class ModelBrowserState {
 		if (model.maxTokens) facts.push(`${tokenCount(model.maxTokens)} out`);
 		facts.push(formatCostDetail(model));
 		if (model.reasoning) facts.push("reasoning");
-		if (model.input.includes("image")) facts.push("vision");
 		const int = intelligenceOf(model);
 		if (int !== undefined) facts.push(`${(options.symbol ?? glyph)("icon.intelligence")} ${int}`);
 		const measured = this.measured(item);
@@ -667,6 +666,8 @@ export class ModelBrowserState {
 		} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 			facts.push(`~${formatTps(model.tps)}`);
 		}
+		facts.push(`user: ${model.input.join("/") || "none"}`);
+		facts.push(`tools: ${(model.toolResultInput ?? model.input).join("/") || "none"}`);
 		const credits = nextCreditRateNote(model);
 		if (credits) facts.push(credits);
 		if (options.description) {

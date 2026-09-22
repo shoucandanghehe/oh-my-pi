@@ -39,51 +39,31 @@ export function isPersistenceTruncatedString(value: unknown): value is string {
 	return typeof value === "string" && value.endsWith(TRUNCATION_NOTICE);
 }
 
-export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"type" in value &&
-		(value as { type?: string }).type === "image" &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string"
-	);
-}
-
-function isImageMimeType(value: unknown): value is string {
-	return typeof value === "string" && value.toLowerCase().startsWith("image/");
-}
-
-export function isImageDataPayload(value: unknown): value is { data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string" &&
-		(isImageBlock(value) || ("mimeType" in value && isImageMimeType((value as { mimeType?: unknown }).mimeType)))
-	);
-}
-
 /**
- * True when an image payload sits in a persistence position whose base64 is
+ * True when a media payload sits in a persistence position whose base64 is
  * externalized to the blob store instead of truncated as a generic string: a
- * `content` image block, an `images[]` entry, or a snapcompact frame under
- * `frames[]`. The eager load path uses the same position check but deliberately
- * leaves snapcompact frames as references for lazy context rebuilding.
+ * `content` media block, an `images[]` entry, a file mention's legacy `image`
+ * field, or a snapcompact frame under `frames[]`. The eager load path uses the
+ * same position check but deliberately leaves snapcompact frames as references
+ * for lazy context rebuilding.
  */
-export function isExternalizableImagePosition(
+export function isExternalizableMediaPosition(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
-	if (!isImageDataPayload(value)) return false;
-	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images" || key === SNAPCOMPACT_FRAMES_KEY;
+	if (typeof value !== "object" || value === null || !("data" in value) || typeof value.data !== "string") return false;
+	const type = "type" in value ? value.type : undefined;
+	const typed = type === "image" || type === "audio" || type === "video";
+	if (key === TEXT_CONTENT_KEY) return typed;
+	if (key !== "image" && key !== "images" && key !== SNAPCOMPACT_FRAMES_KEY) return false;
+	return typed || ("mimeType" in value && typeof value.mimeType === "string" && /^(?:image|audio|video)\//i.test(value.mimeType));
 }
 
-function shouldExternalizeImagePayload(
+function shouldExternalizeMediaPayload(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
-	if (!isExternalizableImagePosition(value, key)) return false;
+	if (!isExternalizableMediaPosition(value, key)) return false;
 	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
 	return true;
 }
@@ -195,7 +175,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	) {
 		return { ...obj, result: externalizeImagePayloadSync(blobStore, obj, obj.result, undefined) };
 	}
-	if (shouldExternalizeImagePayload(obj, key)) {
+	if (shouldExternalizeMediaPayload(obj, key)) {
 		return { ...obj, data: externalizeImagePayloadSync(blobStore, obj, obj.data, obj.mimeType) };
 	}
 	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/
@@ -373,7 +353,7 @@ function persistenceNodeNeedsRewrite(obj: unknown, key?: string): boolean {
 				return true;
 			}
 		}
-		if (shouldExternalizeImagePayload(obj, key)) return true;
+		if (shouldExternalizeMediaPayload(obj, key)) return true;
 		if (isAtomicPersistenceNode(obj, key)) return false;
 		for (const childKey in obj) {
 			if (!Object.hasOwn(obj, childKey)) continue;

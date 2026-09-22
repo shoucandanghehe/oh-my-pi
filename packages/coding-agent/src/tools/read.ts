@@ -15,7 +15,7 @@ import type {
 	ToolSpeculationExecutionContext,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
-import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
+import { completeSimple, type ImageContent, type MediaContent, type TextContent } from "@oh-my-pi/pi-ai";
 import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,
@@ -993,8 +993,8 @@ function joinReadList(
 	list: ReadList,
 	resultOf: (part: ShapePart<ReadToolDetails>) => AgentToolResult<ReadToolDetails>,
 	hints?: ReadonlyMap<ShapePart<ReadToolDetails>, string>,
-): { content: Array<TextContent | ImageContent>; layout: (string | number)[]; parts: ShapePart<ReadToolDetails>[] } {
-	const content: Array<TextContent | ImageContent> = [];
+): { content: Array<TextContent | MediaContent>; layout: (string | number)[]; parts: ShapePart<ReadToolDetails>[] } {
+	const content: Array<TextContent | MediaContent> = [];
 	const layout: (string | number)[] = [];
 	const parts: ShapePart<ReadToolDetails>[] = [];
 	let block: (string | number)[] = [];

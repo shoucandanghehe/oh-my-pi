@@ -62,6 +62,7 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	ImageContent,
+	MediaContent,
 	Model,
 	ModelSpec,
 	ProviderResponseMetadata,
@@ -1271,6 +1272,8 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
 	images?: ImageContent[];
+	/** Audio/video attachments forwarded without image normalization. */
+	attachments?: MediaContent[];
 	systemPrompt: string[];
 }
 
@@ -1680,7 +1683,7 @@ export type ToolCallEvent =
 interface ToolResultEventBase extends ToolEventIdentity {
 	type: "tool_result";
 	input: Record<string, unknown>;
-	content: (TextContent | ImageContent)[];
+	content: (TextContent | MediaContent)[];
 	isError: boolean;
 }
 
@@ -2282,7 +2285,7 @@ export interface ExtensionAPI {
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
 	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn.
 	 *  Rejects with `PromptDroppedError` if the message was not admitted (e.g. abort or cost cap). */
-	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void>;
+	sendUserMessage(content: string | (TextContent | MediaContent)[], options?: SendUserMessageOptions): Promise<void>;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -2471,7 +2474,7 @@ export interface ProviderModelConfig {
 	/** Optional canonical thinking capability metadata for per-model effort support. */
 	thinking?: Model["thinking"];
 	/** Supported input types. */
-	input: ("text" | "image")[];
+	input: Model["input"];
 	/** Snapcompact frame shape for this model, replacing the model line's default (see `Model.snapcompactShape`). */
 	snapcompactShape?: Model["snapcompactShape"];
 	/** Cost per million tokens. */
@@ -2546,7 +2549,7 @@ export type SendMessageHandler = <T = unknown>(
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
  *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
 export type SendUserMessageHandler = (
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | MediaContent)[],
 	options?: SendUserMessageOptions,
 ) => Promise<void>;
 

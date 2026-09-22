@@ -5,6 +5,7 @@
 import { INTENT_FIELD, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { MediaAttachment } from "../components/MediaAttachment";
 import { resolveToolRenderer } from "./registry";
 import type { ToolRenderHost, ToolRenderProps, ToolResultLike } from "./types";
 import { isRecord, replaceTabs, stripAnsi } from "./util";
@@ -112,6 +113,7 @@ export function ToolView(props: ToolViewProps): ReactNode {
 					<div className="tv-body">
 						{label && <div className="tv-intent">{label}</div>}
 						{renderer.Body ? <renderer.Body {...renderProps} /> : null}
+						{props.result?.content.map((block, index) => <MediaAttachment key={index} block={block} />)}
 					</div>
 				)}
 				{partial && (

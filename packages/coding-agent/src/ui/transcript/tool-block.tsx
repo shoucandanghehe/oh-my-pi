@@ -44,7 +44,7 @@ import { type AgentActivityStatus, toolCallSummary } from "../../modes/view-mode
 import { readImageHeaderDimensions } from "../../utils/image-resize";
 import { readMediaPath } from "../../session/transcript/tool-execution";
 import { type ShellInspectorSource, shellVizEventAction } from "../apps/shell-visualizer/model";
-import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
+import { sanitizeDisplayLine, sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
 import { recentActivityLine } from "../overlays/pickers/agent-hub-model";
 import type { HubRecentLine } from "../styles/pickers/agent-hub";
 import type { ToolTerm } from "../styles/tools/look";
@@ -232,8 +232,12 @@ export class ToolCall {
 			const state = this.state();
 			const args = this.#args();
 			const result = this.#result();
-			// A call skipped to service steering input never ran: the generic card says so.
-			const presenter = result && !this.#partial() && isInterruptSkip(result) ? defaultPresenter : this.presenter;
+			// Saved device dispatches used the write tool's name, not its filesystem result shape.
+			const legacyDevice = this.name === "write" && isRecord(result?.details) &&
+				isRecord(result.details.xdev) && typeof result.details.xdev.tool === "string";
+			const presenter = legacyDevice || (result && !this.#partial() && isInterruptSkip(result))
+				? defaultPresenter
+				: this.presenter;
 			const call = presenter.call?.(args, state);
 			let view = call;
 			if (result) {
@@ -774,9 +778,15 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 	const facts = call.facts;
 	const body = structural((): JSXNode => {
 		const presentation = facts.presentation();
-		if (typeof presentation === "object") return compactBody(presentation);
 		// A concise row carries no body: unfolding it presents the full card, which builds its own.
 		if (presentation === "concise") return undefined;
+		const result = facts.result();
+		const media = result?.content.flatMap((block, index) => {
+			if (block.type !== "audio" && block.type !== "video") return [];
+			const mime = block.mimeType ? sanitizeDisplayLine(block.mimeType) : "";
+			return <text key={`media${index}`} spans={[{ t: `[${block.type} attachment${mime ? `: ${mime}` : ""}]` }]} />;
+		});
+		if (typeof presentation === "object") return [compactBody(presentation), media];
 		const view = call.view();
 		// Result images show under the body unless the view draws them itself.
 		const drawsImages = flattenNodes(view?.body).some(node => {
@@ -784,10 +794,10 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 			if (node.kind === "image") return true;
 			if (node.kind !== "media") return false;
 			const props = untrack(node.props);
-			return "path" in props && props.path === readMediaPath(facts.result()?.details);
+			return "path" in props && props.path === readMediaPath(result?.details);
 		});
-		const images = facts.showImages() && !drawsImages ? imageNodes(facts.result()) : undefined;
-		return [view?.body, images];
+		const images = facts.showImages() && !drawsImages ? imageNodes(result) : undefined;
+		return [view?.body, media, images];
 	});
 	const bodyNodes = structural(() => flattenNodes(body()));
 	const imageLinks = computed(() => imagePlaceholderLinks(facts.result()));

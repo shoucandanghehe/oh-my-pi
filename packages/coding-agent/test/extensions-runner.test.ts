@@ -10,7 +10,7 @@ import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-age
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
-import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import {
 	isPerCallContextMessage,
 	kCursorExecResolved,
@@ -1779,7 +1779,7 @@ export default function (pi) {
 			}),
 		};
 
-		const firstText = (result: { content: readonly (TextContent | ImageContent)[] }): string | undefined => {
+		const firstText = (result: { content: readonly (TextContent | MediaContent)[] }): string | undefined => {
 			const block = result.content[0];
 			return block?.type === "text" ? block.text : undefined;
 		};

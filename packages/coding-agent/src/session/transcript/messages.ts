@@ -1,4 +1,4 @@
-import type { AssistantMessage, ImageContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, MediaContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import type { BranchSummaryMessage, CompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
@@ -52,7 +52,7 @@ export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 export const LIVE_ENDED_MESSAGE_TYPE = "live-ended";
 
 /** Content shape accepted for extension-injected messages. */
-export type CustomMessageContent = string | (TextContent | ImageContent)[];
+export type CustomMessageContent = string | (TextContent | MediaContent)[];
 
 /** Custom-message fields an extension may set; `role` and `timestamp` are the session's. */
 type CustomMessagePayloadField =
@@ -314,7 +314,7 @@ export interface FileMentionMessage {
 		byteSize?: number;
 		/** Why the file contents were omitted from auto-read. */
 		skippedReason?: "tooLarge" | "binary";
-		image?: ImageContent;
+		image?: MediaContent;
 	}>;
 	timestamp: number;
 }

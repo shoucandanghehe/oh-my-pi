@@ -55,6 +55,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
+import { resolveModelRoute, withResolvedModelRoute } from "@oh-my-pi/pi-catalog/media-capabilities";
 import { cloneJsonTree, Laps, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { LiveSteeringChannel } from "./live-steering";
@@ -587,7 +588,7 @@ const EMPTY_ERROR_TOOL_RESULT_TEXT = "Tool failed with no output.";
 
 function hasSubstantiveToolResultContent(content: AgentToolResult["content"]): boolean {
 	for (const block of content) {
-		if (block.type === "image") return true;
+		if (block.type === "image" || block.type === "audio" || block.type === "video") return true;
 		if (block.type === "text" && block.text.trim().length > 0) return true;
 	}
 	return false;
@@ -630,11 +631,11 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 		if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
 			content.push({ type: "text", text: sanitizeText((block as { text: string }).text) });
 		} else if (
-			block.type === "image" &&
+			(block.type === "image" || block.type === "audio" || block.type === "video") &&
 			typeof (block as { data?: unknown }).data === "string" &&
 			typeof (block as { mimeType?: unknown }).mimeType === "string"
 		) {
-			content.push(block as { type: "image"; data: string; mimeType: string });
+			content.push(block as (typeof content)[number]);
 		} else {
 			invalidBlocks++;
 		}
@@ -2117,7 +2118,7 @@ function openLiveSteering(
 			const userMessages: UserMessage[] = [];
 			for (const message of converted) {
 				if (message.role !== "user") return undefined;
-				if (typeof message.content !== "string" && message.content.some(part => part.type === "image")) {
+				if (typeof message.content !== "string" && message.content.some(part => part.type !== "text")) {
 					return undefined;
 				}
 				userMessages.push(message);
@@ -2132,7 +2133,10 @@ async function prepareProviderCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedProviderCall> {
-	const model = config.getModel?.() ?? config.model;
+	const baseModel = config.getModel?.() ?? config.model;
+	const disabled = config.getDisableReasoning?.() ?? config.disableReasoning;
+	const requestedEffort = disabled ? undefined : (config.getReasoning?.() ?? config.reasoning);
+	const model = withResolvedModelRoute(baseModel, resolveModelRoute(baseModel, requestedEffort));
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);

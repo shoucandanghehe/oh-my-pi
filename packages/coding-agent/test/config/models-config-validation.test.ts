@@ -141,14 +141,17 @@ describe("ModelsConfigSchema Responses compat overrides", () => {
 		};
 	}
 
-	test("accepts a boolean supportsConfigurationUpdate override and keeps its value", () => {
-		for (const value of [false, true]) {
-			const checked = ModelsConfigSchema(astraProxyConfig({ supportsConfigurationUpdate: value }));
-			if (checked instanceof OmpErrors) throw new Error(checked.summary);
-			const config: ModelsConfig = checked;
-			expect(config.providers?.["astra-proxy"]?.compat?.supportsConfigurationUpdate).toBe(value);
-		}
-	});
+	test.each(["supportsConfigurationUpdate", "supportsMidConversationToolChanges"] as const)(
+		"accepts a boolean %s override and keeps its value",
+		key => {
+			for (const value of [false, true]) {
+				const checked = ModelsConfigSchema(astraProxyConfig({ [key]: value }));
+				if (checked instanceof OmpErrors) throw new Error(checked.summary);
+				const config: ModelsConfig = checked;
+				expect(config.providers?.["astra-proxy"]?.compat?.[key]).toBe(value);
+			}
+		},
+	);
 
 	test("rejects a non-boolean statefulResponses override instead of silently storing responses", () => {
 		const checked = ModelsConfigSchema(astraProxyConfig({ statefulResponses: "false" }));
@@ -310,7 +313,7 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 		// A models.yml naming a modality the catalog does not know must not take
 		// the whole config down: the file loads with the modality dropped, and
 		// the warning names that modality plus the catalog's own vocabulary.
-		const file = writeModelsFile([{ id: "some/video-capable-model", input: "text, image, video" }]);
+		const file = writeModelsFile([{ id: "media-model", input: [...catalogInputModalities(), "document"].join(", ") }]);
 		const config = ModelsConfigFile.relocate(file);
 		const result = config.tryLoad();
 		expect(result.status).toBe("ok");
@@ -318,8 +321,8 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toEqual(catalogInputModalities());
 		const [warning] = result.warnings;
 		expect(warning).toContain('provider "openrouter"');
-		expect(warning).toContain('model "some/video-capable-model"');
-		expect(warning).toContain('modality "video"');
+		expect(warning).toContain('model "media-model"');
+		expect(warning).toContain('modality "document"');
 		for (const modality of catalogInputModalities()) {
 			expect(warning).toContain(modality);
 		}
@@ -329,20 +332,20 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 		// The default models.yml handle is one ConfigFile for the process, and
 		// tryLoad returns its cached result. Findings live on that result, so a
 		// second registry reports the same modality warning.
-		const file = writeModelsFile([{ id: "some/video-capable-model", input: "text, image, video" }]);
+		const file = writeModelsFile([{ id: "media-model", input: "text, image, document" }]);
 		const config = ModelsConfigFile.relocate(file);
 		const first = config.tryLoad();
 		const second = config.tryLoad();
 		expect(second).toBe(first);
 		if (first.status !== "ok" || second.status !== "ok") throw new Error("expected the file to load");
-		expect(first.warnings.some(warning => warning.includes('modality "video"'))).toBe(true);
+		expect(first.warnings.some(warning => warning.includes('modality "document"'))).toBe(true);
 		expect(second.warnings).toEqual(first.warnings);
 	});
 
 	test("a failed load does not keep the dropped-modality warning", () => {
-		// `input: [video, 7]` reports `video` and then fails the schema. The
+		// `input: [document, 7]` reports `document` and then fails the schema. The
 		// next successful load of the same file must not repeat that warning.
-		const file = writeModelsFile([{ id: "m", input: "video, 7" }]);
+		const file = writeModelsFile([{ id: "m", input: "document, 7" }]);
 		const config = ModelsConfigFile.relocate(file);
 		const failed = config.tryLoad();
 		expect(failed.status).toBe("error");
@@ -359,7 +362,7 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 	test("a model whose only modality is unsupported keeps the catalog default", () => {
 		// Dropping every modality must not leave the model with an empty input
 		// list: the key goes away so the catalog's own default applies.
-		const file = writeModelsFile([{ id: "only-video", input: "video" }]);
+		const file = writeModelsFile([{ id: "only-document", input: "document" }]);
 		const config = ModelsConfigFile.relocate(file);
 		const result = config.tryLoad();
 		expect(result.status).toBe("ok");
@@ -377,7 +380,7 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 	});
 
 	test("the registry loads the model and reports the dropped modality once", async () => {
-		const file = writeModelsFile([{ id: "some/video-capable-model", input: "text, image, video" }]);
+		const file = writeModelsFile([{ id: "media-model", input: "text, image, document" }]);
 		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			const registry = new ModelRegistry(authStorage, file);
@@ -385,12 +388,11 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 			// from the constructor load must not be joined by a second copy.
 			await registry.refresh("offline", { refreshCommandCredentials: true });
 			expect(registry.getError()).toBeUndefined();
-			const model = registry.getAll().find(entry => entry.id === "some/video-capable-model");
-			const input: readonly string[] = model?.input ?? [];
-			expect(input).toEqual(catalogInputModalities());
-			const warnings = registry.drainConfigWarnings().filter(warning => warning.includes('modality "video"'));
+			const model = registry.getAll().find(entry => entry.id === "media-model");
+			expect(model?.input).toEqual(["text", "image"]);
+			const warnings = registry.drainConfigWarnings().filter(warning => warning.includes('modality "document"'));
 			expect(warnings).toHaveLength(1);
-			expect(warnings[0]).toContain('model "some/video-capable-model"');
+			expect(warnings[0]).toContain('model "media-model"');
 		} finally {
 			authStorage.close();
 		}

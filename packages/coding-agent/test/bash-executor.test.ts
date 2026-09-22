@@ -18,7 +18,7 @@ import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-ag
 import { evaluateLoopCondition } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
 import { defaultShellVizPreferences, readShellPresentation } from "@oh-my-pi/pi-coding-agent/tools/shell-viz";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
-import { saveImagesToTemp } from "@oh-my-pi/pi-coding-agent/utils/image-temp";
+import { saveMediaToTemp } from "@oh-my-pi/pi-coding-agent/utils/image-temp";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
@@ -279,8 +279,8 @@ describe("executeBash", () => {
 			mimeType: "image/png",
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 		};
-		const [first] = await saveImagesToTemp([image]);
-		const [again] = await saveImagesToTemp([image]);
+		const [first] = await saveMediaToTemp([image]);
+		const [again] = await saveMediaToTemp([image]);
 		expect(again).toBe(first);
 
 		const other: ImageContent = {
@@ -288,7 +288,7 @@ describe("executeBash", () => {
 			mimeType: "image/png",
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
 		};
-		const [different] = await saveImagesToTemp([other]);
+		const [different] = await saveMediaToTemp([other]);
 		expect(different).not.toBe(first);
 
 		removeSyncWithRetries(first);
