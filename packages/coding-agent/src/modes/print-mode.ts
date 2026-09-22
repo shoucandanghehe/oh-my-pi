@@ -6,7 +6,7 @@
  * - `omp --mode json "prompt"` - JSON event stream
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { MCPManager } from "../mcp/manager";
@@ -38,8 +38,8 @@ export interface PrintModeOptions {
 	messages?: string[];
 	/** First message to send (may contain @file content) */
 	initialMessage?: string;
-	/** Images to attach to the initial message */
-	initialImages?: ImageContent[];
+	/** Media attachments to include with the initial message. */
+	initialImages?: MediaContent[];
 	/** If true, include thinking blocks in text output */
 	printThoughts?: boolean;
 	/** Whether the caller explicitly started the headless plan flow. */
@@ -427,11 +427,13 @@ async function runPrintModeCore(
 		return true;
 	};
 	/** Prompt the model with one input, gated on strict MCP readiness. */
-	const promptTurn = async (text: string, images?: PrintModeOptions["initialImages"]): Promise<void> => {
+	const promptTurn = async (text: string, content?: PrintModeOptions["initialImages"]): Promise<void> => {
 		if (!(await prepareAgentTurn())) return;
 		admittedAgentTurn = true;
+		const images = content?.filter((attachment): attachment is ImageContent => attachment.type === "image");
+		const attachments = content?.filter(attachment => attachment.type !== "image");
 		await logger.time("print:prompt", () =>
-			images !== undefined ? session.prompt(text, { images }) : session.prompt(text),
+			content !== undefined ? session.prompt(text, { images, attachments }) : session.prompt(text),
 		);
 	};
 

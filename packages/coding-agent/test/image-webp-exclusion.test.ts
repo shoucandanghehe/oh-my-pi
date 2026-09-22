@@ -174,8 +174,10 @@ describe("normalizeModelContextImages model-aware WebP exclusion", () => {
 			display: false,
 			timestamp: 1,
 		};
+		const model = buildStbVisionModel("managed-primary");
 		const boundary = new SessionProviderBoundary({
-			model: () => buildStbVisionModel("managed-primary"),
+			model: () => model,
+			activeRouteModel: () => model,
 		} as never);
 
 		const normalized = await boundary.normalizeAgentMessageImages(message);

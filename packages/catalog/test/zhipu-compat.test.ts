@@ -174,7 +174,7 @@ describe("zhipu-coding-plan model discovery", () => {
 		expect(models?.[0]?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
 	});
 
-	it("keeps FlashX reasoning and image support across bundled and discovered coding-plan models", async () => {
+	it("keeps Flash video and FlashX image support across coding-plan model discovery", async () => {
 		const mockFetch: FetchImpl = Object.assign(
 			async (): Promise<Response> =>
 				new Response(
@@ -216,7 +216,7 @@ describe("zhipu-coding-plan model discovery", () => {
 		const flash47 = models?.find(model => model.id === "glm-4.7-flash");
 
 		expect(flash53?.reasoning).toBe(true);
-		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image"]);
+		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image", "video"]);
 		// Older flash SKUs stay non-reasoning and text-only.
 		expect(flash47?.reasoning).toBe(false);
 		expect(flash47 && buildModel(flash47).input).toEqual(["text"]);

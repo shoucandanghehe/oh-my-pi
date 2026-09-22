@@ -176,6 +176,43 @@ describe("openai-completions convertMessages", () => {
 			{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } },
 		]);
 	});
+
+	it("honors toolResultInput restrictions without stripping supported user images", () => {
+		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
+		const model: Model<"openai-completions"> = {
+			...baseModel,
+			api: "openai-completions",
+			input: ["text", "image"],
+			toolResultInput: ["text"],
+		};
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }],
+					timestamp: 1,
+				},
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: {} }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: emptyUsage,
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				buildToolResult("tool-1", 3),
+			],
+		};
+
+		const messages = convertMessages(model, context, compat);
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "tool"]);
+		expect(messages[0].content).toEqual([
+			{ type: "image_url", image_url: { url: "data:image/png;base64,ZmFrZQ==" } },
+		]);
+		expect(messages[2].content).toContain(NON_VISION_IMAGE_PLACEHOLDER);
+	});
 	it("serializes assistant tool-call turns with string content for strict OpenAI-compatible backends", () => {
 		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
 		const model: Model<"openai-completions"> = {

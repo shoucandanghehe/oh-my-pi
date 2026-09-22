@@ -554,7 +554,8 @@ export function findCutPoint(
 		const message = getMessageFromEntry(entry);
 		if (message) {
 			accumulatedTokens +=
-				i === latestTurnIndex ? tokenizer.countLatestTurn(message) : tokenizer.countMessage(message);
+				(i === latestTurnIndex ? tokenizer.countLatestTurn(message) : tokenizer.countMessage(message)) +
+				estimateMediaTokens(message);
 		}
 		if (i !== cutPoints[cutPointIndex]) continue;
 		if (accumulatedTokens > keepRecentTokens) break;
@@ -867,6 +868,24 @@ interface SummaryWindow {
  * on message boundaries. Only called when the whole conversation does not fit —
  * the common single-window path never pays this per-message sizing pass.
  */
+const AUDIO_TOKEN_ESTIMATE = 8_000;
+const VIDEO_TOKEN_ESTIMATE = 24_000;
+
+/**
+ * Tokenizer.countMessage intentionally only models text and image blocks.
+ * Compaction still needs a bounded charge for lifecycle media so a large
+ * base64 payload cannot distort cut-point selection.
+ */
+function estimateMediaTokens(message: AgentMessage): number {
+	if (!("content" in message) || typeof message.content === "string" || !Array.isArray(message.content)) return 0;
+	let total = 0;
+	for (const block of message.content) {
+		if (block.type === "audio") total += AUDIO_TOKEN_ESTIMATE;
+		else if (block.type === "video") total += VIDEO_TOKEN_ESTIMATE;
+	}
+	return total;
+}
+
 function planSummaryWindows(
 	messages: Message[],
 	tokenizer: Tokenizer,
@@ -1979,14 +1998,17 @@ export async function compact(
 			);
 			preserveData = withOpenAiRemoteCompactionPreserveData(preserveData, remote);
 		};
-		const whole = buildOpenAiNativeHistory(
-			convertToLlm(remoteMessages),
-			model,
-			previousReplacementHistory,
-			supportsOriginalDetail,
-		);
-		if (whole.length > 0) {
-			try {
+		let remoteHistoryBuilt = false;
+		try {
+			// Unsupported media must fall back to local summarization even when history encoding fails.
+			const whole = buildOpenAiNativeHistory(
+				convertToLlm(remoteMessages),
+				model,
+				previousReplacementHistory,
+				supportsOriginalDetail,
+			);
+			remoteHistoryBuilt = true;
+			if (whole.length > 0) {
 				await sendRemoteCompaction(
 					() => sendV1(whole, !canCompactBeforeTail),
 					async () => {
@@ -2002,18 +2024,25 @@ export async function compact(
 					},
 				);
 				usedRemoteCompaction = true;
-			} catch (err) {
-				// A user/session abort is a cancellation, not a remote failure —
-				// swallowing it here would downgrade Esc into "fall back to local
-				// summarization" and keep compaction running on an aborted signal.
-				if (signal?.aborted) throw err;
+			}
+		} catch (err) {
+			// A user/session abort is a cancellation, not a remote failure —
+			// swallowing it here would downgrade Esc into "fall back to local
+			// summarization" and keep compaction running on an aborted signal.
+			if (signal?.aborted) throw err;
+			if (remoteHistoryBuilt) {
 				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
-				logger.warn("OpenAI remote compaction failed", {
+			}
+			logger.warn(
+				remoteHistoryBuilt
+					? "OpenAI remote compaction failed"
+					: "OpenAI remote compaction history construction failed, falling back to local summarization",
+				{
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
 					provider: model.provider,
-				});
-			}
+				},
+			);
 		}
 	}
 
