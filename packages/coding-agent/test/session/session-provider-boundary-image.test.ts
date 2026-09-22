@@ -40,6 +40,7 @@ function makeHost(active: Model<Api>, artifactsDir: string): SessionProviderBoun
 			getAvailable: () => [],
 		},
 		model: () => active,
+		activeRouteModel: () => active,
 		sessionId: () => "test-session",
 		localProtocolOptions: () => ({ getArtifactsDir: () => artifactsDir, getSessionId: () => "test-session" }),
 		obfuscator: () => undefined,

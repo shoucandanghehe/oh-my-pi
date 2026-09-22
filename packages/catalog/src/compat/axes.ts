@@ -478,7 +478,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"discovery-api": { key: "discoveryApi", set: "catalog", shape: "scalar" },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
-	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
+	"input-modalities": {
+		key: "inputModalities",
+		set: "catalog",
+		shape: "array",
+		values: ["text", "image", "audio", "video"],
+	},
 	kind: { key: "kind", set: "catalog", shape: "scalar", values: MODEL_KINDS },
 	"web-search": {
 		key: "webSearch",
@@ -568,6 +573,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * splits larger requests. Unassigned: the endpoint takes any batch size.
 	 */
 	"judgment-questions-max": { key: "judgmentQuestionsMax", set: "catalog", shape: "scalar" },
+	"image-edit-format": { key: "imageEditFormat", set: "catalog", shape: "scalar", values: ["multipart"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
 	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },

@@ -144,7 +144,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "openai-images" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -221,6 +221,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 				`snapcompactShape.frameSize an integer from ${MIN_CONFIGURED_FRAME_SIZE} to ${MAX_CONFIGURED_FRAME_SIZE}`,
 			),
 	);
+
+	const ModelInputSchema = type('("text" | "image" | "audio" | "video")[]');
 
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",

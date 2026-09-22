@@ -9,6 +9,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
+	AudioContent,
 	Context,
 	Effort,
 	ImageContent,
@@ -19,6 +20,7 @@ import type {
 	ServiceTierByFamily,
 	SimpleStreamOptions,
 	ToolChoice,
+	VideoContent,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
@@ -485,8 +487,10 @@ export interface PromptOptions {
 	 * reaching the agent, instead of resolving `true` (default: false).
 	 */
 	throwOnDrop?: boolean;
-	/** Image attachments. */
+	/** Image attachments, normalized for the active model. */
 	images?: ImageContent[];
+	/** Audio or video attachments forwarded without image normalization. */
+	attachments?: (AudioContent | VideoContent)[];
 	/** Queue behavior while streaming. `"aside"` is non-interrupting — it does not steer/follow-up
 	 *  an in-flight tool batch, injecting at the next step boundary instead (see
 	 *  AgentSession.sendUserMessage's `deliverAs: "aside"`). */
@@ -666,7 +670,12 @@ export interface ResetSessionContextResult {
 }
 
 /** Queued user content restored to the editor. */
-export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+export type RestoredQueuedMessage = {
+	text: string;
+	images?: ImageContent[];
+	audio?: AudioContent[];
+	video?: VideoContent[];
+};
 
 /** A queued message the dequeue key took back, tagged with the queue it left so the editor can restore its delivery. */
 export type DequeuedMessage = RestoredQueuedMessage & { queue: "steering" | "followUp" };

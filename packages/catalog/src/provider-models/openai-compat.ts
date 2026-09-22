@@ -35,6 +35,7 @@ import {
 	MODEL_KINDS,
 	type Api,
 	type FetchImpl,
+	type InputModality,
 	type Model,
 	type ModelKind,
 	type ModelSpec,
@@ -123,12 +124,15 @@ function toModelName(value: unknown, fallback: string): string {
 	return trimmed.length > 0 ? trimmed : fallback;
 }
 
-function toInputCapabilities(value: unknown): ("text" | "image")[] {
+function toInputCapabilities(value: unknown): InputModality[] {
 	if (!Array.isArray(value)) {
 		return ["text"];
 	}
-	const supportsImage = value.some(item => item === "image");
-	return supportsImage ? ["text", "image"] : ["text"];
+	const modalities: InputModality[] = ["text"];
+	if (value.includes("image")) modalities.push("image");
+	if (value.includes("audio")) modalities.push("audio");
+	if (value.includes("video")) modalities.push("video");
+	return modalities;
 }
 
 /**
@@ -671,7 +675,7 @@ interface OllamaResolvedMetadata {
 	maxTokens: number;
 	capabilities?: string[];
 	reasoning?: boolean;
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 }
 
 interface OllamaShowMetadata {
@@ -679,7 +683,7 @@ interface OllamaShowMetadata {
 	maxTokens?: number;
 	capabilities?: string[];
 	reasoning?: boolean;
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 }
 
 function getOllamaContextWindow(modelInfo: Record<string, unknown> | undefined): number | undefined {
@@ -732,7 +736,7 @@ async function fetchOllamaShowMetadata(
 			reasoning: capabilities ? capabilities.includes("thinking") : undefined,
 			input: capabilities
 				? capabilities.includes("vision")
-					? (["text", "image"] as Array<"text" | "image">)
+					? (["text", "image"] as InputModality[])
 					: (["text"] as Array<"text">)
 				: undefined,
 		};
@@ -1551,7 +1555,8 @@ function mapNovitaModel(
 		...model,
 		reasoning: Array.isArray(entry.features) ? novitaArrayIncludes(entry.features, "reasoning") : model.reasoning,
 		supportsTools: novitaArrayIncludes(entry.features, "function-calling"),
-		input: toInputCapabilities(entry.input_modalities),
+		// The OpenAI chat-completions encoder has no video wire format.
+		input: toInputCapabilities(entry.input_modalities).filter(modality => modality !== "video"),
 		cost: {
 			input: toNovitaCostPerMillion(entry.input_token_price_per_m),
 			output: toNovitaCostPerMillion(entry.output_token_price_per_m),
@@ -2816,7 +2821,7 @@ interface ClinePassLiveCatalogEntry {
 	maxTokens?: number;
 	cost?: ModelSpec<"openai-completions">["cost"];
 	reasoning?: boolean;
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 }
 
 interface ClinePassLiveCatalog {
@@ -3673,7 +3678,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 								: [];
 							const thinking = mapOpenRouterThinking(entry);
 							const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
-							const input: ("text" | "image")[] = Array.isArray(architecture?.input_modalities)
+							const input: InputModality[] = Array.isArray(architecture?.input_modalities)
 								? toInputCapabilities(architecture.input_modalities)
 								: String(architecture?.modality ?? "").includes("image")
 									? ["text", "image"]
@@ -3989,7 +3994,9 @@ export function zenmuxModelManagerOptions(config?: ZenMuxModelManagerConfig): Mo
 						api: isAnthropicModel ? "anthropic-messages" : "openai-completions",
 						baseUrl: isAnthropicModel ? anthropicBaseUrl : openAiBaseUrl,
 						reasoning: typeof capabilities?.reasoning === "boolean" ? capabilities.reasoning : defaults.reasoning,
-						input: toInputCapabilities(entry.input_modalities),
+						input: toInputCapabilities(entry.input_modalities).filter(
+							modality => isAnthropicModel || modality !== "video",
+						),
 						cost: {
 							input: getZenMuxPricingValue(pricings, "prompt"),
 							output: getZenMuxPricingValue(pricings, "completion"),
@@ -4341,7 +4348,7 @@ export function kimiCodeModelManagerOptions(
 
 /** Native LM Studio metadata keyed by model id from `/api/v0/models` and `/api/v1/models`. */
 export interface LmStudioNativeModelMetadata {
-	input: ("text" | "image")[];
+	input: InputModality[];
 	contextWindow?: number;
 	/**
 	 * LM Studio reports a decision model (`type: "decision"`): it answers typed
@@ -4371,14 +4378,13 @@ function getLmStudioCapabilityNames(value: unknown): string[] {
 	return value.flatMap(item => (typeof item === "string" ? [item.toLowerCase()] : []));
 }
 
+
 function getLmStudioModelType(entry: Record<string, unknown>): string {
 	return typeof entry.type === "string" ? entry.type.toLowerCase() : "";
 }
 
-function getLmStudioNativeInput(entry: Record<string, unknown>): ("text" | "image")[] {
+function getLmStudioNativeInput(entry: Record<string, unknown>): InputModality[] {
 	const modelType = getLmStudioModelType(entry);
-	// A decision model stays `type: "decision"` when it reads images; LM Studio
-	// says so through `has_vision_adapter` instead.
 	if (modelType === "decision") {
 		return entry.has_vision_adapter === true ? ["text", "image"] : ["text"];
 	}
@@ -7271,6 +7277,7 @@ export function mapModelsDevToModels(
 				baseUrl: resolved.baseUrl,
 				reasoning: kind === undefined ? m.reasoning : false,
 				input: toInputCapabilities(m.modalities?.input),
+				vendorInput: toInputCapabilities(m.modalities?.input),
 				cost: {
 					input: toNumber(m.cost?.input) ?? 0,
 					output: toNumber(m.cost?.output) ?? 0,

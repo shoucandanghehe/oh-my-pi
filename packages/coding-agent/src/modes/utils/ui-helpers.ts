@@ -108,6 +108,7 @@ import {
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
 	splitAssistantMessageToolTimeline,
+	userMessageDisplayText,
 } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 
 import {
@@ -437,7 +438,7 @@ export class UiHelpers {
 					this.ctx.chatContainer.addChild(card);
 					break;
 				}
-				const userText = message.role === "user" ? textContent(message.content) : "";
+				const userText = message.role === "user" ? userMessageDisplayText(message) : "";
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					const cached = options?.reuseSettledComponent

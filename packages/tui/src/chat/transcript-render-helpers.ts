@@ -19,6 +19,7 @@ import {
 	shouldRenderAbortReason,
 } from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
 import {
 	formatArtifactErrorNotice,
 	formatMinimizedMeta,
@@ -310,7 +311,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 			detail = file.skippedReason === "binary" ? `skipped: binary, ${size}` : `skipped: ${size}`;
 		} else {
 			detail = file.image
-				? "image"
+				? file.image.type
 				: file.lineCount === undefined
 					? "unknown lines"
 					: formatCount("line", file.lineCount);
@@ -410,6 +411,22 @@ export function splitAssistantMessageToolTimeline(message: AssistantAgentMessage
 		hasToolCalls: true,
 		lastToolCallId,
 	};
+}
+
+/** Visible text for a user message: its text blocks, or an attachment marker when only media is attached. */
+export function userMessageDisplayText(message: UserMessage): string {
+	if (typeof message.content === "string") return message.content;
+	const text = message.content
+		.filter((block): block is { type: "text"; text: string } => block.type === "text")
+		.map(block => block.text)
+		.join("");
+	if (text) return text;
+
+	const hasAudio = message.content.some(block => block.type === "audio");
+	const hasVideo = message.content.some(block => block.type === "video");
+	if (hasAudio && hasVideo) return "[audio and video attachments]";
+	if (hasAudio) return "[audio attachment]";
+	return hasVideo ? "[video attachment]" : "";
 }
 
 /**
