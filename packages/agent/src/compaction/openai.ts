@@ -16,6 +16,7 @@
  */
 
 import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { validateContextMedia } from "@oh-my-pi/pi-ai/media-input";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
@@ -550,6 +551,9 @@ export function buildOpenAiNativeHistory(
 	previousReplacementHistory?: Array<Record<string, unknown>>,
 	supportsImageDetailOriginal = false,
 ): Array<Record<string, unknown>> {
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	const compactionWireModel = model.remoteCompaction?.model ?? model.requestModelId ?? model.id;
+	model = validateContextMedia({ ...model, api: compactionApi }, { messages }, undefined, compactionWireModel);
 	const input: Array<Record<string, unknown>> = previousReplacementHistory
 		? adaptComputerHistoryForCompaction([...previousReplacementHistory], model.supportsComputerUse === true)
 		: [];
@@ -601,7 +605,9 @@ export function buildOpenAiNativeHistory(
 							detail: "auto",
 							image_url: `data:${block.mimeType};base64,${block.data}`,
 						});
+						continue;
 					}
+					throw new Error(`OpenAI remote compaction cannot encode ${block.type} input`);
 				}
 			}
 			if (contentBlocks.length > 0) {

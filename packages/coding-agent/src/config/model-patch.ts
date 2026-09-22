@@ -1,7 +1,8 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { resolveEffectiveMediaCapabilities } from "@oh-my-pi/pi-catalog/media-capabilities";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { apiServesKind, modelKind, type ModelKind, runnerApiKind } from "@oh-my-pi/pi-catalog/types";
@@ -242,7 +243,7 @@ export interface ModelPatch {
 	kind?: ModelKind;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
-	input?: ("text" | "image")[];
+	input?: Model<Api>["input"];
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
@@ -350,8 +351,14 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	// compat must not replace it with the catalog's baseline limits.
 	built.contextWindow = result.contextWindow;
 	built.maxTokens = result.maxTokens;
-	// Explicit input and cost patches outrank catalog corrections.
-	if (patch.input !== undefined) built.input = patch.input;
+	// Explicit input declarations outrank catalog evidence, not encoder limits.
+	// Update the route's source facts as well as both derived capability views.
+	if (patch.input !== undefined) {
+		built.vendorInput = [...patch.input];
+		const effective = resolveEffectiveMediaCapabilities(built.api, built.vendorInput);
+		built.input = [...effective.input];
+		built.toolResultInput = [...effective.toolResultInput];
+	}
 	// Patches never change model identity. Preserve already-resolved pricing,
 	// including earlier custom prices and the deliberate absence of a schedule.
 	built.cost = result.cost;

@@ -15,6 +15,7 @@ import type {
 	AssistantMessage,
 	CredentialDisabledEvent,
 	ImageContent,
+	MediaContent,
 	Model,
 	ProviderResponseMetadata,
 	TextContent,
@@ -2161,6 +2162,7 @@ export class ExtensionRunner {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string[],
+		attachments?: MediaContent[],
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		if (!this.hasHandlers("before_agent_start")) return undefined;
 		const ctx = this.createContext();
@@ -2177,6 +2179,7 @@ export class ExtensionRunner {
 					type: "before_agent_start",
 					prompt,
 					images,
+					attachments,
 					systemPrompt: currentSystemPrompt,
 				};
 				const handlerResult = await this.#runHandlerWithTimeout(

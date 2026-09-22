@@ -13,3 +13,12 @@ Sources:
 - JSON/JSONL/NDJSON: file.json?q=<jq filter>; &raw=true unquoted strings, &compact=true one-line values, &offset=&limit= page results; `&` inside the filter → %26.
 {{#if BINARY_VIEWS}}- Executables (ELF/PE/Mach-O, extensionless ok): overview + function list; :<func|0xaddr> pseudocode, :<func>:asm, :imports, :exports, :strings, :xrefs:<func|0xaddr>; line ranges apply after the view (bin:main:10-40). Universal Mach-O: host-arch slice by default, bin:@<arch> picks another (bin:@x86_64:main).
 {{/if}}- PDF/documents: extracted text; notebooks: editable cells; images: decoded inline. URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.
+- Bare image path → pixels sent directly to the active model. When it supports image input, MUST use this for image understanding, except for the `?q=` cases below; also works with `attachment://N` and `.svg:img`.
+- `?q=<question>` — image only (also `.svg:img?q=`, `attachment://N?q=`, `local://…?q=`): a separate vision-model call returns text, not pixels. Use only when the active model cannot accept images, direct image delivery failed, or the user requests a separate visual opinion. NEVER substitute it merely to save context or override a request to inspect the image directly.
+- Internal URIs — `artifact://<id>` recovers spilled output; page with `:N-M`/`:raw:N-M`.
+- `ssh://host/<path>` reads remote file/dir (UTF-8, ≤1 MiB); bare `ssh://` lists hosts; writable with `write` and searchable with `grep`.
+  Literal `:`, `?`, `#` → percent-encode (`%3A`/`%3F`/`%23`). Requires a verified POSIX shell on the remote host. For Windows or other unsupported hosts, use `bash` with a remote SSH command or mount with `sshfs`.
+
+<critical>
+Summary footer names elided ranges? Re-issue ONLY those ranges. NEVER guess `..`/`…` content.
+</critical>

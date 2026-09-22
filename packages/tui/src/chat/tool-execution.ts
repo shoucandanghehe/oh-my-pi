@@ -51,6 +51,7 @@ import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, Wid
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { FenceFigure } from "./fence-figure";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
+import { sanitizeDisplayLine } from "../overlays/extensions/display-text";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
 
@@ -341,6 +342,7 @@ export class ToolExecutionComponent extends Container {
 	#imageSpacers: Spacer[] = [];
 	/** The renderer's {@link ToolRenderer.figure} drawing; kept across rebuilds while its language is unchanged, so it redraws in place and its raster survives them. */
 	#figure: FenceFigure | undefined;
+	#mediaIndicators: Text | undefined;
 	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
 	#toolLabel: string;
@@ -1686,6 +1688,23 @@ export class ToolExecutionComponent extends Container {
 			this.#refreshContentText(stateBgKey, stateBgFn);
 		}
 
+		// Audio/video cannot play in the terminal. Keep their markers outside
+		// renderer-owned output so text-only custom and built-in renderers cannot
+		// silently hide attachments, just as image children are handled below.
+		if (this.#mediaIndicators) this.removeChild(this.#mediaIndicators);
+		this.#mediaIndicators = undefined;
+		const mediaIndicators = this.#result?.content
+			.filter(block => block.type === "audio" || block.type === "video")
+			.map(block => {
+				const mimeType = block.mimeType ? sanitizeDisplayLine(block.mimeType) : "";
+				return `[${block.type} attachment${mimeType ? `: ${mimeType}` : ""}]`;
+			})
+			.join("\n");
+		if (mediaIndicators) {
+			this.#mediaIndicators = new Text(theme.fg("toolOutput", mediaIndicators), 1, 0);
+			this.addChild(this.#mediaIndicators);
+		}
+
 		// Handle images (same for both custom and built-in)
 		for (const img of this.#imageComponents) {
 			this.removeChild(img);
@@ -1912,7 +1931,14 @@ export class ToolExecutionComponent extends Container {
 				label: this.#toolLabel,
 				args: this.#args,
 				result: this.#result
-					? { output: this.#getTextOutput(), isError: this.#result.isError, skipped: this.#isBenignSkip() }
+					? {
+							output: this.#getTextOutput(),
+							hasAttachments: this.#result.content.some(
+								block => block.type === "audio" || block.type === "video",
+							),
+							isError: this.#result.isError,
+							skipped: this.#isBenignSkip(),
+						}
 					: undefined,
 				options: this.#renderState,
 			},

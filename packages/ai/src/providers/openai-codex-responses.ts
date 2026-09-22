@@ -33,6 +33,7 @@ import type {
 	CodexCompactionRequestContext,
 	Context,
 	FetchImpl,
+	MediaContent,
 	Model,
 	ProviderSessionState,
 	RawSseEvent,
@@ -5118,9 +5119,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 
 function normalizeInputMessageContent(
 	model: Model<"openai-codex-responses">,
-	content:
-		| string
-		| Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string; url?: string }>,
+	content: string | Array<TextContent | MediaContent>,
 ): ResponseInputContent[] {
 	// gpt-5.x codex rejects reserved Harmony control-token spellings in input
 	// data; escape the transport copy of untrusted user text so ordinary docs or

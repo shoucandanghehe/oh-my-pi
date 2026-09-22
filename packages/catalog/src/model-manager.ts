@@ -9,6 +9,7 @@ import {
 	type Api,
 	type Model,
 	type ModelCost,
+	type InputModality,
 	modelKind,
 	type ModelSpec,
 	type Provider,
@@ -656,9 +657,18 @@ function mergeDynamicModel<TApi extends Api>(
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative = endpointChanged || authority.input;
-	const supportsImage = dynamicInputAuthoritative
-		? dynamicModel.input.includes("image")
-		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const dynamicVendorInput = dynamicModel.vendorInput ?? dynamicModel.input;
+	const existingVendorInput = existingModel.vendorInput ?? existingModel.input;
+	const vendorInput = dynamicInputAuthoritative
+		? dynamicVendorInput
+		: (["text", "image", "audio", "video"] as const).filter(
+				modality => existingVendorInput.includes(modality) || dynamicVendorInput.includes(modality),
+			);
+	const inputModalities = new Set<InputModality>(vendorInput);
+	const input: InputModality[] = ["text"];
+	for (const modality of ["image", "audio", "video"] as const) {
+		if (inputModalities.has(modality)) input.push(modality);
+	}
 	// Providers with authoritative reasoning metadata must not regain a
 	// stale bundled dial after explicitly reporting no reasoning. Others
 	// retain the additive fallback for discovery that omits capabilities.
@@ -697,7 +707,9 @@ function mergeDynamicModel<TApi extends Api>(
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
 		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
-		input: supportsImage ? ["text", "image"] : ["text"],
+		input,
+		vendorInput: [...vendorInput],
+		vendorInputByWireModel: dynamicModel.vendorInputByWireModel ?? existingModel.vendorInputByWireModel,
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output, authority.cost),
@@ -842,13 +854,13 @@ function isModelLike(value: unknown): value is ModelSpec<Api> {
 	return true;
 }
 
-function isModelInputArray(value: unknown): value is ("text" | "image")[] {
+function isModelInputArray(value: unknown): value is InputModality[] {
 	if (!Array.isArray(value) || value.length === 0) {
 		return false;
 	}
 	for (let i = 0; i < value.length; i++) {
 		const item = value[i];
-		if (item !== "text" && item !== "image") {
+		if (item !== "text" && item !== "image" && item !== "audio" && item !== "video") {
 			return false;
 		}
 	}
