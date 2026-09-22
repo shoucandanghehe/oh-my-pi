@@ -9,7 +9,7 @@ import {
 	isNonBlankContext,
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
-import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
+import type { ComputerSafetyCheck, MediaContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import {
@@ -397,7 +397,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			});
 
 			if (resultResult) {
-				const modifiedContent: (TextContent | ImageContent)[] = resultResult.content ?? result.content;
+				const modifiedContent: (TextContent | MediaContent)[] = resultResult.content ?? result.content;
 				const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
 
 				// Effective error state: an explicit handler override wins; otherwise the

@@ -5,6 +5,7 @@ import {
 	applyShakeRegion,
 	collectShakeRegions,
 	DEFAULT_PRUNE_CONFIG,
+	findCutPoint,
 	invalidateMessageCache,
 	isEstimateCacheable,
 	pruneToolOutputs,
@@ -193,5 +194,38 @@ describe("estimate cache invalidation seams", () => {
 		invalidateMessageCache(result as AgentMessage);
 		expect(tokenizer.countMessage(result as AgentMessage)).toBeGreaterThan(before);
 		expect(second.countMessage(result as AgentMessage)).toBeGreaterThan(before);
+	});
+});
+
+describe("media token estimation", () => {
+	test("charges bounded audio/video estimates when selecting a compaction cut point", () => {
+		const older = messageEntry({
+			role: "user",
+			content: "x".repeat(8_000),
+			timestamp: 1,
+		} as AgentMessage);
+		const smallAudio = messageEntry({
+			role: "user",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "a".repeat(64) }],
+			timestamp: 2,
+		} as AgentMessage);
+		const largeAudio = messageEntry({
+			role: "user",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "a".repeat(100_000) }],
+			timestamp: 3,
+		} as AgentMessage);
+
+		// Both payload sizes use the same fixed audio charge; a length-derived
+		// estimate would make the large payload force a later cut.
+		expect(findCutPoint([older, smallAudio], tokenizer, 0, 2, 10_000).firstKeptEntryIndex).toBe(0);
+		expect(findCutPoint([older, largeAudio], tokenizer, 0, 2, 10_000).firstKeptEntryIndex).toBe(0);
+
+		const video = messageEntry({
+			role: "user",
+			content: [{ type: "video", mimeType: "video/mp4", data: "a".repeat(64) }],
+			timestamp: 4,
+		} as AgentMessage);
+		expect(findCutPoint([older, smallAudio], tokenizer, 0, 2, 20_000).firstKeptEntryIndex).toBe(0);
+		expect(findCutPoint([older, video], tokenizer, 0, 2, 20_000).firstKeptEntryIndex).toBe(1);
 	});
 });

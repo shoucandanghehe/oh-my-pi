@@ -10,14 +10,16 @@ provider "zhipu-coding-plan" {
 	thinking-format "zai"
 	class "glm" {
 		thinking-mode "effort"
-		// Vision family and flash >=5.3 accept image input; the /models
-		// listing carries no modality metadata.
+		// Vision family and flash >=5.3 accept image input; flash >=5.3
+		// additionally accepts native video input via the OpenAI-compatible
+		// `video_url` content part; the /models listing carries no modality
+		// metadata.
 		family "vision" {
 			input-modalities "text" "image"
 		}
 		family "flash" {
 			revision ">=5.3" {
-				input-modalities "text" "image"
+				input-modalities "text" "image" "video"
 			}
 		}
 		family "turbo" {

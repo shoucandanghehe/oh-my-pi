@@ -539,7 +539,7 @@ export function findCutPoint(
 	for (let i = endIndex - 1; i >= startIndex; i--) {
 		const entry = entries[i];
 		const message = getMessageFromEntry(entry);
-		if (message) accumulatedTokens += tokenizer.countMessage(message);
+		if (message) accumulatedTokens += tokenizer.countMessage(message) + estimateMediaTokens(message);
 		if (i !== cutPoints[cutPointIndex]) continue;
 		if (accumulatedTokens > keepRecentTokens) break;
 		cutIndex = i;
@@ -832,6 +832,24 @@ interface SummaryWindow {
  * on message boundaries. Only called when the whole conversation does not fit —
  * the common single-window path never pays this per-message sizing pass.
  */
+const AUDIO_TOKEN_ESTIMATE = 8_000;
+const VIDEO_TOKEN_ESTIMATE = 24_000;
+
+/**
+ * Tokenizer.countMessage intentionally only models text and image blocks.
+ * Compaction still needs a bounded charge for lifecycle media so a large
+ * base64 payload cannot distort cut-point selection.
+ */
+function estimateMediaTokens(message: AgentMessage): number {
+	if (!("content" in message) || typeof message.content === "string" || !Array.isArray(message.content)) return 0;
+	let total = 0;
+	for (const block of message.content) {
+		if (block.type === "audio") total += AUDIO_TOKEN_ESTIMATE;
+		else if (block.type === "video") total += VIDEO_TOKEN_ESTIMATE;
+	}
+	return total;
+}
+
 function planSummaryWindows(
 	messages: Message[],
 	tokenizer: Tokenizer,
@@ -1797,14 +1815,20 @@ export async function compact(
 				: previousV2Compaction?.provider === model.provider
 					? previousV2Compaction.replacementHistory
 					: undefined;
-		const remoteHistory = buildOpenAiNativeHistory(
-			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			model,
-			previousReplacementHistory,
-			openAiCompatSupportsImageDetailOriginal(model),
-		);
-		if (remoteHistory.length > 0) {
-			try {
+		let remoteHistoryBuilt = false;
+		try {
+			// History construction runs inside the fallback boundary so a media
+			// block the compact model can't encode (e.g. video on an OpenAI
+			// compact of a video-capable main model) falls back to local
+			// summarization instead of aborting the whole compaction.
+			const remoteHistory = buildOpenAiNativeHistory(
+				(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
+				model,
+				previousReplacementHistory,
+				openAiCompatSupportsImageDetailOriginal(model),
+			);
+			remoteHistoryBuilt = true;
+			if (remoteHistory.length > 0) {
 				const remote = await withAuth(
 					apiKey,
 					key =>
@@ -1825,18 +1849,25 @@ export async function compact(
 				);
 				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
 				usedRemoteCompaction = true;
-			} catch (err) {
-				// A user/session abort is a cancellation, not a remote failure —
-				// swallowing it here would downgrade Esc into "fall back to local
-				// summarization" and keep compaction running on an aborted signal.
-				if (signal?.aborted) throw err;
+			}
+		} catch (err) {
+			// A user/session abort is a cancellation, not a remote failure —
+			// swallowing it here would downgrade Esc into "fall back to local
+			// summarization" and keep compaction running on an aborted signal.
+			if (signal?.aborted) throw err;
+			if (remoteHistoryBuilt) {
 				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
-				logger.warn("OpenAI remote compaction failed", {
+			}
+			logger.warn(
+				remoteHistoryBuilt
+					? "OpenAI remote compaction failed"
+					: "OpenAI remote compaction history construction failed, falling back to local summarization",
+				{
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
 					provider: model.provider,
-				});
-			}
+				},
+			);
 		}
 	}
 

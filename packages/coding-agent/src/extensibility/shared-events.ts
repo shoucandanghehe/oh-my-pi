@@ -14,7 +14,7 @@
  */
 import { type AgentMessage, isNonBlankContext } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation, CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantRetryRecovery, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantRetryRecovery, MediaContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
@@ -384,7 +384,7 @@ export function buildAggregatedToolCallResult(
  */
 export interface ToolResultEventResult {
 	/** Replacement content array (text and images) */
-	content?: (TextContent | ImageContent)[];
+	content?: (TextContent | MediaContent)[];
 	/** Replacement details */
 	details?: unknown;
 	/** Override isError flag */

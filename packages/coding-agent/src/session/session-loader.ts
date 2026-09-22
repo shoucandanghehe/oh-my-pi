@@ -6,7 +6,7 @@ import { BlobStore, isBlobRef, lazyImageDataSync, resolveImageData, resolveImage
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
-import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
+import { isExternalizableMediaPosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import {
 	parseTitleSlotFromContent,
@@ -433,7 +433,7 @@ function hasImageUrl(value: unknown): value is { image_url: string } {
 type BlobReferenceResolver = (data: string, asDataUrl?: boolean) => Promise<string>;
 
 async function resolvePersistedBlobRefs(value: unknown, resolve: BlobReferenceResolver, key?: string): Promise<void> {
-	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
+	if (key !== "frames" && isExternalizableMediaPosition(value, key) && isBlobRef(value.data)) {
 		value.data = await resolve(value.data);
 		return;
 	}

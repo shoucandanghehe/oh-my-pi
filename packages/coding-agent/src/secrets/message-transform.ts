@@ -3,7 +3,7 @@ import type {
 	AnthropicCompactionPayload,
 	AssistantMessage,
 	Context,
-	ImageContent,
+	MediaContent,
 	Message,
 	ProviderPayload,
 	TextContent,
@@ -499,14 +499,14 @@ export function obfuscateNativeReplay<
 
 type UserFacingMessage = Extract<Message, { role: "user" | "developer" | "toolResult" }>;
 
-/** Obfuscate `text` blocks of a content array; image and other blocks pass through. */
+/** Obfuscate `text` blocks of a content array; media blocks pass through. */
 function obfuscateTextBlocks(
 	obfuscator: SecretObfuscator,
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	sharedRegexSecretValues?: ReadonlySet<string>,
-): (TextContent | ImageContent)[] {
+): (TextContent | MediaContent)[] {
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): TextContent | MediaContent => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
 		if (text === block.text) return block;
@@ -516,13 +516,13 @@ function obfuscateTextBlocks(
 	return changed ? result : content;
 }
 
-/** Restore placeholders in `text` blocks of a content array; image and other blocks pass through. */
+/** Restore placeholders in `text` blocks of a content array; media blocks pass through. */
 function deobfuscateTextBlocks(
 	obfuscator: SecretObfuscator,
-	content: (TextContent | ImageContent)[],
-): (TextContent | ImageContent)[] {
+	content: (TextContent | MediaContent)[],
+): (TextContent | MediaContent)[] {
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): TextContent | MediaContent => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.deobfuscate(block.text);
 		if (text === block.text) return block;

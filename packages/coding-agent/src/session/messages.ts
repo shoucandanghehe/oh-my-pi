@@ -50,7 +50,7 @@ import {
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, MediaContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { escapeXmlAttribute, escapeXmlText, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
@@ -660,7 +660,7 @@ function renderSteeringEnvelope(message: string): string {
 	return prompt.render(userInterjectionTemplate, { message });
 }
 
-function getArrayContentText(content: (TextContent | ImageContent)[]): string {
+function getArrayContentText(content: (TextContent | MediaContent)[]): string {
 	let firstText: string | undefined;
 	let textParts: string[] | undefined;
 	for (const part of content) {
@@ -677,14 +677,8 @@ function getArrayContentText(content: (TextContent | ImageContent)[]): string {
 	return textParts === undefined ? (firstText ?? "") : textParts.join("\n");
 }
 
-function getArrayContentImages(content: (TextContent | ImageContent)[]): ImageContent[] {
-	let images: ImageContent[] | undefined;
-	for (const part of content) {
-		if (part.type !== "image") continue;
-		if (images === undefined) images = [];
-		images.push(part);
-	}
-	return images ?? [];
+function getArrayContentMedia(content: (TextContent | MediaContent)[]): MediaContent[] {
+	return content.filter((part): part is MediaContent => part.type !== "text");
 }
 
 function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
@@ -705,8 +699,8 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 
 	const text = getArrayContentText(message.content);
 	if (text.length === 0) return message.role === "user" ? message : userMessage;
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
-	content.push(...getArrayContentImages(message.content));
+	const content: (TextContent | MediaContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
+	content.push(...getArrayContentMedia(message.content));
 	return { ...userMessage, content };
 }
 
@@ -731,15 +725,15 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	return wrappedMessages ?? messages;
 }
 
-/** Result of filtering image blocks out of a `(TextContent | ImageContent)[]` array. */
+/** Result of filtering image blocks out of a `(TextContent | MediaContent)[]` array. */
 interface StripContentResult {
-	content: (TextContent | ImageContent)[];
+	content: (TextContent | MediaContent)[];
 	removed: number;
 }
 
-function stripImagesFromArrayContent(content: (TextContent | ImageContent)[]): StripContentResult {
+function stripImagesFromArrayContent(content: (TextContent | MediaContent)[]): StripContentResult {
 	let removed = 0;
-	const kept: (TextContent | ImageContent)[] = [];
+	const kept: (TextContent | MediaContent)[] = [];
 	for (const part of content) {
 		if (part.type === "image") {
 			removed++;
@@ -789,7 +783,7 @@ function stripImagesFromMessageContent(message: AgentMessage): number {
 			if (typeof message.content === "string") return 0;
 			const { content, removed } = stripImagesFromArrayContent(message.content);
 			if (removed > 0) {
-				// All four roles type `content` as `string | (TextContent | ImageContent)[]`;
+				// All four roles type `content` as `string | (TextContent | MediaContent)[]`;
 				// TypeScript can't narrow the assignment across the union, so cast once.
 				(message as { content: typeof content }).content = content;
 			}
@@ -824,7 +818,7 @@ function stripImagesFromMessageContent(message: AgentMessage): number {
 		case "fileMention": {
 			let removed = 0;
 			for (const file of message.files) {
-				if (file.image) {
+				if (file.image?.type === "image") {
 					file.image = undefined;
 					removed++;
 				}
@@ -857,7 +851,7 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 		if (msg.role !== "user" && msg.role !== "developer" && msg.role !== "toolResult") continue;
 		const content = msg.content;
 		if (!Array.isArray(content) || !content.some(part => part.type === "image")) continue;
-		const replaced: (TextContent | ImageContent)[] = [];
+		const replaced: (TextContent | MediaContent)[] = [];
 		for (const part of content) {
 			if (part.type !== "image") {
 				replaced.push(part);
@@ -948,7 +942,7 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	};
 }
 
-function customMessageContentToLlmContent(content: CustomMessage["content"]): (TextContent | ImageContent)[] {
+function customMessageContentToLlmContent(content: CustomMessage["content"]): (TextContent | MediaContent)[] {
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }
 
@@ -956,8 +950,8 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 	if (!isCustomMessageContent(message.content)) return undefined;
 	if (typeof message.content === "string") return undefined;
 	const textBlocks = message.content.filter((content): content is TextContent => content.type === "text");
-	const imageBlocks = message.content.filter((content): content is ImageContent => content.type === "image");
-	if (imageBlocks.length === 0) return undefined;
+	const mediaBlocks = message.content.filter((content): content is MediaContent => content.type !== "text");
+	if (mediaBlocks.length === 0) return undefined;
 
 	const converted: Message[] = [];
 	if (textBlocks.length > 0) {
@@ -968,9 +962,10 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
 			timestamp: message.timestamp,
 		});
 	}
+	const mediaLabel = mediaBlocks.every(block => block.type === "image") ? "Images" : "Media";
 	converted.push({
 		role: "user",
-		content: [{ type: "text", text: `Images attached to ${message.customType}.` }, ...imageBlocks],
+		content: [{ type: "text", text: `${mediaLabel} attached to ${message.customType}.` }, ...mediaBlocks],
 		attribution: message.attribution,
 		timestamp: message.timestamp,
 	});
@@ -1060,19 +1055,16 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 				},
 			];
 		case "fileMention": {
-			// One `fileMention` can mix `@notes.md` (text) and `@screenshot.png` (image)
-			// in the same turn (`generateFileMentionMessages` packs every `@…` into a
-			// single message). Splitting by image presence keeps text-only mentions on
-			// the higher-priority `developer` slot while routing image attachments
-			// through `user`, the only Responses content slot that legitimately accepts
-			// `input_image` (Codex chatgpt.com /codex/responses rejects everything else
-			// with `Invalid value: 'input_image'`, #3443).
+			// One `fileMention` can mix text files with media attachments.
+			// Text-only mentions stay on the higher-priority `developer` slot,
+			// while attachments use `user`, the only Responses content slot that
+			// legitimately accepts media such as `input_image` (#3443).
 			const wrap = (file: FileMentionMessage["files"][number]): string => {
 				const inner = file.content ? `\n${file.content}\n` : "\n";
 				return `<file path="${file.path}">${inner}</file>`;
 			};
 			const textFiles = m.files.filter(file => !file.image);
-			const imageFiles = m.files.filter(file => file.image);
+			const mediaFiles = m.files.filter(file => file.image);
 			const out: Message[] = [];
 			if (textFiles.length > 0) {
 				out.push({
@@ -1082,11 +1074,11 @@ function convertOne(m: AgentMessage, interruptedNext: boolean): Message[] {
 					timestamp: m.timestamp,
 				});
 			}
-			if (imageFiles.length > 0) {
-				const content: (TextContent | ImageContent)[] = [
-					{ type: "text" as const, text: imageFiles.map(wrap).join("\n") },
+			if (mediaFiles.length > 0) {
+				const content: (TextContent | MediaContent)[] = [
+					{ type: "text" as const, text: mediaFiles.map(wrap).join("\n") },
 				];
-				for (const file of imageFiles) {
+				for (const file of mediaFiles) {
 					if (file.image) content.push(file.image);
 				}
 				out.push({

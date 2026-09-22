@@ -65,6 +65,8 @@ import type {
 	MessageAttribution,
 	Model,
 	OAuthAccountIdentity,
+	AudioContent,
+	MediaContent,
 	ProviderResponseMetadata,
 	ProviderSessionState,
 	ResetCreditAccountStatus,
@@ -80,6 +82,7 @@ import type {
 	ToolResultMessage,
 	UsageReport,
 	UserMessage,
+	VideoContent,
 } from "@oh-my-pi/pi-ai";
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -1910,6 +1913,7 @@ export class AgentSession implements SettingsScope {
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
+			activeRouteModel: () => this.#models.activeRouteModel,
 			sessionId: () => this.sessionId,
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			transformContext: (messages, signal) => this.#transformContext(messages, signal),
@@ -6687,7 +6691,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
-		return normalizeModelContextImages(images, { model: this.model });
+		return normalizeModelContextImages(images, { model: this.#models.activeRouteModel ?? this.model });
 	}
 
 	/**
@@ -6887,6 +6891,7 @@ export class AgentSession implements SettingsScope {
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
+				attachments: options?.attachments,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -6910,7 +6915,10 @@ export class AgentSession implements SettingsScope {
 		const attachmentSourceNotices = this.#createAttachmentSourceNotices(options?.images, submittedAt);
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		const userContent: (TextContent | MediaContent)[] = [{ type: "text", text: expandedText }];
+		if (options?.attachments?.length) {
+			userContent.push(...options.attachments);
+		}
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
 		}
@@ -6944,6 +6952,7 @@ export class AgentSession implements SettingsScope {
 					images: normalizedImages,
 					descriptionNotice: imageDescriptionNotice,
 				},
+				attachments: options?.attachments,
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -7151,6 +7160,7 @@ export class AgentSession implements SettingsScope {
 		if (!first) return undefined;
 		const text: string[] = [];
 		const images: ImageContent[] = [];
+		const attachments: MediaContent[] = [];
 		for (const message of userMessages) {
 			if (!("content" in message)) continue;
 			if (typeof message.content === "string") {
@@ -7161,6 +7171,7 @@ export class AgentSession implements SettingsScope {
 			for (const part of message.content) {
 				if (part.type === "text") parts.push(part.text);
 				else if (part.type === "image") images.push(part);
+				else if (part.type === "audio" || part.type === "video") attachments.push(part);
 			}
 			text.push(parts.join(""));
 		}
@@ -7171,6 +7182,7 @@ export class AgentSession implements SettingsScope {
 			this.#promptGeneration,
 			signal,
 			"queued",
+			attachments.length > 0 ? attachments : undefined,
 		);
 	};
 
@@ -7188,6 +7200,7 @@ export class AgentSession implements SettingsScope {
 		generation: number,
 		signal: AbortSignal | undefined,
 		origin: "direct" | "queued",
+		attachments?: MediaContent[],
 	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
 		const sessionGeneration = this.#sessionGeneration;
 		const alreadyDisposing = this.#isDisposed && origin === "direct";
@@ -7203,7 +7216,12 @@ export class AgentSession implements SettingsScope {
 			const sourceBase = this.#tools.baseSystemPrompt;
 			const basePreparation = await this.#tools.buildSystemPromptForAgentStart(prompt, isCurrent, signal);
 			if (!isCurrent()) return cancelled;
-			const result = await this.#extensionRunner?.emitBeforeAgentStart(prompt, images, basePreparation.systemPrompt);
+			const result = await this.#extensionRunner?.emitBeforeAgentStart(
+				prompt,
+				images,
+				basePreparation.systemPrompt,
+				attachments,
+			);
 			if (!isCurrent()) return cancelled;
 			// Overrides are opaque replacements, not string patches. Re-run only policy preparation
 			// against the winning base; discard this attempt's returned context and staged memory.
@@ -7270,7 +7288,7 @@ export class AgentSession implements SettingsScope {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "attachments"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
@@ -7392,6 +7410,7 @@ export class AgentSession implements SettingsScope {
 				generation,
 				setupAbort.signal,
 				"direct",
+				options?.attachments,
 			);
 			const preparedMessages = preparation.commit();
 			if (!preparedMessages) return false;
@@ -7704,7 +7723,7 @@ export class AgentSession implements SettingsScope {
 		// enqueues as a user-role message) and place the developer message
 		// directly on the follow-up queue.
 		const normalizedImages = await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		const content: (TextContent | MediaContent)[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
@@ -7761,11 +7780,13 @@ export class AgentSession implements SettingsScope {
 			timestamp?: number;
 			attribution?: MessageAttribution;
 			preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined };
+			attachments?: MediaContent[];
 		},
 	): Promise<void> {
 		const attribution = options?.attribution ?? "user";
 		const timestamp = options?.timestamp;
 		const preprocessed = options?.preprocessed;
+		const attachments = options?.attachments;
 		// Captured before any await below so the aside branch can detect a
 		// newSession()/switchSession() that completed while normalization/vision
 		// description was in flight and drop a record that would otherwise land in a
@@ -7784,7 +7805,10 @@ export class AgentSession implements SettingsScope {
 		// vision-model request for the same attachment.
 		const attachmentSourceNotices = this.#createAttachmentSourceNotices(images, timestamp ?? Date.now());
 		const normalizedImages = preprocessed ? preprocessed.images : await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		const content: (TextContent | MediaContent)[] = [{ type: "text", text }];
+		if (attachments?.length) {
+			content.push(...attachments);
+		}
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
@@ -8272,43 +8296,48 @@ export class AgentSession implements SettingsScope {
 	 * an idle session instead starts a turn, since there is no live run to inject into.
 	 */
 	async sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
+		content: string | (TextContent | MediaContent)[],
 		options?: SendUserMessageOptions,
 	): Promise<void> {
-		// Normalize content to text string + optional images
+		// Normalize content to text string + optional images and media attachments
 		let text: string;
 		let images: ImageContent[] | undefined;
+		let attachments: (AudioContent | VideoContent)[] | undefined;
 
 		if (typeof content === "string") {
 			text = content;
 		} else {
 			const textParts: string[] = [];
 			images = [];
+			attachments = [];
 			for (const part of content) {
 				if (part.type === "text") {
 					textParts.push(part.text);
-				} else {
+				} else if (part.type === "image") {
 					images.push(part);
+				} else {
+					attachments.push(part);
 				}
 			}
 			text = textParts.join("\n");
 			if (images.length === 0) images = undefined;
+			if (attachments.length === 0) attachments = undefined;
 		}
 
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution });
+				await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution, attachments });
 				return;
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution });
+			await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution, attachments });
 			return;
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution });
+			await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution, attachments });
 			return;
 		}
 
@@ -8323,6 +8352,7 @@ export class AgentSession implements SettingsScope {
 			attribution: options?.attribution,
 			expandPromptTemplates: false,
 			images,
+			attachments,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 		});
 	}

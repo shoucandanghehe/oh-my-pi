@@ -11,7 +11,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
@@ -407,9 +407,9 @@ export function outputMeta(): OutputMetaBuilder {
  * Append output notice to tool result content if meta is present.
  */
 function appendOutputNotice(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	meta: OutputMeta | undefined,
-): (TextContent | ImageContent)[] {
+): (TextContent | MediaContent)[] {
 	const notice = formatOutputNotice(meta);
 	if (!notice) return content;
 
@@ -555,7 +555,7 @@ async function spillLargeResultToArtifact(
 			});
 
 	// Replace text blocks with single truncated block, keep images
-	const newContent: (TextContent | ImageContent)[] = [];
+	const newContent: (TextContent | MediaContent)[] = [];
 	for (const block of result.content) {
 		if (block.type !== "text") {
 			newContent.push(block);

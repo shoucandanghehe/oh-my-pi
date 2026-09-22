@@ -832,7 +832,7 @@ describe("OpenCode provider discovery", () => {
 				contextWindow: 1_000_000,
 				maxTokens: 131_072,
 				reasoning: true,
-				input: ["text", "image"],
+				input: ["text", "image", "video"],
 			});
 			if (!model) throw new Error("Gateway-first model was not resolved");
 			expect(getSupportedEfforts(model)).toEqual([

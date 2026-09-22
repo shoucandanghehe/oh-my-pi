@@ -371,7 +371,7 @@ describe("ModelBrowser native model metadata", () => {
 
 		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
 		// Tabs and newlines are flattened so the blurb stays one detail row.
-		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
+		expect(detail).toMatch(/Fast {2,}agentic coder$/);
 	});
 
 	test("models without upstream metadata render the plain detail line", () => {

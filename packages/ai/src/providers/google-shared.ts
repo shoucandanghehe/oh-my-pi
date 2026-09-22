@@ -40,7 +40,7 @@ import type {
 	ThinkingLevel,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
 	Content,
@@ -189,6 +189,8 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				});
 			} else {
 				const supportsImages = model.input.includes("image");
+				const supportsAudio = model.input.includes("audio");
+				const supportsVideo = model.input.includes("video");
 				const parts: Part[] = [];
 				let omittedImages = false;
 				for (const item of msg.content) {
@@ -196,15 +198,25 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
-					} else if (supportsImages) {
-						parts.push(convertGoogleImagePart(item));
-					} else {
-						omittedImages = true;
+						continue;
 					}
+					if (item.type === "image") {
+						if (supportsImages) {
+							parts.push(convertGoogleImagePart(item));
+						} else {
+							omittedImages = true;
+						}
+						continue;
+					}
+					if ((item.type === "audio" && supportsAudio) || (item.type === "video" && supportsVideo)) {
+						parts.push({ inlineData: { mimeType: item.mimeType, data: item.data } });
+						continue;
+					}
+					throw new AIError.ValidationError(
+						`Google ${model.api} cannot encode ${item.type}; routed media preflight must reject it`,
+					);
 				}
-				if (omittedImages) {
-					parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
-				}
+				if (omittedImages) parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
 				if (parts.length === 0) continue;
 				contents.push({
 					role: "user",
@@ -277,31 +289,31 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				parts,
 			});
 		} else if (msg.role === "toolResult") {
-			// Extract text and image content
-			const supportsImages = model.input.includes("image");
+			// Tool-result audio/video is not proven on any Google route.
+			const supportsImages = (model.toolResultInput ?? model.input).includes("image");
+			const unsupportedMedia = msg.content.find(c => c.type === "audio" || c.type === "video");
+			if (unsupportedMedia) {
+				throw new AIError.ValidationError(
+					`Google tool results cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+				);
+			}
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map(c => c.text).join("\n");
 			const imageContent = supportsImages ? msg.content.filter((c): c is ImageContent => c.type === "image") : [];
-			const omittedImages = !supportsImages && msg.content.some((c): c is ImageContent => c.type === "image");
+			const omittedImages = !supportsImages && msg.content.some(c => c.type === "image");
 
 			const hasText = textResult.length > 0;
 			const hasImages = imageContent.length > 0;
-
-			// Gemini 3+ models support multimodal function responses with images nested inside
-			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
-			// Antigravity also accept this shape. Gemini < 3 still needs a separate user image turn.
 			const modelSupportsMultimodalFunctionResponse = model.compat.multimodalFunctionResponse;
-
-			// Use "output" key for success, "error" key for errors as per SDK documentation
 			const responseValue = omittedImages
-				? [hasText ? textResult.toWellFormed() : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
+				? joinTextWithImagePlaceholder(textResult, true)
 				: hasText
 					? textResult.toWellFormed()
 					: hasImages
 						? "(see attached image)"
 						: "";
 
-			const imageParts = imageContent.map(convertGoogleImagePart);
+			const imageParts: Part[] = imageContent.map(image => convertGoogleImagePart(image));
 
 			const includeId = model.compat.supportsFunctionPartId;
 			const emittedName = emittedToolCallNames.get(msg.toolCallId);
@@ -326,7 +338,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				});
 			}
 
-			// For Gemini < 3, buffer images for a separate user message after the functionResponse turn
+			// For Gemini < 3, buffer media for a separate user message after the functionResponse turn.
 			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
 				pendingToolImageParts.push({ text: "Tool result image:" }, ...imageParts);
 			}

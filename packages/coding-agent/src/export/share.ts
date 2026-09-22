@@ -20,7 +20,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
@@ -50,6 +50,8 @@ const TEXT_CAPS = [32_768, 8_192, 2_048, 512];
 /** 1×1 transparent GIF; stands in for stripped data-URL images so <img> tags stay valid. */
 const BLANK_IMAGE_DATA_URL = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
 const IMAGE_OMITTED_TEXT = "[image omitted from share]";
+const AUDIO_OMITTED_TEXT = "[audio omitted from share]";
+const VIDEO_OMITTED_TEXT = "[video omitted from share]";
 
 export type ShareStore = "blob" | "gist";
 
@@ -99,7 +101,7 @@ export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOpt
  * Redact secrets from a share snapshot. A share blob leaves the machine, so
  * every text-bearing field is rewritten through the obfuscator. The walk is
  * typed end-to-end (no generic object traversal): inline image bytes are left
- * intact (size-trimmed later by {@link stripImagePayloads}) and opaque,
+ * intact (size-trimmed later by {@link stripMediaPayloads}) and opaque,
  * untyped payloads we cannot redact field-by-field (`compaction.preserveData`,
  * extension `details`/`data`, `mode_change.data`, structured output schemas)
  * are dropped so they cannot leak.
@@ -124,7 +126,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 		if (!isRecord(value)) return;
 		for (const item of Object.values(value)) addJsonStrings(item);
 	};
-	const addContent = (content: string | (TextContent | ImageContent)[]): void => {
+	const addContent = (content: string | (TextContent | MediaContent)[]): void => {
 		if (typeof content === "string") {
 			add(content);
 			return;
@@ -147,7 +149,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 			case "custom":
 			case "hookMessage":
 			case "toolResult":
-				addContent(message.content as string | (TextContent | ImageContent)[]);
+				addContent(message.content as string | (TextContent | MediaContent)[]);
 				return;
 			case "assistant":
 				add(message.errorMessage);
@@ -347,9 +349,9 @@ function redactShareEntry(
 
 function redactShareContent(
 	o: SecretObfuscator,
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | MediaContent)[],
 	sharedRegexSecretValues: ReadonlySet<string>,
-): string | (TextContent | ImageContent)[] {
+): string | (TextContent | MediaContent)[] {
 	if (typeof content === "string") return o.obfuscate(content, sharedRegexSecretValues);
 	return content.map(block =>
 		block.type === "text" ? { ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) } : block,
@@ -401,7 +403,7 @@ function redactShareMessage(
 			return {
 				...message,
 				details: undefined,
-				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | ImageContent)[],
+				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | MediaContent)[],
 			};
 		case "assistant":
 			// Drop opaque provider-replay state (encrypted reasoning / native history) the viewer
@@ -466,7 +468,7 @@ function redactShareMessage(
 				blocks:
 					message.blocks === undefined
 						? undefined
-						: (redactShareContent(o, message.blocks, sharedRegexSecretValues) as (TextContent | ImageContent)[]),
+						: (redactShareContent(o, message.blocks, sharedRegexSecretValues) as (TextContent | MediaContent)[]),
 			};
 		case "fileMention":
 			return {
@@ -528,7 +530,7 @@ export async function sealToFit(key: CryptoKey, data: SessionData, maxBytes: num
 
 	// Work on a deep copy; the caller may re-fit the original at another budget.
 	const working = structuredClone(data);
-	stripImagePayloads(working);
+	stripMediaPayloads(working);
 	sealed = await sealSessionData(key, working);
 	if (sealed.byteLength <= maxBytes) return { sealed, truncated: true };
 
@@ -564,16 +566,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
-/** Replace inline image payloads (image blocks + data: URLs) with tiny placeholders, in place. */
-function stripImagePayloads(value: unknown): void {
+/** Replace inline media payloads (image/audio/video blocks + data: URLs) with tiny placeholders, in place. */
+function stripMediaPayloads(value: unknown): void {
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
 			const item: unknown = value[i];
-			if (isRecord(item) && item.type === "image" && typeof item.data === "string" && item.data.length > 1024) {
-				value[i] = { type: "text", text: IMAGE_OMITTED_TEXT };
+			if (
+				isRecord(item) &&
+				(item.type === "image" || item.type === "audio" || item.type === "video") &&
+				typeof item.data === "string" &&
+				item.data.length > 1024
+			) {
+				const placeholder =
+					item.type === "image"
+						? IMAGE_OMITTED_TEXT
+						: item.type === "audio"
+							? AUDIO_OMITTED_TEXT
+							: VIDEO_OMITTED_TEXT;
+				value[i] = { type: "text", text: placeholder };
 				continue;
 			}
-			stripImagePayloads(item);
+			stripMediaPayloads(item);
 		}
 		return;
 	}
@@ -584,7 +597,7 @@ function stripImagePayloads(value: unknown): void {
 			if (v.length > 1024 && v.startsWith("data:")) value[k] = BLANK_IMAGE_DATA_URL;
 			continue;
 		}
-		stripImagePayloads(v);
+		stripMediaPayloads(v);
 	}
 }
 

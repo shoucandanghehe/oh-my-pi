@@ -62,7 +62,9 @@ import type {
 	ChatCompletionChunk,
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
+	ChatCompletionContentPartInputAudio,
 	ChatCompletionContentPartText,
+	ChatCompletionContentPartVideo,
 	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
 	ChatCompletionTool,
@@ -103,6 +105,7 @@ import {
 	type OpenAIPromptCacheOptions,
 	type OpenAIRequestSetup,
 	type OpenAIStrictToolsState,
+	openAIAudioFormat,
 	parseAzureDeploymentNameMap,
 	resolveOpenAICompatPolicy,
 	resolveOpenAICompletionsOutputClamp,
@@ -2210,17 +2213,19 @@ export function convertMessages(
 				});
 			} else {
 				const supportsImages = isOpenAICompletionsVisionSupported(model);
+				const supportsAudio = model.input.includes("audio");
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
-						content.push({
-							type: "text",
-							text,
-						} satisfies ChatCompletionContentPartText);
-					} else if (supportsImages) {
+						content.push({ type: "text", text } satisfies ChatCompletionContentPartText);
+					} else if (item.type === "image") {
+						if (!supportsImages) {
+							omittedImages = true;
+							continue;
+						}
 						content.push({
 							type: "image_url",
 							image_url: {
@@ -2229,16 +2234,34 @@ export function convertMessages(
 								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
 							},
 						} satisfies ChatCompletionContentPartImage);
+					} else if (item.type === "audio") {
+						const format = supportsAudio ? openAIAudioFormat(item.mimeType) : undefined;
+						if (!format) {
+							throw new AIError.ValidationError(`Unsupported OpenAI Chat audio input: ${item.mimeType}`);
+						}
+						content.push({
+							type: "input_audio",
+							input_audio: { data: item.data, format },
+						} satisfies ChatCompletionContentPartInputAudio);
+					} else if (item.type === "video") {
+						if (!model.input.includes("video")) {
+							throw new AIError.ValidationError(`Unsupported OpenAI Chat video input: ${item.mimeType}`);
+						}
+						content.push({
+							type: "video_url",
+							video_url: {
+								url: `data:${item.mimeType};base64,${item.data}`,
+							},
+						} satisfies ChatCompletionContentPartVideo);
 					} else {
-						omittedImages = true;
+						throw new AIError.ValidationError("OpenAI Chat Completions has no video input encoder");
 					}
 				}
-				if (omittedImages) {
+				if (omittedImages)
 					content.push({
 						type: "text",
 						text: NON_VISION_IMAGE_PLACEHOLDER,
 					} satisfies ChatCompletionContentPartText);
-				}
 				if (content.length === 0) continue;
 				params.push({
 					role: "user",
@@ -2493,34 +2516,36 @@ export function convertMessages(
 			}
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
-			// Batch consecutive tool results and collect all images
-			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			// Batch consecutive tool results and collect all supported media.
+			const mediaBlocks: ChatCompletionContentPartImage[] = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
 				const toolMsg = transformedMessages[j] as ToolResultMessage;
 
-				// Extract text and image content
+				// Extract text and media content.
 				const textResult = toolMsg.content
 					.filter(c => c.type === "text")
 					.map(c => (c as TextContent).text)
 					.join("\n");
-				const supportsImages = isOpenAICompletionsVisionSupported(model);
+				const supportsImages =
+					isOpenAICompletionsVisionSupported(model) && (model.toolResultInput ?? model.input).includes("image");
 				const hasImages = toolMsg.content.some(c => c.type === "image");
+				const unsupportedMedia = toolMsg.content.find(c => c.type === "audio" || c.type === "video");
+				if (unsupportedMedia) {
+					throw new AIError.ValidationError(
+						`OpenAI Chat tool results cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+					);
+				}
 				const omittedImages = hasImages && !supportsImages;
 
-				// Always send tool result with text (or placeholder if only images)
-				const hasText = textResult.length > 0;
+				// Always send tool result text plus any explicit media omission placeholder.
 				const remappedToolCallId = consumeToolCallId(toolMsg.toolCallId);
 				const resolvedToolCallId =
 					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
-				const toolResultContent = omittedImages
-					? joinTextWithImagePlaceholder(textResult, true)
-					: hasText
-						? textResult
-						: hasImages
-							? "(see attached image)"
-							: "";
+				const toolResultContent = (
+					omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult
+				).toWellFormed();
 				const toolResultMsg: OpenAICompletionsToolMessageParam = {
 					role: "tool",
 					content: toolResultContent.toWellFormed(),
@@ -2531,24 +2556,22 @@ export function convertMessages(
 				}
 				params.push(toolResultMsg);
 
-				if (hasImages && supportsImages) {
-					for (const block of toolMsg.content) {
-						if (block.type === "image") {
-							imageBlocks.push({
-								type: "image_url",
-								image_url: {
-									url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
-								},
-							});
-						}
+				for (const block of toolMsg.content) {
+					if (block.type === "image" && supportsImages) {
+						mediaBlocks.push({
+							type: "image_url",
+							image_url: {
+								url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
+							},
+						});
 					}
 				}
 			}
 
 			i = j - 1;
 
-			// After all consecutive tool results, add a single user message with all images
-			if (imageBlocks.length > 0) {
+			// After all consecutive tool results, add a single user message with all supported media.
+			if (mediaBlocks.length > 0) {
 				if (compat.requiresAssistantAfterToolResult) {
 					params.push({
 						role: "assistant",
@@ -2563,7 +2586,7 @@ export function convertMessages(
 							type: "text",
 							text: "Attached image(s) from tool result:",
 						},
-						...imageBlocks,
+						...mediaBlocks,
 					],
 				});
 				lastRole = "user";

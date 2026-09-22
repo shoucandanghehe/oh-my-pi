@@ -36,7 +36,7 @@
  */
 import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
-import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type { Api, InputModality, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { resolveModelPolicy } from "./resolve";
 import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
 import { collapseVariantId, collapseVocabulary, stripThinkingVariantSuffix } from "./taxonomy";
@@ -914,7 +914,28 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			if (family.suppressWhenOff) thinking.suppressWhenOff = true;
 		}
 
-		const input: ("text" | "image")[] = [];
+		const vendorInputByWireModel = Object.fromEntries(
+			rawPresent.map((id, index) => {
+				const spec = memberSpecs[index];
+				return [id, [...(spec.vendorInput ?? spec.input)]];
+			}),
+		);
+		// Preserve-absent effort routes target a backing id discovery did not
+		// return (e.g. a bare-only family that keeps the absent -thinking
+		// target). Seed those routed ids from the primary present member so a
+		// selected effort does not resolve to an empty capability set and drop
+		// supported media.
+		const primaryVendorInput = [...(memberSpecs[0].vendorInput ?? memberSpecs[0].input)];
+		for (const effortKey in routing) {
+			const target = routing[effortKey as Effort | "off"];
+			if (target !== undefined && !(target in vendorInputByWireModel)) {
+				vendorInputByWireModel[target] = [...primaryVendorInput];
+			}
+		}
+
+		const input: InputModality[] = [];
+		if (memberSpecs.some(spec => spec.input.includes("audio"))) input.push("audio");
+		if (memberSpecs.some(spec => spec.input.includes("video"))) input.push("video");
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
 		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
 
@@ -936,6 +957,8 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 			...(cursorMaxMode === undefined ? {} : { cursorMaxMode }),
 			...(cursorMaxModeRoutes === undefined ? {} : { cursorMaxModeRoutes }),
+			vendorInput: [...(firstMember.vendorInput ?? firstMember.input)],
+			vendorInputByWireModel,
 		};
 		// The default wire id is the family's declared `defaultMember` when live,
 		// else the highest-priority live member. Omitted when it equals the
@@ -949,6 +972,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 				: undefined;
 		const defaultWireId = preferredDefault ?? rawPresent.find(id => !retired?.has(id)) ?? rawPresent[0];
 		if (defaultWireId === undefined) continue;
+		const defaultVendorInput = vendorInputByWireModel[defaultWireId];
+		collapsed.input = [...defaultVendorInput];
+		collapsed.vendorInput = [...defaultVendorInput];
 		if (defaultWireId === family.id) {
 			if (usedAbsentEffortRoute) {
 				collapsed.requestModelId = defaultWireId;

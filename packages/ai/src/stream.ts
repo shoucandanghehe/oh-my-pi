@@ -20,6 +20,7 @@ import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
+import { validateContextMedia } from "./media-input";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -917,9 +918,24 @@ export function stream<TApi extends Api>(
 	if (model.resolveHeaders) {
 		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}
-	if (!model.requiresGlyphTokenization) {
-		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+	const directOptions = options as
+		| {
+				effort?: Effort;
+				reasoning?: Effort;
+				requestModelId?: string;
+				chatModelUid?: string;
+				wireModelId?: string;
+		  }
+		| undefined;
+	const routedModel = validateContextMedia(
+		model,
+		context,
+		directOptions?.effort ?? directOptions?.reasoning,
+		directOptions?.requestModelId ?? directOptions?.chatModelUid ?? directOptions?.wireModelId,
+	);
+	if (!routedModel.requiresGlyphTokenization) {
+		return withThinkingLoopGuard(routedModel, options, opts =>
+			withProviderInFlightLimit(routedModel, opts, () => streamDispatch(routedModel, context, opts)),
 		);
 	}
 	const codec = applyGlyphCodec(context);
@@ -927,8 +943,8 @@ export function stream<TApi extends Api>(
 	const wireOptions: OptionsForApi<TApi> | undefined =
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
-		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+		withThinkingLoopGuard(routedModel, wireOptions, opts =>
+			withProviderInFlightLimit(routedModel, opts, () => streamDispatch(routedModel, codec.context, opts)),
 		),
 	);
 }
@@ -1495,8 +1511,23 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
-	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, sessionOptions);
+	const directOptions = options as
+		| {
+				effort?: Effort;
+				reasoning?: Effort;
+				requestModelId?: string;
+				chatModelUid?: string;
+				wireModelId?: string;
+		  }
+		| undefined;
+	const routedModel = validateContextMedia(
+		model,
+		context,
+		directOptions?.effort ?? directOptions?.reasoning,
+		directOptions?.requestModelId ?? directOptions?.chatModelUid ?? directOptions?.wireModelId,
+	);
+	if (!routedModel.requiresGlyphTokenization) {
+		return streamSimpleWithAnthropicCacheRefresh(routedModel, context, sessionOptions);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = sessionOptions.cursorExecHandlers ?? sessionOptions.execHandlers;
@@ -1509,7 +1540,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(routedModel, codec.context, wireOptions));
 }
 
 /**

@@ -394,7 +394,7 @@ describe("generated model policies", () => {
 		}
 	});
 
-	it("pins zai glm-5.3-flash to the 1M tier and restores its native image input", () => {
+	it("pins zai glm-5.3-flash to the 1M tier and restores its native image and video input", () => {
 		const models = [
 			createSpec({
 				id: "glm-5.3-flash",
@@ -416,8 +416,12 @@ describe("generated model policies", () => {
 			expect(model.contextWindow).toBe(1_000_000);
 			expect(model.maxTokens).toBe(131_072);
 			// Natively multimodal despite the missing `v` marker; upstream
-			// metadata reports the flash SKU as text-only.
-			expect(model.input).toEqual(["text", "image"]);
+			// metadata reports the flash SKU as text-only. Video rides the
+			// OpenAI-compatible `video_url` part, so only transports with a
+			// video encoder keep the modality in the effective capability set.
+			expect(model.input).toEqual(
+				model.api === "openai-completions" ? ["text", "image", "video"] : ["text", "image"],
+			);
 			// Same mandatory low/high/max ladder as the GLM-5.3 base line.
 			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 			expect(model.thinking?.requiresEffort).toBe(true);
@@ -497,6 +501,19 @@ describe("generated model policies", () => {
 		for (const [id, contextWindow] of windows) {
 			expect(resolved.models.find(model => model.id === id)?.contextWindow).toBe(contextWindow);
 		}
+	});
+
+	it("restores Gemini 3.8 Flash native audio and video input", () => {
+		const model = buildGenerated(
+			createSpec({
+				id: "gemini-3.8-flash",
+				api: "google-generative-ai",
+				provider: "google",
+			}),
+		);
+
+		expect(model.vendorInput).toEqual(["text", "image", "audio", "video"]);
+		expect(model.input).toEqual(["text", "image", "audio", "video"]);
 	});
 
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {

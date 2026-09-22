@@ -1113,6 +1113,8 @@ export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	model?: string;
 }
 
+export type InputModality = "text" | "image" | "audio" | "video";
+
 /** Per-million-token rates for one model pricing tier. */
 export interface TokenCost {
 	input: number;
@@ -1176,6 +1178,24 @@ export type ModelTokenizer =
 	| "deepseek-v3"
 	| "kimi-k2"
 	| "glm5";
+/** A concrete media form that OMP can serialize for one request position. */
+export interface SupportedMediaForm {
+	modality: "audio" | "video";
+	mimeTypes: readonly string[];
+	wireShape: string;
+	/** Provider wire format after MIME normalization, when the wire uses one. */
+	normalizedFormat?: string;
+}
+
+/** Exact capability evidence and effective encoders selected for one wire route. */
+export interface ResolvedModelRoute {
+	wireModelId: string;
+	vendorInput: readonly InputModality[];
+	input: readonly InputModality[];
+	toolResultInput: readonly InputModality[];
+	userMediaForms: readonly SupportedMediaForm[];
+	toolResultMediaForms: readonly SupportedMediaForm[];
+}
 
 /** One account's discovered entitlements on a model; see {@link Model.accountAccess}. */
 export interface ModelAccountAccess {
@@ -1250,7 +1270,13 @@ export interface Model<TApi extends Api = Api> {
 	 * the consumer's fallback policy.
 	 */
 	tokenizer?: ModelTokenizer;
-	input: ("text" | "image")[];
+	input: InputModality[];
+	/** Trusted vendor/discovery evidence for the default wire route. Built models always materialize it. */
+	vendorInput?: InputModality[];
+	/** Effective modalities accepted specifically inside tool results. Built models always materialize it. */
+	toolResultInput?: InputModality[];
+	/** Trusted evidence keyed by exact routed wire model for collapsed families. */
+	vendorInputByWireModel?: Readonly<Record<string, readonly InputModality[]>>;
 	/**
 	 * Decoder family used for image inputs when it has narrower format support
 	 * than OMP's general image pipeline. `stb` local backends reject WebP.
@@ -1432,7 +1458,16 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "requiresToolResultImageHoisting"
 	| "supportsAssistantPrefill"
 	| "supportsComputerUseConfig"
+	| "vendorInput"
+	| "toolResultInput"
+	| "vendorInputByWireModel"
 > {
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
+	/**
+	 * Optional explicit vendor evidence. Authored `input` remains accepted for
+	 * compatibility and is used as evidence when this field is absent.
+	 */
+	vendorInput?: InputModality[];
+	vendorInputByWireModel?: Readonly<Record<string, readonly InputModality[]>>;
 }

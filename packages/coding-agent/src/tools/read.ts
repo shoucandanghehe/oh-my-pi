@@ -15,7 +15,7 @@ import type {
 	ToolSpeculationExecutionContext,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
-import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
+import { completeSimple, type ImageContent, type MediaContent, type TextContent } from "@oh-my-pi/pi-ai";
 import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,
@@ -1034,7 +1034,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
-		const content: Array<TextContent | ImageContent> = [];
+		const content: Array<TextContent | MediaContent> = [];
 		const displayReadTargets: string[] = [];
 		const displayReadTargetLinks: Array<string | null> = [];
 		let pendingText = notice;

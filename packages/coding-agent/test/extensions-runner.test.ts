@@ -9,7 +9,7 @@ import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1330,7 +1330,7 @@ describe("ExtensionRunner", () => {
 			}),
 		};
 
-		const firstText = (result: { content: readonly (TextContent | ImageContent)[] }): string | undefined => {
+		const firstText = (result: { content: readonly (TextContent | MediaContent)[] }): string | undefined => {
 			const block = result.content[0];
 			return block?.type === "text" ? block.text : undefined;
 		};

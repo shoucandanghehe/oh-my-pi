@@ -120,7 +120,8 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		resolvedModel.cost ??
 		reference?.cost ??
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
-	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
+	const input: Model["input"] | undefined =
+		resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
 	const built = buildModel({
 		id: resolvedModel.id,
@@ -130,7 +131,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
 		thinking: inheritReferenceThinking(resolvedModel.thinking, reference, resolvedModel.provider),
-		input: input as ("text" | "image")[],
+		input,
 		imageInputDecoder: resolvedModel.imageInputDecoder,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,

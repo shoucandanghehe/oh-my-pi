@@ -699,6 +699,10 @@ function buildUserPrompt(msg: UserMessage | DeveloperMessage, messageId: string)
 				prompt += part.text;
 			} else if (part.type === "image") {
 				images.push(create(ImageDataSchema, { base64Data: part.data, mimeType: part.mimeType }));
+			} else {
+				throw new AIError.ValidationError(
+					`Devin transport cannot encode ${part.type}; routed media preflight must reject it`,
+				);
 			}
 		}
 	}
@@ -757,12 +761,16 @@ function buildChatMessagePrompts(
 			);
 		} else {
 			let resultText = "";
-			const images = [];
+			const images: ImageData[] = [];
 			for (const part of msg.content) {
 				if (part.type === "text") {
 					resultText += part.text;
 				} else if (part.type === "image") {
 					images.push(create(ImageDataSchema, { base64Data: part.data, mimeType: part.mimeType }));
+				} else {
+					throw new AIError.ValidationError(
+						`Devin tool results cannot encode ${part.type}; routed media preflight must reject it`,
+					);
 				}
 			}
 			prompts.push(

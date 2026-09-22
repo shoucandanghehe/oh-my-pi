@@ -27,6 +27,8 @@ export interface DefaultToolRenderInput {
 	/** Settled or streaming result; omitted while only the call is available. */
 	result?: {
 		output: string;
+		/** Non-text output is rendered separately by the caller. */
+		hasAttachments?: boolean;
 		isError?: boolean;
 		/** Synthetic placeholder for a call skipped mid-batch to service steering/peer
 		 * input — the tool never ran, so it renders neutral (info) rather than as an error. */
@@ -104,7 +106,7 @@ function buildDefaultToolSnapshot(
 	if (result) {
 		const textContent = result.output.trimEnd();
 		if (!textContent) {
-			body.push(uiTheme.fg("dim", "(no output)"));
+			if (!result.hasAttachments) body.push(uiTheme.fg("dim", "(no output)"));
 		} else {
 			let renderedAsJson = false;
 			if (textContent.startsWith("{") || textContent.startsWith("[")) {

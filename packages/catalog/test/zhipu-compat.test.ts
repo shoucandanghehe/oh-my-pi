@@ -173,7 +173,7 @@ describe("zhipu-coding-plan model discovery", () => {
 		expect(models?.[0]?.baseUrl).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
 	});
 
-	it("maps glm-5.3-flash as a reasoning model with native image input", async () => {
+	it("maps glm-5.3-flash as a reasoning model with native image and video input", async () => {
 		const mockFetch: FetchImpl = Object.assign(
 			async (): Promise<Response> =>
 				new Response(
@@ -196,9 +196,9 @@ describe("zhipu-coding-plan model discovery", () => {
 		// GLM-5.3-Flash is the first natively multimodal, mandatory-thinking
 		// flash SKU; its id carries no `v` marker.
 		expect(flash53?.reasoning).toBe(true);
-		// Image input is rule-owned (`providers/zhipu-coding-plan.kdl`
+		// Image and video input are rule-owned (`providers/zhipu-coding-plan.kdl`
 		// input-modalities) and corrected at build time.
-		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image"]);
+		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image", "video"]);
 		// Older flash SKUs stay non-reasoning and text-only.
 		expect(flash47?.reasoning).toBe(false);
 		expect(flash47 && buildModel(flash47).input).toEqual(["text"]);

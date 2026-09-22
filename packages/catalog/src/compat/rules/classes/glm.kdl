@@ -84,11 +84,12 @@ class "glm" {
 			}
 		}
 	}
-	// glm-5.3-flash ships native image input that upstream metadata still
-	// reports as text-only.
+	// glm-5.3-flash ships native image and video input (video via the
+	// OpenAI-compatible `video_url` content part) that upstream metadata
+	// still reports as text-only.
 	on "zai" "zhipu-coding-plan" {
 		models "glm-5.3-flash" {
-			input-modalities "text" "image"
+			input-modalities "text" "image" "video"
 		}
 	}
 	on "alibaba-coding-plan" "alibaba-token-plan" "wafer-serverless" {

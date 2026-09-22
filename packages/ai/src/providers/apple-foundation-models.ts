@@ -16,7 +16,7 @@ import * as AIError from "../error";
 import type {
 	AssistantMessage,
 	Context,
-	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	StreamFunction,
@@ -114,7 +114,7 @@ export async function getAppleFoundationModelsAvailability(): Promise<AppleFound
  * the prefix cache valid.
  */
 function toParts(
-	content: string | ReadonlyArray<TextContent | ImageContent>,
+	content: string | ReadonlyArray<TextContent | MediaContent>,
 	supportsImages: boolean,
 	images: { count: number },
 ): Part[] {

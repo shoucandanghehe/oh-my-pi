@@ -41,6 +41,7 @@ export type * from "./providers/synthetic";
 export * from "./registry";
 export * from "./stream";
 export * from "./types";
+export type { VideoContent } from "./types";
 export * from "./usage";
 export * from "./usage/claude";
 export * from "./usage/claude-reset";

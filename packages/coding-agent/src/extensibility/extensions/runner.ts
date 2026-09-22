@@ -9,7 +9,13 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type {
+	CredentialDisabledEvent,
+	ImageContent,
+	MediaContent,
+	Model,
+	ProviderResponseMetadata,
+} from "@oh-my-pi/pi-ai";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -1935,6 +1941,7 @@ export class ExtensionRunner {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string[],
+		attachments?: MediaContent[],
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		if (!this.hasHandlers("before_agent_start")) return undefined;
 		const ctx = this.createContext();
@@ -1951,6 +1958,7 @@ export class ExtensionRunner {
 					type: "before_agent_start",
 					prompt,
 					images,
+					attachments,
 					systemPrompt: currentSystemPrompt,
 				};
 				const handlerResult = await this.#runHandlerWithTimeout(

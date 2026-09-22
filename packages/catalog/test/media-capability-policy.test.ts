@@ -1,0 +1,188 @@
+import { describe, expect, test } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import {
+	BUILTIN_MEDIA_POLICIES,
+	findSupportedMediaForm,
+	resolveModelRoute,
+} from "@oh-my-pi/pi-catalog/media-capabilities";
+import type { InputModality, KnownApi, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+
+const APIS = [
+	"openai-completions",
+	"openai-responses",
+	"openrouter",
+	"openai-codex-responses",
+	"azure-openai-responses",
+	"anthropic-messages",
+	"apple-foundation-models",
+	"bedrock-converse-stream",
+	"google-generative-ai",
+	"google-gemini-cli",
+	"google-vertex",
+	"ollama-chat",
+	"cursor-agent",
+	"gitlab-duo-agent",
+	"devin-agent",
+] as const satisfies readonly KnownApi[];
+
+type Expected = readonly [user: readonly InputModality[], tools: readonly InputModality[]];
+const EXPECTED: Record<KnownApi, Expected> = {
+	"openai-completions": [
+		["text", "image", "audio", "video"],
+		["text", "image"],
+	],
+	"openai-responses": [
+		["text", "image"],
+		["text", "image"],
+	],
+	openrouter: [
+		["text", "image"],
+		["text", "image"],
+	],
+	"openai-codex-responses": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"azure-openai-responses": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"anthropic-messages": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"apple-foundation-models": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"bedrock-converse-stream": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"google-generative-ai": [
+		["text", "image", "audio", "video"],
+		["text", "image"],
+	],
+	"google-gemini-cli": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"google-vertex": [
+		["text", "image", "audio", "video"],
+		["text", "image"],
+	],
+	"ollama-chat": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"cursor-agent": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"gitlab-duo-agent": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"devin-agent": [
+		["text", "image"],
+		["text", "image"],
+	],
+};
+
+function model(api: KnownApi, extra: Partial<ModelSpec> = {}) {
+	return buildModel({
+		id: `${api}-model`,
+		name: api,
+		api,
+		provider: "test",
+		baseUrl: "https://example.test",
+		reasoning: false,
+		input: ["text", "image", "audio", "video"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 8192,
+		maxTokens: 1024,
+		...extra,
+	} as ModelSpec);
+}
+
+describe("route-resolved media capability policy", () => {
+	test("preserves vendor evidence while restricting each API to its implemented media encoders", () => {
+		expect(Object.keys(BUILTIN_MEDIA_POLICIES).sort()).toEqual([...APIS].sort());
+		for (const api of APIS) {
+			const built = model(api);
+			expect(built.vendorInput, api).toEqual(["text", "image", "audio", "video"]);
+			expect(built.input, `${api} user`).toEqual([...EXPECTED[api][0]]);
+			expect(built.toolResultInput ?? [], `${api} tools`).toEqual([...EXPECTED[api][1]]);
+		}
+	});
+
+	test("metadata never enables a missing encoder", () => {
+		for (const api of [
+			"openai-codex-responses",
+			"google-gemini-cli",
+			"anthropic-messages",
+			"bedrock-converse-stream",
+		] as const) {
+			const built = model(api);
+			expect(built.vendorInput).toContain("video");
+			expect(built.input).not.toContain("video");
+		}
+	});
+
+	test("MIME gates accept canonical MP3 forms and reject unsupported Ogg", () => {
+		const openAiForms = resolveModelRoute(model("openai-completions")).userMediaForms;
+		expect(findSupportedMediaForm(openAiForms, "audio", "audio/x-wav")?.normalizedFormat).toBe("wav");
+		expect(findSupportedMediaForm(openAiForms, "audio", "audio/mpeg")?.normalizedFormat).toBe("mp3");
+		expect(findSupportedMediaForm(openAiForms, "audio", "audio/ogg")).toBeUndefined();
+
+		const googleForms = resolveModelRoute(model("google-generative-ai")).userMediaForms;
+		expect(findSupportedMediaForm(googleForms, "audio", "audio/mpeg")?.wireShape).toBe("inlineData");
+	});
+
+	test("selected collapsed member evidence changes effective support without a family union", () => {
+		const routed = model("openai-completions", {
+			id: "family",
+			requestModelId: "family-off",
+			reasoning: true,
+			vendorInput: ["text", "audio"],
+			vendorInputByWireModel: {
+				"family-off": ["text", "audio"],
+				"family-high": ["text"],
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High],
+				effortRouting: { [Effort.High]: "family-high" },
+			},
+		});
+		expect(resolveModelRoute(routed).input).toContain("audio");
+		expect(resolveModelRoute(routed, Effort.High).input).toEqual(["text"]);
+	});
+	test("an unannotated routed wire id falls back to the model's default vendor input", () => {
+		// Bundled models predate per-wire vendor evidence (models.json was not
+		// regenerated for audio/video), so a routed wire id absent from the
+		// per-wire map must fall back to the model's default vendor input rather
+		// than resolving to an empty capability set that silently drops media.
+		const routed = model("openai-completions", {
+			id: "family",
+			requestModelId: "family-off",
+			reasoning: true,
+			vendorInput: ["text", "image", "audio"],
+			vendorInputByWireModel: {
+				"family-off": ["text"],
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High],
+				effortRouting: { [Effort.High]: "family-high" },
+			},
+		});
+		// `family-high` is the routed wire id but is absent from the per-wire map.
+		const route = resolveModelRoute(routed, Effort.High);
+		expect(route.wireModelId).toBe("family-high");
+		expect(route.vendorInput).toEqual(["text", "image", "audio"]);
+		// The default fallback preserves audio support an empty set would drop.
+		expect(route.input).toContain("audio");
+	});
+});

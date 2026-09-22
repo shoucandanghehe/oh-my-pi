@@ -16,6 +16,8 @@ import type { Api, Model } from "./types";
 // kimi-for-coding[-highspeed] -> 32768, #6711); v11 invalidates rows that may
 // persist derived computer-use
 // headers and records which model ids lost headers or cannot be rebuilt.
+// v13 invalidated rows predating per-wire vendor media evidence and effective
+// user/tool-result capabilities;
 // v9 invalidated Kimi Code rows predating live effort and protocol metadata;
 // v8 invalidated Codex discovery rows predating provider-native V2 compaction
 // metadata; v7 invalidated rows predating the Antigravity Gemini budget-mode
@@ -24,7 +26,7 @@ import type { Api, Model } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 13;
+const CACHE_SCHEMA_VERSION = 14;
 const HEADER_RESTORE_VERSION = 1;
 /**
  * Explicit compatibility gate for materialized rows. Bump whenever buildModel
@@ -257,7 +259,7 @@ function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
 		typeof model.reasoning !== "boolean" ||
 		!Array.isArray(model.input) ||
 		model.input.length === 0 ||
-		model.input.some(input => input !== "text" && input !== "image") ||
+		model.input.some(input => input !== "text" && input !== "image" && input !== "video") ||
 		model.headers !== undefined ||
 		!Object.hasOwn(model, "supportsComputerUseConfig") ||
 		(model.supportsComputerUseConfig !== null && typeof model.supportsComputerUseConfig !== "boolean")
