@@ -15,7 +15,15 @@
  */
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { Context, ImageContent, Model, TextContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import type {
+	Context,
+	ImageContent,
+	MediaContent,
+	Model,
+	TextContent,
+	ToolResultMessage,
+	UserMessage,
+} from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };
@@ -137,7 +145,7 @@ export interface InlineToolResultCandidate {
 	id: string;
 	/** Token count of all joined text blocks, including text beside images. */
 	textTokens: number;
-	/** Frames needed to render the joined text (0 = empty or below floor). */
+	/** Frames needed to render the joined text (0 for empty, below floor, or audio/video media). */
 	frames: number;
 	/** Error tool results must stay text-only for provider API validation. */
 	isError?: boolean;
@@ -231,7 +239,7 @@ interface BuiltInlineToolResultCandidate {
 
 /**
  * Build the exact same text payload and planning candidate for estimation and
- * live transformation. Image blocks do not suppress co-resident text.
+ * live transformation. Media blocks do not suppress co-resident text.
  */
 function buildInlineToolResultCandidate(
 	toolCallId: string,
@@ -243,12 +251,18 @@ function buildInlineToolResultCandidate(
 	const blocks: BlockViews = Array.isArray(content) ? (content as BlockViews) : [];
 	const textBlocks: string[] = [];
 	let sourceImageIndex = 0;
+	let sourceMediaIndex = 0;
+	let hasAudioOrVideo = false;
 	for (const block of blocks) {
 		if (block.type === "text" && typeof block.text === "string") {
 			textBlocks.push(block.text);
 		} else if (block.type === "image") {
 			sourceImageIndex++;
 			textBlocks.push(`[Source image ${sourceImageIndex} was attached here in the original tool result.]`);
+		} else if (block.type === "audio" || block.type === "video") {
+			sourceMediaIndex++;
+			hasAudioOrVideo = true;
+			textBlocks.push(`[Source ${block.type} ${sourceMediaIndex} was attached here in the original tool result.]`);
 		}
 	}
 	const text = textBlocks.join("\n");
@@ -258,7 +272,10 @@ function buildInlineToolResultCandidate(
 		candidate: {
 			id: toolCallId,
 			textTokens,
-			frames: !isError && textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
+			frames:
+				!isError && !hasAudioOrVideo && textTokens >= MIN_TOOL_RESULT_TOKENS
+					? snapcompact.frames(text, { shape })
+					: 0,
 			isError,
 		},
 		text,
@@ -514,16 +531,25 @@ export class SnapcompactInlineTransformer {
 			const target = targets.get(swap.id);
 			if (!target) continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.text, shape, shapeKey);
-			const content: (TextContent | ImageContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
+			const content: (TextContent | MediaContent)[] = [{ type: "text", text: toolResultNote }, ...frames];
 			let sourceImageIndex = 0;
+			let sourceMediaIndex = 0;
 			for (const block of target.message.content) {
-				if (block.type !== "image") continue;
-				sourceImageIndex++;
-				content.push({
-					type: "text",
-					text: `[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
-				});
-				content.push(block);
+				if (block.type === "image") {
+					sourceImageIndex++;
+					content.push({
+						type: "text",
+						text: `[Original source image ${sourceImageIndex}; corresponds to its marker in the compacted text.]`,
+					});
+					content.push(block);
+				} else if (block.type === "audio" || block.type === "video") {
+					sourceMediaIndex++;
+					content.push({
+						type: "text",
+						text: `[Original source ${block.type} ${sourceMediaIndex}; corresponds to its marker in the compacted text.]`,
+					});
+					content.push(block);
+				}
 			}
 			messages[target.index] = { ...target.message, content };
 			changed = true;
@@ -562,7 +588,7 @@ export class SnapcompactInlineTransformer {
 			}
 			const frames = cached.frames;
 			const original = messages[userIndex] as UserMessage;
-			const originalContent: (TextContent | ImageContent)[] =
+			const originalContent: (TextContent | MediaContent)[] =
 				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
 			messages[userIndex] = {
 				...original,

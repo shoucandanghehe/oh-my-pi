@@ -14,7 +14,7 @@ import {
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
-import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
+import { isExternalizableMediaPosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import {
 	parseTitleSlotFromContent,
@@ -526,11 +526,11 @@ interface BlobRefSite {
 }
 
 /**
- * Collect the blob references in session image blocks and provider image URLs.
+ * Collect the blob references in session media blocks and provider image URLs.
  * Snapcompact frames stay as references until context rebuilding selects them.
  */
 function collectBlobRefSites(value: unknown, sites: BlobRefSite[], key?: string): void {
-	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
+	if (key !== "frames" && isExternalizableMediaPosition(value, key) && isBlobRef(value.data)) {
 		sites.push({ holder: value, key: "data", ref: value.data, asDataUrl: false });
 		return;
 	}

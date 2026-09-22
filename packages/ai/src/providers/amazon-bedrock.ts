@@ -1063,8 +1063,12 @@ function buildToolResultBlock(
 			} else {
 				content.push(image);
 			}
-		} else {
+		} else if (block.type === "text") {
 			content.push({ text: block.text.toWellFormed() });
+		} else {
+			throw new AIError.ValidationError(
+				`Bedrock has no proven ${block.type} encoder on this branch; routed media preflight must reject it`,
+			);
 		}
 	}
 	return {
@@ -1107,6 +1111,11 @@ function convertMessages(
 							case "image":
 								contentBlocks.push({ image: createImageBlock(c.mimeType, c.data) });
 								break;
+							case "audio":
+							case "video":
+								throw new AIError.ValidationError(
+									`Bedrock has no proven ${c.type} encoder on this branch; routed media preflight must reject it`,
+								);
 							default:
 								throw new AIError.ValidationError("Unknown user content type");
 						}

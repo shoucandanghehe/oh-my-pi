@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
-import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import {
 	APP_NAME,
@@ -615,7 +615,7 @@ async function runInteractiveMode(
 	eventBus?: EventBus,
 	subagentEventBus?: EventBus,
 	initialMessage?: string,
-	initialImages?: ImageContent[],
+	initialImages?: MediaContent[],
 	joinLink?: string,
 	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
@@ -764,7 +764,9 @@ async function runInteractiveMode(
 			// before this dispatch runs (the composer accepts input as soon as the
 			// first turn starts): the CLI message queues into that turn instead of
 			// dying with AgentBusyError.
-			await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
+			const images = initialImages?.filter((attachment): attachment is ImageContent => attachment.type === "image");
+			const attachments = initialImages?.filter(attachment => attachment.type !== "image");
+			await session.prompt(initialMessage, { images, attachments, streamingBehavior: "steer" });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);

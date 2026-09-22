@@ -624,7 +624,7 @@ export interface CompiledSeedModel {
 	provider: string;
 	baseUrl: string;
 	reasoning: boolean;
-	input: ("text" | "image")[];
+	input: ("text" | "image" | "video")[];
 	supportsTools?: boolean;
 	cost: TokenCost;
 	contextWindow: number | null;
