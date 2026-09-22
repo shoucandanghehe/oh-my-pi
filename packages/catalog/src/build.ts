@@ -9,9 +9,10 @@
 
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
+import { resolveEffectiveMediaCapabilities } from "./media-capabilities";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
-import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
+import { type Api, type InputModality, MODEL_KINDS, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -60,8 +61,11 @@ function applyEffectiveFallbackRates(
 }
 
 /** Narrow a compiled `input-modalities` axis value to the model input union. */
-function isInputModalities(value: unknown): value is ("text" | "image")[] {
-	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
+function isInputModalities(value: unknown): value is InputModality[] {
+	return (
+		Array.isArray(value) &&
+		value.every(entry => entry === "text" || entry === "image" || entry === "audio" || entry === "video")
+	);
 }
 
 /**
@@ -345,6 +349,9 @@ export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string)
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const policy = resolveModelPolicy(spec);
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
+	const policyInput = policy.catalog.inputModalities;
+	const vendorInput = [...(isInputModalities(policyInput) ? policyInput : (spec.vendorInput ?? spec.input))];
+	const effective = resolveEffectiveMediaCapabilities(spec.api, vendorInput);
 	const model: Model<TApi> = {
 		...spec,
 		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
@@ -358,6 +365,9 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		thinking: policy.thinking,
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,
+		vendorInput,
+		input: [...effective.input],
+		toolResultInput: [...effective.toolResultInput],
 		compat: policy.compat,
 		compatConfig: spec.compat,
 	};
@@ -365,5 +375,6 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	applyCatalogCorrections(model, policy.catalog);
 	// Configured lifetimes replace catalog lifetimes rather than merging with them.
 	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
+	model.input = [...effective.input];
 	return model;
 }

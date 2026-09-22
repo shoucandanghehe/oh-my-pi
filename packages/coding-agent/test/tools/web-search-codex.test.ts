@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { hasCodexSearch, searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
@@ -14,6 +15,8 @@ type CapturedRequest = {
 };
 
 function codexModel(id: string, baseUrl = "https://chatgpt.com/backend-api"): Model<"openai-codex-responses"> {
+	const bundled = getBundledModel<"openai-codex-responses">("openai-codex", id);
+	if (bundled) return { ...bundled, baseUrl };
 	return buildModel({
 		id,
 		name: id,
@@ -34,6 +37,27 @@ const proxyCodexModel = {
 	baseUrl: "https://proxy.example/backend-api",
 	headers: { "X-Proxy-Tenant": "tenant-1" },
 };
+
+function proxyModel(id: string): Model<"openai-codex-responses"> {
+	return {
+		...codexModel(id, proxyCodexModel.baseUrl),
+		headers: proxyCodexModel.headers,
+	};
+}
+
+function makeNativeSearchResponse(): string {
+	return JSON.stringify({
+		output: "Example Article (https://example.com/article)\nSearch result snippet.",
+		results: [
+			{
+				type: "text_result",
+				title: "Example Article",
+				url: "https://example.com/article",
+				snippet: "Search result snippet.",
+			},
+		],
+	});
+}
 
 // A completed hosted web_search tool call. Real Codex searches always stream a
 // `response.web_search_call.*` event; the provider now requires that evidence
@@ -256,9 +280,9 @@ describe("searchCodex model selection", () => {
 		oauthOnlyAuthStorage = createAuthStorage();
 		oauthOnlyAuthStorage.keys.setRuntime("openai-codex", "official-oauth-token");
 		vi.spyOn(oauthOnlyAuthStorage.keys, "source").mockReturnValue({ kind: "oauth", concrete: true });
-		modelRegistry = new ModelRegistry(oauthAuthStorage);
-		proxyModelRegistry = new ModelRegistry(proxyAuthStorage);
-		oauthModelRegistry = new ModelRegistry(oauthOnlyAuthStorage);
+		modelRegistry = new ModelRegistry(oauthAuthStorage, undefined, { ignoreLocalModelConfig: true });
+		proxyModelRegistry = new ModelRegistry(proxyAuthStorage, undefined, { ignoreLocalModelConfig: true });
+		oauthModelRegistry = new ModelRegistry(oauthOnlyAuthStorage, undefined, { ignoreLocalModelConfig: true });
 	});
 
 	function makeSearchParams(
@@ -285,10 +309,11 @@ describe("searchCodex model selection", () => {
 				body: init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : null,
 				signal: init?.signal,
 			};
+			const nativeSearch = capturedRequest.url.endsWith("/alpha/search");
 			return Promise.resolve(
-				new Response(responseBody ?? makeSseResponse(responseModel), {
+				new Response(responseBody ?? (nativeSearch ? makeNativeSearchResponse() : makeSseResponse(responseModel)), {
 					status: 200,
-					headers: { "Content-Type": "text/event-stream" },
+					headers: { "Content-Type": nativeSearch ? "application/json" : "text/event-stream" },
 				}),
 			);
 		};
@@ -303,24 +328,26 @@ describe("searchCodex model selection", () => {
 		oauthOnlyAuthStorage.close();
 	});
 
-	it("sends the selected Codex model id on the wire", async () => {
-		const model = codexModel("gpt-5.6-luna");
-		const result = await searchCodex(makeSearchParams("selected codex model", mockCodexFetch("gpt-5.6-luna"), model));
+	it("uses native Alpha Search for the selected Responses-Lite model", async () => {
+		const result = await searchCodex(
+			makeSearchParams("selected native model", mockCodexFetch("gpt-5.6-luna"), codexModel("gpt-5.6-luna")),
+		);
 
 		expect(capturedRequest).not.toBeNull();
-		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/alpha/search");
 		expect(new Headers(capturedRequest?.headers).get("x-openai-internal-codex-residency")).toBe("us");
 		expect(capturedRequest?.body?.model).toBe("gpt-5.6-luna");
 		expect(result.model).toBe("gpt-5.6-luna");
-		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
+		expect(result.sources).toEqual([
+			{ title: "Example Article", url: "https://example.com/article", snippet: "Search result snippet." },
+		]);
 	});
 
 	it("uses email-only OAuth credentials without an account header", async () => {
-		delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
 		const result = await searchCodex({
-			...makeSearchParams("email-only Codex search", mockCodexFetch("gpt-5.6-luna")),
+			...makeSearchParams("email-only Codex search", mockCodexFetch("gpt-5.6-luna"), codexModel("gpt-5.6-luna")),
 			authStorage: emailOnlyAuthStorage,
-			modelRegistry: new ModelRegistry(emailOnlyAuthStorage),
+			modelRegistry: new ModelRegistry(emailOnlyAuthStorage, undefined, { ignoreLocalModelConfig: true }),
 		});
 
 		const headers = new Headers(capturedRequest?.headers);
@@ -338,7 +365,7 @@ describe("searchCodex model selection", () => {
 		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);
 
 		await searchCodex({
-			...makeSearchParams("slow codex search", mockCodexFetch("gpt-5.6-luna")),
+			...makeSearchParams("slow codex search", mockCodexFetch("gpt-5.6-luna"), codexModel("gpt-5.6-luna")),
 			timeoutMs: 180_000,
 		});
 
@@ -347,30 +374,34 @@ describe("searchCodex model selection", () => {
 	});
 
 	function sentUserText(): string | undefined {
+		const commands = capturedRequest?.body?.commands as { search_query?: Array<{ q: string }> } | undefined;
+		if (commands) return commands.search_query?.[0]?.q;
 		const input = capturedRequest?.body?.input as Array<Record<string, unknown>> | undefined;
 		const userItem = input?.find(item => item.role === "user");
 		const content = userItem?.content as Array<Record<string, unknown>> | undefined;
 		return content?.[0]?.text as string | undefined;
 	}
 
-	it("re-emits directive queries with normalized Google-style operators", async () => {
+	it.each(["gpt-5.6-luna", "gpt-5.4"])("normalizes Google-style query operators for %s", async modelId => {
 		await searchCodex(
 			makeSearchParams(
 				'bun runtime site:bun.sh -site:reddit.com after:2024-01-01 "exact phrase"',
-				mockCodexFetch("gpt-5.6-luna"),
+				mockCodexFetch(modelId),
+				codexModel(modelId),
 			),
 		);
 
 		expect(capturedRequest).not.toBeNull();
 		expect(sentUserText()).toBe('bun runtime "exact phrase" site:bun.sh -site:reddit.com after:2024-01-01');
-		// Tool config stays untouched: the ChatGPT backend's filter support is
-		// unverified, so no `filters` field is added to the web_search tool.
-		expect(capturedRequest?.body?.tools).toEqual([{ type: "web_search", search_context_size: "high" }]);
+		if (capturedRequest?.url.endsWith("/responses")) {
+			// The hosted endpoint does not support a separate filters object.
+			expect(capturedRequest?.body?.tools).toEqual([{ type: "web_search", search_context_size: "high" }]);
+		}
 	});
 
-	it("sends directive-free queries byte-identical", async () => {
+	it.each(["gpt-5.6-luna", "gpt-5.4"])("sends directive-free queries byte-identical for %s", async modelId => {
 		const query = "how does the bun runtime schedule timers?";
-		await searchCodex(makeSearchParams(query, mockCodexFetch("gpt-5.6-luna")));
+		await searchCodex(makeSearchParams(query, mockCodexFetch(modelId), codexModel(modelId)));
 
 		expect(sentUserText()).toBe(query);
 	});
@@ -392,29 +423,134 @@ describe("searchCodex model selection", () => {
 		expect(result.answer).toBe("Codex answer");
 	});
 
-	it("refuses to send official OAuth credentials to a configured Codex endpoint", async () => {
-		let fetchCalled = false;
-		const fetchMock: FetchImpl = () => {
-			fetchCalled = true;
-			return Promise.resolve(new Response("unexpected"));
+	it.each([
+		{ id: "tenant-native", useResponsesLite: true, route: "alpha/search" },
+		{ id: "tenant-hosted", useResponsesLite: false, route: "responses" },
+	])("keeps selected provider credentials on its selected $id endpoint", async ({ id, useResponsesLite, route }) => {
+		const model = {
+			...codexModel("gpt-5.4", "https://tenant.example/backend-api"),
+			id,
+			provider: "tenant-codex",
+			useResponsesLite,
+			headers: { "X-Model-Tenant": "selected" },
 		};
+		const controller = new AbortController();
+		proxyAuthStorage.keys.setRuntime(model.provider, "selected-provider-key");
+		const credentialSource = vi.spyOn(proxyAuthStorage.keys, "source");
+		const getOAuthAccess = vi.spyOn(oauthAuthStorage.oauth, "access");
+		const resolver = vi.spyOn(proxyModelRegistry, "resolver");
+		const resolveModelHeaders = vi.spyOn(proxyModelRegistry, "resolveModelHeaders");
+		// Decoys reproduce the old hard-coded openai-codex registry lookup.
+		vi.spyOn(proxyModelRegistry, "find").mockReturnValue(
+			codexModel("gpt-5.6-luna", "https://wrong.example/backend-api"),
+		);
+		vi.spyOn(proxyModelRegistry, "getProviderBaseUrl").mockReturnValue("https://wrong.example/backend-api");
+		const fetchMock: FetchImpl = async (url, init) => {
+			expect(String(url)).toBe(`https://tenant.example/backend-api/codex/${route}`);
+			const headers = new Headers(init?.headers);
+			expect(headers.get("authorization")).toBe("Bearer selected-provider-key");
+			expect(headers.get("x-model-tenant")).toBe("selected");
+			expect(headers.has("x-proxy-tenant")).toBe(false);
+			expect(JSON.parse(init?.body as string).model).toBe(id);
+			return new Response(useResponsesLite ? makeNativeSearchResponse() : makeSseResponse(id), {
+				headers: { "Content-Type": useResponsesLite ? "application/json" : "text/event-stream" },
+			});
+		};
+
+		const result = await searchCodex({
+			...makeSearchParams("selected provider", fetchMock, model),
+			modelRegistry: proxyModelRegistry,
+			sessionId: "selected-session",
+			signal: controller.signal,
+		});
+
+		expect(result.model).toBe(id);
+		expect(credentialSource).toHaveBeenCalledWith("tenant-codex");
+		expect(resolver).toHaveBeenCalledWith(model, "selected-session");
+		expect(resolveModelHeaders).toHaveBeenCalledWith(model, controller.signal);
+		expect(getOAuthAccess).not.toHaveBeenCalled();
+	});
+
+	it("propagates cancellation through the selected model header resolver before sending credentials", async () => {
+		const controller = new AbortController();
+		const abortError = new DOMException("Search cancelled", "AbortError");
+		const fetchMock = vi.fn();
+		const getOAuthAccess = vi.spyOn(oauthAuthStorage.oauth, "access");
+		vi.spyOn(modelRegistry, "resolveModelHeaders").mockImplementation(async (_model, signal) => {
+			controller.abort(abortError);
+			signal?.throwIfAborted();
+			return undefined;
+		});
 
 		await expect(
 			searchCodex({
-				...makeSearchParams("unsafe proxy", fetchMock, proxyCodexModel),
-				authStorage: oauthOnlyAuthStorage,
-				modelRegistry: oauthModelRegistry,
+				...makeSearchParams("cancel during headers", fetchMock),
+				signal: controller.signal,
 			}),
-		).rejects.toThrow("Refusing to send official Codex OAuth credentials");
-		expect(fetchCalled).toBe(false);
+		).rejects.toBe(abortError);
+		expect(getOAuthAccess).not.toHaveBeenCalled();
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
+	it("uses native Alpha Search for Responses-Lite models on a configured Codex endpoint", async () => {
+		const result = await searchCodex({
+			...makeSearchParams("native proxy search", mockCodexFetch("gpt-5.6-sol"), proxyModel("gpt-5.6-sol")),
+			authStorage: proxyAuthStorage,
+			modelRegistry: proxyModelRegistry,
+		});
+
+		expect(capturedRequest?.url).toBe("https://proxy.example/backend-api/codex/alpha/search");
+		const headers = new Headers(capturedRequest?.headers);
+		expect(headers.get("authorization")).toBe("Bearer test-proxy-key");
+		expect(headers.get("accept")).toBe("application/json");
+		expect(headers.get("x-proxy-tenant")).toBe("tenant-1");
+		expect(capturedRequest?.body).toEqual({
+			id: expect.any(String),
+			model: "gpt-5.6-sol",
+			commands: {
+				search_query: [{ q: "native proxy search" }],
+			},
+			settings: {
+				search_context_size: "high",
+				allowed_callers: ["direct"],
+				external_web_access: true,
+			},
+		});
+		expect(result).toEqual(
+			expect.objectContaining({
+				answer: "Example Article (https://example.com/article)\nSearch result snippet.",
+				model: "gpt-5.6-sol",
+				sources: [
+					{
+						title: "Example Article",
+						url: "https://example.com/article",
+						snippet: "Search result snippet.",
+					},
+				],
+			}),
+		);
+	});
+
+	it.each(["oauth", "env"] as const)(
+		"refuses to send official %s credentials to a configured Codex endpoint",
+		async kind => {
+			const fetchMock = vi.fn();
+			vi.spyOn(oauthOnlyAuthStorage.keys, "source").mockReturnValue({ kind, concrete: true });
+
+			await expect(
+				searchCodex({
+					...makeSearchParams("unsafe proxy", fetchMock, proxyCodexModel),
+					authStorage: oauthOnlyAuthStorage,
+					modelRegistry: oauthModelRegistry,
+				}),
+			).rejects.toThrow("Refusing to send official Codex OAuth credentials");
+			expect(fetchMock).not.toHaveBeenCalled();
+		},
+	);
+
 	it("validates the credential origin from the registry storage that supplies the key", async () => {
-		let fetchCalled = false;
-		const fetchMock: FetchImpl = () => {
-			fetchCalled = true;
-			return Promise.resolve(new Response("unexpected"));
-		};
+		const fetchMock = vi.fn();
+
 		await expect(
 			searchCodex({
 				...makeSearchParams("registry oauth leak", fetchMock, proxyCodexModel),
@@ -422,7 +558,7 @@ describe("searchCodex model selection", () => {
 				modelRegistry: oauthModelRegistry,
 			}),
 		).rejects.toThrow("Refusing to send official Codex OAuth credentials");
-		expect(fetchCalled).toBe(false);
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it("prefers a command-backed proxy key over stored OAuth on a custom endpoint", async () => {
@@ -441,29 +577,66 @@ describe("searchCodex model selection", () => {
 		expect(result.answer).toBe("Codex answer");
 	});
 
-	it("keeps hosted web_search top-level for selected Responses-Lite catalog models (#7666)", async () => {
-		const solModel = codexModel("gpt-5.6-sol");
-		const result = await searchCodex(makeSearchParams("Sol web search", mockCodexFetch("gpt-5.6-sol"), solModel));
+	it("uses the selected hosted model even when a legacy environment override conflicts", async () => {
+		const previousOverride = process.env.PI_CODEX_WEB_SEARCH_MODEL;
+		process.env.PI_CODEX_WEB_SEARCH_MODEL = "gpt-5.6-luna";
+		try {
+			const result = await searchCodex(
+				makeSearchParams("explicit hosted model", mockCodexFetch("gpt-5.5"), codexModel("gpt-5.5")),
+			);
 
-		expect(capturedRequest).not.toBeNull();
-		const headers = new Headers(capturedRequest?.headers);
-		expect(headers.get("x-openai-internal-codex-responses-lite")).toBeNull();
-		expect(capturedRequest?.body).toEqual(
-			expect.objectContaining({
-				model: "gpt-5.6-sol",
-				tools: [{ type: "web_search", search_context_size: "high" }],
-				tool_choice: { type: "web_search" },
-				instructions: "Codex test system prompt",
-				input: [
-					{
-						type: "message",
-						role: "user",
-						content: [{ type: "input_text", text: "Sol web search" }],
-					},
-				],
-			}),
-		);
-		expect(result.model).toBe("gpt-5.6-sol");
+			expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+			expect(capturedRequest?.body?.model).toBe("gpt-5.5");
+			expect(capturedRequest?.body?.tools).toEqual([{ type: "web_search", search_context_size: "high" }]);
+			expect(capturedRequest?.body?.tool_choice).toEqual({ type: "web_search" });
+			expect(new Headers(capturedRequest?.headers).has("x-openai-internal-codex-responses-lite")).toBe(false);
+			expect(result.model).toBe("gpt-5.5");
+		} finally {
+			if (previousOverride === undefined) delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
+			else process.env.PI_CODEX_WEB_SEARCH_MODEL = previousOverride;
+		}
+	});
+
+	it("rejects a native response without structured search evidence", async () => {
+		const fetchMock: FetchImpl = () =>
+			Promise.resolve(
+				new Response(JSON.stringify({ output: "Plain model answer without search results." }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+
+		await expect(
+			searchCodex(makeSearchParams("native evidence guard", fetchMock, codexModel("gpt-5.6-sol"))),
+		).rejects.toThrow(/missing output or structured search result evidence/);
+	});
+
+	it("surfaces an unsupported selected model without reselecting a bundled default", async () => {
+		let calls = 0;
+		capturedRequest = null;
+		const fetchMock: FetchImpl = (url, init) => {
+			calls += 1;
+			capturedRequest = {
+				url: typeof url === "string" ? url : url.toString(),
+				headers: init?.headers,
+				body: init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : null,
+			};
+
+			expect(capturedRequest.body?.model).toBe("gpt-5.5");
+			return Promise.resolve(
+				new Response(
+					JSON.stringify({
+						detail: "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.",
+					}),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				),
+			);
+		};
+
+		await expect(
+			searchCodex(makeSearchParams("explicit unsupported model", fetchMock, codexModel("gpt-5.5"))),
+		).rejects.toThrow("gpt-5.5");
+		expect(calls).toBe(1);
 	});
 
 	it("forces web_search tool choice and extracts markdown link citations when annotations are absent", async () => {
@@ -667,8 +840,8 @@ describe("searchCodex model selection", () => {
 		expect(result.sources).toEqual([{ title: "Docs", url: "https://example.com/docs" }]);
 	});
 
-	it("fails a selected Responses-Lite model that answers without running web search (#6988)", async () => {
-		const terraModel = codexModel("gpt-5.6-terra");
+	it("fails a selected hosted model that answers without running web search (#6988)", async () => {
+		const hostedModel = codexModel("gpt-5.5");
 		const sse = [
 			`data: ${JSON.stringify({
 				type: "response.output_item.done",
@@ -685,14 +858,14 @@ describe("searchCodex model selection", () => {
 			"",
 			`data: ${JSON.stringify({
 				type: "response.completed",
-				response: { id: "resp_no_search", model: "gpt-5.6-terra" },
+				response: { id: "resp_no_search", model: hostedModel.id },
 			})}`,
 			"",
 		].join("\n");
 		const fetchMock: FetchImpl = () =>
 			Promise.resolve(new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } }));
 
-		await expect(searchCodex(makeSearchParams("no search performed", fetchMock, terraModel))).rejects.toThrow(
+		await expect(searchCodex(makeSearchParams("no search performed", fetchMock, hostedModel))).rejects.toThrow(
 			/without running web search/,
 		);
 	});
