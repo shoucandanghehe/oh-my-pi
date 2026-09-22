@@ -118,7 +118,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiCompatSchema = OpenAICompatSchema.and(BedrockCompatSchema);
 
 	const ApiSchema = type(
-		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
+		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "openai-images" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "openai-decisions" | "google-decisions" | "workers-ai-systemone" | "liquid-systemone" | "nace-systemone" | "typesafe"',
 	);
 
 	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
@@ -183,6 +183,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "cl100k" | "o200k"',
 	);
 
+	const ModelInputSchema = type('("text" | "image" | "audio" | "video")[]');
+
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
 		"api?": ApiSchema,
@@ -219,7 +221,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
@@ -279,7 +281,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"kind?": ModelKindSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,

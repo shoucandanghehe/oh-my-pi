@@ -217,6 +217,20 @@ export interface ChatCompletionContentPartImageImageURL {
 	detail?: "auto" | "low" | "high";
 }
 
+/** Video content part (multimodal extensions of the Chat Completions API, e.g. GLM video input). */
+export interface ChatCompletionContentPartVideo {
+	video_url: ChatCompletionContentPartVideoVideoURL;
+	/** Always `video_url`. */
+	type: "video_url";
+	/** Explicit OpenAI prompt-cache breakpoint. */
+	prompt_cache_breakpoint?: { mode: "explicit" };
+}
+
+/** `video_url` payload; either a URL of the video or a base64 data URL (`data:video/mp4;base64,...`). */
+export interface ChatCompletionContentPartVideoVideoURL {
+	url: string;
+}
+
 /** Audio content part (gpt-4o-audio). */
 export interface ChatCompletionContentPartInputAudio {
 	input_audio: ChatCompletionContentPartInputAudioInputAudio;
@@ -267,6 +281,7 @@ export interface ChatCompletionContentPartRefusal {
 export type ChatCompletionContentPart =
 	| ChatCompletionContentPartText
 	| ChatCompletionContentPartImage
+	| ChatCompletionContentPartVideo
 	| ChatCompletionContentPartInputAudio
 	| ChatCompletionContentPartFile;
 

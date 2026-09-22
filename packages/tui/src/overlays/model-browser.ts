@@ -1635,7 +1635,6 @@ export class ModelBrowser implements Component {
 		if (model.maxTokens) facts.push(`${formatNumber(model.maxTokens).toLowerCase()} out`);
 		facts.push(formatCostDetail(model));
 		if (model.reasoning) facts.push("reasoning");
-		if (model.input.includes("image")) facts.push("vision");
 		const intelligence = formatIntelligence(model);
 		if (intelligence) facts.push(intelligence);
 		const measured = this.#perfFor(selected);
@@ -1645,6 +1644,8 @@ export class ModelBrowser implements Component {
 		} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 			facts.push(`~${formatTps(model.tps)}`);
 		}
+		facts.push(`user: ${model.input.join("/") || "none"}`);
+		facts.push(`tools: ${(model.toolResultInput ?? model.input).join("/") || "none"}`);
 		// Last fact before prose, so narrow widths cut it before capability and perf facts.
 		const nextCredits = nextCreditRateNote(model);
 		if (nextCredits) facts.push(nextCredits);
