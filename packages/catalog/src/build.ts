@@ -10,6 +10,7 @@
 import RULES from "./compat/rules.json" with { type: "json" };
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
+import { resolveEffectiveMediaCapabilities } from "./media-capabilities";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import {
 	applyDueDatedCostCard,
@@ -24,6 +25,7 @@ import {
 	type AntigravityModelWireProfile,
 	type Api,
 	type EffectiveTokenCost,
+	type InputModality,
 	MODEL_KINDS,
 	type Model,
 	type ModelAccountAccess,
@@ -43,8 +45,11 @@ function objectPayload(value: unknown): object | undefined {
 }
 
 /** Narrow a compiled `input-modalities` axis value to the model input union. */
-function isInputModalities(value: unknown): value is ("text" | "image")[] {
-	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
+function isInputModalities(value: unknown): value is InputModality[] {
+	return (
+		Array.isArray(value) &&
+		value.every(entry => entry === "text" || entry === "image" || entry === "audio" || entry === "video")
+	);
 }
 
 /**
@@ -518,6 +523,9 @@ export function nextBuildPriceChange(cost: ModelCost, now: number): number {
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const policy = resolveModelPolicy(spec);
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
+	const policyInput = policy.catalog.inputModalities;
+	const vendorInput = [...(isInputModalities(policyInput) ? policyInput : (spec.vendorInput ?? spec.input))];
+	const effective = resolveEffectiveMediaCapabilities(spec.api, vendorInput);
 	const model: Model<TApi> = {
 		...spec,
 		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
@@ -532,6 +540,9 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		thinking: policy.thinking,
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,
+		vendorInput,
+		input: [...effective.input],
+		toolResultInput: [...effective.toolResultInput],
 		compat: policy.compat,
 		compatConfig: spec.compat,
 	};
@@ -541,5 +552,6 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	// Configured kinds and lifetimes replace catalog values rather than merging with them.
 	if (spec.kindConfig !== undefined) model.kind = spec.kindConfig;
 	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
+	model.input = [...effective.input];
 	return model;
 }

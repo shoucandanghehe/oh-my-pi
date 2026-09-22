@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
@@ -20,7 +20,7 @@ type SkillPromptMessage = Pick<
 	"customType" | "content" | "display" | "details" | "attribution"
 > & {
 	customType: typeof SKILL_PROMPT_MESSAGE_TYPE;
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | MediaContent)[];
 	display: true;
 	details: SkillPromptDetails;
 	attribution: "user";

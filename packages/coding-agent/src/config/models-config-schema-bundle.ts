@@ -183,6 +183,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "o200k"',
 	);
 
+	const ModelInputSchema = type('("text" | "image" | "audio" | "video")[]');
+
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
 		"api?": ApiSchema,
@@ -219,7 +221,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
@@ -279,7 +281,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"kind?": ModelKindSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
-		"input?": '("text" | "image")[]',
+		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,

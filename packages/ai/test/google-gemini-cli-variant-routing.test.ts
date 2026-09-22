@@ -111,7 +111,7 @@ function unroutedModel(): Model<"google-gemini-cli"> {
 async function captureRequest(
 	model: Model<"google-gemini-cli">,
 	reasoning: Effort | undefined,
-	options: { forceReasoningOff?: boolean; email?: string } = {},
+	options: { forceReasoningOff?: boolean; disableReasoning?: boolean; email?: string } = {},
 ): Promise<{ body: CapturedRequestBody; attributedModel: string }> {
 	let requestBody: string | undefined;
 	const fetchMock: FetchImpl = (_input, init) => {
@@ -122,6 +122,7 @@ async function captureRequest(
 		apiKey: JSON.stringify({ token: "token", projectId: "proj-123", email: options.email }),
 		reasoning,
 		forceReasoningOff: options.forceReasoningOff,
+		disableReasoning: options.disableReasoning,
 		fetch: fetchMock,
 	});
 	const result = await stream.result();
@@ -181,6 +182,7 @@ describe("google-gemini-cli effort-tier variant routing", () => {
 			for (const [reasoning, options] of [
 				[undefined, {}],
 				[Effort.High, { forceReasoningOff: true }],
+				[Effort.High, { disableReasoning: true }],
 			] as const) {
 				const request = await captureRequest(model, reasoning, options);
 				expect(request.body.model).toBe(`${id}-low`);

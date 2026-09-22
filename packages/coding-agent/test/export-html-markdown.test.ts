@@ -186,4 +186,48 @@ describe("HTML export Markdown", () => {
 		expect(document.querySelector(".tree-node.active")?.getAttribute("data-id")).toBe("message-0");
 		expect(document.querySelector("#messages")?.textContent).toContain("root");
 	});
+	test("renders audio/video-only and mixed messages", () => {
+		const audio = { type: "audio", mimeType: "audio/wav", data: "UklGRg==" };
+		const video = { type: "video", mimeType: "video/mp4", data: "AAAA" };
+		const entries: MinimalMessageEntry[] = [
+			{
+				type: "message",
+				id: "user-audio-only",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:01.000Z",
+				message: { role: "user", content: [audio], timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "user-video-only",
+				parentId: "user-audio-only",
+				timestamp: "2026-01-01T00:00:02.000Z",
+				message: { role: "user", content: [video], timestamp: 2 },
+			},
+			{
+				type: "message",
+				id: "assistant-mixed",
+				parentId: "user-video-only",
+				timestamp: "2026-01-01T00:00:03.000Z",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "before media" }, audio, video, { type: "text", text: "after media" }],
+					timestamp: 3,
+				},
+			},
+		];
+		const document = renderSession(createSession(entries, "assistant-mixed", "html-media-test"));
+
+		const userAudio = document.querySelector("#entry-user-audio-only audio");
+		const userVideo = document.querySelector("#entry-user-video-only video");
+		const assistant = document.getElementById("entry-assistant-mixed");
+		expect(userAudio?.getAttribute("src")).toBe("data:audio/wav;base64,UklGRg==");
+		expect(userAudio?.hasAttribute("controls")).toBe(true);
+		expect(userVideo?.getAttribute("src")).toBe("data:video/mp4;base64,AAAA");
+		expect(userVideo?.hasAttribute("controls")).toBe(true);
+		expect(assistant?.querySelector("audio")?.getAttribute("src")).toBe("data:audio/wav;base64,UklGRg==");
+		expect(assistant?.querySelector("video")?.getAttribute("src")).toBe("data:video/mp4;base64,AAAA");
+		expect(assistant?.textContent).toContain("before media");
+		expect(assistant?.textContent).toContain("after media");
+	});
 });

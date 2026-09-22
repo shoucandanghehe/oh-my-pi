@@ -40,6 +40,7 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	ImageContent,
+	MediaContent,
 	Model,
 	ModelSpec,
 	ProviderResponseMetadata,
@@ -1171,6 +1172,8 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
 	images?: ImageContent[];
+	/** Audio/video attachments forwarded without image normalization. */
+	attachments?: MediaContent[];
 	systemPrompt: string[];
 }
 
@@ -1554,7 +1557,7 @@ interface ToolResultEventBase {
 	type: "tool_result";
 	toolCallId: string;
 	input: Record<string, unknown>;
-	content: (TextContent | ImageContent)[];
+	content: (TextContent | MediaContent)[];
 	isError: boolean;
 }
 
@@ -2062,7 +2065,7 @@ export interface ExtensionAPI {
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
 	 *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
-	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
+	sendUserMessage(content: string | (TextContent | MediaContent)[], options?: SendUserMessageOptions): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -2229,7 +2232,7 @@ export interface ProviderModelConfig {
 	/** Optional canonical thinking capability metadata for per-model effort support. */
 	thinking?: Model["thinking"];
 	/** Supported input types. */
-	input: ("text" | "image")[];
+	input: Model["input"];
 	/** Cost per million tokens. */
 	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	/** Premium Copilot requests charged per user-initiated request. */
@@ -2300,7 +2303,7 @@ export type SendMessageHandler = <T = unknown>(
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
  *  batch while streaming, except that it ends a running interruptible `wait`; idle still starts a turn. */
 export type SendUserMessageHandler = (
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | MediaContent)[],
 	options?: SendUserMessageOptions,
 ) => void;
 

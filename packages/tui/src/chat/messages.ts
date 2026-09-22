@@ -1,4 +1,4 @@
-import type { AssistantMessage, ImageContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, MediaContent, MessageAttribution, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import type { OutputMeta } from "../tools/output-meta";
@@ -36,7 +36,7 @@ export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
 export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 
 /** Content shape accepted for extension-injected messages. */
-export type CustomMessageContent = string | (TextContent | ImageContent)[];
+export type CustomMessageContent = string | (TextContent | MediaContent)[];
 
 /** Public input accepted by `pi.sendMessage` and `AgentSession.sendCustomMessage`. */
 export type CustomMessagePayload<T = unknown> =
@@ -264,7 +264,7 @@ export interface FileMentionMessage {
 		byteSize?: number;
 		/** Why the file contents were omitted from auto-read. */
 		skippedReason?: "tooLarge" | "binary";
-		image?: ImageContent;
+		image?: MediaContent;
 	}>;
 	timestamp: number;
 }

@@ -1,7 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type VariantCollapseTable } from "../compat/collapse";
-import type { AntigravityModelWireProfile, ModelSpec } from "../types";
+import type { AntigravityModelWireProfile, InputModality, ModelSpec } from "../types";
 import { discoveryFetch, toPositiveNumber } from "../utils";
 import { ensureAntigravityVersion, getAntigravityHeaders } from "../wire/gemini-headers";
 
@@ -219,6 +219,9 @@ export async function fetchAntigravityDiscoveryModels(
 
 			const supportsImages = model.supportsImages === true;
 			const wireProfile = antigravityWireProfileOf(model);
+			const vendorInput: InputModality[] = ["text"];
+			if (supportsImages) vendorInput.push("image");
+			if (model.supportsVideo === true) vendorInput.push("video");
 			models.push({
 				id: modelId,
 				name: model.displayName || modelId,
@@ -226,7 +229,8 @@ export async function fetchAntigravityDiscoveryModels(
 				provider: "google-antigravity",
 				baseUrl: discovered.endpoint,
 				reasoning: model.supportsThinking === true,
-				input: supportsImages ? ["text", "image"] : ["text"],
+				input: vendorInput,
+				vendorInput,
 				cost: {
 					input: 0,
 					output: 0,

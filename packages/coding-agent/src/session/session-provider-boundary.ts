@@ -2,7 +2,15 @@
 
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	MediaContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
@@ -31,7 +39,7 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "./settings";
 
-type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent;
+type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | MediaContent;
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionProviderBoundaryHost {
@@ -40,6 +48,7 @@ export interface SessionProviderBoundaryHost {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
+	activeRouteModel(): Model | undefined;
 	sessionId(): string;
 	/** The session tree's current cost gate. */
 	costGate?(): CostGate | undefined;
@@ -293,7 +302,7 @@ export class SessionProviderBoundary {
 
 	/** Normalizes image payloads for the active model. */
 	normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
-		return normalizeModelContextImages(images, { model: this.#host.model() });
+		return normalizeModelContextImages(images, { model: this.#host.activeRouteModel() ?? this.#host.model() });
 	}
 
 	/** Builds a hidden vision-model description for attachments sent to a text-only model. */
@@ -301,7 +310,7 @@ export class SessionProviderBoundary {
 		normalizedImages: ImageContent[],
 		signal?: AbortSignal,
 	): Promise<CustomMessage | undefined> {
-		const model = this.#host.model();
+		const model = this.#host.activeRouteModel() ?? this.#host.model();
 		if (!shouldDescribeImagesForTextModel(model, this.#host.settings)) return undefined;
 
 		let blocks: TextContent[];
