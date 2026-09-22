@@ -2,6 +2,7 @@ import type {
 	Context,
 	DeveloperMessage,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ProviderPayload,
@@ -34,11 +35,11 @@ function countImages(context: Context): number {
 }
 
 function clampContent(
-	content: readonly (TextContent | ImageContent)[],
+	content: readonly (TextContent | MediaContent)[],
 	state: { remainingDrops: number },
-): (TextContent | ImageContent)[] | undefined {
+): (TextContent | MediaContent)[] | undefined {
 	let changed = false;
-	const clamped: (TextContent | ImageContent)[] = [];
+	const clamped: (TextContent | MediaContent)[] = [];
 	for (const part of content) {
 		if (part.type === "image" && state.remainingDrops > 0) {
 			state.remainingDrops--;
@@ -184,10 +185,10 @@ function inlineImageFromDataUri(imageUrl: unknown): ImageContent | undefined {
 
 /** `undefined` when every image decodes, so callers can keep the original array. */
 async function replaceUnreadableContent(
-	content: readonly (TextContent | ImageContent)[],
+	content: readonly (TextContent | MediaContent)[],
 	model: Model,
-): Promise<(TextContent | ImageContent)[] | undefined> {
-	let replaced: (TextContent | ImageContent)[] | undefined;
+): Promise<(TextContent | MediaContent)[] | undefined> {
+	let replaced: (TextContent | MediaContent)[] | undefined;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type !== "image" || !sendsInlineImageBytes(part, model)) continue;

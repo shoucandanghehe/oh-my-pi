@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1595,7 +1595,7 @@ function getAdvisorTurnError(messages: readonly AgentMessage[]): Error | undefin
 	return new Error("Advisor turn ended without an assistant response");
 }
 
-type TextualContent = string | readonly (TextContent | ImageContent)[];
+type TextualContent = string | readonly (TextContent | MediaContent)[];
 
 function obfuscateTextualContent(
 	obfuscator: SecretObfuscator,
@@ -1604,7 +1604,7 @@ function obfuscateTextualContent(
 ): TextualContent {
 	if (typeof content === "string") return obfuscator.obfuscate(content, sharedRegexSecretValues);
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): TextContent | MediaContent => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
 		if (text === block.text) return block;

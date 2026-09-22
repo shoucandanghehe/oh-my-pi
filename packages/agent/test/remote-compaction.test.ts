@@ -25,6 +25,7 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentials";
+import { UnsupportedMediaError } from "@oh-my-pi/pi-ai/error";
 import {
 	buildTransformedCodexRequestBody,
 	getOpenAICodexTransportDetails,
@@ -310,6 +311,37 @@ describe("buildOpenAiNativeHistory custom tool calls", () => {
 		const call = items.find(item => item.type === "function_call");
 
 		expect(call?.arguments).toBe('{"rowId":"9007199254740993"}');
+	});
+});
+
+describe("buildOpenAiNativeHistory media", () => {
+	test("rejects user audio even when the model metadata advertises it", () => {
+		const message: UserMessage = {
+			role: "user",
+			content: [
+				{ type: "text", text: "before" },
+				{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" },
+				{ type: "text", text: "after" },
+			],
+			timestamp: 1,
+		};
+		expect(() => buildOpenAiNativeHistory([message], makeOpenAiModel({ input: ["text", "audio"] }))).toThrow(
+			UnsupportedMediaError,
+		);
+	});
+
+	test("rejects tool-result audio before remote compaction can issue a request", () => {
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_audio",
+			toolName: "record",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" }],
+			isError: false,
+			timestamp: 1,
+		};
+		expect(() => buildOpenAiNativeHistory([toolResult], makeOpenAiModel({ input: ["text", "audio"] }))).toThrow(
+			UnsupportedMediaError,
+		);
 	});
 });
 
@@ -2688,6 +2720,36 @@ describe("compact() remote compaction failure handling", () => {
 			}),
 		).rejects.toThrow("Remote compaction failed");
 		expect(completeSpy).not.toHaveBeenCalled();
+	});
+
+	test("falls back to local summarization when remote history cannot encode user video", async () => {
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		preparation.messagesToSummarize = [
+			{
+				role: "user",
+				content: [{ type: "video", data: "YQ==", mimeType: "video/mp4" }],
+				timestamp: 1,
+			},
+		];
+		let remoteCalls = 0;
+		const fetchMock: FetchImpl = async () => {
+			remoteCalls++;
+			return new Response();
+		};
+
+		const result = await compact(
+			preparation,
+			makeOpenAiModel({ input: ["text", "video"] }),
+			"test-key",
+			undefined,
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(result.summary).toContain("local summary");
+		expect(completeSpy).toHaveBeenCalled();
+		expect(remoteCalls).toBe(0);
 	});
 });
 

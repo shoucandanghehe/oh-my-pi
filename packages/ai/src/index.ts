@@ -42,6 +42,7 @@ export * from "./registry";
 export { resolveCacheRetention } from "./utils";
 export * from "./stream";
 export * from "./types";
+export type { VideoContent } from "./types";
 export * from "./usage";
 export * from "./usage/claude";
 export * from "./usage/claude-reset";

@@ -34,6 +34,7 @@ import type {
 	DeveloperMessage,
 	FetchImpl,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ProviderInputTransformation,
@@ -843,10 +844,10 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 }
 
 async function resizeAnthropicManyImageContent(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	state: { resized: number },
 	limit: ResizeLimiter,
-): Promise<(TextContent | ImageContent)[]> {
+): Promise<(TextContent | MediaContent)[]> {
 	let changed = false;
 	const next = await Promise.all(
 		content.map(async block => {
@@ -928,7 +929,7 @@ type AnthropicToolResultContent =
  * Convert content blocks to Anthropic API format
  */
 function convertContentBlocks(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	supportsImages = true,
 ): AnthropicToolResultContent {
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
@@ -942,6 +943,12 @@ function convertContentBlocks(
 			sawText = true;
 			blocks.push({ type: "text", text });
 			continue;
+		}
+
+		if (block.type === "audio" || block.type === "video") {
+			throw new AIError.ValidationError(
+				`Anthropic Messages cannot encode ${block.type}; routed media preflight must reject it`,
+			);
 		}
 
 		if (!supportsImages) {

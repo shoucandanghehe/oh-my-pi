@@ -81,7 +81,10 @@ interface ModelJson {
 	reasoning: boolean;
 	/** Supported thinking efforts when the model thinks, otherwise null. */
 	thinking: readonly Effort[] | null;
-	input: ("text" | "image")[];
+	input: Model<Api>["input"];
+	vendorInput: Model<Api>["vendorInput"];
+	toolResultInput: Model<Api>["toolResultInput"];
+	vendorInputByWireModel?: Model<Api>["vendorInputByWireModel"];
 	cost: Model<Api>["cost"];
 }
 
@@ -123,6 +126,9 @@ function toModelJson(model: Model<Api>): ModelJson {
 		reasoning: model.reasoning,
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
+		vendorInput: model.vendorInput ?? model.input,
+		toolResultInput: model.toolResultInput ?? model.input,
+		...(model.vendorInputByWireModel ? { vendorInputByWireModel: model.vendorInputByWireModel } : {}),
 		cost: model.cost,
 	};
 }
@@ -276,7 +282,8 @@ export function renderProviderModels(
 				{ header: "context", align: "right" },
 				{ header: "max-out", align: "right" },
 				{ header: "thinking" },
-				{ header: "images" },
+				{ header: "user" },
+				{ header: "tools" },
 			],
 			rows,
 		)) {
