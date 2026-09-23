@@ -54,7 +54,7 @@ function createHub(
 ): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
 		observers,
-		transcript: { fs, parseEntries: () => [] },
+		transcript: { fs, parseEntries: () => [], visitEntries: async () => {} },
 		loadPersisted: async () => {},
 		hubKeys: [],
 		onDone: () => {},

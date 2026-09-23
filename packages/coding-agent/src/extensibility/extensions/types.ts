@@ -33,6 +33,7 @@ import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,

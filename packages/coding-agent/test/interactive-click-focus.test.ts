@@ -22,6 +22,11 @@ function plainRows(rows: readonly string[]): string[] {
 	return rows.map(row => Bun.stripANSI(row).trimEnd());
 }
 
+function paintedColumn(row: string, marker: string): number {
+	const index = row.indexOf(marker);
+	return index < 0 ? -1 : Bun.stringWidth(row.slice(0, index));
+}
+
 describe("inline click-to-focus geometry", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -29,12 +34,15 @@ describe("inline click-to-focus geometry", () => {
 	let mode: InteractiveMode;
 	let term: VirtualTerminal;
 	let eventBus: EventBus;
+	let previousBackend: string | undefined;
 
 	beforeAll(() => {
 		initTheme();
 	});
 
 	beforeEach(async () => {
+		previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-click-focus-e2e-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -59,9 +67,12 @@ describe("inline click-to-focus geometry", () => {
 		authStorage?.close();
 		tempDir?.removeSync();
 		resetSettingsForTest();
+		if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+		else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
 	});
 
 	it("maps a painted live task row back to its agent id", async () => {
+		cfgTuiMouse.set(session.settings, true);
 		await mode.init({ suppressWelcomeIntro: true });
 		void mode.getUserInput();
 		await term.waitForRender();
@@ -114,6 +125,34 @@ describe("inline click-to-focus geometry", () => {
 
 		// Chrome rows (the status line at the bottom) name no agent.
 		expect(mode.resolveViewportClickCandidates(viewport.length - 1 - top)).toEqual([]);
+
+		// A neighboring pane can share the same screen row; its column must
+		// never inherit the main pane's click target or hover band.
+		expect(
+			mode.openBtwWorkspacePane({
+				render: () => Array.from({ length: term.rows }, () => "SidePaneMarker"),
+			}),
+		).toBe(true);
+		await term.waitForRender(() => plainRows(term.getViewport()).some(line => line.includes("SidePaneMarker")));
+		const splitRows = plainRows(term.getViewport());
+		const cardRow = splitRows.findIndex(line => line.includes("ClickWorker"));
+		expect(cardRow).toBeGreaterThanOrEqual(0);
+		const sideColumn = paintedColumn(splitRows[cardRow]!, "SidePaneMarker");
+		expect(sideColumn).toBeGreaterThanOrEqual(0);
+		expect(mode.resolveViewportClickCandidates(cardRow - mode.ui.getMutableViewport().top, sideColumn)).toEqual([]);
+		const cardBackground = term.getViewportRowBackgroundValues(cardRow);
+		term.sendInput(`\x1b[<32;${sideColumn + 1};${cardRow + 1}M`);
+		await term.waitForRender();
+		expect(term.getViewportRowBackgroundValues(cardRow)).toEqual(cardBackground);
+		const mainColumn = paintedColumn(splitRows[cardRow]!, "ClickWorker");
+		expect(mode.resolveViewportClickCandidates(cardRow - mode.ui.getMutableViewport().top, mainColumn)).toEqual([
+			"ClickWorker",
+		]);
+		term.sendInput(`\x1b[<32;${mainColumn + 1};${cardRow + 1}M`);
+		await term.waitForRender();
+		const band = term.getViewportRowBackgroundValues(cardRow);
+		expect(band[mainColumn]).not.toBe(cardBackground[mainColumn]);
+		expect(band[sideColumn]).toBe(cardBackground[sideColumn]);
 	});
 
 	it("bands the hovered live card and clears it off-target", async () => {
@@ -180,28 +219,19 @@ describe("inline click-to-focus geometry", () => {
 		await term.waitForRender();
 		const before = workerBg();
 		expect(before).toBeDefined();
-		// Motion is single-shot against the last painted spans, which can lag
-		// one frame behind a just-mounted card: force a fresh frame, re-locate
-		// by content, and retry until the band lands. The final expect still
-		// fails loudly when nothing ever paints.
-		for (let attempt = 0; attempt < 20; attempt++) {
-			mode.ui.requestRender();
-			await term.waitForRender();
-			const rows = plainRows(term.getViewport());
-			const row = rows.findIndex(line => line.includes("HoverWorker"));
-			expect(row).toBeGreaterThanOrEqual(0);
-			term.sendInput(`\x1b[<32;5;${row + 1}M`);
-			await term.waitForRender(() => changed(before));
-			if (changed(before)) break;
-			if (attempt === 19) expect(changed(before)).toBe(true);
-		}
-
-		// Motion over the card bands its row.
+		const row = plainRows(term.getViewport()).findIndex(line => line.includes("HoverWorker"));
+		expect(row).toBeGreaterThanOrEqual(0);
+		const column = paintedColumn(plainRows(term.getViewport())[row]!, "HoverWorker");
+		expect(mode.resolveViewportClickCandidates(row - mode.ui.getMutableViewport().top, column)).toEqual([
+			"HoverWorker",
+		]);
+		term.sendInput(`\x1b[<32;${column + 1};${row + 1}M`);
+		await term.waitForRender();
 		expect(changed(before)).toBe(true);
 
-		// The live composer frame itself carries the band while hovered.
-		const frame = mode.composer.renderFrame({ columns: 120, rows: 32 });
-		expect(frame.viewport.filter(line => line.includes("\x1b[48")).length).toBeGreaterThan(0);
+		// The frame actually used by the app viewport carries the band.
+		const frame = mode.composer.renderAppViewportFrame({ columns: term.columns - 1, rows: term.rows }, []);
+		expect(frame.viewport[row]).toContain("\x1b[48");
 
 		// Disabling capture mid-hover clears the controller cache too: after
 		// re-enabling, motion over the same card must restore the band instead
@@ -216,7 +246,8 @@ describe("inline click-to-focus geometry", () => {
 		await term.waitForRender();
 		const cardRow = plainRows(term.getViewport()).findIndex(line => line.includes("HoverWorker"));
 		expect(cardRow).toBeGreaterThanOrEqual(0);
-		term.sendInput(`\x1b[<32;5;${cardRow + 1}M`);
+		const cardColumn = paintedColumn(plainRows(term.getViewport())[cardRow]!, "HoverWorker");
+		term.sendInput(`\x1b[<32;${cardColumn + 1};${cardRow + 1}M`);
 		await term.waitForRender(() => changed(before));
 		expect(changed(before)).toBe(true);
 
@@ -250,7 +281,11 @@ describe("inline click-to-focus geometry", () => {
 			const viewport = plainRows(term.getViewport());
 			const screenRow = viewport.findIndex(row => row.includes(marker));
 			expect(screenRow).toBeGreaterThanOrEqual(0);
-			term.sendInput(`\x1b[<0;5;${screenRow + 1}M`);
+			const column = paintedColumn(viewport[screenRow]!, marker);
+			expect(mode.resolveViewportClickCandidates(screenRow - mode.ui.getMutableViewport().top, column)).toEqual([
+				"@omp:toggle-pinned-hud",
+			]);
+			term.sendInput(`\x1b[<0;${column + 1};${screenRow + 1}M`);
 		};
 
 		// Collapsed by default: three rows plus the expander.

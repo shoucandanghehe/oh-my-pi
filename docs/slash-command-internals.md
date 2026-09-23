@@ -298,16 +298,18 @@ From the pause screen, press the configured interrupt key (Esc by default), Ente
 
 ## 11) Built-in command note: `/btw`
 
-`/btw <question>` creates an independent, durable side thread and displays its
-first reply in the inline panel. There is no temporary QuickAsk or upgrade step.
-The thread's Main snapshot is frozen and journaled before its first request.
-Later Main messages do not enter an existing BTW thread automatically.
+In the Main workspace, `/btw <question>` creates an independent, durable side
+thread and displays its first reply inline. The thread's Main snapshot is frozen
+and saved in its sidecar before the first model request. Later Main messages do
+not enter an existing BTW thread automatically.
 
 In the app-viewport workspace, `Enter` opens the same inline thread in the BTW pane,
 even while its reply is running. Opening the pane does not recreate the conversation,
 repeat the question, or change its provider lineage. If the pane cannot open, the
-inline panel stays visible. Bare `/btw` opens the shared BTW workspace; without the
-workspace backend, it reopens the selected saved thread inline.
+inline panel stays visible. Bare `/btw` opens the shared BTW workspace;
+`/btw --history` opens earlier sidecar answers for follow-up. Without the
+workspace backend, bare `/btw` opens that history directly. A focused
+subagent's `/btw` uses its own scoped history rather than the Main workspace.
 
 - `Esc` or `/btw --clear` dismisses the inline panel and cancels its running request,
   but does not delete the thread. A new `/btw <question>` starts another thread.
@@ -336,17 +338,22 @@ eval/browser execution, memory writes, session/process control, and unclassified
 MCP tools remain unavailable. A tool's `read` approval tier alone is not sufficient
 to grant BTW access.
 
-The existing `btw-thread` custom events in the session journal store frozen context,
-complete turn messages, provider lineage, drafts, and read state. Restoring a thread
-preserves its native reasoning/replay metadata subject to the provider's protocol.
-Actual provider cache reuse is not guaranteed.
+BTW checkpoints live under the session's `btw-history/` artifacts directory, not
+in Main's journal. They retain frozen context, complete turn messages, provider
+lineage, drafts, and read state. Restoring a thread preserves its native
+reasoning/replay metadata subject to the provider's protocol; actual provider
+cache reuse is not guaranteed.
 
-In-flight requests are journaled for explicit pause/recovery; completed turns are
-saved on success. Partial output from failed or cancelled turns is not committed
-as a completed turn. `--no-session` keeps the journal in memory.
+Requests are checkpointed before inference and completed turns on success.
+Interrupted requests retain their input for explicit `/continue`; disposing a
+manager releases its history leases so the same process can reopen the session.
+Partial output from failed or cancelled turns is not committed as a completed
+turn. `--no-session` keeps checkpoints in memory.
 
-This branch does not use the upstream `btw-history/` sidecar UI or storage.
-Existing sidecar files are not deleted or converted into synthetic thread snapshots.
+Legacy `btw-thread` journal records require the separate one-time migration.
+Opening legacy history without its `.migrated-v1` marker is rejected; there is no
+automatic migration or dual writing. Stop old writers before migration and do
+not resume them against migrated sessions.
 
 ## 12) Bundled command note: `/annotate`
 

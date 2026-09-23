@@ -1206,7 +1206,7 @@ describe("MainSessionPane", () => {
 			onPersistDraft: () => {},
 			onSelectThread: () => true,
 			onMarkRead: () => {},
-			onCloseThread: () => true,
+			onCloseThread: async () => true,
 			onPromoteThread: async () => true,
 		});
 		const thread: BtwThreadView = {

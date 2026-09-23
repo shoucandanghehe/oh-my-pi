@@ -47,7 +47,6 @@ import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 
-const MAX_WIDGET_LINES = 10;
 /** Approval answers, as a collab guest's select shows them. */
 const APPROVE_OPTION = "Approve";
 const DENY_OPTION = "Deny";

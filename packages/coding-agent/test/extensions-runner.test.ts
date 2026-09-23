@@ -2939,7 +2939,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				}),
 			).rejects.toThrow("thread deleted");
 

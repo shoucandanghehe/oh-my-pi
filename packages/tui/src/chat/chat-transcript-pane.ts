@@ -1,11 +1,16 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "../app-keybindings";
 import type { AutocompleteProvider } from "../autocomplete";
+import { sanitizeErrorLine } from "../chrome/error-block";
 import type { EditorTopBorder } from "../components/composer";
 import { ScrollView } from "../components/scroll-view";
 import { matchesKey } from "../keys";
 import { type MouseRoutable, routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
+import { node, span } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import { isNativeRendering } from "../native/state";
 import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "../text-selection";
 import {
 	type AppViewportHoverProvider,
@@ -69,6 +74,9 @@ function sanitizeNotice(text: string, maxWidth: number): string {
 	return truncateToWidth(singleLine, Math.max(10, maxWidth));
 }
 
+/** Native text is truncated by the terminal, within the sanitizer's i32 width limit. */
+const NATIVE_LINE_WIDTH = 0x7fff_ffff;
+
 /** Shared transcript, scrolling, selection, editor, and pane chrome. */
 export class ChatTranscriptPane
 	implements Component, Focusable, MouseRoutable, TargetedRender, ViewportHeightAware, AppViewportHoverProvider
@@ -102,6 +110,7 @@ export class ChatTranscriptPane
 	#returnToBottomRow = -1;
 	#returnToBottomCol = -1;
 	#returnToBottomHovered = false;
+	#linkEpoch = 0;
 
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
 		this.#builder = new ChatTranscriptBuilder({
@@ -257,21 +266,26 @@ export class ChatTranscriptPane
 	}
 
 	rebuild(messages: readonly AgentMessage[]): void {
+		this.#linkEpoch++;
 		this.#nextEntryIndex = 0;
 		this.#lastEntryId = null;
 		this.#builder.rebuild(this.#messageEntries(messages));
+		this.#resolveAssistantLinks(messages);
 		this.options.builder.requestRender();
 	}
 
 	append(messages: readonly AgentMessage[]): void {
 		this.#builder.append(this.#messageEntries(messages));
+		this.#resolveAssistantLinks(messages);
 		this.options.builder.requestRender();
 	}
 
 	rebuildEntries(entries: readonly TranscriptEntryLike[]): void {
+		this.#linkEpoch++;
 		this.#nextEntryIndex = entries.length;
 		this.#lastEntryId = entries.at(-1)?.id ?? null;
 		this.#builder.rebuild(entries);
+		this.#resolveAssistantLinks(entries.flatMap(entry => (entry.type === "message" ? [entry.message] : [])));
 		this.options.builder.requestRender();
 	}
 
@@ -279,6 +293,7 @@ export class ChatTranscriptPane
 		this.#nextEntryIndex += entries.length;
 		this.#lastEntryId = entries.at(-1)?.id ?? this.#lastEntryId;
 		this.#builder.append(entries);
+		this.#resolveAssistantLinks(entries.flatMap(entry => (entry.type === "message" ? [entry.message] : [])));
 		this.options.builder.requestRender();
 	}
 
@@ -297,6 +312,38 @@ export class ChatTranscriptPane
 		});
 	}
 
+	#resolveAssistantLinks(messages: readonly AgentMessage[]): void {
+		const resolveLinks = this.options.builder.resolveLinks;
+		if (!resolveLinks) return;
+		const texts = messages.flatMap(message =>
+			message.role === "assistant"
+				? message.content.flatMap(content => (content.type === "text" ? [content.text] : []))
+				: [],
+		);
+		if (texts.length === 0) return;
+		const epoch = this.#linkEpoch;
+		void resolveLinks(texts)
+			.then(targets => {
+				if (epoch !== this.#linkEpoch) return;
+				if (this.#builder.mergeLinkTargets(targets)) this.options.builder.requestRender();
+			})
+			.catch(error => {
+				if (epoch === this.#linkEpoch) logger.warn("Transcript link resolution failed", { error });
+			});
+	}
+
+	invalidateLinkContext(): void {
+		this.#linkEpoch++;
+		this.#builder.resetLinkTargets();
+		this.options.builder.requestRender();
+	}
+
+	setLiveAssistant(message: Extract<AgentMessage, { role: "assistant" }> | undefined): void {
+		const component = this.#builder.setLiveAssistant(message);
+		if (component) this.options.builder.ui.requestComponentRender(component);
+		else this.options.builder.requestRender();
+	}
+
 	updateStreamingAssistant(message: Extract<AgentMessage, { role: "assistant" }>): boolean {
 		const component = this.#builder.updateStreamingAssistant(message);
 		if (!component) return false;
@@ -307,6 +354,7 @@ export class ChatTranscriptPane
 	finalizeStreamingAssistant(message: Extract<AgentMessage, { role: "assistant" }>): boolean {
 		const component = this.#builder.finalizeStreamingAssistant(message);
 		if (!component) return false;
+		this.#resolveAssistantLinks([message]);
 		this.options.builder.ui.requestComponentRender(component);
 		return true;
 	}
@@ -441,6 +489,11 @@ export class ChatTranscriptPane
 		}
 		for (const key of this.options.expandKeys) {
 			if (matchesKey(data, key)) {
+				if (isNativeRendering()) {
+					this.#builder.setExpanded(!this.#builder.expanded);
+					this.options.builder.requestRender();
+					return;
+				}
 				const startRow = this.#scrollView.getScrollOffset();
 				const endRow = startRow + Math.max(1, this.#selectionViewportHeight) - 1;
 				const visibleBlocks = this.#builder.container.getVirtualBlocksInRowRange(
@@ -459,6 +512,47 @@ export class ChatTranscriptPane
 			// Editor.onChange also covers asynchronous clipboard completion.
 			this.options.builder.requestRender();
 		}
+	}
+
+	/** Describe the same transcript and draft owners without VT viewport slicing. */
+	describe(_cx: DescribeContext): NativeNode {
+		const children: NativeChild[] = [
+			this.#builder.isEmpty
+				? node(
+						"text",
+						{
+							spans: [
+								span(
+									sanitizeErrorLine(this.options.getPlaceholder(NATIVE_LINE_WIDTH), NATIVE_LINE_WIDTH),
+									"dim",
+								),
+							],
+							wrap: "word",
+						},
+						undefined,
+						"placeholder",
+					)
+				: node("col", { grow: 1 }, [this.#builder.container], "transcript"),
+		];
+		const notice = this.#notice ?? this.options.getNotice?.();
+		if (notice) {
+			children.push(
+				node(
+					"text",
+					{ text: sanitizeErrorLine(notice, NATIVE_LINE_WIDTH), tone: "error", truncate: "end" },
+					undefined,
+					"notice",
+				),
+			);
+		}
+		if (this.options.aboveEditor) children.push(this.options.aboveEditor);
+		if (this.options.editor?.readOnly) {
+			children.push(node("text", { spans: [span(this.options.editor.label, "dim")] }, undefined, "read-only"));
+		} else if (this.#editor) {
+			children.push(this.#editor);
+		}
+		if (this.options.belowEditor) children.push(this.options.belowEditor);
+		return node("col", { grow: 1 }, children);
 	}
 
 	render(width: number): readonly string[] {
@@ -645,6 +739,7 @@ export class ChatTranscriptPane
 	}
 
 	dispose(): void {
+		this.#linkEpoch++;
 		for (const editor of this.#editors.values()) {
 			editor.onSubmit = undefined;
 		}
