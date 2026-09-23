@@ -47,6 +47,7 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 		showError: vi.fn(),
 		showWarning: vi.fn(),
 		applyCwdChange,
+		withBtwSessionMove: vi.fn(async (operation: () => Promise<boolean>) => operation()),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
@@ -83,6 +84,24 @@ describe("CommandController /move", () => {
 			expect(ctx.session.moveSession).not.toHaveBeenCalled();
 			expect(ctx.present).not.toHaveBeenCalled();
 			expect(ctx.statusContainer.children).toHaveLength(0);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not create a worktree while BTW cannot move the session", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-btw-busy-"));
+		try {
+			const { ctx, state } = createMoveContext(sourceDir);
+			ctx.withBtwSessionMove = vi.fn(async () => false);
+			const createWorktree = vi.spyOn(sessionWorktree, "createSessionWorktree");
+
+			await new CommandController(ctx).handleWorktreeCommand("feature");
+
+			expect(ctx.withBtwSessionMove).toHaveBeenCalledTimes(1);
+			expect(createWorktree).not.toHaveBeenCalled();
+			expect(ctx.session.moveSession).not.toHaveBeenCalled();
+			expect(state.cwd).toBe(sourceDir);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
@@ -269,6 +288,25 @@ describe("CommandController /move", () => {
 			expect(state.cwd).toBe(sourceDir);
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not relocate while a BTW session-move gate refuses the operation", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-source-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-target-"));
+		try {
+			const { ctx, state } = createMoveContext(sourceDir);
+			ctx.withBtwSessionMove = vi.fn(async () => false);
+
+			await new CommandController(ctx).handleMoveCommand(targetDir);
+
+			expect(ctx.withBtwSessionMove).toHaveBeenCalledTimes(1);
+			expect(ctx.session.moveSession).not.toHaveBeenCalled();
+			expect(ctx.applyCwdChange).not.toHaveBeenCalled();
+			expect(state.cwd).toBe(sourceDir);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
 		}
 	});
 

@@ -70,7 +70,7 @@ function cloneNotificationField(value: unknown): unknown {
 }
 
 /** Build a detached, notification-only snapshot of an `AgentMessage`. */
-function cloneMessageNotification(message: AgentMessage): AgentMessage {
+export function cloneMessageNotification(message: AgentMessage): AgentMessage {
 	const snapshot: Record<PropertyKey, unknown> = {};
 	for (const key of Reflect.ownKeys(message)) {
 		const descriptor = Object.getOwnPropertyDescriptor(message, key);

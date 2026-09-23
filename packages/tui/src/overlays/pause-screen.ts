@@ -179,6 +179,7 @@ export function renderPauseScreen(
 			if (content.length < screenHeight) content.push(titleLine);
 			if (content.length < screenHeight) content.push(clockLine);
 		}
+
 	} else {
 		if (sessionName) {
 			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());

@@ -4,6 +4,7 @@ import {
 	type BrailleScrollbarMetrics,
 	type Component,
 	type ComponentViewportTailProvider,
+	Container,
 	componentContains,
 	extractComponentTextSelection,
 	extractRenderedTextSelection,
@@ -62,6 +63,8 @@ export class MainSessionPane
 	#selectionScrollLines: readonly string[] = [];
 	#selectionStickyLines: readonly string[] = [];
 	#selectionViewportHeight = 0;
+	/** Click targets of the last painted content frame, indexed by pane-local row. */
+	#clickCandidates: string[][] = [];
 	#selectionStickyStart = 0;
 	#renderWidth = 0;
 	#tailFrameActive = false;
@@ -72,6 +75,7 @@ export class MainSessionPane
 	#returnToBottomRow = -1;
 	#returnToBottomCol = -1;
 	#returnToBottomHovered = false;
+	#hoveredClickId: string | undefined;
 
 	constructor(options: MainSessionPaneOptions) {
 		this.#scrollRoot = options.scrollRoot;
@@ -102,6 +106,52 @@ export class MainSessionPane
 	}
 	containsComponent(component: Component): boolean {
 		return componentContains(this.#stickyRoot, component) || componentContains(this.#scrollRoot, component);
+	}
+
+	/** Resolve only painted content rows; the pane header belongs to WorkspaceLayout. */
+	getClickFocusAgentIdsAtRow(row: number): string[] {
+		return this.#clickCandidates[row] ?? [];
+	}
+	setHoveredClickId(id: string | undefined): void {
+		this.#hoveredClickId = id;
+	}
+
+	#clickIdsAtAnchor(anchor: VirtualRowAnchor | undefined, width: number, heights: Map<Container, number[]>): string[] {
+		if (!anchor || anchor.row < 0) return [];
+		if (anchor.child) return this.#clickIdsAtAnchor(anchor.child, anchor.child.width, heights);
+		const component = anchor.component as Component &
+			Partial<{
+				getClickFocusAgentIds(): string[];
+				getClickAgentAtRow(row: number): string | undefined;
+			}>;
+		const ids = component.getClickFocusAgentIds?.();
+		if (ids?.length) return ids;
+		const id = component.getClickAgentAtRow?.(anchor.row);
+		if (id !== undefined) return [id];
+		if (!(component instanceof Container)) return [];
+		const childHeights = heights.get(component) ?? component.children.map(child => child.render(width).length);
+		heights.set(component, childHeights);
+		let row = anchor.row;
+		for (const [index, child] of component.children.entries()) {
+			const height = childHeights[index]!;
+			if (row < height) return this.#clickIdsAtAnchor({ component: child, row, width }, width, heights);
+			row -= height;
+		}
+		return [];
+	}
+
+	#captureClickCandidates(viewportHeight: number, scrollRows: number, offset: number): void {
+		const scroll = this.#virtualScrollProvider();
+		if (!scroll?.getVirtualRowAnchor) {
+			this.#clickCandidates = [];
+			return;
+		}
+		const width = Math.max(1, this.#renderWidth - 1);
+		const heights = new Map<Container, number[]>();
+		this.#clickCandidates = Array.from({ length: this.#height }, (_value, row) => {
+			if (row >= viewportHeight || row >= scrollRows) return [];
+			return this.#clickIdsAtAnchor(scroll.getVirtualRowAnchor?.(width, offset + row), width, heights);
+		});
 	}
 
 	#materializeGeometry(): void {
@@ -316,6 +366,7 @@ export class MainSessionPane
 			this.#selectionScrollLines = [];
 			this.#selectionViewportHeight = 0;
 			this.#selectionStickyStart = 0;
+			this.#clickCandidates = [];
 			this.#clearReturnToBottomControl();
 			return sticky.slice(-this.#height);
 		}
@@ -328,6 +379,7 @@ export class MainSessionPane
 		this.#selectionScrollLines = scroll;
 		this.#selectionViewportHeight = viewportHeight;
 		this.#selectionStickyStart = viewportHeight;
+		this.#captureClickCandidates(viewportHeight, visible.length, this.#offset);
 		const rendered = [...this.#renderScrollWindow(visible, width, viewportHeight, scroll.length, this.#offset)];
 		const renderedSticky = this.#renderStickyWithReturnControl(width, viewportHeight, sticky);
 		return [...rendered, ...renderedSticky];
@@ -459,6 +511,7 @@ export class MainSessionPane
 		if (sticky.length >= this.#height) {
 			this.#selectionViewportHeight = 0;
 			this.#selectionStickyStart = 0;
+			this.#clickCandidates = [];
 			this.#clearReturnToBottomControl();
 			return sticky.slice(-this.#height).slice(-requested);
 		}
@@ -470,6 +523,7 @@ export class MainSessionPane
 		this.#offset = Math.max(0, Math.min(offset, this.#maxOffset));
 		this.#selectionViewportHeight = viewportHeight;
 		this.#selectionStickyStart = viewportHeight;
+		this.#captureClickCandidates(viewportHeight, scroll.length, this.#offset);
 		const rendered = [...this.#renderScrollWindow(scroll, width, viewportHeight, totalRows, this.#offset)];
 		const renderedSticky = this.#renderStickyWithReturnControl(width, viewportHeight, sticky);
 		return [...rendered, ...renderedSticky].slice(-requested);
@@ -543,7 +597,11 @@ export class MainSessionPane
 		totalRows: number,
 		offset: number,
 	): readonly string[] {
-		const windowLines = Array.from({ length: height }, (_value, row) => lines[row] ?? "");
+		const windowLines = Array.from({ length: height }, (_value, row) => {
+			const line = lines[row] ?? "";
+			if (!this.#hoveredClickId || !this.#clickCandidates[row]?.includes(this.#hoveredClickId)) return line;
+			return theme.bgFill("selectedBg", line.replace(/\x1b\[(?:4[0-7]|10[0-7]|48;[0-9;]*)m/g, ""));
+		});
 		const scrollbar = layoutBrailleScrollbar(height, totalRows, offset);
 		this.#width = Math.max(0, Math.trunc(width));
 		this.#scrollbarHeight = height;

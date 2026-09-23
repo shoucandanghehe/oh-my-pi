@@ -434,7 +434,7 @@ export class AssistantMessageComponent extends Container {
 	/** {@link #displayedMessage} before extension text renderers: the reply as written, which thinking state and the native Copy follow. */
 	#answerMessage: AssistantMessage | undefined;
 	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
-	#thinkingExtensions = new Map<number, Component[]>();
+	#thinkingExtensions = new Map<number, ThinkingExtensionComponents>();
 	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
 	#thinkingCollapsed = new Map<number, boolean>();
 	/** When each thinking block was seen streaming and when it stopped (native "Thought for 12s"), by content index. */
@@ -1064,7 +1064,8 @@ export class AssistantMessageComponent extends Container {
 								"head",
 							)
 						: node("text", { spans: [span(thoughtLabel(clock), "muted")], title }, undefined, "head");
-					const body = markdown(`k${index}`, "body", display.text, streaming);
+					const extensions = this.#thinkingExtensions.get(index);
+					const body = extensions?.replace ?? markdown(`k${index}`, "body", display.text, streaming);
 					children.push(
 						node(
 							"section",
@@ -1083,7 +1084,7 @@ export class AssistantMessageComponent extends Container {
 							`k${index}`,
 						),
 					);
-					if (!this.#hideThinkingBlock) children.push(...(this.#thinkingExtensions.get(index) ?? []));
+					if (!this.#hideThinkingBlock) children.push(...(extensions?.append ?? []));
 				} else if (content.type === "image" && content.data && content.mimeType && this.#showImages) {
 					children.push(this.#nativeImages.get(`i${index}`, content.data, content.mimeType));
 				}
@@ -1813,6 +1814,7 @@ export class AssistantMessageComponent extends Container {
 
 	#requestThinkingRender(rerunRenderers: boolean): void {
 		if (!rerunRenderers) {
+			this.#blockVersion++;
 			this.#onImageUpdate?.();
 			return;
 		}
@@ -2127,6 +2129,7 @@ export class AssistantMessageComponent extends Container {
 					this.#visibleThinkingUsesRenderers = true;
 				}
 				const thinkingComponents = this.#renderThinkingExtensions(message, content, i, thinkingIndex, thinkingText);
+				this.#thinkingExtensions.set(i, thinkingComponents);
 				if (thinkingComponents.replace) {
 					this.#contentContainer.addChild(thinkingComponents.replace);
 				} else {
