@@ -527,9 +527,10 @@ export type RestoredQueuedMessage = {
 	video?: VideoContent[];
 };
 
-/** Options for the same ephemeral side turn used by /btw. */
+/** Options for a detached single side request against the current session context. */
 export interface EphemeralTurnOptions {
 	promptText: string;
+	images?: ImageContent[];
 	/** Detached prior side-turn messages to prepend to this request. They are copied and never appended to the session history. */
 	history?: readonly Message[];
 	/** Opaque provider-lineage key for a series of related side turns. Rotate it after cancellation or failure before retrying. */

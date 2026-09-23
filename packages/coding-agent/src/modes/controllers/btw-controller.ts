@@ -1,9 +1,12 @@
+import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import btwConversationPrompt from "../../prompts/system/btw-conversation.md" with { type: "text" };
 import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
+import { resolveSessionMarkdownLinks } from "../../internal-urls/hyperlink-targets";
 import type { ContinuePausedAgentsResult } from "../../session/agent-session-types";
-import { BtwManager } from "../../session/btw-manager";
+import { BtwHistoryStore, type BtwHistoryRecord } from "../../session/btw-history";
+import { BtwManager, type BtwThread } from "../../session/btw-manager";
 import { BTW_THREAD_CUSTOM_TYPE, type BtwPromotionLifecycle, type BtwPromotionRequest } from "../../session/btw-thread";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
@@ -16,12 +19,18 @@ interface BtwRequest {
 	threadKey: string;
 }
 
+const memoryHistoryStores = new WeakMap<object, { sessionId: string; store: BtwHistoryStore }>();
+
 export class BtwController {
 	#activeRequest: BtwRequest | undefined;
 	#branchInFlight = false;
 	#copyInFlight = false;
 	#manager: BtwManager | undefined;
 	#managerSessionId: string | undefined;
+	#managerArtifactsDir: string | null | undefined;
+	#openingManager: Promise<BtwManager> | undefined;
+	#disposing: Promise<void> | undefined;
+	#generation = 0;
 	#workspacePane: BtwConversationPane | undefined;
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
@@ -32,8 +41,8 @@ export class BtwController {
 		this.#manager?.prepareForPausedExit();
 	}
 
-	continuePaused(): Promise<ContinuePausedAgentsResult> {
-		return this.#managerForCurrentSession().continuePaused();
+	async continuePaused(): Promise<ContinuePausedAgentsResult> {
+		return (await this.#managerForCurrentSession()).continuePaused();
 	}
 
 	hasActiveRequest(): boolean {
@@ -136,7 +145,20 @@ export class BtwController {
 		return true;
 	}
 
-	dispose(): void {
+	async dispose(): Promise<void> {
+		if (this.#disposing) return this.#disposing;
+		const disposing = this.#dispose();
+		this.#disposing = disposing;
+		try {
+			await disposing;
+		} finally {
+			if (this.#disposing === disposing) this.#disposing = undefined;
+		}
+	}
+
+	async #dispose(): Promise<void> {
+		this.#generation++;
+		await this.#openingManager?.catch(() => undefined);
 		const manager = this.#manager;
 		const sessionMatches = manager !== undefined && this.#managerSessionId === this.ctx.sessionManager.getSessionId();
 		this.#closeActiveRequest();
@@ -144,10 +166,11 @@ export class BtwController {
 			if (!sessionMatches) this.#workspacePane.abandon();
 			this.#closeWorkspacePane();
 		}
-		if (sessionMatches) manager.dispose();
-		else manager?.abandon();
+		if (sessionMatches) await manager.dispose();
+		else await manager?.abandon();
 		this.#manager = undefined;
 		this.#managerSessionId = undefined;
+		this.#managerArtifactsDir = undefined;
 	}
 
 	async start(question: string): Promise<void> {
@@ -156,7 +179,9 @@ export class BtwController {
 			return;
 		}
 		const input = question.trim();
-		const manager = this.#managerForCurrentSession();
+		const generation = this.#generation;
+		const manager = await this.#managerForCurrentSession();
+		if (generation !== this.#generation) return;
 		if (!input) {
 			if (this.ctx.workspaceEnabled) {
 				if (this.#openWorkspacePane(manager)) this.#detachActiveRequest();
@@ -234,20 +259,85 @@ export class BtwController {
 		}
 	}
 
-	#managerForCurrentSession(): BtwManager {
+	async #managerForCurrentSession(): Promise<BtwManager> {
+		await this.#disposing;
 		const sessionId = this.ctx.sessionManager.getSessionId();
-		if (this.#manager && this.#managerSessionId === sessionId) return this.#manager;
+		const artifactsDir = this.ctx.sessionManager.getLocalArtifactsDir();
+		if (this.#manager && this.#managerSessionId === sessionId && this.#managerArtifactsDir === artifactsDir) {
+			return this.#manager;
+		}
+		if (this.#openingManager) return this.#openingManager;
+		const opening = this.#openManager(sessionId, artifactsDir);
+		this.#openingManager = opening;
+		try {
+			return await opening;
+		} finally {
+			if (this.#openingManager === opening) this.#openingManager = undefined;
+		}
+	}
+
+	async #openManager(sessionId: string, artifactsDir: string | null): Promise<BtwManager> {
 		this.#closeActiveRequest();
 		this.#workspacePane?.abandon();
 		this.#closeWorkspacePane();
-		this.#manager?.abandon();
-		this.#managerSessionId = sessionId;
-		this.#manager = new BtwManager({
-			entries: this.ctx.sessionManager.getEntries(),
+		if (this.#manager) {
+			await this.#manager.dispose();
+			await this.#manager.abandon();
+		}
+		this.#manager = undefined;
+		let store: BtwHistoryStore;
+		if (
+			artifactsDir &&
+			!(await Bun.file(path.join(artifactsDir, "btw-history", ".migrated-v1")).exists()) &&
+			this.ctx.sessionManager
+				.getEntries()
+				.some(entry => entry.type === "custom" && entry.customType === BTW_THREAD_CUSTOM_TYPE)
+		) {
+			throw new Error(
+				"This session has BTW history in Main; run the one-time BTW sidecar migration before opening it",
+			);
+		}
+		if (artifactsDir) {
+			store = await BtwHistoryStore.open(artifactsDir);
+		} else {
+			const owner = this.ctx.sessionManager;
+			const previous = memoryHistoryStores.get(owner);
+			store = previous?.sessionId === sessionId ? previous.store : await BtwHistoryStore.open(undefined);
+			memoryHistoryStores.set(owner, { sessionId, store });
+		}
+		if (
+			this.ctx.sessionManager.getSessionId() !== sessionId ||
+			this.ctx.sessionManager.getLocalArtifactsDir() !== artifactsDir
+		) {
+			throw new Error("BTW session changed while opening its history");
+		}
+		const manager = new BtwManager({
+			restoredThreads: [...store.getRecords()]
+				.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+				.map(({ id, version: _version, phase, ...record }) => {
+					if (phase === "running") throw new Error(`BTW history ${id} was not recovered`);
+					return structuredClone({ ...record, key: id, phase });
+				}),
 			appendEvent: event => {
-				if (this.ctx.sessionManager.getSessionId() !== sessionId) return;
-				this.ctx.sessionManager.appendCustomEntry(BTW_THREAD_CUSTOM_TYPE, event);
+				if (this.ctx.sessionManager.getSessionId() !== sessionId || this.#managerArtifactsDir !== artifactsDir) {
+					return;
+				}
+				let write: Promise<void>;
+				if (event.op === "remove") {
+					write = store.remove(event.key);
+				} else {
+					const thread = manager.thread(event.key);
+					if (!thread) throw new Error(`Unknown BTW thread: ${event.key}`);
+					write = store.upsert(this.#historyRecord(thread));
+				}
+				void write.catch(error =>
+					this.ctx.showError(
+						`BTW history write failed: ${error instanceof Error ? error.message : String(error)}`,
+					),
+				);
 			},
+			flushEvents: () => store.flush(),
+			closeEvents: () => store.close(),
 			createConversation: (modelRef, checkpoint, sideOptions) => {
 				const active = this.ctx.session.model;
 				const model =
@@ -265,17 +355,49 @@ export class BtwController {
 			now: Date.now,
 			onChange: () => this.#updateWorkspacePane(),
 		});
-		return this.#manager;
+		this.#managerArtifactsDir = artifactsDir;
+		this.#managerSessionId = sessionId;
+		this.#manager = manager;
+		return manager;
+	}
+
+	#historyRecord(thread: BtwThread): BtwHistoryRecord {
+		const checkpoint = thread.conversation.checkpoint();
+		if (!checkpoint.baseMessages) throw new Error("BTW thread has no frozen Main snapshot");
+		const pausedRequest =
+			thread.phase === "running" && thread.request
+				? { input: thread.request.input, images: thread.request.images, timestamp: thread.request.timestamp }
+				: thread.pausedRequest;
+		return {
+			version: 1,
+			id: thread.key,
+			title: thread.title,
+			createdAt: thread.createdAt,
+			anchorLeafId: thread.anchorLeafId,
+			model: thread.model,
+			sideSessionId: checkpoint.sideSessionId,
+			baseMessages: checkpoint.baseMessages,
+			turns: checkpoint.turns,
+			draft: thread.draft,
+			draftImages: thread.draftImages,
+			draftImageLinks: thread.draftImageLinks,
+			readThrough: thread.readThrough,
+			phase: thread.phase,
+			error: thread.error,
+			pausedRequest,
+		};
 	}
 
 	#openWorkspacePane(manager: BtwManager): boolean {
 		if (!this.#workspacePane) {
+			const ownerSession = this.ctx.session;
 			this.#workspacePane = new BtwConversationPane({
 				ui: this.ctx.ui,
 				cwd: this.ctx.sessionManager.getCwd(),
 				expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
 				hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 				proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+				resolveLinks: texts => resolveSessionMarkdownLinks(texts, ownerSession),
 				requestRender: () => {
 					if (this.#workspacePane) this.ctx.ui.requestComponentRender(this.#workspacePane);
 					else this.ctx.ui.requestRender();
@@ -290,6 +412,19 @@ export class BtwController {
 					manager.setDraft(key, text, images, imageLinks);
 				},
 				onSelectThread: key => manager.select(key),
+				onDisplayThread: key => {
+					const thread = manager.thread(key);
+					if (!thread || thread.conversation.extensionRunner) return;
+					void thread.conversation.initializeExtensionRuntime().then(
+						() => {
+							if (this.#manager === manager) this.#updateWorkspacePane();
+						},
+						error =>
+							this.ctx.showError(
+								`BTW extension failed: ${error instanceof Error ? error.message : String(error)}`,
+							),
+					);
+				},
 				onMarkRead: key => {
 					manager.markRead(key);
 				},
@@ -378,7 +513,10 @@ export class BtwController {
 			this.ctx.showStatus("Start a new durable BTW thread with /new", { dim: true });
 			return false;
 		}
-		if (command === "/delete") return this.#closeThread(manager, key);
+		if (command === "/delete") {
+			void this.#closeThread(manager, key);
+			return true;
+		}
 		if (command === "/handoff") {
 			if (thread.phase === "running" || thread.turns.length === 0) {
 				this.ctx.showError("Wait for a completed BTW reply before handing off to Main");
@@ -433,7 +571,9 @@ export class BtwController {
 			draftImages: thread.draftImages,
 			draftImageLinks: thread.draftImageLinks,
 			turns: thread.turns,
+			extensionRunner: thread.conversation.extensionRunner,
 			getTool: name => thread.conversation.getTool(name),
+			isBuiltInTool: name => Boolean(thread.conversation.getTool(name)) && this.ctx.session.hasBuiltInTool(name),
 			unread: thread.unread,
 			status: thread.conversation.status,
 			request: thread.request
@@ -449,14 +589,19 @@ export class BtwController {
 		pane.update(threads, manager.activeKey);
 	}
 
-	#closeThread(manager: BtwManager, key: string): boolean {
+	async #closeThread(manager: BtwManager, key: string): Promise<boolean> {
 		if (this.#branchInFlight || manager !== this.#manager) {
 			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
 			return false;
 		}
-		if (!manager.remove(key, "deleted")) return false;
-		if (manager.children.length === 0) this.#closeWorkspacePane();
-		return true;
+		try {
+			if (!(await manager.remove(key, "deleted"))) return false;
+			if (manager.children.length === 0) this.#closeWorkspacePane();
+			return true;
+		} catch (error) {
+			this.ctx.showError(`Could not delete BTW thread: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		}
 	}
 
 	#threadCopyText(key: string | undefined): string | undefined {
@@ -485,18 +630,23 @@ export class BtwController {
 		const thread = manager?.thread(key);
 		const sessionId = this.#managerSessionId;
 		if (!manager || !thread || !sessionId) return false;
-		// Promotion switches the session, after which `abandon()` must not write
-		// into the new session's journal — so persist every unflushed draft now,
-		// before the branch is attempted. No-op when a draft is already stored.
+		// Flush pending BTW drafts before promotion changes the parent session.
 		for (const candidate of manager.children) {
 			manager.persistDraft(candidate.key);
 		}
+		try {
+			await manager.flushEvents();
+		} catch (error) {
+			this.ctx.showError(`Cannot promote BTW: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		}
 		const lifecycle: BtwPromotionLifecycle = {
-			prepare: () => {
+			prepare: async () => {
 				if (!manager.preparePromotion(key)) throw new Error("BTW thread is no longer promotable");
+				await manager.flushEvents();
 			},
-			rollback: () => {
-				manager.rollbackPromotion(key);
+			rollback: async () => {
+				if (manager.rollbackPromotion(key)) await manager.flushEvents();
 			},
 		};
 		const promoted = await this.#promote(
@@ -504,13 +654,13 @@ export class BtwController {
 			lifecycle,
 		);
 		if (this.#manager !== manager) {
-			manager.abandon();
+			await manager.abandon();
 			return promoted;
 		}
 		if (!promoted) return false;
-		manager.completePromotion(key);
+		await manager.completePromotion(key);
 		if (this.#activeRequest?.threadKey === key) this.#detachActiveRequest();
-		manager.abandon();
+		await manager.abandon();
 		this.#manager = undefined;
 		this.#managerSessionId = undefined;
 		if (this.#workspacePane) {

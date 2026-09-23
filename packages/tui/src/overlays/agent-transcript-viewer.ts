@@ -4,23 +4,22 @@
  * `AgentHubOverlayComponent.openChat` mounts this as a `fullscreen` overlay
  * (`ui.showOverlay(..., { fullscreen: true })`), so it borrows the terminal's
  * alternate screen buffer (the vim/less idiom) and paints the whole screen — no
- * compositing into the live transcript's scrollback. It renders a parked
- * subagent / advisor / collab-guest transcript that has no live in-view session.
+ * compositing into the live transcript's scrollback. It shows subagent,
+ * advisor, and collab-guest transcripts outside Main.
  *
- * Local transcripts tail append-only growth: unchanged file identity plus stable
- * sentinels means only newly appended JSONL is parsed and rendered. Rewrites,
- * truncation, rotation, or sentinel drift fall back to a full rebuild so changed
- * historical entries cannot leave stale components behind. Collab guests use the
- * same append path over the host's byte-capped transcript reads.
+ * Local transcripts tail complete JSONL entries by file identity and sentinels.
+ * A live local session adds its current assistant partial as a transient tail
+ * until the complete entry arrives; rewrites and rotations rebuild the history.
+ * Collab guests read the host's byte-capped transcript instead.
  */
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { componentContains, renderTargeted, type TargetedRender } from "../tui";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { VirtualRowAnchor } from "../tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../app-keybindings";
-import type { ExtensionPresentationSource, MessageRenderer } from "../chat/extension-types";
+import type { AssistantThinkingRenderer, ExtensionPresentationSource, MessageRenderer } from "../chat/extension-types";
 import type { SessionMessageEntryLike } from "../chat/transcript-entry";
 import { renderWorkspacePaneHeader } from "../chrome/shared";
 import type { EditorTopBorder } from "../components/composer";
@@ -45,13 +44,16 @@ type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose"> &
 	Partial<Pick<StatusLineComponent, "setHookStatus" | "render">>;
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
-export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
+export type AgentTranscriptEntry =
+	| SessionMessageEntryLike
+	| { type: "model_change"; model: string }
+	| { type: "session"; cwd: string };
 
 /** Local filesystem and session parsing capabilities supplied by the host. */
 export interface AgentTranscriptSource {
 	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync">;
 	parseEntries(text: string): AgentTranscriptEntry[];
-	/** Stream message/model entries from a bounded snapshot without completing its partial tail. */
+	/** Stream complete session headers, message entries, and model changes from a bounded snapshot. */
 	visitEntries(
 		filePath: string,
 		visit: (entry: AgentTranscriptEntry) => void | boolean,
@@ -81,6 +83,8 @@ export interface AgentTranscriptViewerDeps {
 	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	getAssistantThinkingRenderers?: () => readonly AssistantThinkingRenderer[];
+	resolveLinks?: (texts: readonly string[], cwd: string) => Promise<ReadonlyMap<string, string>>;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
@@ -107,6 +111,11 @@ const AUTO_CLOSE_FRAMES = Math.ceil(AUTO_CLOSE_DURATION_MS / AUTO_CLOSE_FRAME_MS
 
 const SENTINEL_BYTES = 4096;
 const ASYNC_LOCAL_LOAD_THRESHOLD_BYTES = 2 * 1024 * 1024;
+function sameAssistantTurn(left: AssistantMessage, right: AssistantMessage): boolean {
+	if (left.timestamp !== right.timestamp || left.provider !== right.provider || left.model !== right.model)
+		return false;
+	return left.responseId === undefined || right.responseId === undefined || left.responseId === right.responseId;
+}
 
 interface LocalTranscriptSentinel {
 	offset: number;
@@ -348,6 +357,8 @@ export class AgentTranscriptViewer
 	#localUnavailable = "";
 	#localLoadToken = 0;
 	#localLoading: { path: string; dev: number; ino: number } | undefined;
+	#liveAssistant: AssistantMessage | undefined;
+	#sourceCwd: string | undefined;
 	// Remote transcript state (incremental; the host caps each read).
 	#remoteBytes = 0;
 	#remoteFetchInFlight = false;
@@ -373,12 +384,16 @@ export class AgentTranscriptViewer
 		this.#widgets = new ExtensionWidgets(deps.ui);
 		this.#belowEditor.addChild(this.#widgets.below);
 		this.#belowEditor.addChild({ render: width => this.#statusLine?.render?.(width) ?? [] });
+		const resolveLinks = deps.resolveLinks;
 		this.#pane = new ChatTranscriptPane({
 			builder: {
 				ui: deps.ui,
 				getTool: deps.getTool,
 				isBuiltInTool: deps.isBuiltInTool,
 				getMessageRenderer: deps.getMessageRenderer,
+				getAssistantThinkingRenderers: deps.getAssistantThinkingRenderers,
+				resolveLinks:
+					!deps.remote && resolveLinks ? texts => resolveLinks(texts, this.#sourceCwd ?? deps.cwd) : undefined,
 				cwd: deps.cwd,
 				hideThinkingBlock: deps.hideThinkingBlock,
 				proseOnlyThinking: deps.proseOnlyThinking,
@@ -551,6 +566,11 @@ export class AgentTranscriptViewer
 			this.#fetchRemote();
 			return;
 		}
+		this.#refreshLocalTranscript();
+		this.#syncLiveAssistant();
+	}
+
+	#refreshLocalTranscript(): void {
 		const sessionFile = this.#deps.registry.get(this.#deps.agentId)?.sessionFile;
 		if (!sessionFile) {
 			this.#clearLocal("none");
@@ -576,6 +596,21 @@ export class AgentTranscriptViewer
 		this.#loadLocalFull(sessionFile, stat);
 	}
 
+	#syncLiveAssistant(): void {
+		if (this.#deps.remote) return;
+		const state = this.#deps.registry.get(this.#deps.agentId)?.session?.agent?.state;
+		const streamMessage = state?.streamMessage;
+		let assistant = streamMessage?.role === "assistant" ? streamMessage : undefined;
+		if (!assistant && state && this.#liveAssistant) {
+			const last = state.messages.at(-1);
+			assistant =
+				last?.role === "assistant" && sameAssistantTurn(this.#liveAssistant, last) ? last : this.#liveAssistant;
+		}
+		if (assistant === this.#liveAssistant) return;
+		this.#liveAssistant = assistant;
+		this.#pane.setLiveAssistant(assistant);
+	}
+
 	#clearLocal(reason: string): void {
 		if (!this.#localState && !this.#localLoading && this.#localUnavailable === reason) return;
 		this.#localLoadToken++;
@@ -583,6 +618,7 @@ export class AgentTranscriptViewer
 		this.#localState = undefined;
 		this.#localUnavailable = reason;
 		this.#model = undefined;
+		this.#sourceCwd = undefined;
 		this.#rebuild([]);
 	}
 
@@ -654,11 +690,13 @@ export class AgentTranscriptViewer
 			pending,
 			sentinels: sentinelsFromBuffer(data),
 		};
+		this.#sourceCwd = undefined;
 		this.#model = undefined;
 		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete)));
 	}
 
 	async #loadLocalFullAsync(sessionFile: string, stat: fs.Stats, token: number): Promise<void> {
+		this.#sourceCwd = undefined;
 		const batch: AgentTranscriptEntry[] = [];
 		const decoder = new TextDecoder();
 		let pending = "";
@@ -795,6 +833,7 @@ export class AgentTranscriptViewer
 					this.#remoteError = "";
 					this.#hasRemoteData = false;
 					this.#model = undefined;
+					this.#sourceCwd = undefined;
 					this.#rebuild([]);
 					this.#fetchRemote();
 					return;
@@ -836,17 +875,37 @@ export class AgentTranscriptViewer
 				if (!this.#model && entry.message.role === "assistant") this.#model = entry.message.model;
 			} else if (entry.type === "model_change") {
 				this.#model = entry.model;
+			} else if (entry.type === "session") {
+				this.#sourceCwd = entry.cwd;
 			}
 		}
 		return messages;
 	}
 
 	#rebuild(entries: SessionMessageEntryLike[]): void {
+		const live = this.#liveAssistant;
+		this.#liveAssistant = undefined;
 		this.#pane.rebuildEntries(entries);
+		this.#restoreLiveAssistant(live, entries);
 	}
 
 	#append(entries: SessionMessageEntryLike[]): void {
+		const live = this.#liveAssistant;
+		if (live) this.#pane.setLiveAssistant(undefined);
+		this.#liveAssistant = undefined;
 		this.#pane.appendEntries(entries);
+		this.#restoreLiveAssistant(live, entries);
+	}
+
+	#restoreLiveAssistant(live: AssistantMessage | undefined, entries: SessionMessageEntryLike[]): void {
+		if (
+			live &&
+			!entries.some(entry => entry.message.role === "assistant" && sameAssistantTurn(live, entry.message))
+		) {
+			this.#liveAssistant = live;
+			this.#pane.setLiveAssistant(live);
+		}
+		this.#syncLiveAssistant();
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
@@ -944,10 +1003,21 @@ export class AgentTranscriptViewer
 	#syncSessionPresentation(): void {
 		const session = this.#deps.registry.get(this.#deps.agentId)?.session ?? null;
 		const presentation = this.#deps.remote ? undefined : this.#deps.getExtensionPresentation?.(this.#deps.agentId);
-		if (session !== this.#statusLineSession || presentation !== this.#extensionPresentation) {
+		const sessionChanged = session !== this.#statusLineSession;
+		if (sessionChanged || presentation !== this.#extensionPresentation) {
 			this.#statusLine?.dispose();
 			this.#statusLine = session ? this.#deps.createStatusLine(this.#deps.agentId) : undefined;
 			this.#statusLineSession = session;
+		}
+		if (sessionChanged && this.#liveAssistant) {
+			this.#pane.setLiveAssistant(undefined);
+			this.#liveAssistant = undefined;
+		}
+		if (sessionChanged && this.#deps.resolveLinks && !this.#deps.remote) {
+			this.#localLoadToken++;
+			this.#localLoading = undefined;
+			this.#localState = undefined;
+			this.#pane.invalidateLinkContext();
 		}
 		if (presentation === this.#extensionPresentation) return;
 		this.#detachPresentation?.();

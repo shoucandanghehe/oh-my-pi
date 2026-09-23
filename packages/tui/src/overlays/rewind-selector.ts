@@ -11,7 +11,6 @@ import {
 	matchesKey,
 	padding,
 	routeSgrMouseInput,
-	ScrollView,
 	sliceByColumn,
 	type TUI,
 	truncateToWidth,
@@ -311,8 +310,9 @@ export class RewindSelectorComponent implements Component {
 		const point = this.#history.point;
 		if (!point || matches.some(item => item.target.entryId === this.#history.target?.entryId)) return;
 		const next =
-			matches.findLast(item =>
-				item.point.chunk < point.chunk || (item.point.chunk === point.chunk && item.point.target < point.target),
+			matches.findLast(
+				item =>
+					item.point.chunk < point.chunk || (item.point.chunk === point.chunk && item.point.target < point.target),
 			) ?? matches.at(-1);
 		if (next) {
 			this.#history.select(next.point);
@@ -324,13 +324,18 @@ export class RewindSelectorComponent implements Component {
 		const point = this.#history.point;
 		if (!point) return;
 		const matches = this.#filterMatches().filter(item => !userTurnsOnly || item.target.isUserTurn);
-		const next = delta < 0
-			? matches.findLast(item =>
-					item.point.chunk < point.chunk || (item.point.chunk === point.chunk && item.point.target < point.target),
-				)
-			: matches.find(item =>
-					item.point.chunk > point.chunk || (item.point.chunk === point.chunk && item.point.target > point.target),
-				);
+		const next =
+			delta < 0
+				? matches.findLast(
+						item =>
+							item.point.chunk < point.chunk ||
+							(item.point.chunk === point.chunk && item.point.target < point.target),
+					)
+				: matches.find(
+						item =>
+							item.point.chunk > point.chunk ||
+							(item.point.chunk === point.chunk && item.point.target > point.target),
+					);
 		if (!next) return;
 		this.#history.select(next.point);
 		this.#scrollToSelection = true;
@@ -361,11 +366,11 @@ export class RewindSelectorComponent implements Component {
 		if (this.#filter !== undefined) this.#refreshFilter();
 		const columns = this.#filter === undefined ? this.#stripColumns() : [];
 		const filtered = this.#filter === undefined ? undefined : this.#filterColumn(contentWidth);
-		const composed = filtered?.column ?? (
-			columns.length > 0
+		const composed =
+			filtered?.column ??
+			(columns.length > 0
 				? this.#renderStrip(columns, contentWidth)
-				: this.#history.column(contentWidth, { selected: this.#history.point })
-		);
+				: this.#history.column(contentWidth, { selected: this.#history.point }));
 		const followBottom =
 			!this.#scrollToSelection && this.#scrollView.getScrollOffset() === this.#scrollView.getMaxScrollOffset();
 		const height = Math.max(3, (this.deps.ui.terminal?.rows || process.stdout.rows || 40) - CHROME_ROWS);
@@ -402,8 +407,12 @@ export class RewindSelectorComponent implements Component {
 		this.#scrollToSelection = false;
 		this.#scrollView.setLines(visible);
 		const lateral = columns.length > 0 ? "←/→ branches" : "←/→ user turns";
-		const footer = filtered?.footer ??
-			theme.fg("dim", `message ${this.#history.position}/${this.#history.entries.length}  ↑/↓ step  ${lateral}  f filter  enter rewind  ctrl+o expand  esc cancel`);
+		const footer =
+			filtered?.footer ??
+			theme.fg(
+				"dim",
+				`message ${this.#history.position}/${this.#history.entries.length}  ↑/↓ step  ${lateral}  f filter  enter rewind  ctrl+o expand  esc cancel`,
+			);
 		return [
 			...this.#border.render(width),
 			` ${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
@@ -425,9 +434,10 @@ export class RewindSelectorComponent implements Component {
 		const selected = matches.findIndex(item => item.target.entryId === this.#history.target?.entryId);
 		const composed = composeOutlineColumn(rows, 0, rows.length, targets, selected, width, undefined);
 		const lines = matches.length ? composed.lines : [theme.fg("muted", `  No items match "${this.#filter}"`)];
-		const count = matches.length === 0
-			? theme.fg("error", "no matches")
-			: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
+		const count =
+			matches.length === 0
+				? theme.fg("error", "no matches")
+				: theme.fg("dim", `${selected >= 0 ? selected + 1 : "-"}/${matches.length}`);
 		return {
 			column: {
 				length: lines.length,

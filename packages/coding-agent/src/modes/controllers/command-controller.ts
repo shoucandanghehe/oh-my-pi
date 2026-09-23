@@ -1322,6 +1322,14 @@ export class CommandController {
 	/** Relocate after source settings are saved; false means no successful move. */
 	async #relocateSession(resolvedPath: string): Promise<boolean> {
 		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return false;
+		try {
+			await this.ctx.prepareBtwForRelocation();
+		} catch (error) {
+			this.ctx.showError(
+				`Cannot move session while BTW history is unwritten: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return false;
+		}
 
 		const previousState = this.ctx.sessionManager.captureState();
 		try {

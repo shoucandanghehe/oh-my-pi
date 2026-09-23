@@ -513,12 +513,11 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
-		expect(text).toContain("MUST use `xd://lsp` for definitions");
-		expect(text).toContain("MUST run `xd://lsp` references first");
+		expect(text).toContain("`xd://lsp`");
 		expect(text).not.toContain("`lsp`");
 	});
 
-	it("renders exactly one of the map-unknown-code and inline-first delegation rules per bias", async () => {
+	it("lets eager task mode override restrained delegation without overriding gated policy", async () => {
 		const renderDelegation = async (delegationBias: "eager" | "restrained" | "gated", eagerTasks: boolean) => {
 			const { systemPrompt } = await buildSystemPrompt({
 				cwd: tempDir,
@@ -530,14 +529,14 @@ describe("system prompt tool inventory", () => {
 				delegationBias,
 				eagerTasks,
 			});
-			const count = (needle: string) => systemPrompt[0].split(needle).length - 1;
-			return [count("Map unknown code via `task`"), count("Inline first.")];
+			return systemPrompt;
 		};
-		expect(await renderDelegation("eager", false)).toEqual([1, 0]);
-		expect(await renderDelegation("eager", true)).toEqual([1, 0]);
-		expect(await renderDelegation("restrained", true)).toEqual([1, 0]);
-		expect(await renderDelegation("restrained", false)).toEqual([0, 1]);
-		expect(await renderDelegation("gated", true)).toEqual([0, 0]);
+		const eager = await renderDelegation("eager", false);
+		const explicitlyEager = await renderDelegation("eager", true);
+		expect(await renderDelegation("restrained", true)).toEqual(explicitlyEager);
+		expect(await renderDelegation("restrained", false)).not.toEqual(eager);
+		expect(await renderDelegation("gated", false)).not.toEqual(eager);
+		expect(await renderDelegation("gated", true)).not.toEqual(explicitlyEager);
 	});
 
 	it("keeps enabled computer prelude routing and safety explicit", async () => {

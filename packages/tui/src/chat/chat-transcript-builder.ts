@@ -9,7 +9,7 @@ import { type Component, type TUI } from "../tui";
 import type { AdvisorMessageDetails } from "./messages";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "./messages";
 import { chatTranscriptDisplayPreferences as displayPreferences } from "./display-preferences";
-import type { MessageRenderer } from "./extension-types";
+import type { AssistantThinkingRenderer, MessageRenderer } from "./extension-types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "./messages";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -61,11 +61,13 @@ export interface ChatTranscriptBuilderDeps {
 	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	getAssistantThinkingRenderers?: () => readonly AssistantThinkingRenderer[];
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
 	/** Session-scoped resolved destinations for model-authored Markdown links. */
 	linkTargets?: ReadonlyMap<string, string>;
+	resolveLinks?: (texts: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 	requestRender: () => void;
 	onVirtualLayoutUpdate?: (component: Component) => void;
 }
@@ -91,6 +93,9 @@ export class ChatTranscriptBuilder {
 	#expanded = false;
 	#entryComponents = new Map<string, Component[]>();
 	#streamingAssistantComponent: AssistantMessageComponent | undefined;
+	#liveAssistantComponent: AssistantMessageComponent | undefined;
+	#liveAssistantTimestamp: number | undefined;
+	#linkTargets: ReadonlyMap<string, string>;
 
 	readonly #deps: ChatTranscriptBuilderDeps;
 	readonly #previousUsage: Usage | undefined;
@@ -98,9 +103,33 @@ export class ChatTranscriptBuilder {
 	constructor(deps: ChatTranscriptBuilderDeps, previousUsage?: Usage) {
 		this.#deps = deps;
 		this.#previousUsage = previousUsage;
+		this.#linkTargets = deps.linkTargets ?? new Map();
 		this.container = new TranscriptContainer(deps.onVirtualLayoutUpdate);
 		this.#lastAssistantUsage = previousUsage;
 		this.container.setToolActivityVisible(!displayPreferences.hideToolActivity);
+	}
+
+	mergeLinkTargets(targets: ReadonlyMap<string, string>): boolean {
+		let changed = false;
+		const merged = new Map(this.#linkTargets);
+		for (const [href, target] of targets) {
+			if (merged.get(href) === target) continue;
+			merged.set(href, target);
+			changed = true;
+		}
+		if (!changed) return false;
+		this.#linkTargets = merged;
+		for (const component of this.container.children) {
+			if (component instanceof AssistantMessageComponent) component.setLinkTargets(merged);
+		}
+		return true;
+	}
+
+	resetLinkTargets(): void {
+		this.#linkTargets = this.#deps.linkTargets ?? new Map();
+		for (const component of this.container.children) {
+			if (component instanceof AssistantMessageComponent) component.setLinkTargets(this.#linkTargets);
+		}
 	}
 
 	/** Whether the transcript currently holds any rendered rows. */
@@ -139,6 +168,43 @@ export class ChatTranscriptBuilder {
 		if (!component || message.content.some(content => content.type === "toolCall")) return undefined;
 		component.updateContent(message);
 		if (!component.isTranscriptBlockFinalized()) component.markTranscriptBlockFinalized();
+		return component;
+	}
+	/** Keep a live subagent partial outside the persisted entry ledger until JSONL catches up. */
+	setLiveAssistant(
+		message: Extract<AgentMessage, { role: "assistant" }> | undefined,
+	): AssistantMessageComponent | undefined {
+		if (!message) {
+			const component = this.#liveAssistantComponent;
+			if (component) {
+				this.container.removeChild(component);
+				component.dispose();
+				this.#liveAssistantComponent = undefined;
+				this.#liveAssistantTimestamp = undefined;
+			}
+			return undefined;
+		}
+		if (this.#liveAssistantComponent && this.#liveAssistantTimestamp === message.timestamp) {
+			this.#liveAssistantComponent.updateContent(message, { transient: true });
+			return this.#liveAssistantComponent;
+		}
+		this.setLiveAssistant(undefined);
+		const component = new AssistantMessageComponent(
+			message,
+			this.#deps.hideThinkingBlock?.() ?? false,
+			() => this.#deps.requestRender(),
+			this.#deps.getAssistantThinkingRenderers?.(),
+			this.#deps.ui.imageBudget,
+			this.#deps.proseOnlyThinking?.() ?? true,
+			this.#linkTargets,
+		);
+		component.setMidStreamPublication(false);
+		component.setImagesVisible(displayPreferences.showImages);
+		component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+		component.setExpanded(this.#expanded);
+		this.container.addChild(component);
+		this.#liveAssistantComponent = component;
+		this.#liveAssistantTimestamp = message.timestamp;
 		return component;
 	}
 
@@ -205,6 +271,9 @@ export class ChatTranscriptBuilder {
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
 		this.#streamingAssistantComponent = undefined;
+		this.#liveAssistantComponent = undefined;
+		this.#liveAssistantTimestamp = undefined;
+		this.#linkTargets = this.#deps.linkTargets ?? new Map();
 		this.#expandables = [];
 		this.#entryComponents.clear();
 		this.#syntheticExpandables = [];
@@ -435,10 +504,10 @@ export class ChatTranscriptBuilder {
 			timeline.beforeTools,
 			hideThinkingBlock,
 			() => this.#deps.requestRender(),
-			this.#deps.getMessageRenderer ? undefined : [], // placeholder for thinkingRenderers
+			this.#deps.getAssistantThinkingRenderers?.(),
 			this.#deps.ui.imageBudget,
 			proseOnlyThinking,
-			this.#deps.linkTargets,
+			this.#linkTargets,
 		);
 		assistantComponent.setImagesVisible(displayPreferences.showImages);
 		assistantComponent.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
@@ -474,10 +543,10 @@ export class ChatTranscriptBuilder {
 				segment,
 				hideThinkingBlock,
 				() => this.#deps.requestRender(),
-				this.#deps.getMessageRenderer ? undefined : [],
+				this.#deps.getAssistantThinkingRenderers?.(),
 				this.#deps.ui.imageBudget,
 				proseOnlyThinking,
-				this.#deps.linkTargets,
+				this.#linkTargets,
 			);
 			component.setImagesVisible(displayPreferences.showImages);
 			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);

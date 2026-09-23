@@ -366,6 +366,99 @@ describe("AgentSession message pipeline", () => {
 		expect(calls).toBe(0);
 	});
 
+	it("rejects side inference when disposal races context preparation", async () => {
+		const session = sideSession(["Answer"]);
+		const entered = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const prepareContext = vi.spyOn(session.agent, "buildSideRequestContext").mockImplementation(async messages => {
+			entered.resolve();
+			await resume.promise;
+			return { messages, tools: [] };
+		});
+		const turn = session.runEphemeralTurn({ promptText: "Question?" });
+		await entered.promise;
+		await session.dispose();
+		resume.resolve();
+		await expect(turn).rejects.toThrow("Session disposed");
+		prepareContext.mockClear();
+		await expect(session.runEphemeralTurn({ promptText: "Too late" })).rejects.toThrow("Session disposed");
+		expect(prepareContext).not.toHaveBeenCalled();
+	});
+
+	it("includes detached side history and images while preserving topic-specific provider lineage", async () => {
+		const contexts: Context[] = [];
+		const options: SimpleStreamOptions[] = [];
+		const agent = new Agent({
+			promptCacheKey: "parent-cache",
+			initialState: {
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				systemPrompt: [],
+				tools: [],
+				messages: [{ role: "user", content: "Main question", timestamp: 1 }],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (_model, context, streamOptions) => {
+				contexts.push(context);
+				options.push(streamOptions ?? {});
+				const stream = new AssistantMessageEventStream();
+				const message = createAssistantMessage("Answer");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+				return stream;
+			},
+		});
+		sessions.push(session);
+		const priorQuestion: Message = {
+			role: "user",
+			content: [{ type: "text", text: "Prior side question" }],
+			timestamp: 2,
+		};
+		const history: Message[] = [priorQuestion, createAssistantMessage("Prior side answer")];
+		const historySnapshot = structuredClone(history);
+		const mainSnapshot = structuredClone(agent.state.messages);
+		const journalSnapshot = structuredClone(session.sessionManager.getEntries());
+		const image: ImageContent = { type: "image", data: "side-image", mimeType: "image/png" };
+		const entered = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		vi.spyOn(session, "convertMessagesToLlm").mockImplementationOnce(async messages => {
+			entered.resolve();
+			await resume.promise;
+			return convertToLlm(messages);
+		});
+		const turn = session.runEphemeralTurn({
+			promptText: "Follow-up",
+			history,
+			images: [image],
+			conversationKey: "topic-a",
+		});
+		await entered.promise;
+		priorQuestion.content = "Caller mutation";
+		history.push({ role: "user", content: "Late caller message", timestamp: 3 });
+		resume.resolve();
+		await turn;
+		const outbound = contexts[0]!.messages;
+		expect(outbound.slice(-3, -1)).toEqual(convertToLlm(historySnapshot));
+		expect(outbound.at(-1)?.content).toEqual([{ type: "text", text: "Follow-up" }, image]);
+		expect(JSON.stringify(outbound)).not.toContain("Caller mutation");
+		expect(JSON.stringify(outbound)).not.toContain("Late caller message");
+		await session.runEphemeralTurn({ promptText: "Same topic", conversationKey: "topic-a" });
+		await session.runEphemeralTurn({ promptText: "Other topic", conversationKey: "topic-b" });
+		await session.runEphemeralTurn({ promptText: "Standalone one" });
+		await session.runEphemeralTurn({ promptText: "Standalone two" });
+		expect(options[0]?.sessionId).toBe(`${session.sessionId}:side:conversation:topic-a`);
+		expect(options[1]?.sessionId).toBe(options[0]?.sessionId);
+		expect(options[2]?.sessionId).not.toBe(options[0]?.sessionId);
+		expect(options[3]?.sessionId).not.toBe(options[4]?.sessionId);
+		expect(options.every(option => option.promptCacheKey === "parent-cache")).toBe(true);
+		expect(agent.state.messages).toEqual(mainSnapshot);
+		expect(session.sessionManager.getEntries()).toEqual(journalSnapshot);
+	});
+
 	it.each(["tool", "caller"] as const)(
 		"stops registered-tool side inference on %s cancellation",
 		async cancellation => {
@@ -1123,14 +1216,17 @@ describe("AgentSession message pipeline", () => {
 		const session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			settings: Settings.isolated({ "compaction.enabled": false, "providers.openaiWebsockets": "on" }),
 			modelRegistry: createModelRegistryStub() as never,
 			sideStreamFn,
 		});
 		sessions.push(session);
+		const mainSnapshot = structuredClone(agent.state.messages);
+		const journalSnapshot = structuredClone(session.sessionManager.getEntries());
 
 		const conversation = session.createEphemeralConversation("side instructions");
-		const first = await conversation.prompt("Question 1?");
+		const image: ImageContent = { type: "image", data: "side-image", mimeType: "image/png" };
+		const first = await conversation.prompt("Question 1?", { images: [image] });
 		const refreshedConversation = session.createEphemeralConversation("side instructions");
 		session.agent.appendMessage({ role: "user", content: "late main turn", timestamp: Date.now() });
 		const second = await conversation.prompt("Question 2?");
@@ -1145,6 +1241,7 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedContexts).toHaveLength(3);
 		const [firstContext, secondContext] = capturedContexts;
 		if (!firstContext || !secondContext) throw new Error("Expected both side-conversation provider contexts");
+		expect(firstContext.messages.at(-1)?.content).toEqual([{ type: "text", text: "Question 1?" }, image]);
 		expect(secondContext.messages.slice(0, firstContext.messages.length)).toEqual(firstContext.messages);
 		const secondUsers = capturedContexts[1]?.messages.filter(
 			(message): message is Extract<Message, { role: "user" }> => message.role === "user",
@@ -1156,7 +1253,12 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedContexts[2]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
 			true,
 		);
-		expect(capturedOptions.map(option => option.promptCacheKey)).toEqual(["parent-cache", "parent-cache", "parent-cache"]);
+		expect(capturedOptions.map(option => option.promptCacheKey)).toEqual([
+			"parent-cache",
+			"parent-cache",
+			"parent-cache",
+		]);
+		expect(capturedOptions.every(option => option.preferWebsockets === true)).toBe(true);
 		expect(agent.state.messages.slice(0, mainSnapshot.length)).toEqual(mainSnapshot);
 		expect(session.sessionManager.getEntries()).toEqual(journalSnapshot);
 	});
@@ -1234,7 +1336,7 @@ describe("AgentSession message pipeline", () => {
 		sessions.push(session);
 
 		const conversation = session.createEphemeralConversation("side instructions");
-		expect(conversation.getTool("side_tool")?.label).toBe("Side Tool");
+		expect(conversation.getTool("side_tool")).toBeUndefined();
 		const first = await conversation.prompt("Question?", {
 			onTextDelta: delta => deltas.push(delta),
 			onMessage: event => {
@@ -1247,7 +1349,7 @@ describe("AgentSession message pipeline", () => {
 		expect(deltas).toEqual(["Recovered without tools"]);
 		expect(executions).toBe(0);
 		expect(capturedContexts).toHaveLength(2);
-		expect(capturedContexts[0]?.tools?.map(tool => tool.name)).toEqual(["side_tool"]);
+		expect(capturedContexts[0]?.tools?.map(tool => tool.name)).toEqual([]);
 		expect(capturedOptions[0]?.promptCacheKey).toBe(session.sessionId);
 		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
 		expect(capturedContexts[1]?.messages.find(message => message.role === "toolResult")).toMatchObject({
@@ -1396,6 +1498,7 @@ describe("AgentSession message pipeline", () => {
 			readOnlyTools: true,
 			shareSummaryWithMain: shareWithMain,
 		});
+		await conversation.initializeExtensionRuntime();
 		const result = await conversation.prompt("Share what we found with Main.");
 
 		expect(result.replyText).toBe("The summary was not shared.");
@@ -1484,7 +1587,7 @@ describe("AgentSession message pipeline", () => {
 		});
 		sessions.push(session);
 		const manager = new BtwManager({
-			entries: [],
+			restoredThreads: [],
 			appendEvent: () => {},
 			createConversation: (_modelRef, checkpoint, sideOptions) =>
 				session.createEphemeralConversation("side instructions", checkpoint, model, sideOptions),

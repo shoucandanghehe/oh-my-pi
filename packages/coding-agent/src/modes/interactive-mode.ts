@@ -123,7 +123,7 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
+import { resolveSessionMarkdownLinks } from "../internal-urls/hyperlink-targets";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
@@ -279,7 +279,7 @@ import {
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { renderWorkspacePaneHeader, sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
-import { agentTranscriptSource } from "./agent-hub-runtime";
+import { agentTranscriptSource, resolveAgentTranscriptLinks } from "./agent-hub-runtime";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
@@ -342,6 +342,7 @@ import {
 	cfgStatusLineTransparent,
 	cfgSymbolPreset,
 	cfgTerminalShowImages,
+	cfgTerminalShowProgress,
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
@@ -1260,18 +1261,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return cfgTerminalShowImages.get(this.settings);
 	}
 	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>> {
-		const session = this.viewSession;
-		return resolveMarkdownLinkTargets(texts, {
-			cwd: session.sessionManager.getCwd(),
-			sessionFile: session.sessionFile,
-			settings: session.settings,
-			localProtocolOptions: {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			},
-			skills: session.skills,
-			rules: session.ttsrManager?.getRules(),
-		});
+		return resolveSessionMarkdownLinks(texts, this.viewSession);
 	}
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
@@ -1559,7 +1549,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session, statusLineHost);
 		this.terminalActivity = new TerminalActivityController({
-			isProgressEnabled: () => this.settings.get("terminal.showProgress"),
+			isProgressEnabled: () => cfgTerminalShowProgress.get(this.settings),
 			setProgress: active => this.ui.terminal.setProgress(active),
 			setTitleState: setTerminalTitleState,
 		});
@@ -1667,6 +1657,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			ui: this.ui,
 			getTool: name => this.session.getToolByName(name),
 			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
+			getAssistantThinkingRenderers: () => this.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+			resolveLinks: (texts, cwd) =>
+				resolveAgentTranscriptLinks(
+					registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+					agentId,
+					texts,
+					cwd,
+				),
 			cwd: this.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.proseOnlyThinking,
@@ -1676,7 +1674,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				const session = (registryOverride ?? AgentRegistry.global()).get(id)?.session;
 				return session ? this.statusLine.createPeer(session) : undefined;
 			},
-			getStatusLineTransparent: () => this.settings.get("statusLine.transparent"),
+			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
 			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
 			requestRender: () => {
 				if (viewer) this.ui.requestComponentRender(viewer);
@@ -2011,33 +2009,34 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#workspaceWelcome = undefined;
 			this.composer.setHeaderExtras(headerBefore, headerAfter);
 			this.composer.setStatusComponent(this.statusLine);
-			this.composer.setRuntimeChildren([
-				this.chatContainer,
-				this.pendingMessagesContainer,
-				this.todoContainer,
-				this.subagentContainer,
-				this.btwContainer,
-				this.omfgContainer,
-				this.cleanseContainer,
-				this.errorBannerContainer,
-				this.modelCycleContainer,
-				this.deferredCommandContainer,
-				// Judge batches stay editor-anchored and update independently of eval
-				// transcript output, directly above the working/throughput/title row.
-				this.judgmentBatchProgressContainer,
-				// Working loader / transient status sits below the sticky todo + subagent
-				// HUDs, just above the editor's hook-widget top margin — so it reads next to
-				// the prompt while keeping the one-line gap above the editor (the band
-				// composer collapses that gap so its status band sits flush).
-				this.statusContainer,
-				this.attachmentChipsContainer,
-				this.hookWidgetContainerAbove,
-				this.editorContainer,
-				this.hookWidgetContainerBelow,
-			],
-			// Inline dialogs and a tall multi-line draft swap into the editor
-			// container and collapse again; everything else is turn-scoped.
-			{ transient: [this.editorContainer] },
+			this.composer.setRuntimeChildren(
+				[
+					this.chatContainer,
+					this.pendingMessagesContainer,
+					this.todoContainer,
+					this.subagentContainer,
+					this.btwContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
+					this.modelCycleContainer,
+					this.deferredCommandContainer,
+					// Judge batches stay editor-anchored and update independently of eval
+					// transcript output, directly above the working/throughput/title row.
+					this.judgmentBatchProgressContainer,
+					// Working loader / transient status sits below the sticky todo + subagent
+					// HUDs, just above the editor's hook-widget top margin — so it reads next to
+					// the prompt while keeping the one-line gap above the editor (the band
+					// composer collapses that gap so its status band sits flush).
+					this.statusContainer,
+					this.attachmentChipsContainer,
+					this.hookWidgetContainerAbove,
+					this.editorContainer,
+					this.hookWidgetContainerBelow,
+				],
+				// Inline dialogs and a tall multi-line draft swap into the editor
+				// container and collapse again; everything else is turn-scoped.
+				{ transient: [this.editorContainer] },
 			);
 		}
 		this.ui.setFocus(this.editor);
@@ -7204,6 +7203,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
 		await this.#commandController.handleForkCommand();
+	}
+
+	prepareBtwForRelocation(): Promise<void> {
+		return this.#btwController.dispose();
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {

@@ -21,7 +21,7 @@ export interface AgentHubSession {
 	readonly thinkingLevel: ThinkingLevel | undefined;
 	readonly model: Model | undefined;
 	readonly servingModel?: { selector: string; isFallback: boolean };
-	readonly agent?: { state: { messages: AgentMessage[] } };
+	readonly agent?: { state: { messages: AgentMessage[]; streamMessage?: AgentMessage | null } };
 	getSessionStats(): {
 		tokens: { input: number; output: number; cacheWrite: number };
 		assistantMessages: number;

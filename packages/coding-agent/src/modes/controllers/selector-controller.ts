@@ -84,7 +84,7 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
-import { createAgentHubRuntime } from "../agent-hub-runtime";
+import { createAgentHubRuntime, resolveAgentTranscriptLinks } from "../agent-hub-runtime";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
@@ -2188,6 +2188,9 @@ export class SelectorController {
 			getTool: name => this.ctx.session.getToolByName(name),
 			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
+			getAssistantThinkingRenderers: () => this.ctx.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+			resolveLinks: (id, texts, cwd) =>
+				resolveAgentTranscriptLinks(this.ctx.collabGuest?.agentRegistry ?? AgentRegistry.global(), id, texts, cwd),
 			cwd: this.ctx.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
@@ -2195,7 +2198,7 @@ export class SelectorController {
 				const session = AgentRegistry.global().get(id)?.session;
 				return session ? this.ctx.statusLine.createPeer(session) : undefined;
 			},
-			getStatusLineTransparent: () => this.ctx.settings.get("statusLine.transparent"),
+			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.ctx.settings),
 			getExtensionPresentation: id => AgentRegistry.global().get(id)?.session?.extensionRunner,
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			openAgent: this.ctx.workspaceEnabled ? id => this.ctx.openAgentWorkspacePane(id) : undefined,

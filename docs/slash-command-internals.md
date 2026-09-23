@@ -312,17 +312,22 @@ eval/browser execution, memory writes, session/process control, and unclassified
 MCP tools remain unavailable. A tool's `read` approval tier alone is not sufficient
 to grant BTW access.
 
-The existing `btw-thread` custom events in the session journal store frozen context,
-complete turn messages, provider lineage, drafts, and read state. Restoring a thread
-preserves its native reasoning/replay metadata subject to the provider's protocol.
-Actual provider cache reuse is not guaranteed.
+BTW checkpoints live under the session's `btw-history/` artifacts directory, not
+in Main's journal. They retain frozen context, complete turn messages, provider
+lineage, drafts, and read state. Restoring a thread preserves its native
+reasoning/replay metadata subject to the provider's protocol; actual provider
+cache reuse is not guaranteed.
 
-In-flight requests are journaled for explicit pause/recovery; completed turns are
-saved on success. Partial output from failed or cancelled turns is not committed
-as a completed turn. `--no-session` keeps the journal in memory.
+Requests are checkpointed before inference and completed turns on success.
+Interrupted requests retain their input for explicit `/continue`; disposing a
+manager releases its history leases so the same process can reopen the session.
+Partial output from failed or cancelled turns is not committed as a completed
+turn. `--no-session` keeps checkpoints in memory.
 
-This branch does not use the upstream `btw-history/` sidecar UI or storage.
-Existing sidecar files are not deleted or converted into synthetic thread snapshots.
+Legacy `btw-thread` journal records require the separate one-time migration.
+Opening legacy history without its `.migrated-v1` marker is rejected; there is no
+automatic migration or dual writing. Stop old writers before migration and do
+not resume them against migrated sessions.
 
 ## 12) Bundled command note: `/annotate`
 

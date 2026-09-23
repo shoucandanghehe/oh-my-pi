@@ -1,13 +1,7 @@
 import { type AgentMessage, PAUSE_SHUTDOWN_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { ContinuePausedAgentsResult } from "./agent-session-types";
-import {
-	type BtwPausedRequest,
-	type BtwThreadEvent,
-	type BtwThreadModelRef,
-	type RestoredBtwThread,
-	restoreBtwThreads,
-} from "./btw-thread";
+import type { BtwPausedRequest, BtwThreadEvent, BtwThreadModelRef, RestoredBtwThread } from "./btw-thread";
 import type {
 	EphemeralConversation,
 	EphemeralConversationCheckpoint,
@@ -15,7 +9,6 @@ import type {
 	EphemeralTurnResult,
 } from "./ephemeral-conversation";
 import type { BtwSummarySource } from "./messages";
-import type { SessionEntry } from "./session-entries";
 
 export type BtwThreadPhase = "ready" | "running" | "error";
 
@@ -28,8 +21,10 @@ export interface BtwThreadRequest {
 }
 
 export interface BtwManagerOptions {
-	entries: Iterable<SessionEntry>;
+	restoredThreads: readonly RestoredBtwThread[];
 	appendEvent: (event: BtwThreadEvent) => void;
+	flushEvents?: () => Promise<void>;
+	closeEvents?: () => Promise<void>;
 	createConversation: (
 		model: BtwThreadModelRef,
 		checkpoint: EphemeralConversationCheckpoint | undefined,
@@ -103,6 +98,8 @@ export class BtwThread {
 /** Owns every durable BTW thread in creation order. */
 export class BtwManager {
 	readonly #appendEvent: BtwManagerOptions["appendEvent"];
+	readonly #flushEvents: BtwManagerOptions["flushEvents"];
+	readonly #closeEvents: BtwManagerOptions["closeEvents"];
 	readonly #createConversation: BtwManagerOptions["createConversation"];
 	readonly #createSideOptions: BtwManagerOptions["createSideOptions"];
 	readonly #nextKey: BtwManagerOptions["nextKey"];
@@ -116,12 +113,14 @@ export class BtwManager {
 
 	constructor(options: BtwManagerOptions) {
 		this.#appendEvent = options.appendEvent;
+		this.#flushEvents = options.flushEvents;
+		this.#closeEvents = options.closeEvents;
 		this.#createConversation = options.createConversation;
 		this.#createSideOptions = options.createSideOptions;
 		this.#nextKey = options.nextKey;
 		this.#now = options.now;
 		this.#onChange = options.onChange;
-		for (const restored of restoreBtwThreads(options.entries)) this.#restore(restored);
+		for (const restored of options.restoredThreads) this.#restore(restored);
 		this.#activeKey = this.#childKeys[0];
 	}
 
@@ -241,12 +240,13 @@ export class BtwManager {
 		return true;
 	}
 
-	completePromotion(key: string): boolean {
+	async completePromotion(key: string): Promise<boolean> {
 		if (!this.#preparedPromotions.delete(key)) return false;
+		await this.#threads.get(key)?.conversation.disposeExtensionRuntime();
 		return this.#forget(key);
 	}
 
-	remove(key: string, reason: "deleted" | "promoted"): boolean {
+	async remove(key: string, reason: "deleted" | "promoted"): Promise<boolean> {
 		const thread = this.#threads.get(key);
 		if (!thread) return false;
 		const abortController = thread.abortController;
@@ -256,6 +256,8 @@ export class BtwManager {
 		if (!this.#preparedPromotions.has(key)) {
 			this.#appendEvent({ version: 1, op: "remove", key, reason });
 		}
+		await this.#flushEvents?.();
+		await thread.conversation.disposeExtensionRuntime();
 		this.#preparedPromotions.delete(key);
 		return this.#forget(key);
 	}
@@ -308,6 +310,8 @@ export class BtwManager {
 		});
 		this.#onChange?.();
 		try {
+			await this.#flushEvents?.();
+			await thread.conversation.initializeExtensionRuntime();
 			const result = await thread.conversation.prompt(request.input, {
 				images: request.images,
 				dedupeReply: false,
@@ -336,6 +340,7 @@ export class BtwManager {
 			thread.error = undefined;
 			const turn = thread.turns.at(-1);
 			if (turn) this.#appendEvent({ version: 1, op: "turn", key, turn });
+			await this.#flushEvents?.();
 			return result;
 		} catch (error) {
 			if (thread.request !== request) throw error;
@@ -343,6 +348,7 @@ export class BtwManager {
 			thread.phase = aborted ? "ready" : "error";
 			thread.error = aborted ? undefined : error instanceof Error ? error.message : String(error);
 			this.#appendEvent({ version: 1, op: "terminal", key, error: thread.error });
+			await this.#flushEvents?.();
 			throw error;
 		} finally {
 			if (thread.request === request) {
@@ -368,6 +374,12 @@ export class BtwManager {
 			thread.abortController = undefined;
 			thread.phase = "ready";
 			abortController?.abort(PAUSE_SHUTDOWN_ABORT_REASON);
+			this.#appendEvent({
+				version: 1,
+				op: "request",
+				key: thread.key,
+				...thread.pausedRequest,
+			});
 			changed = true;
 		}
 		if (changed) this.#onChange?.();
@@ -405,19 +417,27 @@ export class BtwManager {
 		return { continued, skipped, complete: skipped.length === 0 };
 	}
 
-	dispose(): void {
-		for (const thread of this.#threads.values()) {
-			this.persistDraft(thread.key);
-			const abortController = thread.abortController;
-			thread.request = undefined;
-			thread.abortController = undefined;
-			abortController?.abort();
+	flushEvents(): Promise<void> {
+		return this.#flushEvents?.() ?? Promise.resolve();
+	}
+
+	async dispose(): Promise<void> {
+		this.prepareForPausedExit();
+		try {
+			await this.#flushEvents?.();
+		} finally {
+			try {
+				await Promise.all([...this.#threads.values()].map(thread => thread.conversation.disposeExtensionRuntime()));
+			} finally {
+				await this.#closeEvents?.();
+			}
 		}
 	}
 
 	/** Stop old-session work after a successful session transition without writing into the new session. */
-	abandon(): void {
-		for (const thread of this.#threads.values()) {
+	async abandon(): Promise<void> {
+		const threads = [...this.#threads.values()];
+		for (const thread of threads) {
 			thread.request = undefined;
 			thread.abortController?.abort();
 			thread.abortController = undefined;
@@ -427,6 +447,11 @@ export class BtwManager {
 		this.#preparedPromotions.clear();
 		this.#dirtyDrafts.clear();
 		this.#activeKey = undefined;
+		try {
+			await Promise.all(threads.map(thread => thread.conversation.disposeExtensionRuntime()));
+		} finally {
+			await this.#closeEvents?.();
+		}
 	}
 
 	#createEvent(thread: BtwThread): Extract<BtwThreadEvent, { op: "create" }> {

@@ -559,20 +559,25 @@ describe("RewindSelectorComponent", () => {
 
 	it("searches only rendered expansion content and refuses Enter when no item matches", () => {
 		const selected: string[] = [];
-		const selector = new RewindSelectorComponent([
-			entry("u", null, userMessage("prompt")),
-			entry("c", "u", { role: "custom", customType: "expand", content: "body", display: true, timestamp: 2 }),
-		], {
-			ui: testUi(),
-			cwd: process.cwd(),
-			getMessageRenderer: () => (_message, { expanded }) => ({
-				measureRows: () => 1,
-				render: () => [expanded ? "hidden needle" : "collapsed body"],
-			}),
-			requestRender() {},
-			onSelect: id => selected.push(id),
-			onCancel() {},
-		});
+		const selector = new RewindSelectorComponent(
+			[
+				entry("u", null, userMessage("prompt")),
+				entry("c", "u", { role: "custom", customType: "expand", content: "body", display: true, timestamp: 2 }),
+			],
+			{
+				ui: testUi(),
+				cwd: process.cwd(),
+				getMessageRenderer:
+					() =>
+					(_message, { expanded }) => ({
+						measureRows: () => 1,
+						render: () => [expanded ? "hidden needle" : "collapsed body"],
+					}),
+				requestRender() {},
+				onSelect: id => selected.push(id),
+				onCancel() {},
+			},
+		);
 		try {
 			selector.render(80);
 			for (const key of ["f", ..."needle"]) selector.handleInput(key);

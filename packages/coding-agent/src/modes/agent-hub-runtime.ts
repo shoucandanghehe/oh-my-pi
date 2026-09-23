@@ -9,21 +9,36 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import { parseSessionEntries, visitEntriesFromFileStream } from "../session/session-loader";
+import { resolveMarkdownLinkTargets, resolveSessionMarkdownLinks } from "../internal-urls/hyperlink-targets";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
 	parseEntries: text =>
-		parseSessionEntries(text).filter(entry => entry.type === "message" || entry.type === "model_change"),
+		parseSessionEntries(text).filter(
+			entry => entry.type === "session" || entry.type === "message" || entry.type === "model_change",
+		),
 	visitEntries: (filePath, visit, options) =>
 		visitEntriesFromFileStream(
 			filePath,
 			entry => {
-				if (entry.type === "message" || entry.type === "model_change") return visit(entry);
+				if (entry.type === "session" || entry.type === "message" || entry.type === "model_change")
+					return visit(entry);
 			},
 			options,
 		),
 };
+
+export function resolveAgentTranscriptLinks(
+	registry: Pick<AgentRegistry, "get">,
+	id: string,
+	texts: readonly string[],
+	cwd: string,
+): Promise<ReadonlyMap<string, string>> {
+	const ref = registry.get(id);
+	if (ref?.session) return resolveSessionMarkdownLinks(texts, ref.session);
+	return resolveMarkdownLinkTargets(texts, { cwd }, { resolveInternalUrls: false });
+}
 
 /** Host services used by the roster, without exposing runtime implementation to tui. */
 export function createAgentHubRuntime(

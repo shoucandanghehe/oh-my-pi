@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -11,12 +11,7 @@ import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import {
-	type BtwPromotionLifecycle,
-	type BtwPromotionRequest,
-	type BtwThreadEvent,
-	restoreBtwThreads,
-} from "@oh-my-pi/pi-coding-agent/session/btw-thread";
+import type { BtwPromotionLifecycle, BtwPromotionRequest } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
 import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
@@ -25,8 +20,18 @@ import {
 	type EphemeralTurnOptions,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ExtensionPresentationObserver } from "@oh-my-pi/pi-tui/chat/extension-types";
+import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { Container, replaceTabs, type SgrMouseEvent, sliceByColumn, type TUI } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	replaceTabs,
+	type SgrMouseEvent,
+	setTerminalHyperlinks,
+	sliceByColumn,
+	TERMINAL,
+	type TUI,
+} from "@oh-my-pi/pi-tui";
 
 const usage: Usage = {
 	input: 0,
@@ -91,6 +96,7 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 	let leafId: string | null = "leaf-1";
 	let sessionId = "session-1";
 	const journal = SessionManager.inMemory();
+	Object.assign(session, { sessionManager: journal });
 	return {
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
 		terminalActivity: { set: vi.fn(), release: vi.fn() },
@@ -109,7 +115,7 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 		},
 		sessionManager: {
 			getEntries: () => journal.getEntries(),
-			appendCustomEntry: (type: string, event: BtwThreadEvent) => journal.appendCustomEntry(type, event),
+			getLocalArtifactsDir: () => null,
 			getCwd: () => process.cwd(),
 			getLeafId: () => leafId,
 			getSessionId: () => sessionId,
@@ -145,7 +151,7 @@ beforeAll(async () => {
 	await Settings.init({ inMemory: true, cwd: process.cwd() });
 });
 async function drainBtwRequest(): Promise<void> {
-	for (let i = 0; i < 10; i++) await Promise.resolve();
+	for (let i = 0; i < 100; i++) await Promise.resolve();
 }
 
 describe("BtwPanelComponent", () => {
@@ -163,8 +169,11 @@ describe("BtwPanelComponent", () => {
 });
 
 describe("BtwConversationPane", () => {
-	it("binds the status line to the selected BTW runtime", () => {
+	it("binds BTW widgets and status to the displayed thread without leaking prior presentation", () => {
 		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
+		let alphaObserver: ExtensionPresentationObserver | undefined;
+		const detachAlpha = vi.fn();
+		const detachBeta = vi.fn();
 		const runtimeStatus = (id: string, name: string): EphemeralConversationStatus => ({
 			sessionId: id,
 			model: {
@@ -196,6 +205,16 @@ describe("BtwConversationPane", () => {
 				request: undefined,
 				turns: [],
 				status: runtimeStatus("alpha", "Side Alpha"),
+				extensionRunner: {
+					observePresentation: (observer: ExtensionPresentationObserver) => {
+						alphaObserver = observer;
+						observer.setWidget("thread", ["Alpha widget"]);
+						observer.setStatus("thread", "alpha status");
+						return detachAlpha;
+					},
+					getAssistantThinkingRenderers: () => [],
+					getMessageRenderer: () => undefined,
+				},
 			},
 			{
 				key: "beta",
@@ -208,10 +227,20 @@ describe("BtwConversationPane", () => {
 				request: undefined,
 				turns: [],
 				status: runtimeStatus("beta", "Side Beta"),
+				extensionRunner: {
+					observePresentation: (observer: ExtensionPresentationObserver) => {
+						observer.setWidget("thread", ["Beta widget"]);
+						observer.setStatus("thread", "beta status");
+						return detachBeta;
+					},
+					getAssistantThinkingRenderers: () => [],
+					getMessageRenderer: () => undefined,
+				},
 			},
 		] as BtwThreadView[];
 		let activeModel = "Main";
 		const statusLine = {
+			setHookStatus: vi.fn(),
 			setRuntimeStatus: vi.fn((status: EphemeralConversationStatus | undefined) => {
 				activeModel = status?.model.name ?? "Main";
 			}),
@@ -239,17 +268,185 @@ describe("BtwConversationPane", () => {
 			onPersistDraft: vi.fn(),
 			onSelectThread: () => true,
 			onMarkRead: vi.fn(),
-			onCloseThread: () => true,
+			onCloseThread: async () => true,
 			onPromoteThread: async () => true,
 		});
 
 		pane.setViewportHeight(14);
 		pane.update(threads, "alpha");
 		expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("Side Alpha STATUS");
+		expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("Alpha widget");
 		pane.update(threads, "beta");
 		expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("Side Beta STATUS");
+		expect(detachAlpha).toHaveBeenCalledTimes(1);
+		expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("Beta widget");
+		expect(Bun.stripANSI(pane.render(100).join("\n"))).not.toContain("Alpha widget");
+		alphaObserver?.setWidget("thread", ["late alpha"]);
+		expect(Bun.stripANSI(pane.render(100).join("\n"))).not.toContain("late alpha");
+		expect(statusLine.setHookStatus).toHaveBeenCalledWith("thread", undefined);
 		expect(statusLine.setRuntimeStatus).toHaveBeenLastCalledWith(threads[1]?.status, "Beta");
 		pane.dispose();
+		expect(detachBeta).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a previous BTW thread's late link resolution out of the selected thread", async () => {
+		const previous = Promise.withResolvers<ReadonlyMap<string, string>>();
+		const selected = Promise.withResolvers<ReadonlyMap<string, string>>();
+		const originalHyperlinks = TERMINAL.hyperlinks;
+		setTerminalHyperlinks(true);
+		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
+		const pane = new BtwConversationPane({
+			ui,
+			cwd: process.cwd(),
+			expandKeys: [],
+			hideThinkingBlock: () => false,
+			proseOnlyThinking: () => false,
+			resolveLinks: texts => (texts[0]?.includes("Alpha") ? previous.promise : selected.promise),
+			requestRender: () => {},
+			statusLine: {
+				setRuntimeStatus: vi.fn(),
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: vi.fn(),
+			},
+			onSubmit: () => true,
+			onNewThread: () => true,
+			canCopy: () => false,
+			onCopy: async () => false,
+			onClose: vi.fn(),
+			onDraftChange: vi.fn(),
+			onPersistDraft: vi.fn(),
+			onSelectThread: () => true,
+			onMarkRead: vi.fn(),
+			onCloseThread: async () => true,
+			onPromoteThread: async () => true,
+		});
+		const thread = (key: string): BtwThreadView => ({
+			key,
+			title: key,
+			phase: "ready",
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			error: undefined,
+			draft: "",
+			unread: 0,
+			turns: [
+				{
+					input: "Find the note",
+					assistantMessage: createAssistantMessage(`${key} [note](note.md)`),
+					replyText: `${key} [note](note.md)`,
+					timestamp: key === "Alpha" ? 1 : 2,
+				},
+			],
+			request: undefined,
+		});
+		try {
+			pane.setViewportHeight(20);
+			pane.update([thread("Alpha"), thread("Beta")], "Alpha");
+			pane.update([thread("Alpha"), thread("Beta")], "Beta");
+			selected.resolve(new Map([["note.md", "file:///beta/note.md"]]));
+			await selected.promise;
+			await Promise.resolve();
+			expect(pane.render(120).join("\n")).toContain("file:///beta/note.md");
+			previous.resolve(new Map([["note.md", "file:///alpha/note.md"]]));
+			await previous.promise;
+			await Promise.resolve();
+			expect(pane.render(120).join("\n")).not.toContain("file:///alpha/note.md");
+		} finally {
+			pane.dispose();
+			setTerminalHyperlinks(originalHyperlinks);
+		}
+	});
+
+	it("applies late initialized renderers to unchanged restored history", () => {
+		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
+		const pane = new BtwConversationPane({
+			ui,
+			cwd: process.cwd(),
+			expandKeys: [],
+			hideThinkingBlock: () => false,
+			proseOnlyThinking: () => false,
+			requestRender: () => ui.requestRender(),
+			statusLine: {
+				setRuntimeStatus: vi.fn(),
+				getTopBorder: () => ({ content: " STATUS ", width: 8, revision: 0 }),
+				dispose: vi.fn(),
+			},
+			onSubmit: () => true,
+			onNewThread: () => true,
+			canCopy: () => false,
+			onCopy: async () => false,
+			onClose: vi.fn(),
+			onDraftChange: vi.fn(),
+			onPersistDraft: vi.fn(),
+			onSelectThread: () => true,
+			onMarkRead: vi.fn(),
+			onCloseThread: async () => true,
+			onPromoteThread: async () => true,
+		});
+		const thread: BtwThreadView = {
+			key: "restored",
+			title: "Restored",
+			phase: "ready",
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			error: undefined,
+			request: undefined,
+			draft: "",
+			unread: 0,
+			turns: [
+				{
+					input: "Explain",
+					intermediateMessages: [
+						{
+							role: "custom",
+							customType: "side-note",
+							content: "source",
+							display: true,
+							timestamp: 2,
+						} as AgentMessage,
+					],
+					assistantMessage: {
+						...createAssistantMessage("Answer"),
+						content: [
+							{ type: "thinking", thinking: "Inspect restored" },
+							{ type: "text", text: "Answer" },
+						],
+					},
+					replyText: "Answer",
+					timestamp: 1,
+				},
+			],
+		};
+		try {
+			pane.setViewportHeight(25);
+			pane.update([thread], thread.key);
+			expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("Inspect restored");
+			pane.update(
+				[
+					{
+						...thread,
+						extensionRunner: {
+							observePresentation: () => () => {},
+							getAssistantThinkingRenderers: () => [
+								context => ({
+									type: "replace" as const,
+									component: { render: () => [`Translated: ${context.text.toUpperCase()}`] },
+								}),
+							],
+							getMessageRenderer: type =>
+								type === "side-note"
+									? message => ({ render: () => [`Side note: ${String(message.content).toUpperCase()}`] })
+									: undefined,
+						},
+					},
+				],
+				thread.key,
+			);
+			const rendered = Bun.stripANSI(pane.render(100).join("\n"));
+			expect(rendered).toContain("Translated: INSPECT RESTORED");
+			expect(rendered).toContain("Side note: SOURCE");
+			expect(rendered).not.toContain("Inspect restored");
+		} finally {
+			pane.dispose();
+		}
 	});
 
 	it("updates the current stream block without rebuilding the displayed thread", () => {
@@ -277,7 +474,7 @@ describe("BtwConversationPane", () => {
 			onPersistDraft: vi.fn(),
 			onSelectThread: () => true,
 			onMarkRead: vi.fn(),
-			onCloseThread: () => true,
+			onCloseThread: async () => true,
 			onPromoteThread: async () => true,
 		});
 		const thread: BtwThreadView = {
@@ -285,21 +482,68 @@ describe("BtwConversationPane", () => {
 			title: "Streaming",
 			phase: "running",
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			extensionRunner: {
+				observePresentation: () => () => {},
+				getAssistantThinkingRenderers: () => [
+					context => ({
+						type: "replace" as const,
+						component: { render: () => [context.text === "Inspect first" ? "先检查" : "继续检查"] },
+					}),
+				],
+				getMessageRenderer: type =>
+					type === "side-note"
+						? message => ({ render: () => [`Side note: ${String(message.content).toUpperCase()}`] })
+						: undefined,
+			},
 			error: undefined,
 			draft: "",
+			getTool: name => (name === "bash" ? ({ name, label: "SIDE-BASH" } as AgentTool) : undefined),
+			isBuiltInTool: () => false,
 			unread: 0,
 			turns: [],
 			request: {
 				input: "Explain",
-				messages: [],
-				streamMessage: createAssistantMessage("partial one"),
+				messages: [
+					{
+						role: "custom",
+						customType: "side-note",
+						content: "source",
+						display: true,
+						timestamp: 2,
+					} as AgentMessage,
+					{
+						...createAssistantMessage(""),
+						content: [{ type: "toolCall", id: "side-bash", name: "bash", arguments: { command: "echo side" } }],
+						stopReason: "toolUse",
+					},
+					{
+						role: "toolResult",
+						toolCallId: "side-bash",
+						toolName: "bash",
+						content: [{ type: "text", text: "SIDE RESULT" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+				streamMessage: {
+					...createAssistantMessage("partial one"),
+					content: [
+						{ type: "thinking", thinking: "Inspect first" },
+						{ type: "text", text: "partial one" },
+					],
+				},
 				timestamp: 1,
 			},
 		};
 		try {
-			pane.setViewportHeight(12);
+			pane.setViewportHeight(25);
 			pane.update([thread], thread.key);
 			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("partial one");
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("先检查");
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("Side note: SOURCE");
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).not.toContain("Inspect first");
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("SIDE-BASH");
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("SIDE RESULT");
 			requestRender.mockClear();
 			requestComponentRender.mockClear();
 
@@ -309,7 +553,13 @@ describe("BtwConversationPane", () => {
 						...thread,
 						request: {
 							...thread.request!,
-							streamMessage: createAssistantMessage("partial two"),
+							streamMessage: {
+								...createAssistantMessage("partial two"),
+								content: [
+									{ type: "thinking", thinking: "Inspect next" },
+									{ type: "text", text: "partial two" },
+								],
+							},
 						},
 					},
 				],
@@ -318,6 +568,7 @@ describe("BtwConversationPane", () => {
 
 			expect(requestComponentRender).toHaveBeenCalled();
 			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("partial two");
+			expect(Bun.stripANSI(pane.render(80).join("\n"))).toContain("继续检查");
 		} finally {
 			pane.dispose();
 		}
@@ -347,7 +598,7 @@ describe("BtwConversationPane", () => {
 			onPersistDraft: vi.fn(),
 			onSelectThread: () => true,
 			onMarkRead: vi.fn(),
-			onCloseThread: () => true,
+			onCloseThread: async () => true,
 			onPromoteThread: async () => true,
 		});
 		const partialAnswer = Array.from({ length: 120 }, (_value, index) => String(index + 1)).join("\n");
@@ -523,7 +774,7 @@ describe("BtwConversationPane", () => {
 			onPersistDraft: vi.fn(),
 			onSelectThread,
 			onMarkRead: vi.fn(),
-			onCloseThread: () => true,
+			onCloseThread: async () => true,
 			onPromoteThread: async () => true,
 		});
 		pane.setViewportHeight(14);
@@ -751,6 +1002,22 @@ describe("BtwConversationPane", () => {
 });
 
 describe("BtwController", () => {
+	it("rejects BTW on non-file session storage instead of silently losing the thread", async () => {
+		const manager = SessionManager.create(process.cwd(), "/virtual-btw-sessions", new MemorySessionStorage());
+		const ctx = makeCtx(
+			makeFakeSession(async () => ({
+				replyText: "unused",
+				assistantMessage: createAssistantMessage("unused"),
+			})),
+		);
+		Object.assign(ctx, { sessionManager: manager });
+		try {
+			await expect(new BtwController(ctx).start("Question?")).rejects.toThrow("file-backed session storage");
+		} finally {
+			await manager.close();
+		}
+	});
+
 	it("keeps a running inline thread durable across failed and successful workspace opens", async () => {
 		const reply = Promise.withResolvers<RunEphemeralTurnResult>();
 		const run = vi.fn(() => reply.promise);
@@ -760,9 +1027,6 @@ describe("BtwController", () => {
 		const open = vi.spyOn(ctx, "openBtwWorkspacePane").mockReturnValue(false);
 		const controller = new BtwController(ctx);
 		await controller.start("Persist before answering");
-		const restored = restoreBtwThreads(ctx.sessionManager.getEntries());
-		expect(restored.map(thread => thread.pausedRequest?.input)).toEqual(["Persist before answering"]);
-		const threadKey = restored[0]!.key;
 		const panel = ctx.btwContainer.children[0];
 		expect(await controller.handleOpenThread()).toBe(false);
 		expect(ctx.btwContainer.children).toEqual([panel]);
@@ -779,10 +1043,7 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 		expect(run).toHaveBeenCalledTimes(1);
 		expect(Bun.stripANSI(pane!.render(100).join("\n"))).toContain("Still the same thread");
-		const completed = restoreBtwThreads(ctx.sessionManager.getEntries());
-		expect(completed.map(thread => thread.key)).toEqual([threadKey]);
-		expect(completed[0]!.turns.map(turn => turn.input)).toEqual(["Persist before answering"]);
-		controller.dispose();
+		await controller.dispose();
 	});
 
 	it("restores an inline-only thread after dismiss and controller disposal", async () => {
@@ -795,16 +1056,14 @@ describe("BtwController", () => {
 		await controller.start("Keep this");
 		await drainBtwRequest();
 		controller.handleEscape();
-		controller.dispose();
+		await controller.dispose();
 		const resumed = new BtwController(ctx);
 		await resumed.start("");
 		expect(run).toHaveBeenCalledTimes(1);
 		expect(Bun.stripANSI(ctx.btwContainer.render(100).join("\n"))).toContain("Saved answer");
 		expect(resumed.handlesOpenThreadKey()).toBe(false);
-		expect(restoreBtwThreads(ctx.sessionManager.getEntries()).map(thread => thread.turns[0]?.input)).toEqual([
-			"Keep this",
-		]);
-		resumed.dispose();
+		expect(ctx.sessionManager.getEntries()).toEqual([]);
+		await resumed.dispose();
 	});
 
 	it("replaces a previous request by aborting it before issuing the next runEphemeralTurn", async () => {
@@ -826,10 +1085,10 @@ describe("BtwController", () => {
 		const controller = new BtwController(ctx);
 
 		await controller.start("First?");
+		await drainBtwRequest();
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
 		await controller.start("Second?");
-		// Allow the second call to settle.
-		await Promise.resolve();
-		await Promise.resolve();
+		await drainBtwRequest();
 
 		expect(runEphemeralTurn).toHaveBeenCalledTimes(2);
 		expect(signals[0]?.aborted).toBe(true);
@@ -837,6 +1096,7 @@ describe("BtwController", () => {
 		expect(btwContainer.children).toHaveLength(1);
 		// Allow the orphaned first request to finish to keep the test clean.
 		first.resolve({ replyText: "first", assistantMessage: createAssistantMessage("first") });
+		await controller.dispose();
 	});
 
 	it("clears the panel when the active request is dismissed via Escape", async () => {
@@ -1018,7 +1278,7 @@ describe("BtwController", () => {
 		await controller.start("Question?");
 		await drainBtwRequest();
 		const branchPromise = controller.handleBranch();
-		await Promise.resolve();
+		await drainBtwRequest();
 		expect(controller.handlesBranchKey()).toBe(true);
 		expect(controller.canOpenThread()).toBe(false);
 		expect(controller.handlesOpenThreadKey()).toBe(false);
@@ -1191,11 +1451,10 @@ describe("BtwController", () => {
 		await disposeController.start("Question?");
 		await drainBtwRequest();
 		expect(disposeController.canBranch()).toBe(true);
-		disposeController.dispose();
+		await disposeController.dispose();
 		expect(disposeController.canBranch()).toBe(false);
 	});
 	it("renders durable tool events through the same transcript path as Main", async () => {
-		const events: BtwThreadEvent[] = [];
 		const model = {
 			id: "claude-sonnet-4-5",
 			api: "anthropic-messages",
@@ -1241,6 +1500,7 @@ describe("BtwController", () => {
 						await turnGate.promise;
 						options.onMessage?.({ type: "end", message: toolCall });
 						options.onMessage?.({ type: "end", message: toolResult });
+						turnFinished.resolve();
 						return {
 							replyText: "Direct answer",
 							assistantMessage: createAssistantMessage("Direct answer"),
@@ -1264,10 +1524,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => {
-					events.push(event);
-					if (event.op === "turn") turnFinished.resolve();
-				},
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -1299,19 +1556,22 @@ describe("BtwController", () => {
 
 		expect(ctx.btwContainer.children).toHaveLength(0);
 		expect(createConversation.mock.calls[0]?.[3]).toMatchObject({ readOnlyTools: true });
-		expect(events[0]).toMatchObject({ op: "create", anchorLeafId: "leaf-1", turns: [] });
-		expect(events.map(event => event.op)).toContain("turn");
 		const completedTranscript = Bun.stripANSI(pane.render(100).join("\n"));
 		expect(completedTranscript).toContain("fixture.ts");
 		expect(completedTranscript.match(/Inspecting fixture/g)).toHaveLength(1);
 		expect(completedTranscript).toContain("Direct answer");
-		controller.dispose();
+		await controller.dispose();
+		const resumed = new BtwController(ctx);
+		await resumed.start("");
+		const restoredTranscript = Bun.stripANSI(activePane!.render(100).join("\n"));
+		expect(restoredTranscript).toContain("fixture contents");
+		expect(restoredTranscript).toContain("Direct answer");
+		await resumed.dispose();
 	});
 
-	it("submits a pane image to BTW and journals it without modifying Main", async () => {
+	it("submits a pane image to BTW without modifying Main", async () => {
 		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
 		const requests: AgentMessage[][] = [];
-		const events: BtwThreadEvent[] = [];
 		const completed = Promise.withResolvers<void>();
 		const model = { provider: "anthropic", id: "claude-sonnet-4-5" };
 		const session = {
@@ -1324,6 +1584,7 @@ describe("BtwController", () => {
 					checkpoint,
 					runTurn: async messages => {
 						requests.push(messages);
+						completed.resolve();
 						return { replyText: "Image received", assistantMessage: createAssistantMessage("Image received") };
 					},
 				}),
@@ -1335,10 +1596,7 @@ describe("BtwController", () => {
 			keybindings: { getKeys: () => [] },
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_type: string, event: BtwThreadEvent) => {
-					events.push(event);
-					if (event.op === "turn") completed.resolve();
-				},
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -1358,22 +1616,21 @@ describe("BtwController", () => {
 			editor.setDraft("[Image #1]", [image]);
 			pane.handleInput("\r");
 			await completed.promise;
+			await drainBtwRequest();
 			const request = requests[0]?.at(-1);
 			expect(request?.role).toBe("user");
 			expect(request && "content" in request ? request.content : undefined).toEqual([
 				{ type: "text", text: "[Image #1]" },
 				image,
 			]);
-			expect(events.find(event => event.op === "turn")).toMatchObject({ turn: { images: [image] } });
 			expect(pane.getPasteTarget()?.pendingImages).toEqual([]);
 			expect(ctx.btwContainer.children).toHaveLength(0);
 		} finally {
-			controller.dispose();
+			await controller.dispose();
 		}
 	});
 
 	it("creates the thread inline and opens it without recreating the conversation or replaying its first turn", async () => {
-		const events: BtwThreadEvent[] = [];
 		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
 		const model = {
 			id: "claude-sonnet-4-5",
@@ -1418,7 +1675,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: (id: string) => (id === "leaf-1" ? {} : undefined),
@@ -1444,15 +1701,11 @@ describe("BtwController", () => {
 		expect(controller.canOpenThread()).toBe(true);
 		expect(controller.handlesOpenThreadKey()).toBe(false);
 		ctx.btwContainer.addChild(inlinePanel);
-		const persistedBeforeOpen = structuredClone(events);
 
 		expect(await controller.handleOpenThread()).toBe(true);
 		expect(activePane).toBeDefined();
 		expect(Bun.stripANSI(activePane?.render(100).join("\n") ?? "")).toContain("Answer");
-		expect(events).toEqual(persistedBeforeOpen);
 		expect(createConversation).toHaveBeenCalledTimes(1);
-		expect(events[0]).toMatchObject({ op: "create", anchorLeafId: "leaf-1", turns: [] });
-		expect(events.find(event => event.op === "turn")).toMatchObject({ turn: { input: "First?" } });
 
 		await controller.start("Second?");
 		await drainBtwRequest();
@@ -1463,13 +1716,12 @@ describe("BtwController", () => {
 		expect(copySpy).toHaveBeenLastCalledWith("Answer: First?");
 		expect(await controller.handleOpenThread()).toBe(true);
 		expect(mountedPanes.size).toBe(1);
-		expect(events.filter(event => event.op === "create")).toHaveLength(2);
-		controller.dispose();
+		expect(createConversation).toHaveBeenCalledTimes(2);
+		await controller.dispose();
 	});
 
 	it("switches threads during rail expansion while another durable BTW turn is running", async () => {
 		vi.useFakeTimers();
-		const events: BtwThreadEvent[] = [];
 		const running = Promise.withResolvers<RunEphemeralTurnResult>();
 		let runCount = 0;
 		let runningMessage: EphemeralTurnOptions["onMessage"];
@@ -1508,7 +1760,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: (id: string) => (id === "leaf-1" ? {} : undefined),
@@ -1569,11 +1821,10 @@ describe("BtwController", () => {
 		expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("First answer");
 		running.resolve({ replyText: "Finished", assistantMessage: createAssistantMessage("Finished") });
 		await drainBtwRequest();
-		controller.dispose();
+		await controller.dispose();
 	});
 
 	it("keeps the frozen Main context when /refresh is submitted as ordinary BTW input", async () => {
-		const events: BtwThreadEvent[] = [];
 		const frozenMain: string[] = [];
 		let mainContext = "main-v1";
 		let leafId = "leaf-v1";
@@ -1621,7 +1872,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => leafId,
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -1647,8 +1898,6 @@ describe("BtwController", () => {
 		pane.handleInput("\r");
 		await drainBtwRequest();
 		expect(frozenMain).toEqual(["main-v1"]);
-		expect(events.map(event => event.op)).not.toContain("refresh");
-		expect(events.findLast(event => event.op === "turn")?.turn.input).toBe("/refresh");
 
 		expect(capturedSideOptions).toMatchObject({ readOnlyTools: true });
 		await capturedSideOptions?.shareSummaryWithMain?.("Cache invalidation must happen after commit.");
@@ -1663,17 +1912,13 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 		const handoff = sendUserMessage.mock.calls.at(-1);
 		expect(handoff?.[0]).toContain("First?");
+		expect(handoff?.[0]).toContain("/refresh");
 		expect(handoff?.[0]).toContain("Side answer");
 		expect(handoff).toEqual([expect.any(String), { deliverAs: "followUp" }]);
-		expect(events.filter(event => event.op === "turn").map(event => event.turn.input)).toEqual([
-			"First?",
-			"/refresh",
-		]);
-		controller.dispose();
+		await controller.dispose();
 	});
 
-	it("promotes a durable child from its frozen anchor after Main advances and journals removal before switching", async () => {
-		const events: BtwThreadEvent[] = [];
+	it("promotes a durable child from its frozen anchor and removes its sidecar", async () => {
 		let leafId = "anchor-leaf";
 		const model = { id: "claude-sonnet-4-5", api: "anthropic-messages", provider: "anthropic" };
 		const session = {
@@ -1690,7 +1935,7 @@ describe("BtwController", () => {
 		} as unknown as InteractiveModeContext["session"];
 		const handleBtwBranch = vi.fn(
 			async (_request: BtwPromotionRequest, lifecycle: BtwPromotionLifecycle | undefined): Promise<boolean> => {
-				lifecycle?.prepare();
+				await lifecycle?.prepare();
 				return true;
 			},
 		);
@@ -1702,7 +1947,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => leafId,
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -1720,11 +1965,12 @@ describe("BtwController", () => {
 
 		expect(await controller.handleBranch()).toBe(true);
 		expect(handleBtwBranch.mock.calls[0]?.[0]).toMatchObject({ anchorLeafId: "anchor-leaf" });
-		expect(events.map(event => event.op)).toEqual(["create", "request", "turn", "read", "remove"]);
+		await controller.start("");
+		expect(controller.canCopy()).toBe(false);
+		await controller.dispose();
 	});
 
-	it("persists an unsubmitted draft before promoting its thread", async () => {
-		const events: BtwThreadEvent[] = [];
+	it("restores an unsubmitted draft after promotion rollback", async () => {
 		const model = { id: "claude-sonnet-4-5", api: "anthropic-messages", provider: "anthropic" };
 		const session = {
 			sessionId: "session-1",
@@ -1740,8 +1986,9 @@ describe("BtwController", () => {
 		} as unknown as InteractiveModeContext["session"];
 		const handleBtwBranch = vi.fn(
 			async (_request: BtwPromotionRequest, lifecycle: BtwPromotionLifecycle | undefined): Promise<boolean> => {
-				lifecycle?.prepare();
-				return true;
+				await lifecycle?.prepare();
+				await lifecycle?.rollback();
+				return false;
 			},
 		);
 		let activePane: BtwConversationPane | undefined;
@@ -1753,7 +2000,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -1774,18 +2021,16 @@ describe("BtwController", () => {
 		const pane = activePane;
 		if (!pane) throw new Error("Expected durable BTW pane");
 
-		// Draft the next question, then promote straight from the pane without
-		// submitting or switching threads: the draft must reach the old
-		// session's journal before the branch switches sessions.
 		pane.handleInput("my draft");
-		expect(await controller.handleBranch()).toBe(true);
-		expect(events.map(event => event.op)).toEqual(["create", "request", "turn", "read", "draft", "remove"]);
-		expect(events.find(event => event.op === "draft")).toMatchObject({ op: "draft", text: "my draft" });
-		controller.dispose();
+		expect(await controller.handleBranch()).toBe(false);
+		await controller.dispose();
+		const resumed = new BtwController(ctx);
+		await resumed.start("");
+		expect(activePane?.getPasteTarget()?.getText()).toBe("my draft");
+		await resumed.dispose();
 	});
 
 	it("keeps the editor input and reports it when submitting into a running reply", async () => {
-		const events: BtwThreadEvent[] = [];
 		const running = Promise.withResolvers<RunEphemeralTurnResult>();
 		let runCount = 0;
 		const model = { id: "claude-sonnet-4-5", api: "anthropic-messages", provider: "anthropic" };
@@ -1818,7 +2063,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -1853,11 +2098,10 @@ describe("BtwController", () => {
 
 		running.resolve({ replyText: "Second answer", assistantMessage: createAssistantMessage("Second answer") });
 		await drainBtwRequest();
-		controller.dispose();
+		await controller.dispose();
 	});
 
 	it("manages blank threads and deletes the active thread with /delete", async () => {
-		const events: BtwThreadEvent[] = [];
 		const model = { id: "claude-sonnet-4-5", api: "anthropic-messages", provider: "anthropic" };
 		let conversationCount = 0;
 		let turnCount = 0;
@@ -1894,7 +2138,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -1920,9 +2164,7 @@ describe("BtwController", () => {
 		pane.handleInput("\r");
 		await drainBtwRequest();
 
-		const creates = events.filter(event => event.op === "create");
-		expect(creates).toHaveLength(1);
-		expect(creates[0]).toMatchObject({ op: "create", title: "BTW" });
+		expect(conversationCount).toBe(1);
 		expect(turnCount).toBe(0);
 
 		pane.handleInput("Second question");
@@ -1934,15 +2176,11 @@ describe("BtwController", () => {
 		pane.handleInput("/new");
 		pane.handleInput("\r");
 		await drainBtwRequest();
-		const blankCreate = events.filter(event => event.op === "create").at(-1);
-		expect(blankCreate).toBeDefined();
-		expect(blankCreate?.key).not.toBe(creates[0]?.key);
+		expect(conversationCount).toBe(2);
 
 		pane.handleInput("\x1b");
 		expect(controller.canCopy()).toBe(false);
 		expect(controller.handlesCopyKey()).toBe(false);
-		expect(events).not.toContainEqual({ version: 1, op: "remove", key: blankCreate!.key, reason: "deleted" });
-		expect(events).not.toContainEqual({ version: 1, op: "remove", key: creates[0]!.key, reason: "deleted" });
 
 		await controller.start("");
 		const reopenedPane = activePane;
@@ -1951,16 +2189,15 @@ describe("BtwController", () => {
 		reopenedPane.handleInput("\r");
 		await drainBtwRequest();
 		expect(turnCount).toBe(1);
-		expect(events).toContainEqual({ version: 1, op: "remove", key: blankCreate!.key, reason: "deleted" });
 		expect(controller.canCopy()).toBe(true);
 		reopenedPane.handleInput("/delete");
 		reopenedPane.handleInput("\r");
-		expect(events).toContainEqual({ version: 1, op: "remove", key: creates[0]!.key, reason: "deleted" });
-		controller.dispose();
+		await drainBtwRequest();
+		expect(controller.canCopy()).toBe(false);
+		await controller.dispose();
 	});
 
 	it("renders the side assistant stream in the pane while a durable reply is running", async () => {
-		const events: BtwThreadEvent[] = [];
 		const running = Promise.withResolvers<RunEphemeralTurnResult>();
 		let thinkingMessage: EphemeralTurnOptions["onMessage"];
 		let runCount = 0;
@@ -1997,7 +2234,7 @@ describe("BtwController", () => {
 			proseOnlyThinking: false,
 			sessionManager: {
 				getEntries: () => [],
-				appendCustomEntry: (_customType: string, event: BtwThreadEvent) => events.push(event),
+				getLocalArtifactsDir: () => null,
 				getLeafId: () => "leaf-1",
 				getSessionId: () => "session-1",
 				getEntry: () => ({}),
@@ -2031,6 +2268,6 @@ describe("BtwController", () => {
 
 		running.resolve({ replyText: "Because.", assistantMessage: createAssistantMessage("Because.") });
 		await drainBtwRequest();
-		controller.dispose();
+		await controller.dispose();
 	});
 });

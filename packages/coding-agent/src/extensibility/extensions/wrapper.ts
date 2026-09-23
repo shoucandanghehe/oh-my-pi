@@ -165,6 +165,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	) {
 		applyToolProxy(tool, this);
 	}
+	/** The original tool, for rebinding a trusted built-in to a distinct session runner. */
+	unwrap(): AgentTool<TParameters, TDetails> {
+		return this.tool;
+	}
 
 	/**
 	 * Forward browser mode changes when available.

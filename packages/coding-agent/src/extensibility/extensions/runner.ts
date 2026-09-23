@@ -727,6 +727,7 @@ export class ExtensionRunner {
 		commandContextActions?: ExtensionCommandContextActions,
 		uiContext?: ExtensionUIContext,
 		mode: ExtensionMode = "print",
+		options?: { installFileFallbacks?: boolean; registerProviders?: boolean },
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
@@ -748,9 +749,13 @@ export class ExtensionRunner {
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.registerProvider = (name, config, sourceId) => {
+			if (options?.registerProviders === false)
+				throw new Error("Extension provider registration is unavailable in BTW");
 			this.modelRegistry.registerProvider(name, config, sourceId);
 		};
 		this.runtime.unregisterProvider = name => {
+			if (options?.registerProviders === false)
+				throw new Error("Extension provider registration is unavailable in BTW");
 			this.modelRegistry.unregisterProvider(name);
 		};
 
@@ -786,71 +791,73 @@ export class ExtensionRunner {
 		// accumulate duplicate global registrations — drop the prior generation before
 		// installing this one's trampolines.
 		this.disposeFileFallbacks();
-		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
-		for (const ext of this.getLoadedExtensions()) {
-			// Nothing registered by this extension means no trampoline, so a host with
-			// no fallback-registering extension leaves the seam genuinely empty and
-			// `hasFileWriteFallback()`/`hasFileDeleteFallback()` false — the invariant
-			// the whole feature rests on. Each seam is checked separately, so an
-			// extension that only brokers writes never appears in the delete registry.
-			if (ext.fileWriteFallbackHandlers.length === 0 && ext.fileDeleteFallbackHandlers.length === 0) continue;
-			// One trampoline per extension per seam, not per handler: the list is walked
-			// at mutation time so a handler this extension adds later still takes effect,
-			// and `createContext()` takes no extension argument, so within one invocation
-			// a single context is all any of this extension's handlers would have
-			// received anyway.
-			//
-			// The context is built PER INVOCATION rather than captured here, matching
-			// every other dispatch site. `createContext()` materializes `cwd` and
-			// `hasUI` as values, so a trampoline holding one context for the life of the
-			// session would keep handing handlers the workspace this runner initialized
-			// in — wrong the moment `SessionManager.moveTo()` relocates the session
-			// (`/move`), and a handler that scopes or prompts against `ctx.cwd` would
-			// then allow the old workspace and deny the new one. A denied mutation is a
-			// rare path, so the extra object costs nothing that matters.
-			//
-			// Isolation is per HANDLER, not per extension. The registry only sees one
-			// trampoline per extension, so a throw escaping this loop would advance the
-			// registry to the NEXT extension and skip every later handler this one
-			// registered — breaking both the documented "a throwing handler is skipped"
-			// contract and registration order for a backup-handler setup.
-			if (ext.fileWriteFallbackHandlers.length > 0) {
-				this.#fileFallbackDisposers.push(
-					addFileWriteFallback(async req => {
-						if (this.#suspendedExtensions.has(ext)) return false;
-						const ctx = this.createContext();
-						for (const handler of ext.fileWriteFallbackHandlers) {
-							try {
-								if (await handler(req, ctx)) return true;
-							} catch (error) {
-								logger.warn("Extension file write fallback handler threw; trying next handler", {
-									extension: ext.path,
-									error: error instanceof Error ? error.message : String(error),
-								});
+		if (options?.installFileFallbacks !== false) {
+			// Suspended extensions keep a gated trampoline so resuming needs no rewire.
+			for (const ext of this.getLoadedExtensions()) {
+				// Nothing registered by this extension means no trampoline, so a host with
+				// no fallback-registering extension leaves the seam genuinely empty and
+				// `hasFileWriteFallback()`/`hasFileDeleteFallback()` false — the invariant
+				// the whole feature rests on. Each seam is checked separately, so an
+				// extension that only brokers writes never appears in the delete registry.
+				if (ext.fileWriteFallbackHandlers.length === 0 && ext.fileDeleteFallbackHandlers.length === 0) continue;
+				// One trampoline per extension per seam, not per handler: the list is walked
+				// at mutation time so a handler this extension adds later still takes effect,
+				// and `createContext()` takes no extension argument, so within one invocation
+				// a single context is all any of this extension's handlers would have
+				// received anyway.
+				//
+				// The context is built PER INVOCATION rather than captured here, matching
+				// every other dispatch site. `createContext()` materializes `cwd` and
+				// `hasUI` as values, so a trampoline holding one context for the life of the
+				// session would keep handing handlers the workspace this runner initialized
+				// in — wrong the moment `SessionManager.moveTo()` relocates the session
+				// (`/move`), and a handler that scopes or prompts against `ctx.cwd` would
+				// then allow the old workspace and deny the new one. A denied mutation is a
+				// rare path, so the extra object costs nothing that matters.
+				//
+				// Isolation is per HANDLER, not per extension. The registry only sees one
+				// trampoline per extension, so a throw escaping this loop would advance the
+				// registry to the NEXT extension and skip every later handler this one
+				// registered — breaking both the documented "a throwing handler is skipped"
+				// contract and registration order for a backup-handler setup.
+				if (ext.fileWriteFallbackHandlers.length > 0) {
+					this.#fileFallbackDisposers.push(
+						addFileWriteFallback(async req => {
+							if (this.#suspendedExtensions.has(ext)) return false;
+							const ctx = this.createContext();
+							for (const handler of ext.fileWriteFallbackHandlers) {
+								try {
+									if (await handler(req, ctx)) return true;
+								} catch (error) {
+									logger.warn("Extension file write fallback handler threw; trying next handler", {
+										extension: ext.path,
+										error: error instanceof Error ? error.message : String(error),
+									});
+								}
 							}
-						}
-						return false;
-					}),
-				);
-			}
-			if (ext.fileDeleteFallbackHandlers.length > 0) {
-				this.#fileFallbackDisposers.push(
-					addFileDeleteFallback(async req => {
-						if (this.#suspendedExtensions.has(ext)) return false;
-						const ctx = this.createContext();
-						for (const handler of ext.fileDeleteFallbackHandlers) {
-							try {
-								if (await handler(req, ctx)) return true;
-							} catch (error) {
-								logger.warn("Extension file delete fallback handler threw; trying next handler", {
-									extension: ext.path,
-									error: error instanceof Error ? error.message : String(error),
-								});
+							return false;
+						}),
+					);
+				}
+				if (ext.fileDeleteFallbackHandlers.length > 0) {
+					this.#fileFallbackDisposers.push(
+						addFileDeleteFallback(async req => {
+							if (this.#suspendedExtensions.has(ext)) return false;
+							const ctx = this.createContext();
+							for (const handler of ext.fileDeleteFallbackHandlers) {
+								try {
+									if (await handler(req, ctx)) return true;
+								} catch (error) {
+									logger.warn("Extension file delete fallback handler threw; trying next handler", {
+										extension: ext.path,
+										error: error instanceof Error ? error.message : String(error),
+									});
+								}
 							}
-						}
-						return false;
-					}),
-				);
+							return false;
+						}),
+					);
+				}
 			}
 		}
 

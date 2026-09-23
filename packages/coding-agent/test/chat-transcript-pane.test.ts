@@ -3,7 +3,15 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChatTranscriptPane, type ChatTranscriptPaneEditorOptions } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
-import { type Component, ProcessTerminal, type SgrMouseEvent, TUI } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	ProcessTerminal,
+	type SgrMouseEvent,
+	setTerminalHyperlinks,
+	TERMINAL,
+	TUI,
+} from "@oh-my-pi/pi-tui";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -240,6 +248,43 @@ describe("ChatTranscriptPane", () => {
 			expect(Bun.stripANSI(pane.render(70).join("\n"))).toContain("row-999");
 		} finally {
 			pane.dispose();
+		}
+	});
+	it("resolves a model link added when a streamed assistant finalizes", async () => {
+		const originalHyperlinks = TERMINAL.hyperlinks;
+		setTerminalHyperlinks(true);
+		const resolved = Promise.withResolvers<void>();
+		const pane = new ChatTranscriptPane({
+			builder: {
+				ui: new TUI(new ProcessTerminal()),
+				cwd: process.cwd(),
+				resolveLinks: async texts => {
+					if (!texts.some(text => text.includes("note.md"))) return new Map();
+					resolved.resolve();
+					return new Map([["note.md", "file:///current/note.md"]]);
+				},
+				requestRender: () => {},
+			},
+			expandKeys: [],
+			getPlaceholder: () => "No messages yet.",
+			onClose: () => {},
+		});
+		pane.setViewportHeight(12);
+		try {
+			const partial = createAssistantMessage("Draft");
+			pane.rebuild([partial]);
+			expect(
+				pane.finalizeStreamingAssistant({
+					...partial,
+					content: [{ type: "text", text: "Final [note](note.md)" }],
+				}),
+			).toBe(true);
+			await resolved.promise;
+			await Promise.resolve();
+			expect(pane.render(80).join("\n")).toContain("file:///current/note.md");
+		} finally {
+			pane.dispose();
+			setTerminalHyperlinks(originalHyperlinks);
 		}
 	});
 });

@@ -160,6 +160,7 @@ import type {
 	TurnStartEvent,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT } from "../extensibility/extensions";
+import { BtwExtensionRuntime } from "./btw-extension-runtime";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
@@ -242,7 +243,6 @@ import {
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
-import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	buildResolveReminderMessage,
@@ -340,8 +340,8 @@ import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
 	type EphemeralConversationSideOptions,
-	type EphemeralTurnOptions,
-	type EphemeralTurnResult,
+	type EphemeralTurnOptions as EphemeralConversationTurnOptions,
+	type EphemeralTurnResult as EphemeralConversationTurnResult,
 } from "./ephemeral-conversation";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
@@ -10100,8 +10100,8 @@ export class AgentSession implements SettingsScope {
 	 * does not block on, or interfere with, any in-flight main turn. The
 	 * session's history and persisted state are NOT modified by this call.
 	 *
-	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
-	 * the snapshot + stream pipeline. The snapshot includes any in-flight
+	 * Used by extensions, idle recaps, and `OmfgController` (`/omfg`). Durable
+	 * BTW threads use `createEphemeralConversation` instead. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
 	 */
@@ -10114,6 +10114,7 @@ export class AgentSession implements SettingsScope {
 		const sessionGeneration = this.#sessionGeneration;
 		const assertEphemeralTurnReady = () => {
 			args.signal?.throwIfAborted();
+			if (this.#isDisposed) throw new Error("Session disposed during ephemeral turn.");
 			// The side request must use the exact model snapshot captured above.
 			// `modelsAreEqual` intentionally compares only provider/id, while a
 			// replacement with that same identity can still change routing and wire
@@ -10153,19 +10154,134 @@ export class AgentSession implements SettingsScope {
 		const cacheSessionId = this.sessionId;
 		const snapshot = this.#buildEphemeralBaseSnapshot();
 		snapshot.push(createSideChannelNoToolsMessage());
+		if (args.history?.length) {
+			// Detach before the conversion pipeline can await or mutate caller-owned messages.
+			snapshot.push(...structuredClone(args.history));
+		}
 		snapshot.push({
 			role: "user",
 			content: [{ type: "text", text: args.promptText }, ...(args.images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		return this.#runEphemeralSnapshot(
-			model,
-			cacheSessionId,
-			`${cacheSessionId}:side:${Snowflake.next()}`,
-			snapshot,
-			args,
+		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
+		assertEphemeralTurnReady();
+		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
+		const toolHistory = sideContext.messages.some(
+			message =>
+				message.role === "toolResult" ||
+				(message.role === "assistant" &&
+					Array.isArray(message.content) &&
+					message.content.some(block => block.type === "toolCall")),
 		);
+		if (args.tools === false && requiresToolFreeHistoryForToolOptOut(model) && toolHistory) {
+			throw new Error(
+				`Model ${modelDescription} cannot support tools: false with historical tool calls. Omit tools: false or start from tool-free history.`,
+			);
+		}
+		// Apply after context transforms, without mutating a potentially shared context.
+		const context = obfuscateProviderContext(
+			this.#obfuscator,
+			args.tools === false ? { ...sideContext, tools: [] } : sideContext,
+		);
+		if (
+			args.maxContextBytes !== undefined &&
+			Buffer.byteLength(JSON.stringify(context), "utf8") > args.maxContextBytes
+		) {
+			throw new Error(`Ephemeral turn context exceeds the configured ${args.maxContextBytes}-byte limit.`);
+		}
+		// `AssistantMessageEventStream` has no iterator-return cancellation hook, so
+		// throwing out of the consumer loop below (a rejected `onTextDelta` delivery,
+		// an `error` event) would leave the transport streaming: still burning
+		// inference and queueing output nobody reads. Abort the request ourselves when
+		// we stop consuming it, without touching the caller's signal.
+		const streamAbort = new AbortController();
+		const options = this.prepareSimpleStreamOptions(
+			{
+				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
+				// Side-channel turns must not share OpenAI/Codex append-only
+				// conversation state with the main agent turn: IRC and /btw can run
+				// while the main turn is mid-tool-call. Keep the prompt-cache key
+				// stable, but isolate provider routing from the main conversation.
+				// Serialized follow-ups reuse a topic-specific lineage; standalone
+				// side requests retain their unique request lineage.
+				sessionId: args.conversationKey
+					? `${cacheSessionId}:side:conversation:${args.conversationKey}`
+					: `${cacheSessionId}:side:${Snowflake.next()}`,
+				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
+				preferWebsockets: this.preferWebsockets,
+				providerSessionState: this.#providerSessionState,
+				reasoning: toReasoningEffort(this.thinkingLevel),
+				// Budget-thinking transports can raise explicit caps to make room for their
+				// default thinking budget. A side turn's cap is a hard resource boundary.
+				disableReasoning: shouldDisableReasoning(this.thinkingLevel) || cappedBudgetThinking,
+				hideThinkingSummary: this.agent.hideThinkingSummary,
+				serviceTier: this.#models.effectiveServiceTier(model),
+				maxTokens: args.maxTokens,
+				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
+			},
+			model.provider,
+		);
+
+		if (args.tools === false) options.toolChoice = "none";
+
+		let providerReplyText = "";
+		let emittedReplyText = "";
+		let assistantMessage: AssistantMessage | undefined;
+		assertEphemeralTurnReady();
+		const stream = await this.#sideStreamFn(model, context, options);
+		try {
+			for await (const event of stream) {
+				if (event.type === "text_delta") {
+					providerReplyText += event.delta;
+					if (args.onTextDelta) {
+						const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+						if (readyText.length > emittedReplyText.length) {
+							const delta = readyText.slice(emittedReplyText.length);
+							emittedReplyText = readyText;
+							await args.onTextDelta(delta);
+						}
+					}
+					continue;
+				}
+				if (event.type === "done") {
+					// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
+					// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
+					// see #4323) can hand back a message whose `content` was dropped or replaced with
+					// `undefined`. Downstream `.content.filter` at the sanitize step below would then
+					// crash the recap turn with `TypeError: undefined is not an object (evaluating
+					// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
+					// instead of turning a malformed side-channel response into a session-mute crash.
+					const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
+					assistantMessage = this.#obfuscator?.hasSecrets()
+						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+						: { ...event.message, content: rawContent };
+					break;
+				}
+				if (event.type === "error") {
+					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+				}
+			}
+		} catch (error) {
+			streamAbort.abort();
+			throw error;
+		}
+
+		if (!assistantMessage) {
+			throw new Error("Ephemeral turn ended without a final message");
+		}
+		const replyText = this.#deobfuscateFromProvider(providerReplyText);
+		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
+			await args.onTextDelta(replyText.slice(emittedReplyText.length));
+		}
+		const sanitizedMessage: AssistantMessage = {
+			...assistantMessage,
+			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
+		};
+		return {
+			replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
+			assistantMessage: sanitizedMessage,
+		};
 	}
 
 	/**
@@ -10190,32 +10306,35 @@ export class AgentSession implements SettingsScope {
 			: undefined;
 		const cacheSessionId = this.sessionId;
 		const sideSessionId = checkpoint?.sideSessionId ?? `${cacheSessionId}:side:${Snowflake.next()}`;
+		const mainTools = [...this.agent.state.tools];
+		let sideRuntime: BtwExtensionRuntime | undefined;
 		const child = this.agent.createChild({
 			initialState: {
 				model,
 				messages: [],
-				...(shareSummaryWithMainTool ? { tools: [...this.agent.state.tools, shareSummaryWithMainTool] } : {}),
+				tools: [],
 			},
 			sessionId: sideSessionId,
-			promptCacheKey: cacheSessionId,
+			promptCacheKey: this.agent.promptCacheKey ?? cacheSessionId,
 			streamFn: this.#sideStreamFn,
 			convertToLlm: this.#convertToLlm,
 			transformContext: async (messages, signal) => this.#transformContext(messages, signal),
-			// The side transcript renders its own restricted tool set. Its lifecycle
-			// never reaches Main's EventController, so waiting on Main's approval
-			// preview gate would deadlock before the interactive prompt can open.
-			transformToolContext: context => (context ? { ...context, toolApprovalPreview: "never" as const } : context),
+			// Side tools must never inherit Main's tool execution context. The
+			// explicit runtime supplies its own manager, restricted registry and UI.
+			transformToolContext: (_context, toolCall) => sideRuntime?.createToolContext(toolCall),
+			resolveFallbackTool: null,
 			providerSessionState: this.#providerSessionState,
 			getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
-			preferWebsockets: this.#preferWebsockets,
+			preferWebsockets: this.preferWebsockets,
 			serviceTier: this.#models.effectiveServiceTier(model),
 			beforeToolCall: ctx => {
-				if (readOnlyTools && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args)) return undefined;
+				if (readOnlyTools && sideRuntime && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args))
+					return undefined;
 				if (shareSummaryWithMainTool && ctx.toolCall.name === SHARE_SUMMARY_WITH_MAIN_TOOL_NAME) {
-					return this.#extensionRunner
+					return sideRuntime?.runner.hasUI()
 						? undefined
 						: { block: true, reason: "shareSummaryWithMain requires interactive user approval." };
 				}
@@ -10229,9 +10348,11 @@ export class AgentSession implements SettingsScope {
 		const createCapabilityReminder = readOnlyTools
 			? createSideChannelReadonlyMessage
 			: createSideChannelNoToolsMessage;
-		return new EphemeralConversation({
+		const conversation = new EphemeralConversation({
 			snapshotBaseMessages: () => {
-				const baseMessages = this.#buildEphemeralBaseSnapshot();
+				const baseMessages = this.#buildEphemeralBaseSnapshot().map(message =>
+					readOnlyTools ? cloneMessageEndNotification(message) : message,
+				);
 				baseMessages.push({
 					role: "developer",
 					content: [{ type: "text", text: instructions }],
@@ -10242,6 +10363,37 @@ export class AgentSession implements SettingsScope {
 			},
 			checkpoint,
 			getTool: name => child.state.tools.find(tool => tool.name === name),
+			createExtensionRuntime: readOnlyTools
+				? async () => {
+						if (
+							!this.#preparedExtensions &&
+							((this.#extensionPaths?.length ?? 0) > 0 ||
+								(this.#extensionRunner?.getExtensionPaths?.().length ?? 0) > 0)
+						) {
+							throw new Error("BTW cannot bind Main extensions without prepared factories");
+						}
+						const toolInfos = this.getAllToolInfos();
+						const runtime = await BtwExtensionRuntime.create({
+							agent: child,
+							mainTools,
+							availableTools: toolInfos
+								.map(info => this.#tools.getToolByName(info.name))
+								.filter((tool): tool is AgentTool => tool !== undefined),
+							mountedNames: this.#tools.getMountedXdevToolNames(),
+							preparedExtensions: this.#preparedExtensions ?? [],
+							modelRegistry: this.#modelRegistry,
+							settings: this.settings,
+							cwd: this.sessionManager.getCwd(),
+							toolInfos,
+							isReadOnlyToolCall: (tool, args) => this.#tools.isReadOnlySideToolCall(tool, args),
+							shareSummaryTool: shareSummaryWithMainTool,
+							approvalUI: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
+						});
+						child.setTools(runtime.tools);
+						sideRuntime = runtime;
+						return runtime;
+					}
+				: undefined,
 			turnPrefixMessages: () => [createCapabilityReminder()],
 			getRuntimeState: () => ({
 				model: child.state.model,
@@ -10249,16 +10401,24 @@ export class AgentSession implements SettingsScope {
 				isStreaming: child.state.isStreaming,
 				streamMessage: child.state.streamMessage?.role === "assistant" ? child.state.streamMessage : null,
 			}),
-			runTurn: (messages, options) => this.#runEphemeralConversationTurn(child, messages, options),
+			runTurn: async (messages, turnOptions) => {
+				await conversation.waitForExtensionRuntimeInitialization();
+				try {
+					return await this.#runEphemeralConversationTurn(child, messages, turnOptions);
+				} finally {
+					await sideRuntime?.settleEvents();
+				}
+			},
 			sideSessionId,
 		});
+		return conversation;
 	}
 
 	async #runEphemeralConversationTurn(
 		child: Agent,
 		messages: AgentMessage[],
-		args: Omit<EphemeralTurnOptions, "promptText">,
-	): Promise<EphemeralTurnResult> {
+		args: Omit<EphemeralConversationTurnOptions, "promptText">,
+	): Promise<EphemeralConversationTurnResult> {
 		args.signal?.throwIfAborted();
 		const input = messages.at(-1);
 		if (input?.role !== "user") {
@@ -10324,132 +10484,6 @@ export class AgentSession implements SettingsScope {
 			unsubscribe();
 			args.signal?.removeEventListener("abort", abortChild);
 		}
-	}
-
-	async #runEphemeralSnapshot(
-		model: Model,
-		cacheSessionId: string,
-		sideSessionId: string,
-		snapshot: AgentMessage[],
-		args: Omit<EphemeralTurnOptions, "promptText">,
-	): Promise<EphemeralTurnResult> {
-		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
-		assertEphemeralTurnReady();
-		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
-		const toolHistory = sideContext.messages.some(
-			message =>
-				message.role === "toolResult" ||
-				(message.role === "assistant" &&
-					Array.isArray(message.content) &&
-					message.content.some(block => block.type === "toolCall")),
-		);
-		if (args.tools === false && requiresToolFreeHistoryForToolOptOut(model) && toolHistory) {
-			throw new Error(
-				`Model ${modelDescription} cannot support tools: false with historical tool calls. Omit tools: false or start from tool-free history.`,
-			);
-		}
-		// Apply after context transforms, without mutating a potentially shared context.
-		const context = obfuscateProviderContext(
-			this.#obfuscator,
-			args.tools === false ? { ...sideContext, tools: [] } : sideContext,
-		);
-		if (
-			args.maxContextBytes !== undefined &&
-			Buffer.byteLength(JSON.stringify(context), "utf8") > args.maxContextBytes
-		) {
-			throw new Error(`Ephemeral turn context exceeds the configured ${args.maxContextBytes}-byte limit.`);
-		}
-		// `AssistantMessageEventStream` has no iterator-return cancellation hook, so
-		// throwing out of the consumer loop below (a rejected `onTextDelta` delivery,
-		// an `error` event) would leave the transport streaming: still burning
-		// inference and queueing output nobody reads. Abort the request ourselves when
-		// we stop consuming it, without touching the caller's signal.
-		const streamAbort = new AbortController();
-		const options = this.prepareSimpleStreamOptions(
-			{
-				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
-				// Side-channel turns must not share OpenAI/Codex append-only
-				// conversation state with the main agent turn: IRC and /btw can run
-				// while the main turn is mid-tool-call. Keep the prompt-cache key
-				// stable, but give provider routing a unique side-conversation lineage.
-				// The shared provider state map is still required so Codex can allocate
-				// websocket state under that side-channel session id.
-				sessionId: sideSessionId,
-				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
-				preferWebsockets: this.preferWebsockets,
-				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
-				// Budget-thinking transports can raise explicit caps to make room for their
-				// default thinking budget. A side turn's cap is a hard resource boundary.
-				disableReasoning: shouldDisableReasoning(this.thinkingLevel) || cappedBudgetThinking,
-				hideThinkingSummary: this.agent.hideThinkingSummary,
-				serviceTier: this.#models.effectiveServiceTier(model),
-				maxTokens: args.maxTokens,
-				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
-			},
-			model.provider,
-		);
-
-		if (args.tools === false) options.toolChoice = "none";
-
-		let providerReplyText = "";
-		let emittedReplyText = "";
-		let assistantMessage: AssistantMessage | undefined;
-		assertEphemeralTurnReady();
-		const stream = await this.#sideStreamFn(model, context, options);
-		try {
-			for await (const event of stream) {
-				if (event.type === "text_delta") {
-					providerReplyText += event.delta;
-					if (args.onTextDelta) {
-						const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
-						if (readyText.length > emittedReplyText.length) {
-							const delta = readyText.slice(emittedReplyText.length);
-							emittedReplyText = readyText;
-							await args.onTextDelta(delta);
-						}
-					}
-					continue;
-				}
-				if (event.type === "done") {
-					// A well-formed provider "done" event carries `content: AssistantContentBlock[]`,
-					// but a proxy/wrapper (custom extension providers, gateway-wrapped OAuth streams,
-					// see #4323) can hand back a message whose `content` was dropped or replaced with
-					// `undefined`. Downstream `.content.filter` at the sanitize step below would then
-					// crash the recap turn with `TypeError: undefined is not an object (evaluating
-					// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
-					// instead of turning a malformed side-channel response into a session-mute crash.
-					const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
-					assistantMessage = this.#obfuscator?.hasSecrets()
-						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
-						: { ...event.message, content: rawContent };
-					break;
-				}
-				if (event.type === "error") {
-					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
-				}
-
-			}
-		} catch (error) {
-			streamAbort.abort();
-			throw error;
-		}
-
-		if (!assistantMessage) {
-			throw new Error("Ephemeral turn ended without a final message");
-		}
-		const replyText = this.#deobfuscateFromProvider(providerReplyText);
-		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
-			await args.onTextDelta(replyText.slice(emittedReplyText.length));
-		}
-		const sanitizedMessage: AssistantMessage = {
-			...assistantMessage,
-			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
-		};
-		return {
-			replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
-			assistantMessage: sanitizedMessage,
-		};
 	}
 
 	/**
@@ -11080,8 +11114,8 @@ export class AgentSession implements SettingsScope {
 				}
 				// Invalidate prompts admitted during the pre-branch awaits.
 				this.#promptGeneration++;
-				lifecycle?.prepare();
 				promotionPrepared = lifecycle !== undefined;
+				await lifecycle?.prepare();
 				if (promotionPrepared) await this.sessionManager.flush();
 				this.sessionManager.createBranchedSession(anchorLeafId);
 				this.#bash.markSessionTransition(bashTransition);
@@ -11089,7 +11123,7 @@ export class AgentSession implements SettingsScope {
 				sessionTransitioned = true;
 			} catch (error) {
 				if (promotionPrepared && !sessionTransitioned) {
-					lifecycle?.rollback();
+					await lifecycle?.rollback();
 					await this.sessionManager.flush();
 				}
 				throw error;

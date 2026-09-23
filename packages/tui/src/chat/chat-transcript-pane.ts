@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "../app-keybindings";
 import type { AutocompleteProvider } from "../autocomplete";
@@ -102,6 +103,7 @@ export class ChatTranscriptPane
 	#returnToBottomRow = -1;
 	#returnToBottomCol = -1;
 	#returnToBottomHovered = false;
+	#linkEpoch = 0;
 
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
 		this.#builder = new ChatTranscriptBuilder({
@@ -257,21 +259,26 @@ export class ChatTranscriptPane
 	}
 
 	rebuild(messages: readonly AgentMessage[]): void {
+		this.#linkEpoch++;
 		this.#nextEntryIndex = 0;
 		this.#lastEntryId = null;
 		this.#builder.rebuild(this.#messageEntries(messages));
+		this.#resolveAssistantLinks(messages);
 		this.options.builder.requestRender();
 	}
 
 	append(messages: readonly AgentMessage[]): void {
 		this.#builder.append(this.#messageEntries(messages));
+		this.#resolveAssistantLinks(messages);
 		this.options.builder.requestRender();
 	}
 
 	rebuildEntries(entries: readonly TranscriptEntryLike[]): void {
+		this.#linkEpoch++;
 		this.#nextEntryIndex = entries.length;
 		this.#lastEntryId = entries.at(-1)?.id ?? null;
 		this.#builder.rebuild(entries);
+		this.#resolveAssistantLinks(entries.flatMap(entry => (entry.type === "message" ? [entry.message] : [])));
 		this.options.builder.requestRender();
 	}
 
@@ -279,6 +286,7 @@ export class ChatTranscriptPane
 		this.#nextEntryIndex += entries.length;
 		this.#lastEntryId = entries.at(-1)?.id ?? this.#lastEntryId;
 		this.#builder.append(entries);
+		this.#resolveAssistantLinks(entries.flatMap(entry => (entry.type === "message" ? [entry.message] : [])));
 		this.options.builder.requestRender();
 	}
 
@@ -297,6 +305,38 @@ export class ChatTranscriptPane
 		});
 	}
 
+	#resolveAssistantLinks(messages: readonly AgentMessage[]): void {
+		const resolveLinks = this.options.builder.resolveLinks;
+		if (!resolveLinks) return;
+		const texts = messages.flatMap(message =>
+			message.role === "assistant"
+				? message.content.flatMap(content => (content.type === "text" ? [content.text] : []))
+				: [],
+		);
+		if (texts.length === 0) return;
+		const epoch = this.#linkEpoch;
+		void resolveLinks(texts)
+			.then(targets => {
+				if (epoch !== this.#linkEpoch) return;
+				if (this.#builder.mergeLinkTargets(targets)) this.options.builder.requestRender();
+			})
+			.catch(error => {
+				if (epoch === this.#linkEpoch) logger.warn("Transcript link resolution failed", { error });
+			});
+	}
+
+	invalidateLinkContext(): void {
+		this.#linkEpoch++;
+		this.#builder.resetLinkTargets();
+		this.options.builder.requestRender();
+	}
+
+	setLiveAssistant(message: Extract<AgentMessage, { role: "assistant" }> | undefined): void {
+		const component = this.#builder.setLiveAssistant(message);
+		if (component) this.options.builder.ui.requestComponentRender(component);
+		else this.options.builder.requestRender();
+	}
+
 	updateStreamingAssistant(message: Extract<AgentMessage, { role: "assistant" }>): boolean {
 		const component = this.#builder.updateStreamingAssistant(message);
 		if (!component) return false;
@@ -307,6 +347,7 @@ export class ChatTranscriptPane
 	finalizeStreamingAssistant(message: Extract<AgentMessage, { role: "assistant" }>): boolean {
 		const component = this.#builder.finalizeStreamingAssistant(message);
 		if (!component) return false;
+		this.#resolveAssistantLinks([message]);
 		this.options.builder.ui.requestComponentRender(component);
 		return true;
 	}
@@ -645,6 +686,7 @@ export class ChatTranscriptPane
 	}
 
 	dispose(): void {
+		this.#linkEpoch++;
 		for (const editor of this.#editors.values()) {
 			editor.onSubmit = undefined;
 		}

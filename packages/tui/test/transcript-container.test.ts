@@ -794,6 +794,30 @@ describe("TranscriptContainer virtual viewport", () => {
 		}
 	});
 
+	it("repaints a finalized assistant's replacement thinking after an asynchronous translation", async () => {
+		await initTheme(false);
+		const translation = new Block(["翻译中…"], false);
+		let requestRender: (() => void) | undefined;
+		const assistant = new AssistantMessageComponent(finalAnswer, false, undefined, [
+			context => {
+				requestRender = context.requestRender;
+				return { type: "replace", component: translation };
+			},
+		]);
+		assistant.markTranscriptBlockFinalized();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(assistant);
+		transcript.addChild(new Block(["tool result"], false));
+		const viewport = { rows: 12, offset: 0, followBottom: true };
+		expect(transcript.renderVirtualViewport(80, viewport).lines.join("\n")).toContain("翻译中");
+
+		translation.update(["翻译完成"]);
+		requestRender?.();
+		const displayed = transcript.renderVirtualViewport(80, viewport).lines.join("\n");
+		expect(displayed).toContain("翻译完成");
+		expect(displayed).toContain("tool result");
+	});
+
 	it("cancels outstanding layout on clear and disposal without touching replacement content", async () => {
 		let notifications = 0;
 		const transcript = new TranscriptContainer(() => {
