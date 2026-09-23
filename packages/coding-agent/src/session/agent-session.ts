@@ -162,6 +162,7 @@ import type {
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT } from "../extensibility/extensions";
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
+import { BtwExtensionRuntime } from "./btw-extension-runtime";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
@@ -244,7 +245,6 @@ import {
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner, revokeComputerControlForOwner } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
-import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	buildResolveReminderMessage,
@@ -354,8 +354,8 @@ import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
 	type EphemeralConversationSideOptions,
-	type EphemeralTurnOptions,
-	type EphemeralTurnResult,
+	type EphemeralTurnOptions as EphemeralConversationTurnOptions,
+	type EphemeralTurnResult as EphemeralConversationTurnResult,
 } from "./ephemeral-conversation";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
@@ -11284,8 +11284,8 @@ export class AgentSession implements SettingsScope {
 	 * does not block on, or interfere with, any in-flight main turn. The
 	 * session's history and persisted state are NOT modified by this call.
 	 *
-	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
-	 * the snapshot + stream pipeline. The snapshot includes any in-flight
+	 * Used by extensions, idle recaps, and `OmfgController` (`/omfg`). Durable
+	 * BTW threads use `createEphemeralConversation` instead. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
 	 */
@@ -11298,6 +11298,7 @@ export class AgentSession implements SettingsScope {
 		const sessionGeneration = this.#sessionGeneration;
 		const assertEphemeralTurnReady = () => {
 			args.signal?.throwIfAborted();
+			if (this.#isDisposed) throw new Error("Session disposed during ephemeral turn.");
 			// The side request must use the exact model snapshot captured above.
 			// `modelsAreEqual` intentionally compares only provider/id, while a
 			// replacement with that same identity can still change routing and wire
@@ -11337,186 +11338,16 @@ export class AgentSession implements SettingsScope {
 		const cacheSessionId = this.sessionId;
 		const snapshot = this.#buildEphemeralBaseSnapshot();
 		snapshot.push(createSideChannelNoToolsMessage());
+		if (args.history?.length) {
+			// Detach before the conversion pipeline can await or mutate caller-owned messages.
+			snapshot.push(...structuredClone(args.history));
+		}
 		snapshot.push({
 			role: "user",
 			content: [{ type: "text", text: args.promptText }, ...(args.images ?? [])],
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		return this.#runEphemeralSnapshot(
-			model,
-			cacheSessionId,
-			`${cacheSessionId}:side:${Snowflake.next()}`,
-			snapshot,
-			args,
-		);
-	}
-
-	/**
-	 * Create an independent multi-turn conversation whose main-session context
-	 * is snapshotted on its first prompt. Provider routing remains stable while
-	 * the main session continues concurrently.
-	 */
-	createEphemeralConversation(
-		instructions: string,
-		checkpoint?: EphemeralConversationCheckpoint,
-		modelOverride?: Model,
-		options?: EphemeralConversationSideOptions,
-	): EphemeralConversation {
-		const model = modelOverride ?? this.model;
-		if (!model) {
-			throw new Error("No active model on session");
-		}
-		const readOnlyTools = options?.readOnlyTools === true;
-		const shareSummaryWithMain = options?.shareSummaryWithMain;
-		const shareSummaryWithMainTool = shareSummaryWithMain
-			? this.#tools.wrapRuntimeTool(createShareSummaryWithMainTool(shareSummaryWithMain))
-			: undefined;
-		const cacheSessionId = this.sessionId;
-		const sideSessionId = checkpoint?.sideSessionId ?? `${cacheSessionId}:side:${Snowflake.next()}`;
-		const child = this.agent.createChild({
-			initialState: {
-				model,
-				messages: [],
-				...(shareSummaryWithMainTool ? { tools: [...this.agent.state.tools, shareSummaryWithMainTool] } : {}),
-			},
-			sessionId: sideSessionId,
-			promptCacheKey: cacheSessionId,
-			streamFn: this.#sideStreamFn,
-			convertToLlm: this.#convertToLlm,
-			transformContext: async (messages, signal) => this.#transformContext(messages, signal),
-			// The side transcript renders its own restricted tool set. Its lifecycle
-			// never reaches Main's EventController, so waiting on Main's approval
-			// preview gate would deadlock before the interactive prompt can open.
-			transformToolContext: context => (context ? { ...context, toolApprovalPreview: "never" as const } : context),
-			providerSessionState: this.#providerSessionState,
-			getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
-			onPayload: this.#onPayload,
-			onResponse: this.#onResponse,
-			onSseEvent: this.#onSseEvent,
-			preferWebsockets: this.#preferWebsockets,
-			serviceTier: this.#models.effectiveServiceTier(model),
-			beforeToolCall: ctx => {
-				if (readOnlyTools && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args)) return undefined;
-				if (shareSummaryWithMainTool && ctx.toolCall.name === SHARE_SUMMARY_WITH_MAIN_TOOL_NAME) {
-					return this.#extensionRunner
-						? undefined
-						: { block: true, reason: "shareSummaryWithMain requires interactive user approval." };
-				}
-				return { block: true, reason: sideChannelToolDenied };
-			},
-			transformAssistantMessage: message => {
-				if (!this.#obfuscator?.hasSecrets()) return;
-				message.content = deobfuscateAssistantContent(this.#obfuscator, message.content);
-			},
-		});
-		const createCapabilityReminder = readOnlyTools
-			? createSideChannelReadonlyMessage
-			: createSideChannelNoToolsMessage;
-		return new EphemeralConversation({
-			snapshotBaseMessages: () => {
-				const baseMessages = this.#buildEphemeralBaseSnapshot();
-				baseMessages.push({
-					role: "developer",
-					content: [{ type: "text", text: instructions }],
-					attribution: "agent",
-					timestamp: Date.now(),
-				});
-				return baseMessages;
-			},
-			checkpoint,
-			getTool: name => child.state.tools.find(tool => tool.name === name),
-			turnPrefixMessages: () => [createCapabilityReminder()],
-			getRuntimeState: () => ({
-				model: child.state.model,
-				thinkingLevel: child.state.thinkingLevel,
-				isStreaming: child.state.isStreaming,
-				streamMessage: child.state.streamMessage?.role === "assistant" ? child.state.streamMessage : null,
-			}),
-			runTurn: (messages, options) => this.#runEphemeralConversationTurn(child, messages, options),
-			sideSessionId,
-		});
-	}
-
-	async #runEphemeralConversationTurn(
-		child: Agent,
-		messages: AgentMessage[],
-		args: Omit<EphemeralTurnOptions, "promptText">,
-	): Promise<EphemeralTurnResult> {
-		args.signal?.throwIfAborted();
-		const input = messages.at(-1);
-		if (input?.role !== "user") {
-			throw new Error("Ephemeral conversation turn must end with a user message");
-		}
-		const priorMessages = messages.slice(0, -1);
-		child.replaceMessages(priorMessages);
-		const abortChild = (): void => child.abort(args.signal?.reason);
-		args.signal?.addEventListener("abort", abortChild, { once: true });
-
-		let providerReplyText = "";
-		let emittedReplyText = "";
-		const unsubscribe = child.subscribe(event => {
-			if (event.type === "message_end") {
-				if (event.message.role !== "user") args.onMessage?.({ type: "end", message: event.message });
-				return;
-			}
-			if (event.type !== "message_update" || event.message.role !== "assistant") return;
-			args.onMessage?.({ type: "update", message: event.message });
-			const assistantEvent = event.assistantMessageEvent;
-			if (assistantEvent.type === "thinking_delta") {
-				args.onThinkingDelta?.(assistantEvent.delta);
-				return;
-			}
-			if (assistantEvent.type !== "text_delta") return;
-			providerReplyText += assistantEvent.delta;
-			if (!args.onTextDelta) return;
-			const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
-			if (readyText.length <= emittedReplyText.length) return;
-			const delta = readyText.slice(emittedReplyText.length);
-			emittedReplyText = readyText;
-			args.onTextDelta(delta);
-		});
-
-		try {
-			await child.prompt(input);
-			if (child.state.error) throw new Error(child.state.error);
-			const turnMessages = child.state.messages.slice(priorMessages.length + 1);
-			const finalIndex = turnMessages.findLastIndex(message => message.role === "assistant");
-			const assistantMessage = turnMessages[finalIndex];
-			if (assistantMessage?.role !== "assistant") {
-				throw new Error("Ephemeral conversation turn ended without a final assistant message");
-			}
-			const replyText = turnMessages
-				.filter((message): message is AssistantMessage => message.role === "assistant")
-				.flatMap(message => message.content)
-				.filter(block => block.type === "text")
-				.map(block => block.text)
-				.join("")
-				.trim();
-			if (args.onTextDelta && replyText.length > emittedReplyText.length) {
-				args.onTextDelta(replyText.slice(emittedReplyText.length));
-			}
-			return {
-				replyText: args.dedupeReply === false ? replyText : dedupeEphemeralReply(replyText),
-				assistantMessage,
-				intermediateMessages: turnMessages.slice(0, finalIndex),
-			};
-		} catch (error) {
-			child.replaceMessages(priorMessages);
-			throw error;
-		} finally {
-			unsubscribe();
-			args.signal?.removeEventListener("abort", abortChild);
-		}
-	}
-
-	async #runEphemeralSnapshot(
-		model: Model,
-		cacheSessionId: string,
-		sideSessionId: string,
-		snapshot: AgentMessage[],
-		args: Omit<EphemeralTurnOptions, "promptText">,
-	): Promise<EphemeralTurnResult> {
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		assertEphemeralTurnReady();
 		const sideContext = await this.agent.buildSideRequestContext(llmMessages);
@@ -11559,7 +11390,7 @@ export class AgentSession implements SettingsScope {
 				// conversation state with the main agent turn: IRC and /btw can run
 				// while the main turn is mid-tool-call. Keep the prompt-cache key
 				// stable, but isolate provider routing from the main conversation.
-				// Serialized BTW follow-ups reuse a topic-specific lineage; standalone
+				// Serialized follow-ups reuse a topic-specific lineage; standalone
 				// side requests retain their unique request lineage.
 				sessionId: sideSessionId,
 				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
@@ -11615,7 +11446,6 @@ export class AgentSession implements SettingsScope {
 				if (event.type === "error") {
 					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
 				}
-
 			}
 		} catch (error) {
 			streamAbort.abort();
@@ -11648,6 +11478,208 @@ export class AgentSession implements SettingsScope {
 				args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim(), args.replyMaxBytes),
 			assistantMessage: sanitizedMessage,
 		};
+	}
+
+	/**
+	 * Create an independent multi-turn conversation whose main-session context
+	 * is snapshotted on its first prompt. Provider routing remains stable while
+	 * the main session continues concurrently.
+	 */
+	createEphemeralConversation(
+		instructions: string,
+		checkpoint?: EphemeralConversationCheckpoint,
+		modelOverride?: Model,
+		options?: EphemeralConversationSideOptions,
+	): EphemeralConversation {
+		const model = modelOverride ?? this.model;
+		if (!model) {
+			throw new Error("No active model on session");
+		}
+		const readOnlyTools = options?.readOnlyTools === true;
+		const shareSummaryWithMain = options?.shareSummaryWithMain;
+		const shareSummaryWithMainTool = shareSummaryWithMain
+			? this.#tools.wrapRuntimeTool(createShareSummaryWithMainTool(shareSummaryWithMain))
+			: undefined;
+		const cacheSessionId = this.sessionId;
+		const sideSessionId = checkpoint?.sideSessionId ?? `${cacheSessionId}:side:${Snowflake.next()}`;
+		const mainTools = [...this.agent.state.tools];
+		let sideRuntime: BtwExtensionRuntime | undefined;
+		const child = this.agent.createChild({
+			initialState: {
+				model,
+				messages: [],
+				tools: [],
+			},
+			sessionId: sideSessionId,
+			promptCacheKey: this.agent.promptCacheKey ?? cacheSessionId,
+			streamFn: this.#sideStreamFn,
+			convertToLlm: this.#convertToLlm,
+			transformContext: async (messages, signal) => this.#transformContext(messages, signal),
+			// Side tools must never inherit Main's tool execution context. The
+			// explicit runtime supplies its own manager, restricted registry and UI.
+			transformToolContext: (_context, toolCall) => sideRuntime?.createToolContext(toolCall),
+			resolveFallbackTool: null,
+			providerSessionState: this.#providerSessionState,
+			getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
+			onPayload: this.#onPayload,
+			onResponse: this.#onResponse,
+			onSseEvent: this.#onSseEvent,
+			preferWebsockets: this.preferWebsockets,
+			serviceTier: this.#models.effectiveServiceTier(model),
+			beforeToolCall: ctx => {
+				if (readOnlyTools && sideRuntime && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args))
+					return undefined;
+				if (shareSummaryWithMainTool && ctx.toolCall.name === SHARE_SUMMARY_WITH_MAIN_TOOL_NAME) {
+					return sideRuntime?.runner.hasUI()
+						? undefined
+						: { block: true, reason: "shareSummaryWithMain requires interactive user approval." };
+				}
+				return { block: true, reason: sideChannelToolDenied };
+			},
+			transformAssistantMessage: message => {
+				if (!this.#obfuscator?.hasSecrets()) return;
+				message.content = deobfuscateAssistantContent(this.#obfuscator, message.content);
+			},
+		});
+		const createCapabilityReminder = readOnlyTools
+			? createSideChannelReadonlyMessage
+			: createSideChannelNoToolsMessage;
+		const conversation = new EphemeralConversation({
+			snapshotBaseMessages: () => {
+				const baseMessages = this.#buildEphemeralBaseSnapshot().map(message =>
+					readOnlyTools ? cloneMessageEndNotification(message) : message,
+				);
+				baseMessages.push({
+					role: "developer",
+					content: [{ type: "text", text: instructions }],
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
+				return baseMessages;
+			},
+			checkpoint,
+			getTool: name => child.state.tools.find(tool => tool.name === name),
+			createExtensionRuntime: readOnlyTools
+				? async () => {
+						if (
+							!this.#preparedExtensions &&
+							((this.#extensionPaths?.length ?? 0) > 0 ||
+								(this.#extensionRunner?.getExtensionPaths?.().length ?? 0) > 0)
+						) {
+							throw new Error("BTW cannot bind Main extensions without prepared factories");
+						}
+						const toolInfos = this.getAllToolInfos();
+						const runtime = await BtwExtensionRuntime.create({
+							agent: child,
+							mainTools,
+							availableTools: toolInfos
+								.map(info => this.#tools.getToolByName(info.name))
+								.filter((tool): tool is AgentTool => tool !== undefined),
+							mountedNames: this.#tools.getMountedXdevToolNames(),
+							preparedExtensions: this.#preparedExtensions ?? [],
+							modelRegistry: this.#modelRegistry,
+							settings: this.settings,
+							cwd: this.sessionManager.getCwd(),
+							toolInfos,
+							isReadOnlyToolCall: (tool, args) => this.#tools.isReadOnlySideToolCall(tool, args),
+							shareSummaryTool: shareSummaryWithMainTool,
+							approvalUI: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
+						});
+						child.setTools(runtime.tools);
+						sideRuntime = runtime;
+						return runtime;
+					}
+				: undefined,
+			turnPrefixMessages: () => [createCapabilityReminder()],
+			getRuntimeState: () => ({
+				model: child.state.model,
+				thinkingLevel: child.state.thinkingLevel,
+				isStreaming: child.state.isStreaming,
+				streamMessage: child.state.streamMessage?.role === "assistant" ? child.state.streamMessage : null,
+			}),
+			runTurn: async (messages, turnOptions) => {
+				await conversation.waitForExtensionRuntimeInitialization();
+				try {
+					return await this.#runEphemeralConversationTurn(child, messages, turnOptions);
+				} finally {
+					await sideRuntime?.settleEvents();
+				}
+			},
+			sideSessionId,
+		});
+		return conversation;
+	}
+
+	async #runEphemeralConversationTurn(
+		child: Agent,
+		messages: AgentMessage[],
+		args: Omit<EphemeralConversationTurnOptions, "promptText">,
+	): Promise<EphemeralConversationTurnResult> {
+		args.signal?.throwIfAborted();
+		const input = messages.at(-1);
+		if (input?.role !== "user") {
+			throw new Error("Ephemeral conversation turn must end with a user message");
+		}
+		const priorMessages = messages.slice(0, -1);
+		child.replaceMessages(priorMessages);
+		const abortChild = (): void => child.abort(args.signal?.reason);
+		args.signal?.addEventListener("abort", abortChild, { once: true });
+
+		let providerReplyText = "";
+		let emittedReplyText = "";
+		const unsubscribe = child.subscribe(event => {
+			if (event.type === "message_end") {
+				if (event.message.role !== "user") args.onMessage?.({ type: "end", message: event.message });
+				return;
+			}
+			if (event.type !== "message_update" || event.message.role !== "assistant") return;
+			args.onMessage?.({ type: "update", message: event.message });
+			const assistantEvent = event.assistantMessageEvent;
+			if (assistantEvent.type === "thinking_delta") {
+				args.onThinkingDelta?.(assistantEvent.delta);
+				return;
+			}
+			if (assistantEvent.type !== "text_delta") return;
+			providerReplyText += assistantEvent.delta;
+			if (!args.onTextDelta) return;
+			const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+			if (readyText.length <= emittedReplyText.length) return;
+			const delta = readyText.slice(emittedReplyText.length);
+			emittedReplyText = readyText;
+			args.onTextDelta(delta);
+		});
+
+		try {
+			await child.prompt(input);
+			if (child.state.error) throw new Error(child.state.error);
+			const turnMessages = child.state.messages.slice(priorMessages.length + 1);
+			const finalIndex = turnMessages.findLastIndex(message => message.role === "assistant");
+			const assistantMessage = turnMessages[finalIndex];
+			if (assistantMessage?.role !== "assistant") {
+				throw new Error("Ephemeral conversation turn ended without a final assistant message");
+			}
+			const replyText = turnMessages
+				.filter((message): message is AssistantMessage => message.role === "assistant")
+				.flatMap(message => message.content)
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("")
+				.trim();
+			if (args.onTextDelta && replyText.length > emittedReplyText.length) {
+				args.onTextDelta(replyText.slice(emittedReplyText.length));
+			}
+			return {
+				replyText: args.dedupeReply === false ? replyText : dedupeEphemeralReply(replyText, args.replyMaxBytes),
+				assistantMessage,
+				intermediateMessages: turnMessages.slice(0, finalIndex),
+			};
+		} catch (error) {
+			child.replaceMessages(priorMessages);
+			throw error;
+		} finally {
+			unsubscribe();
+			args.signal?.removeEventListener("abort", abortChild);
+		}
 	}
 
 	/**
@@ -12359,8 +12391,8 @@ export class AgentSession implements SettingsScope {
 				}
 				// Invalidate prompts admitted during the pre-branch awaits.
 				this.#promptGeneration++;
-				lifecycle?.prepare();
 				promotionPrepared = lifecycle !== undefined;
+				await lifecycle?.prepare();
 				if (promotionPrepared) await this.sessionManager.flush();
 				this.sessionManager.createBranchedSession(anchorLeafId);
 				this.#bash.markSessionTransition(bashTransition);
@@ -12368,7 +12400,7 @@ export class AgentSession implements SettingsScope {
 				sessionTransitioned = true;
 			} catch (error) {
 				if (promotionPrepared && !sessionTransitioned) {
-					lifecycle?.rollback();
+					await lifecycle?.rollback();
 					await this.sessionManager.flush();
 				}
 				throw error;

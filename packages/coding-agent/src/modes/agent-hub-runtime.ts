@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { getMarkdownLinkUrls } from "@oh-my-pi/pi-tui";
 import type { AgentHubDeps, AgentHubRemote } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import {
 	type AgentMetrics,
@@ -20,13 +21,14 @@ import {
 	parseSessionEntries,
 	visitEntriesFromFileStream,
 } from "../session/session-loader";
+import { resolveMarkdownLinkHrefs, resolveSessionMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
 	parseEntries: text => {
 		const entries = parseSessionEntries(text).filter(
-			entry => entry.type === "message" || entry.type === "model_change",
+			entry => entry.type === "session" || entry.type === "message" || entry.type === "model_change",
 		);
 		for (const entry of entries) {
 			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
@@ -38,11 +40,24 @@ export const agentTranscriptSource: AgentTranscriptSource = {
 			filePath,
 			entry => {
 				if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
-				if (entry.type === "message" || entry.type === "model_change") return visit(entry);
+				if (entry.type === "session" || entry.type === "message" || entry.type === "model_change")
+					return visit(entry);
 			},
 			options,
 		),
 };
+
+export function resolveAgentTranscriptLinks(
+	registry: Pick<AgentRegistry, "get">,
+	id: string,
+	texts: readonly string[],
+	cwd: string,
+): Promise<ReadonlyMap<string, string>> {
+	const ref = registry.get(id);
+	const hrefs = texts.flatMap(getMarkdownLinkUrls);
+	if (ref?.session) return resolveSessionMarkdownLinkHrefs(hrefs, ref.session);
+	return resolveMarkdownLinkHrefs(hrefs, { cwd }, { resolveInternalUrls: false });
+}
 
 /** Host services used by the roster, without exposing runtime implementation to tui. */
 export function createAgentHubRuntime(

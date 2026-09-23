@@ -1,3 +1,4 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
@@ -20,7 +21,9 @@ import {
 	type VirtualRowAnchor,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { ExtensionWidgets } from "@oh-my-pi/pi-tui/chrome/extension-widgets";
 import type { KeyId } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { ExtensionRunner } from "../../extensibility/extensions/runner";
 import type { BtwThreadPhase } from "../../session/btw-manager";
 import type { BtwThreadModelRef } from "../../session/btw-thread";
 import type { EphemeralConversationStatus, EphemeralConversationTurn } from "../../session/ephemeral-conversation";
@@ -29,6 +32,7 @@ import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-uti
 import { renderWorkspacePaneHeader } from "@oh-my-pi/pi-tui/chrome/shared";
 import { theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
+import type { ExtensionPresentationSource } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
 
@@ -43,6 +47,11 @@ export interface BtwThreadView {
 	readonly draftImageLinks?: readonly (string | undefined)[];
 	readonly turns: readonly EphemeralConversationTurn[];
 	readonly getTool?: (name: string) => AgentTool | undefined;
+	readonly isBuiltInTool?: (name: string) => boolean;
+	readonly extensionRunner?: Pick<
+		ExtensionRunner,
+		"observePresentation" | "getAssistantThinkingRenderers" | "getMessageRenderer"
+	>;
 	readonly status?: EphemeralConversationStatus;
 	readonly unread: number;
 	readonly request:
@@ -62,8 +71,11 @@ export interface BtwConversationPaneOptions {
 	expandKeys: readonly KeyId[];
 	hideThinkingBlock: () => boolean;
 	proseOnlyThinking: () => boolean;
+	resolveLinks?: (texts: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 	requestRender: () => void;
-	statusLine: Pick<StatusLineComponent, "getTopBorder" | "setRuntimeStatus" | "dispose">;
+	statusLine: Pick<StatusLineComponent, "getTopBorder" | "setRuntimeStatus" | "dispose"> & {
+		setHookStatus?: StatusLineComponent["setHookStatus"];
+	};
 	onSubmit: (input: string, images?: ImageContent[], key?: string) => boolean;
 	onNewThread: () => boolean;
 	canCopy: (key: string) => boolean;
@@ -72,8 +84,9 @@ export interface BtwConversationPaneOptions {
 	onDraftChange: (key: string, text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]) => void;
 	onPersistDraft: (key: string) => void;
 	onSelectThread: (key: string) => boolean;
+	onDisplayThread?: (key: string) => void;
 	onMarkRead: (key: string) => void;
-	onCloseThread: (key: string) => boolean;
+	onCloseThread: (key: string) => Promise<boolean>;
 	onPromoteThread: (key: string) => Promise<boolean>;
 	/** A submit was consumed because the selected thread is still streaming. */
 	onRejectedSubmit?: () => void;
@@ -125,6 +138,10 @@ export class BtwConversationPane
 {
 	readonly #pane: ChatTranscriptPane;
 	readonly #options: BtwConversationPaneOptions;
+	readonly #widgets: ExtensionWidgets;
+	readonly #statusKeys = new Set<string>();
+	#presentation: ExtensionPresentationSource | undefined;
+	#detachPresentation: (() => void) | undefined;
 	readonly #scrollOffsets = new Map<string, number>();
 	#threads: readonly BtwThreadView[] = [];
 	#selectedKey: string | undefined;
@@ -150,11 +167,17 @@ export class BtwConversationPane
 
 	constructor(options: BtwConversationPaneOptions) {
 		this.#options = options;
+		this.#widgets = new ExtensionWidgets(options.ui);
 		this.#pane = new ChatTranscriptPane({
 			builder: {
 				ui: options.ui,
 				cwd: options.cwd,
 				getTool: name => this.#displayed()?.getTool?.(name),
+				isBuiltInTool: name => this.#displayed()?.isBuiltInTool?.(name) ?? false,
+				getMessageRenderer: type => this.#displayed()?.extensionRunner?.getMessageRenderer(type),
+				getAssistantThinkingRenderers: () =>
+					this.#displayed()?.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+				resolveLinks: options.resolveLinks,
 				hideThinkingBlock: options.hideThinkingBlock,
 				proseOnlyThinking: options.proseOnlyThinking,
 				requestRender: options.requestRender,
@@ -167,6 +190,8 @@ export class BtwConversationPane
 				autocompleteProvider: new CombinedAutocompleteProvider(BTW_SLASH_COMMANDS, options.cwd),
 			},
 			expandKeys: options.expandKeys,
+			aboveEditor: this.#widgets.above,
+			belowEditor: this.#widgets.below,
 			getEditorTopBorder: availableWidth => options.statusLine.getTopBorder(availableWidth),
 			getPlaceholder: () =>
 				"No threads yet — type a question to start a durable BTW thread, or use /btw <question> from Main.",
@@ -448,6 +473,7 @@ export class BtwConversationPane
 			this.#persistCurrentDraft();
 		}
 		this.#pane.dispose();
+		this.#syncPresentation(undefined);
 		this.#options.statusLine.dispose();
 	}
 
@@ -471,7 +497,9 @@ export class BtwConversationPane
 			return true;
 		}
 		if (matchesKey(data, "alt+shift+d")) {
-			return this.#selectedKey ? this.#options.onCloseThread(this.#selectedKey) : false;
+			if (!this.#selectedKey) return false;
+			void this.#options.onCloseThread(this.#selectedKey);
+			return true;
 		}
 		if (matchesKey(data, "alt+c")) {
 			if (!this.#selectedKey || !this.#options.canCopy(this.#selectedKey)) return false;
@@ -573,14 +601,51 @@ export class BtwConversationPane
 		this.#options.requestRender();
 	}
 
+	#syncPresentation(presentation: ExtensionPresentationSource | undefined): void {
+		if (this.#presentation === presentation) return;
+		this.#detachPresentation?.();
+		this.#detachPresentation = undefined;
+		this.#presentation = presentation;
+		this.#widgets.clear();
+		for (const key of this.#statusKeys) this.#options.statusLine.setHookStatus?.(key, undefined);
+		this.#statusKeys.clear();
+		this.#pane.invalidate();
+		if (!presentation) return;
+		this.#detachPresentation = presentation.observePresentation({
+			setWidget: (key, content, options) => {
+				if (this.#presentation !== presentation) return;
+				try {
+					this.#widgets.setWidget(key, content, options);
+				} catch (error) {
+					logger.error("BTW extension widget failed", { key, error });
+					this.#pane.setNotice(
+						`Extension widget ${key}: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				this.#options.requestRender();
+			},
+			setStatus: (key, text) => {
+				if (this.#presentation !== presentation) return;
+				if (text === undefined) this.#statusKeys.delete(key);
+				else this.#statusKeys.add(key);
+				this.#options.statusLine.setHookStatus?.(key, text);
+				this.#options.requestRender();
+			},
+		});
+	}
+
 	#showDisplayedThread(): void {
 		const displayed = this.#displayed();
 		const previousKey = this.#displayedKey;
 		if (previousKey && previousKey !== displayed?.key)
 			this.#scrollOffsets.set(previousKey, this.#pane.getScrollOffset());
 		this.#displayedKey = displayed?.key;
+		if (displayed && displayed.key !== previousKey) this.#options.onDisplayThread?.(displayed.key);
 		this.#options.statusLine.setRuntimeStatus(displayed?.status, displayed?.title);
+		const samePresentation = this.#presentation === displayed?.extensionRunner;
+		this.#syncPresentation(displayed?.extensionRunner);
 		const sameRenderedRequest =
+			samePresentation &&
 			displayed !== undefined &&
 			displayed.key === previousKey &&
 			displayed.request !== undefined &&
@@ -589,6 +654,7 @@ export class BtwConversationPane
 			this.#renderedRequestInput === displayed.request.input &&
 			this.#renderedRequestTimestamp === displayed.request.timestamp;
 		const transcriptUnchanged =
+			samePresentation &&
 			displayed !== undefined &&
 			displayed.key === previousKey &&
 			this.#renderedTurns === displayed.turns &&
@@ -617,6 +683,7 @@ export class BtwConversationPane
 		}
 		if (
 			!updatedStream &&
+			samePresentation &&
 			displayed !== undefined &&
 			displayed.key === previousKey &&
 			displayed.request === undefined &&

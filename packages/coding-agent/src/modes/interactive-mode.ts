@@ -139,8 +139,7 @@ import { HistoryStorage } from "../session/history-storage";
 import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
-import type { ResolveContext } from "../internal-urls/index";
+import { resolveSessionMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
@@ -318,7 +317,7 @@ import {
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { renderWorkspacePaneHeader, sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
-import { agentTranscriptSource } from "./agent-hub-runtime";
+import { agentTranscriptSource, resolveAgentTranscriptLinks } from "./agent-hub-runtime";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
@@ -384,6 +383,7 @@ import {
 	cfgSymbolPreset,
 	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
+	cfgTerminalShowProgress,
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
@@ -1606,21 +1606,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#focusController.target === undefined;
 	}
 	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
-		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
-	}
-	#linkResolveContext(): ResolveContext {
-		const session = this.viewSession;
-		return {
-			cwd: session.sessionManager.getCwd(),
-			sessionFile: session.sessionFile,
-			settings: session.settings,
-			localProtocolOptions: {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			},
-			skills: session.skills,
-			rules: session.ttsrManager?.getRules(),
-		};
+		return resolveSessionMarkdownLinkHrefs(hrefs, this.viewSession);
 	}
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
@@ -1929,7 +1915,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A TSP terminal has no status strip: the tab title carries the PR.
 		this.statusLine.onNativePullRequest = pr => setTerminalTitlePullRequest(pr?.number);
 		this.terminalActivity = new TerminalActivityController({
-			isProgressEnabled: () => this.settings.get("terminal.showProgress"),
+			isProgressEnabled: () => cfgTerminalShowProgress.get(this.settings),
 			setProgress: active => this.ui.terminal.setProgress(active),
 			setTitleState: setTerminalTitleState,
 		});
@@ -2037,6 +2023,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			ui: this.ui,
 			getTool: name => this.session.getToolByName(name),
 			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
+			getAssistantThinkingRenderers: () => this.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+			resolveLinks: (texts, cwd) =>
+				resolveAgentTranscriptLinks(
+					registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+					agentId,
+					texts,
+					cwd,
+				),
 			cwd: this.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.proseOnlyThinking,
@@ -2046,7 +2040,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				const session = (registryOverride ?? AgentRegistry.global()).get(id)?.session;
 				return session ? this.statusLine.createPeer(session) : undefined;
 			},
-			getStatusLineTransparent: () => this.settings.get("statusLine.transparent"),
+			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
 			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
 			requestRender: () => {
 				if (viewer) this.ui.requestComponentRender(viewer);
@@ -2342,9 +2336,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			scrollRoot.addChild(this.modelCycleContainer);
 			scrollRoot.addChild(this.deferredCommandContainer);
 			scrollRoot.addChild(this.statusContainer);
-			// Judge batches stay editor-anchored and update independently of eval
-			// transcript output, directly above the working/throughput/title row.
-			stickyRoot.addChild(this.judgmentBatchProgressContainer);
+			// Judge batches and automatic downloads stay editor-anchored above the working line.
+			stickyRoot.addChild(this.progressHudContainer);
 			stickyRoot.addChild(this.statusLine);
 			stickyRoot.addChild(this.attachmentChipsContainer);
 			stickyRoot.addChild(this.hookWidgetContainerAbove);
@@ -7990,6 +7983,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#cleanseController.dispose();
 		}
 		await this.#commandController.handleForkCommand(placement);
+	}
+
+	prepareBtwForRelocation(): Promise<void> {
+		return this.#btwController.dispose();
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {

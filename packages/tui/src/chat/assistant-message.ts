@@ -1593,6 +1593,7 @@ export class AssistantMessageComponent extends Container {
 
 	#requestThinkingRender(rerunRenderers: boolean): void {
 		if (!rerunRenderers) {
+			this.#blockVersion++;
 			this.#onImageUpdate?.();
 			return;
 		}
