@@ -782,6 +782,31 @@ export class WorkspaceLayout implements Component, AppViewportInputOwner, Target
 		return this.#frame;
 	}
 
+	/**
+	 * Resolve a click against the last painted pane geometry. Pane headers,
+	 * sashes, other panes and unused columns cannot inherit a main-pane target.
+	 */
+	getClickFocusAgentIdsAtRow(row: number, col?: number): string[] {
+		if (!this.#frame || !Number.isInteger(row) || row < 0) return [];
+		for (const [paneId, rect] of this.#frame.panes) {
+			if (row <= rect.y || row >= rect.y + rect.height) continue;
+			if (col === undefined ? this.#frame.panes.size !== 1 : col < rect.x || col >= rect.x + rect.width) {
+				continue;
+			}
+			const component = this.#panes.get(paneId)?.component as
+				| (Component & Partial<{ getClickFocusAgentIdsAtRow(row: number): string[] }>)
+				| undefined;
+			return component?.getClickFocusAgentIdsAtRow?.(row - rect.y - 1) ?? [];
+		}
+		return [];
+	}
+	/** A workspace bands content inside each pane before horizontal composition. */
+	setHoveredClickId(id: string | undefined): void {
+		for (const pane of this.#panes.values()) {
+			const component = pane.component as Component & Partial<{ setHoveredClickId(id: string | undefined): void }>;
+			component.setHoveredClickId?.(id);
+		}
+	}
 	/** Fresh model geometry; unlike frame, this does not replace the last painted hit-test frame. */
 	getLayoutFrame(): WorkspaceFrame | undefined {
 		if (this.#renderWidth <= 0) return undefined;

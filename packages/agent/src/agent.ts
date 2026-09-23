@@ -390,6 +390,8 @@ export interface AgentChildOptions {
 	preferWebsockets?: AgentOptions["preferWebsockets"];
 	serviceTier?: AgentOptions["serviceTier"];
 	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
+	/** `null` disables the parent's unadvertised-tool resolver in an isolated child. */
+	resolveFallbackTool?: AgentOptions["resolveFallbackTool"] | null;
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
 	transformAssistantMessage?: AgentLoopConfig["transformAssistantMessage"];
 	/**
@@ -714,7 +716,10 @@ export class Agent {
 			maxRetryDelayMs: this.#maxRetryDelayMs,
 			getToolContext,
 			transformToolCallArguments: this.#transformToolCallArguments,
-			resolveFallbackTool: this.#resolveFallbackTool,
+			resolveFallbackTool:
+				options.resolveFallbackTool === null
+					? undefined
+					: (options.resolveFallbackTool ?? this.#resolveFallbackTool),
 			intentTracing: this.#intentTracing,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
 			dialect: this.#dialect,

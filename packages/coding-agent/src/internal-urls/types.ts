@@ -13,7 +13,7 @@ import type {
 	ToolApprovalDecision,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";
@@ -43,7 +43,7 @@ export interface InternalWriteDetails {
  * default "Successfully wrote N bytes" result verbatim.
  */
 export interface InternalWriteResult {
-	content: Array<TextContent | ImageContent>;
+	content: Array<TextContent | MediaContent>;
 	details?: InternalWriteDetails;
 	isError?: boolean;
 	useless?: boolean;

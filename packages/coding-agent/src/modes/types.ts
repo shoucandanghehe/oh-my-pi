@@ -138,7 +138,7 @@ export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
 	reuseSettledComponents?: boolean;
 	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
-	preservedLiveToolCallIds?: ReadonlySet<string>;
+	preservedLiveTools?: ReadonlyMap<string, ToolExecutionHandle>;
 }
 
 /** How {@link InteractiveModeContext.showStatus} shows a notice. */
@@ -221,8 +221,8 @@ export interface InteractiveModeContext {
 	unfocusSession(): Promise<void>;
 	/** Drop pending focus requests without changing the view (delegates to SessionFocusController.invalidatePendingFocus). */
 	invalidatePendingFocus(): void;
-	/** Candidate subagent ids under a mutable-viewport line, for click-to-focus. Empty when the line has no target. */
-	resolveViewportClickCandidates(index: number): string[];
+	/** Candidate subagent ids under a mutable-viewport row and optional column. */
+	resolveViewportClickCandidates(index: number, col?: number): string[];
 	/**
 	 * Deliver a click at cell `col` of a mutable-viewport line to the extension owning the link
 	 * drawn there. Returns false when no extension link is under the click.
@@ -272,7 +272,7 @@ export interface InteractiveModeContext {
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
-	setClickHoverId(id: string | undefined): void;
+	setClickHoverId(id: string | undefined, col?: number): void;
 	/** Whether the main view is mounted in the app-viewport multi-pane workspace. */
 	readonly workspaceEnabled: boolean;
 	/** Create or focus a persistent transcript pane for an agent. */
@@ -637,6 +637,7 @@ export interface InteractiveModeContext {
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
+	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean>;
 
 	// Selector handling
 	showSettingsSelector(): void;

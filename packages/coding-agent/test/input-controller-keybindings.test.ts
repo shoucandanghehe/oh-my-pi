@@ -129,6 +129,7 @@ async function createContext() {
 	const handlesBtwOpenThreadKey = vi.fn(() => false);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
+	const handlesBtwCopyKey = vi.fn(() => false);
 	const isGuidedGoalInterviewActive = vi.fn(() => false);
 	const editor: FakeEditor = {
 		setText(text: string) {
@@ -168,6 +169,7 @@ async function createContext() {
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		syncIdleMaintenanceView: vi.fn(),
+		sessionManager: { getSessionId: () => "session" },
 		resetDisplayAfterAppearanceRefresh,
 		ui: {
 			requestRender,
