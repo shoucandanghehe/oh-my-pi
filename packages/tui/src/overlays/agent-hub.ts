@@ -35,7 +35,7 @@ import {
 	activityRowsFromProgress,
 } from "./agent-activity";
 import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
-import type { MessageRenderer } from "../chat/extension-types";
+import type { AssistantThinkingRenderer, MessageRenderer } from "../chat/extension-types";
 import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
 import { USER_INTERRUPT_LABEL } from "../chat/messages";
@@ -299,6 +299,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	isBuiltInTool?: (name: string) => boolean;
 	/** Extension message renderers for custom messages in the transcript. */
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	getAssistantThinkingRenderers?: () => readonly AssistantThinkingRenderer[];
+	resolveLinks?: (agentId: string, texts: readonly string[], cwd: string) => Promise<ReadonlyMap<string, string>>;
 	/** Cwd used by tool renderers for path shortening; defaults to the project dir. */
 	cwd?: string;
 	/** Mirrors the main transcript's thinking-block visibility. */
@@ -452,6 +454,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#getTool: ((name: string) => AgentTool | undefined) | undefined;
 	#isBuiltInTool: ((name: string) => boolean) | undefined;
 	#getMessageRenderer: ((customType: string) => MessageRenderer | undefined) | undefined;
+	#getAssistantThinkingRenderers: (() => readonly AssistantThinkingRenderer[]) | undefined;
+	#resolveLinks: AgentHubDeps<TRecord>["resolveLinks"];
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
@@ -501,6 +505,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#getTool = deps.getTool;
 		this.#isBuiltInTool = deps.isBuiltInTool;
 		this.#getMessageRenderer = deps.getMessageRenderer;
+		this.#getAssistantThinkingRenderers = deps.getAssistantThinkingRenderers;
+		this.#resolveLinks = deps.resolveLinks;
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
@@ -643,6 +649,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (!this.#createStatusLine) throw new Error("Agent Hub chat requires a status line factory");
 		this.#closeTranscriptOverlay();
 		this.#notice = undefined;
+		const resolveLinks = this.#resolveLinks;
 		const viewer = new AgentTranscriptViewer({
 			agentId: id,
 			transcript: this.#transcript,
@@ -654,6 +661,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			getTool: this.#getTool,
 			isBuiltInTool: this.#isBuiltInTool,
 			getMessageRenderer: this.#getMessageRenderer,
+			getAssistantThinkingRenderers: this.#getAssistantThinkingRenderers,
+			resolveLinks: resolveLinks ? (texts, cwd) => resolveLinks(id, texts, cwd) : undefined,
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,

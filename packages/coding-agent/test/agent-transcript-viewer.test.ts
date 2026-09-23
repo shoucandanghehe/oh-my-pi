@@ -2,9 +2,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
+import { agentTranscriptSource, resolveAgentTranscriptLinks } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -14,7 +15,9 @@ import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcrip
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { type Component, ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, ProcessTerminal, setTerminalHyperlinks, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
+import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 let widgetAuth: AuthStorage;
 let widgetModels: ModelRegistry;
@@ -401,6 +404,339 @@ describe("AgentTranscriptViewer", () => {
 			expect(viewerPaints.length).toBeGreaterThanOrEqual(60);
 		} finally {
 			viewer.dispose();
+			vi.useRealTimers();
+		}
+	});
+
+	it("replaces subagent thinking in the pane and paints an asynchronous translation", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-thinking-"));
+		const file = path.join(dir, "Worker.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		const assistant = {
+			...createAssistantMessage("Answer"),
+			content: [
+				{ type: "thinking" as const, thinking: "Inspect project" },
+				{ type: "text" as const, text: "Answer" },
+			],
+		};
+		fs.writeFileSync(
+			file,
+			`${[
+				{ type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: dir },
+				{ type: "message", id: "m0", parentId: null, timestamp, message: assistant },
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+			sessionFile: file,
+		});
+		let translated = "翻译中…";
+		let requestRender: (() => void) | undefined;
+		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
+			agentId: "Worker",
+			registry,
+			ui: new TUI(new ProcessTerminal()),
+			cwd: dir,
+			getAssistantThinkingRenderers: () => [
+				context => {
+					requestRender = context.requestRender;
+					return { type: "replace", component: { render: () => [translated] } };
+				},
+			],
+			expandKeys: [],
+			hubKeys: [],
+			createStatusLine: () => undefined,
+			requestRender: () => {},
+			onClose: () => {},
+			onHubToggle: () => {},
+		});
+		viewer.setViewportHeight(12);
+		try {
+			const before = Bun.stripANSI(viewer.render(80).join("\n"));
+			expect(before).toContain("翻译中");
+			expect(before).not.toContain("Inspect project");
+			translated = "检查项目";
+			requestRender?.();
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("检查项目");
+		} finally {
+			viewer.dispose();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves parked subagent links against its own persisted cwd", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-link-"));
+		const childCwd = path.join(root, "child");
+		const mainCwd = path.join(root, "main");
+		fs.mkdirSync(childCwd);
+		fs.mkdirSync(mainCwd);
+		fs.writeFileSync(path.join(childCwd, "note.md"), "child");
+		fs.writeFileSync(path.join(mainCwd, "note.md"), "main");
+		const file = path.join(root, "Worker.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		fs.writeFileSync(
+			file,
+			`${[
+				{ type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: childCwd },
+				{
+					type: "message",
+					id: "m0",
+					parentId: null,
+					timestamp,
+					message: createAssistantMessage("[note](note.md)"),
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+			sessionFile: file,
+		});
+		const originalHyperlinks = TERMINAL.hyperlinks;
+		setTerminalHyperlinks(true);
+		const resolved = Promise.withResolvers<void>();
+		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
+			agentId: "Worker",
+			registry,
+			ui: new TUI(new ProcessTerminal()),
+			cwd: mainCwd,
+			resolveLinks: async (texts, cwd) => {
+				const targets = await resolveAgentTranscriptLinks(registry, "Worker", texts, cwd);
+				resolved.resolve();
+				return targets;
+			},
+			expandKeys: [],
+			hubKeys: [],
+			createStatusLine: () => undefined,
+			requestRender: () => {},
+			onClose: () => {},
+			onHubToggle: () => {},
+		});
+		viewer.setViewportHeight(12);
+		try {
+			await resolved.promise;
+			await Promise.resolve();
+			const displayed = viewer.render(80).join("\n");
+			expect(displayed).toContain(fileUriForTerminal(path.join(childCwd, "note.md"), undefined, TERMINAL.id));
+			expect(displayed).not.toContain(fileUriForTerminal(path.join(mainCwd, "note.md"), undefined, TERMINAL.id));
+		} finally {
+			viewer.dispose();
+			setTerminalHyperlinks(originalHyperlinks);
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("discards a previous subagent session's late link result after revival", async () => {
+		vi.useFakeTimers();
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-link-revive-"));
+		const file = path.join(root, "Worker.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		fs.writeFileSync(
+			file,
+			`${[
+				{ type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: root },
+				{
+					type: "message",
+					id: "m0",
+					parentId: null,
+					timestamp,
+					message: createAssistantMessage("[note](note.md)"),
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+			sessionFile: file,
+		});
+		const old = Promise.withResolvers<ReadonlyMap<string, string>>();
+		const current = Promise.withResolvers<ReadonlyMap<string, string>>();
+		let requests = 0;
+		const originalHyperlinks = TERMINAL.hyperlinks;
+		setTerminalHyperlinks(true);
+		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
+			agentId: "Worker",
+			registry,
+			ui: new TUI(new ProcessTerminal()),
+			cwd: root,
+			resolveLinks: () => (++requests === 1 ? old.promise : current.promise),
+			expandKeys: [],
+			hubKeys: [],
+			createStatusLine: () => undefined,
+			requestRender: () => {},
+			onClose: () => {},
+			onHubToggle: () => {},
+		});
+		viewer.setViewportHeight(12);
+		try {
+			expect(requests).toBe(1);
+			registry.attachSession("Worker", {} as unknown as AgentSession, file);
+			viewer.render(80);
+			vi.advanceTimersByTime(250);
+			expect(requests).toBe(2);
+			current.resolve(new Map([["note.md", "file:///current/note.md"]]));
+			await current.promise;
+			await Promise.resolve();
+			expect(viewer.render(80).join("\n")).toContain("file:///current/note.md");
+			old.resolve(new Map([["note.md", "file:///old/note.md"]]));
+			await old.promise;
+			await Promise.resolve();
+			expect(viewer.render(80).join("\n")).not.toContain("file:///old/note.md");
+		} finally {
+			viewer.dispose();
+			setTerminalHyperlinks(originalHyperlinks);
+			vi.useRealTimers();
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("translates live subagent thinking and hands it to the persisted turn without duplication", () => {
+		vi.useFakeTimers();
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-live-thinking-"));
+		const file = path.join(dir, "Worker.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		fs.writeFileSync(
+			file,
+			`${JSON.stringify({ type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: dir })}\n`,
+		);
+		const state: { messages: AgentMessage[]; streamMessage: AgentMessage | null } = {
+			messages: [],
+			streamMessage: null,
+		};
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "running",
+			session: { agent: { state } } as AgentSession,
+			sessionFile: file,
+		});
+		const assistant = {
+			...createAssistantMessage("Answer"),
+			timestamp: 42,
+			content: [
+				{ type: "thinking" as const, thinking: "Inspect first" },
+				{ type: "text" as const, text: "Answer" },
+			],
+		};
+		const viewer = new AgentTranscriptViewer({
+			transcript: agentTranscriptSource,
+			agentId: "Worker",
+			registry,
+			ui: new TUI(new ProcessTerminal()),
+			cwd: dir,
+			getAssistantThinkingRenderers: () => [
+				context => ({
+					type: "replace",
+					component: {
+						render: () => [
+							context.text === "Inspect first"
+								? "先检查"
+								: context.text === "Inspect second"
+									? "继续检查"
+									: "检查完成",
+						],
+					},
+				}),
+			],
+			expandKeys: [],
+			hubKeys: [],
+			createStatusLine: () => undefined,
+			requestRender: () => {},
+			onClose: () => {},
+			onHubToggle: () => {},
+		});
+		viewer.setViewportHeight(12);
+		try {
+			state.streamMessage = assistant;
+			vi.advanceTimersByTime(250);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("先检查");
+
+			state.streamMessage = {
+				...assistant,
+				content: [
+					{ type: "thinking", thinking: "Inspect second" },
+					{ type: "text", text: "Answer" },
+				],
+			};
+			vi.advanceTimersByTime(250);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("继续检查");
+
+			const finalMessage = {
+				...assistant,
+				content: [
+					{ type: "thinking" as const, thinking: "Inspect final" },
+					{ type: "text" as const, text: "Answer" },
+				],
+			};
+			state.messages.push(finalMessage);
+			state.streamMessage = null;
+			vi.advanceTimersByTime(250);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("检查完成");
+			const persistedLine = JSON.stringify({
+				type: "message",
+				id: "m0",
+				parentId: null,
+				timestamp,
+				message: finalMessage,
+			});
+			const split = Math.floor(persistedLine.length / 2);
+			fs.appendFileSync(file, persistedLine.slice(0, split));
+			vi.advanceTimersByTime(250);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("检查完成");
+			fs.appendFileSync(file, `${persistedLine.slice(split)}\n`);
+			vi.advanceTimersByTime(250);
+			const completed = Bun.stripANSI(viewer.render(80).join("\n"));
+			expect(completed).toContain("检查完成");
+			expect(completed.match(/检查完成/g)).toHaveLength(1);
+			expect(completed).not.toContain("继续检查");
+
+			state.streamMessage = {
+				...assistant,
+				timestamp: 43,
+				content: [
+					{ type: "thinking", thinking: "Inspect second" },
+					{ type: "text", text: "Next" },
+				],
+			};
+			vi.advanceTimersByTime(250);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("继续检查");
+			registry.attachSession(
+				"Worker",
+				{ agent: { state: { messages: [], streamMessage: null } } } as unknown as AgentSession,
+				file,
+			);
+			expect(Bun.stripANSI(viewer.render(80).join("\n"))).not.toContain("继续检查");
+		} finally {
+			viewer.dispose();
+			fs.rmSync(dir, { recursive: true, force: true });
 			vi.useRealTimers();
 		}
 	});

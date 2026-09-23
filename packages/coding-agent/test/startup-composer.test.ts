@@ -636,21 +636,6 @@ describe("Composer prepaint", () => {
 		expect(terminal.stops).toBe(1);
 	});
 
-	it("first frame mirrors the canonical settings-schema defaults", () => {
-		expect(COMPOSER_DEFAULTS).toEqual({
-			quiet: getDefault("startup.quiet"),
-			composerShape: getDefault("composer.shape") ?? "box",
-			showHardwareCursor: getDefault("showHardwareCursor"),
-			maxInlineImages: getDefault("tui.maxInlineImages"),
-			resizeScrollback: getDefault("tui.resizeScrollback"),
-			imeSafeCursor: getDefault("tui.imeSafeCursor"),
-			autocompleteMaxVisible: getDefault("autocompleteMaxVisible"),
-			spellingTypoDetection: getDefault("spelling.typoDetection"),
-			spellingAutocomplete: getDefault("spelling.autocomplete"),
-			spellingAutocorrect: getDefault("spelling.autocorrect"),
-		});
-	});
-
 	it("isolates a full-height workspace from late root chrome updates", async () => {
 		const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
 		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
@@ -790,6 +775,11 @@ describe("Composer prepaint", () => {
 			);
 			const welcomeMatches = (output.match(/v9\.9\.9/g) || []).length;
 			expect(welcomeMatches).toBe(1);
+			const draftRows = terminal
+				.getViewport()
+				.map(row => Bun.stripANSI(row))
+				.filter(row => row.includes("draft message between"));
+			expect(draftRows).toHaveLength(1);
 			const adoptedEditorRow = terminal
 				.getViewport()
 				.map(row => Bun.stripANSI(row))

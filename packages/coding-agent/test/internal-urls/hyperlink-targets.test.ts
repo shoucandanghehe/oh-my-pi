@@ -200,6 +200,24 @@ describe("resource links in chat markdown", () => {
 		expect(visible).not.toContain("file://");
 	});
 
+	it("resolves parked-session file links without borrowing another session's internal URL mapping", async () => {
+		await Bun.write(path.join(tempDir, "note.md"), "relative");
+		await Bun.write(path.join(tempDir, "local", "note.md"), "internal");
+		const text = "[Relative](note.md) and [Internal](local://note.md)";
+		const context = {
+			cwd: tempDir,
+			localProtocolOptions: {
+				getArtifactsDir: () => tempDir,
+				getSessionId: () => "session",
+			},
+		};
+		const active = await resolveMarkdownLinkTargets([text], context);
+		const parked = await resolveMarkdownLinkTargets([text], context, { resolveInternalUrls: false });
+		expect(active.get("local://note.md")).toBe(url.pathToFileURL(path.join(tempDir, "local", "note.md")).href);
+		expect(parked.get("note.md")).toBe(url.pathToFileURL(path.join(tempDir, "note.md")).href);
+		expect(parked.has("local://note.md")).toBe(false);
+	});
+
 	it("leaves missing, escaping, remote, and non-link destinations unexpanded", async () => {
 		await Bun.write(path.join(tempDir, "local", "report.json"), "{}");
 		await Bun.write(path.join(tempDir, "outside.json"), "{}");

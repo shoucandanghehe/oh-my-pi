@@ -495,6 +495,7 @@ export interface InteractiveModeContext {
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
+	prepareBtwForRelocation(): Promise<void>;
 
 	// Selector handling
 	showSettingsSelector(): void;
