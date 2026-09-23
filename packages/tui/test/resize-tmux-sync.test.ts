@@ -26,7 +26,7 @@ class RecordingTerminal extends BackloggedTerminal {
 	mirror = true;
 	report?: PrivateModeReportHandler;
 
-	onPrivateModeReport(callback: PrivateModeReportHandler): void {
+	override onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.report = callback;
 	}
 

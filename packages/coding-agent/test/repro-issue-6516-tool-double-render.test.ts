@@ -2,6 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgDisplayCollapseCompacted } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { CompactionSummaryMessageComponent } from "@oh-my-pi/pi-tui/chat/compaction-summary-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -291,6 +293,96 @@ describe("issue #6516 — tool output appears twice", () => {
 		expect(mode.pendingTools.get("call-1")).toBe(live);
 		expect(mode.chatContainer.children.filter(child => child instanceof ToolExecutionComponent)).toHaveLength(1);
 	});
+
+	for (const history of ["retained", "compacted"] as const) {
+		it(`keeps a ${history} running task before the compaction divider and routes later results into it`, async () => {
+			cfgDisplayCollapseCompacted.set(session.settings, true);
+			const manager = session.sessionManager;
+			const first = manager.appendMessage({ role: "user", content: "spawn review", timestamp: 1 });
+			manager.appendMessage({
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "call-1", name: "task", arguments: { description: "review", prompt: "go" } },
+					{ type: "text", text: "Review launched; waiting for it." },
+				],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage,
+				stopReason: "toolUse",
+				timestamp: 2,
+			});
+			const runningDetails = { async: { state: "running", jobId: "review-job", type: "task" } };
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "task",
+				content: [{ type: "text", text: "Review in progress" }],
+				details: runningDetails,
+				isError: false,
+				timestamp: 3,
+			});
+			const recent = manager.appendMessage({ role: "user", content: "Continue while reviewing", timestamp: 4 });
+			manager.appendCompaction("Earlier work summarized", undefined, history === "retained" ? first : recent, 1000, {
+				method: "soft",
+				tokensAfter: 100,
+			});
+			manager.appendMessage({ role: "user", content: "After compaction", timestamp: Date.now() + 1 });
+			Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+			mode.isInitialized = true;
+			const live = new ToolExecutionComponent(
+				"task",
+				{ description: "review", prompt: "go" },
+				{},
+				undefined,
+				mode.ui,
+				tempDir.path(),
+				"call-1",
+			);
+			live.updateResult(
+				{ content: [{ type: "text", text: "Review in progress" }], details: runningDetails, isError: false },
+				true,
+				"call-1",
+			);
+			created.push(live);
+			mode.chatContainer.addChild(live);
+			mode.pendingTools.set("call-1", live);
+			mode.eventController.markBackgroundTaskCalls(new Set(["call-1"]));
+
+			for (let rebuild = 0; rebuild < 2; rebuild++) {
+				mode.rebuildChatFromMessages();
+				const children = mode.chatContainer.children;
+				const divider = children.findIndex(child => child instanceof CompactionSummaryMessageComponent);
+				expect(divider).toBeGreaterThan(-1);
+				expect(children.indexOf(live)).toBeLessThan(divider);
+				expect(children.filter(child => child instanceof ToolExecutionComponent)).toEqual([live]);
+				expect(mode.pendingTools.get("call-1")).toBe(live);
+				const rendered = Bun.stripANSI(mode.chatContainer.render(120).join("\n"));
+				expect(rendered).toContain("Review in progress");
+				expect(rendered).toContain("Continue while reviewing");
+				expect(rendered.indexOf("Review in progress")).toBeLessThan(rendered.indexOf("Continue while reviewing"));
+				if (history === "retained") {
+					expect(rendered).toContain("Review launched; waiting for it.");
+					expect(rendered.indexOf("Review in progress")).toBeLessThan(
+						rendered.indexOf("Review launched; waiting for it."),
+					);
+				}
+			}
+
+			await mode.eventController.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "call-1",
+				toolName: "task",
+				result: {
+					content: [{ type: "text", text: "Review finished" }],
+					details: { async: { state: "completed", jobId: "review-job", type: "task" } },
+				},
+				isError: false,
+			});
+			expect(Bun.stripANSI(live.render(120).join("\n"))).toContain("Review finished");
+			expect(mode.pendingTools.has("call-1")).toBe(false);
+		});
+	}
 
 	it("keeps a shared read group attached while a sibling read is still in flight", () => {
 		const entries: SessionEntry[] = [

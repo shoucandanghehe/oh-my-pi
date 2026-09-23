@@ -34,6 +34,7 @@ function makeHarness() {
 			requestRender: () => {},
 			addStartListener: () => {},
 			getFocused: () => undefined,
+			setAppViewportClickHandler: () => {},
 		},
 		handlesBtwBranchKey: () => false,
 		editor: {

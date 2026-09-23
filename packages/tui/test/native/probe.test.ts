@@ -5,6 +5,7 @@ import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multipl
 import * as utils from "@oh-my-pi/pi-utils";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { createProcessTerminalRenderHarness } from "../process-terminal-render-harness";
 
 const DA1_REPLY = "\x1b[?1;2c";
 const HELLO_REPLY = '\x1b_tsp;r;{"r":"hello","v":1,"term":"tern","kinds":["col","text"],"credits":3,"future":1}\x1b\\';
@@ -129,6 +130,44 @@ describe("TSP hello probe", () => {
 			terminal.stop();
 		}
 	});
+
+	for (const deferInput of [true, false]) {
+		it(`balances app-viewport keyboard frames on native handoff with deferred input ${deferInput}`, () => {
+			vi.useFakeTimers();
+			const termProgram = Bun.env.TERM_PROGRAM;
+			const renderBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+			delete Bun.env.TERM_PROGRAM;
+			Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+			const h = createProcessTerminalRenderHarness(100, 30, { conpty: true }, { deferInput });
+			try {
+				if (deferInput) {
+					h.tui.renderNow();
+					h.tui.enableInput();
+					process.stdin.emit("data", "\x1b[?0u");
+				} else {
+					process.stdin.emit("data", "\x1b[?0u");
+					vi.advanceTimersByTime(300);
+					h.tui.renderNow();
+				}
+				expect(h.writes.join("")).toContain("\x1b[?1049h");
+				h.writes.length = 0;
+				process.stdin.emit("data", HELLO_REPLY);
+				const switched = h.writes.join("");
+				expect(switched).toContain("\x1b[<u\x1b[?1049l");
+				if (deferInput) {
+					expect(switched).toContain("\x1b[?1049l\x1b[>1u");
+				} else {
+					expect(switched).not.toContain("\x1b[?1049l\x1b[>1u");
+				}
+				expect(h.tui.nativeRendering).toBe(true);
+			} finally {
+				h.dispose();
+				restoreEnv("TERM_PROGRAM", termProgram);
+				restoreEnv("PI_TUI_RENDER_BACKEND", renderBackend);
+			}
+			expect(h.writes.join("").match(/\x1b\[<u/g)).toHaveLength(2);
+		});
+	}
 
 	it("takes the hello reply and events in their OSC 877 framing through a ConPTY", () => {
 		const { terminal, received, hellos } = setup();

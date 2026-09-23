@@ -680,7 +680,7 @@ export type RestoredQueuedMessage = {
 /** A queued message the dequeue key took back, tagged with the queue it left so the editor can restore its delivery. */
 export type DequeuedMessage = RestoredQueuedMessage & { queue: "steering" | "followUp" };
 
-/** Options for the same ephemeral side turn used by /btw. */
+/** Options for a detached single side request against the current session context. */
 export interface EphemeralTurnOptions {
 	promptText: string;
 	/** Images sent with `promptText`, normalized for the model like a prompt's attachments. */

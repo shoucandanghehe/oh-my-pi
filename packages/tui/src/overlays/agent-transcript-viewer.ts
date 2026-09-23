@@ -4,26 +4,25 @@
  * `AgentHubOverlayComponent.openChat` mounts this as a `fullscreen` overlay
  * (`ui.showOverlay(..., { fullscreen: true })`), so it borrows the terminal's
  * alternate screen buffer (the vim/less idiom) and paints the whole screen — no
- * compositing into the live transcript's scrollback. It renders a parked
- * subagent / advisor / collab-guest transcript that has no live in-view session.
+ * compositing into the live transcript's scrollback. It shows subagent,
+ * advisor, and collab-guest transcripts outside Main.
  *
- * Local transcripts tail append-only growth: unchanged file identity plus stable
- * sentinels means only newly appended JSONL is parsed and rendered. Rewrites,
- * truncation, rotation, or sentinel drift fall back to a full rebuild so changed
- * historical entries cannot leave stale components behind. Collab guests use the
- * same append path over the host's byte-capped transcript reads.
+ * Local transcripts tail complete JSONL entries by file identity and sentinels.
+ * A live local session adds its current assistant partial as a transient tail
+ * until the complete entry arrives; rewrites and rotations rebuild the history.
+ * Collab guests read the host's byte-capped transcript instead.
  */
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
-import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
-import { editorKey } from "../chrome/keybinding-hints";
+import { formatNumber, logger } from "@oh-my-pi/pi-utils";
 import { componentContains, renderTargeted, type TargetedRender } from "../tui";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { VirtualRowAnchor } from "../tui";
 import type { KeyId } from "../app-keybindings";
-import type { ExtensionPresentationSource, MessageRenderer } from "../chat/extension-types";
+import type { AssistantThinkingRenderer, ExtensionPresentationSource, MessageRenderer } from "../chat/extension-types";
 import type { SessionMessageEntryLike } from "../chat/transcript-entry";
+import { sameAssistantTurn } from "../chat/chat-transcript-builder";
 import { renderWorkspacePaneHeader } from "../chrome/shared";
 import type { EditorTopBorder } from "../components/composer";
 import { matchesKey } from "../keys";
@@ -38,10 +37,9 @@ import type { AppViewportHoverProvider } from "../tui";
 import { Container } from "../tui";
 import { fgAnsi } from "../theme/color";
 import type { AgentHubRemote } from "./agent-hub";
-import { sanitizeErrorLine } from "../chrome/error-block";
 import { formatContextUsage } from "../chrome/context-thresholds";
 import { node, span, text } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "../native/node";
 import { actionHint, escCloseButton, hintsRow, overlayCard } from "../native/overlay";
 import { ChatTranscriptPane } from "../chat/chat-transcript-pane";
 import { StatusLineComponent } from "../status-line/component";
@@ -52,20 +50,16 @@ type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose"> &
 	Partial<Pick<StatusLineComponent, "setHookStatus" | "render">>;
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
-export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
+export type AgentTranscriptEntry =
+	| SessionMessageEntryLike
+	| { type: "model_change"; model: string }
+	| { type: "session"; cwd: string };
 
 /** Local filesystem and session parsing capabilities supplied by the host. */
 export interface AgentTranscriptSource {
-	/**
-	 * Sync primitives drive the first paint and the incremental tail. When the
-	 * host also supplies `promises.readFile` (e.g. passes `node:fs` itself), full
-	 * reloads after rotation/rewrite read the file off the UI thread.
-	 */
-	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync"> & {
-		promises?: Pick<typeof fs.promises, "readFile">;
-	};
+	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync">;
 	parseEntries(text: string): AgentTranscriptEntry[];
-	/** Stream message/model entries from a bounded snapshot without completing its partial tail. */
+	/** Stream complete session headers, message entries, and model changes from a bounded snapshot. */
 	visitEntries(
 		filePath: string,
 		visit: (entry: AgentTranscriptEntry) => void | boolean,
@@ -95,6 +89,8 @@ export interface AgentTranscriptViewerDeps {
 	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	getAssistantThinkingRenderers?: () => readonly AssistantThinkingRenderer[];
+	resolveLinks?: (texts: readonly string[], cwd: string) => Promise<ReadonlyMap<string, string>>;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
@@ -172,12 +168,6 @@ function sentinelsFromFile(fs: AgentTranscriptSource["fs"], file: string, size: 
 	const length = Math.min(SENTINEL_BYTES, size);
 	return sentinelOffsets(size).map(offset => ({ offset, bytes: readFileRangeSync(fs, file, offset, length) }));
 }
-
-/**
- * `sanitizeErrorLine` width for described text, which the terminal truncates
- * itself: effectively unbounded, but within the native truncate's i32 range.
- */
-const NATIVE_LINE_WIDTH = 0x7fff_ffff;
 
 const STATUS_TONE: Record<AgentStatus, TspTone> = {
 	running: "success",
@@ -368,6 +358,7 @@ export class AgentTranscriptViewer
 		AppViewportHoverProvider
 {
 	readonly #pane: ChatTranscriptPane;
+	readonly #nativeComposer: Component & Focusable & Pick<AgentTranscriptViewer, "getPasteTarget">;
 	readonly #deps: AgentTranscriptViewerDeps;
 	#model: string | undefined;
 	readonly #widgets: ExtensionWidgets;
@@ -376,8 +367,11 @@ export class AgentTranscriptViewer
 	#detachPresentation: (() => void) | undefined;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
+	#localError = "";
 	#localLoadToken = 0;
 	#localLoading: { path: string; dev: number; ino: number } | undefined;
+	#liveAssistant: AssistantMessage | undefined;
+	#sourceCwd: string | undefined;
 	// Remote transcript state (incremental; the host caps each read).
 	#remoteBytes = 0;
 	#remoteFetchInFlight = false;
@@ -408,12 +402,16 @@ export class AgentTranscriptViewer
 		this.#widgets = new ExtensionWidgets(deps.ui);
 		this.#belowEditor.addChild(this.#widgets.below);
 		this.#belowEditor.addChild({ render: width => this.#statusLine?.render?.(width) ?? [] });
+		const resolveLinks = deps.resolveLinks;
 		this.#pane = new ChatTranscriptPane({
 			builder: {
 				ui: deps.ui,
 				getTool: deps.getTool,
 				isBuiltInTool: deps.isBuiltInTool,
 				getMessageRenderer: deps.getMessageRenderer,
+				getAssistantThinkingRenderers: deps.getAssistantThinkingRenderers,
+				resolveLinks:
+					!deps.remote && resolveLinks ? texts => resolveLinks(texts, this.#sourceCwd ?? deps.cwd) : undefined,
 				cwd: deps.cwd,
 				hideThinkingBlock: deps.hideThinkingBlock,
 				proseOnlyThinking: deps.proseOnlyThinking,
@@ -444,7 +442,7 @@ export class AgentTranscriptViewer
 			renderWorkspaceHeader: (width, focused) => this.renderWorkspaceHeader(width, focused),
 			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
 			getPlaceholder: () => this.#placeholder(),
-			getNotice: () => (this.#remoteError && !this.#pane.isEmpty ? this.#remoteError : undefined),
+			getNotice: () => (!this.#pane.isEmpty ? this.#localError || this.#remoteError || undefined : undefined),
 			onInput: data => {
 				for (const key of deps.hubKeys) {
 					if (!matchesKey(data, key)) continue;
@@ -455,6 +453,23 @@ export class AgentTranscriptViewer
 			},
 			onClose: deps.onClose,
 		});
+		// Native pointer focus must keep input and auto-close protection on the viewer.
+		const viewer = this;
+		this.#nativeComposer = {
+			render: () => [],
+			describe: () => this.#pane.describeComposer(),
+			handleInput: data => this.handleInput(data),
+			get focused() {
+				return viewer.focused;
+			},
+			set focused(focused: boolean) {
+				viewer.focused = focused;
+			},
+			setUseTerminalCursor: useTerminalCursor => this.setUseTerminalCursor(useTerminalCursor),
+			getPasteTarget: () => this.getPasteTarget(),
+			containsComponent: component => componentContains(this.#pane, component),
+			invalidate: () => this.#pane.invalidate(),
+		};
 		// First paint loads synchronously so the initial entry can be revealed
 		// immediately; later full reloads from the poll may go async.
 		this.#refresh(false);
@@ -591,6 +606,11 @@ export class AgentTranscriptViewer
 			this.#fetchRemote();
 			return;
 		}
+		this.#refreshLocalTranscript(allowAsync);
+		this.#syncLiveAssistant();
+	}
+
+	#refreshLocalTranscript(allowAsync: boolean): void {
 		const sessionFile = this.#deps.registry.get(this.#deps.agentId)?.sessionFile;
 		if (!sessionFile) {
 			this.#clearLocal("none");
@@ -631,13 +651,30 @@ export class AgentTranscriptViewer
 		this.#loadLocalFull(sessionFile, stat, allowAsync);
 	}
 
+	#syncLiveAssistant(): void {
+		if (this.#deps.remote) return;
+		const state = this.#deps.registry.get(this.#deps.agentId)?.session?.agent?.state;
+		const streamMessage = state?.streamMessage;
+		let assistant = streamMessage?.role === "assistant" ? streamMessage : undefined;
+		if (!assistant && state && this.#liveAssistant) {
+			const last = state.messages.at(-1);
+			assistant =
+				last?.role === "assistant" && sameAssistantTurn(this.#liveAssistant, last) ? last : this.#liveAssistant;
+		}
+		if (assistant === this.#liveAssistant) return;
+		this.#liveAssistant = assistant;
+		this.#pane.setLiveAssistant(assistant);
+	}
+
 	#clearLocal(reason: string): void {
 		if (!this.#localState && !this.#localLoading && this.#localUnavailable === reason) return;
 		this.#localLoadToken++;
 		this.#localLoading = undefined;
 		this.#localState = undefined;
 		this.#localUnavailable = reason;
+		this.#localError = "";
 		this.#model = undefined;
+		this.#sourceCwd = undefined;
 		this.#rebuild([]);
 	}
 
@@ -673,10 +710,6 @@ export class AgentTranscriptViewer
 		}
 		const token = ++this.#localLoadToken;
 		this.#localLoading = { path: sessionFile, dev: stat.dev, ino: stat.ino };
-		this.#localState = undefined;
-		this.#localUnavailable = "";
-		this.#model = undefined;
-		this.#rebuild([]);
 		void this.#loadLocalFullAsync(sessionFile, stat, token);
 	}
 
@@ -685,6 +718,8 @@ export class AgentTranscriptViewer
 		try {
 			data = this.#deps.transcript.fs.readFileSync(sessionFile);
 		} catch (err) {
+			this.#localError = `Transcript load failed: ${err instanceof Error ? err.message : String(err)}`;
+			this.#deps.requestRender();
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
@@ -703,6 +738,7 @@ export class AgentTranscriptViewer
 		const complete = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
 		const pending = lastNewline >= 0 ? text.slice(lastNewline + 1) : text;
 		this.#localUnavailable = "";
+		this.#localError = "";
 		this.#localState = {
 			path: sessionFile,
 			dev: post.dev,
@@ -713,12 +749,14 @@ export class AgentTranscriptViewer
 			pending,
 			sentinels: sentinelsFromBuffer(data),
 		};
+		this.#sourceCwd = undefined;
 		this.#model = undefined;
 		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete)));
 	}
 
 	async #loadLocalFullAsync(sessionFile: string, stat: fs.Stats, token: number): Promise<void> {
-		const batch: AgentTranscriptEntry[] = [];
+		const incremental = this.#pane.isEmpty;
+		const entries: AgentTranscriptEntry[] = [];
 		const decoder = new TextDecoder();
 		let pending = "";
 		let bytesConsumed = 0;
@@ -726,10 +764,11 @@ export class AgentTranscriptViewer
 			await this.#deps.transcript.visitEntries(
 				sessionFile,
 				entry => {
-					batch.push(entry);
-					if (batch.length < 128) return;
-					this.#append(this.#extractMessages(batch));
-					batch.length = 0;
+					entries.push(entry);
+					if (incremental && entries.length >= 128) {
+						this.#append(this.#extractMessages(entries));
+						entries.length = 0;
+					}
 				},
 				{
 					maxBytes: stat.size,
@@ -747,17 +786,20 @@ export class AgentTranscriptViewer
 		} catch (err) {
 			if (token === this.#localLoadToken) {
 				this.#localLoading = undefined;
+				this.#localError = `Transcript load failed: ${err instanceof Error ? err.message : String(err)}`;
+				this.#deps.requestRender();
 				logger.debug("transcript viewer: incremental load failed", { err: String(err) });
 			}
 			return;
 		}
 		if (token !== this.#localLoadToken || this.#disposed) return;
-		if (batch.length > 0) this.#append(this.#extractMessages(batch));
 		let sentinels: LocalTranscriptSentinel[];
 		try {
 			sentinels = sentinelsFromFile(this.#deps.transcript.fs, sessionFile, bytesConsumed);
 		} catch (err) {
 			this.#localLoading = undefined;
+			this.#localError = `Transcript load failed: ${err instanceof Error ? err.message : String(err)}`;
+			this.#deps.requestRender();
 			logger.debug("transcript viewer: sentinel load failed", { err: String(err) });
 			return;
 		}
@@ -772,6 +814,15 @@ export class AgentTranscriptViewer
 			sentinels,
 		};
 		this.#localLoading = undefined;
+		this.#localUnavailable = "";
+		this.#localError = "";
+		if (incremental) {
+			if (entries.length > 0) this.#append(this.#extractMessages(entries));
+		} else {
+			this.#sourceCwd = undefined;
+			this.#model = undefined;
+			this.#rebuild(this.#extractMessages(entries));
+		}
 		this.#deps.requestRender();
 	}
 
@@ -854,6 +905,7 @@ export class AgentTranscriptViewer
 					this.#remoteError = "";
 					this.#hasRemoteData = false;
 					this.#model = undefined;
+					this.#sourceCwd = undefined;
 					this.#rebuild([]);
 					this.#fetchRemote();
 					return;
@@ -895,6 +947,8 @@ export class AgentTranscriptViewer
 				if (!this.#model && entry.message.role === "assistant") this.#model = entry.message.model;
 			} else if (entry.type === "model_change") {
 				this.#model = entry.model;
+			} else if (entry.type === "session") {
+				this.#sourceCwd = entry.cwd;
 			}
 		}
 		return messages;
@@ -902,10 +956,12 @@ export class AgentTranscriptViewer
 
 	#rebuild(entries: SessionMessageEntryLike[]): void {
 		this.#pane.rebuildEntries(entries);
+		this.#syncLiveAssistant();
 	}
 
 	#append(entries: SessionMessageEntryLike[]): void {
 		this.#pane.appendEntries(entries);
+		this.#syncLiveAssistant();
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): boolean {
@@ -947,7 +1003,7 @@ export class AgentTranscriptViewer
 	// ========================================================================
 
 	containsComponent(component: Component): boolean {
-		return componentContains(this.#pane, component);
+		return component === this.#nativeComposer || componentContains(this.#pane, component);
 	}
 
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
@@ -971,33 +1027,38 @@ export class AgentTranscriptViewer
 			: lines;
 	}
 
+	/** Independent workspace roots use the same flowing/sticky regions as Main. */
+	describeSurface(cx: DescribeContext): NativeSurface {
+		this.#syncSessionPresentation();
+		return { ...this.#pane.describeSurface(cx), dock: [this.#nativeComposer] };
+	}
+
 	/** The top-right `esc` runs Esc. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "action" && event.act === "close") this.#pane.handleInput("\x1b");
 	}
 
-
 	/**
-	 * Header, transcript body (the builder's container, which describes its own
-	 * blocks), notice, message editor, stats and key hints. Scrolling is the
-	 * terminal's, so the j/k/g/G scroll hints are omitted.
+	 * Viewer metadata, session-owned statistics and hints wrap the shared pane.
+	 * The pane describes its transcript, notices, widgets and draft; native
+	 * scrolling is terminal-owned, so VT scroll hints are omitted.
 	 */
 	describe(_cx: DescribeContext): NativeNode {
 		const ref = this.#deps.registry.get(this.#deps.agentId);
-		const notice = this.#notice ?? (this.#remoteError && !this.#builder.isEmpty ? this.#remoteError : undefined);
-		const placeholder = this.#builder.isEmpty ? this.#placeholder(NATIVE_LINE_WIDTH) : undefined;
-		const progress = this.#deps.observers?.getSession(this.#deps.agentId)?.progress;
-		const stats = progress
-			? [progress.contextTokens, progress.contextWindow, progress.durationMs, progress.toolCount, progress.cost]
-			: undefined;
+		this.#syncSessionPresentation();
+		const stats = ref?.session?.getSessionStats();
+		const context = stats?.contextUsage;
+		const sendable = this.getPasteTarget() !== undefined;
 		const signature = JSON.stringify([
 			ref?.status,
 			ref?.kind,
 			ref?.parentId,
 			this.#model,
-			notice,
-			placeholder,
-			stats,
+			context?.tokens,
+			context?.contextWindow,
+			stats?.toolCalls,
+			stats?.cost,
+			sendable,
 			this.#deps.expandKeys[0],
 		]);
 		const cached = this.#nativeCache;
@@ -1021,58 +1082,30 @@ export class AgentTranscriptViewer
 		}
 		top.push(escCloseButton());
 		children.push(node("row", { gap: "md", align: "center" }, top, "top"));
-		children.push(
-			placeholder === undefined
-				? node("col", { grow: 1 }, [this.#builder.container], "transcript")
-				: node("text", { spans: [span(placeholder, "dim")], wrap: "word" }, undefined, "placeholder"),
-		);
-		if (notice) {
-			children.push(
-				node(
-					"text",
-					{ text: sanitizeErrorLine(notice, NATIVE_LINE_WIDTH), tone: "error", truncate: "end" },
-					undefined,
-					"notice",
-				),
-			);
-		}
-		if (this.#editor) children.push(this.#editor);
-		if (progress) {
+		children.push(this.#pane);
+		if (stats) {
 			const statSpans: TspSpan[] = [];
 			const sep = (): void => {
 				if (statSpans.length > 0) statSpans.push(span(theme.sep.dot, "dim"));
 			};
-			if (progress.toolCount > 0) {
-				statSpans.push(span(`${formatNumber(progress.toolCount)} ${theme.icon.extensionTool}`, "dim"));
+			if (stats.toolCalls > 0) {
+				statSpans.push(span(`${formatNumber(stats.toolCalls)} ${theme.icon.extensionTool}`, "dim"));
 			}
-			if (
-				progress.contextTokens &&
-				progress.contextTokens > 0 &&
-				!(progress.contextWindow && progress.contextWindow > 0)
-			) {
+			if (context && context.tokens > 0 && context.contextWindow <= 0) {
 				sep();
-				statSpans.push(span(formatNumber(progress.contextTokens), "dim"));
+				statSpans.push(span(formatNumber(context.tokens), "dim"));
 			}
-			if (progress.durationMs > 0) {
+			if (stats.cost > 0) {
 				sep();
-				statSpans.push(span(formatDuration(progress.durationMs), "dim"));
-			}
-			if (progress.cost > 0) {
-				sep();
-				statSpans.push(span(`$${progress.cost.toFixed(2)}`, "statusLineCost"));
+				statSpans.push(span(`$${stats.cost.toFixed(2)}`, "statusLineCost"));
 			}
 			const statsRow: NativeChild[] = [];
-			if (
-				progress.contextTokens &&
-				progress.contextTokens > 0 &&
-				progress.contextWindow &&
-				progress.contextWindow > 0
-			) {
-				const fraction = progress.contextTokens / progress.contextWindow;
+			if (context && context.tokens > 0 && context.contextWindow > 0) {
+				const fraction = context.tokens / context.contextWindow;
 				statsRow.push(
 					node("progress", {
 						value: Math.min(1, fraction),
-						label: formatContextUsage(fraction * 100, progress.contextWindow),
+						label: formatContextUsage(fraction * 100, context.contextWindow),
 						max: { w: "24ch" },
 					}),
 				);
@@ -1082,7 +1115,7 @@ export class AgentTranscriptViewer
 		}
 		children.push(
 			hintsRow([
-				this.#editor ? actionHint("tui.input.submit", "send") : undefined,
+				sendable ? actionHint("tui.input.submit", "send") : undefined,
 				{ keys: [this.#deps.expandKeys[0] ?? "ctrl+o"], label: "expand" },
 			]),
 		);
@@ -1124,10 +1157,21 @@ export class AgentTranscriptViewer
 	#syncSessionPresentation(): void {
 		const session = this.#deps.registry.get(this.#deps.agentId)?.session ?? null;
 		const presentation = this.#deps.remote ? undefined : this.#deps.getExtensionPresentation?.(this.#deps.agentId);
-		if (session !== this.#statusLineSession || presentation !== this.#extensionPresentation) {
+		const sessionChanged = session !== this.#statusLineSession;
+		if (sessionChanged || presentation !== this.#extensionPresentation) {
 			this.#statusLine?.dispose();
 			this.#statusLine = session ? this.#deps.createStatusLine(this.#deps.agentId) : undefined;
 			this.#statusLineSession = session;
+		}
+		if (sessionChanged && this.#liveAssistant) {
+			this.#pane.setLiveAssistant(undefined);
+			this.#liveAssistant = undefined;
+		}
+		if (sessionChanged && this.#deps.resolveLinks && !this.#deps.remote) {
+			this.#localLoadToken++;
+			this.#localLoading = undefined;
+			this.#localState = undefined;
+			this.#pane.invalidateLinkContext();
 		}
 		if (presentation === this.#extensionPresentation) return;
 		this.#detachPresentation?.();
@@ -1170,6 +1214,7 @@ export class AgentTranscriptViewer
 			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
+		if (this.#localError) return this.#localError;
 		if (this.#localLoading) return "Loading transcript…";
 		if (!this.#deps.registry.get(this.#deps.agentId)?.sessionFile) return "No session file available yet.";
 		return "No messages yet.";

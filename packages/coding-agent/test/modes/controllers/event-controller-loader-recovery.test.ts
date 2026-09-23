@@ -10,7 +10,8 @@ import {
 	type EphemeralConversationCheckpoint,
 	type EphemeralTurnResult,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
-import { Loader } from "@oh-my-pi/pi-tui";
+import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { Container, Loader } from "@oh-my-pi/pi-tui";
 import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -39,7 +40,7 @@ function createContext(options: LoaderRecoveryContextOptions = {}) {
 	const streamState = { isStreaming: false };
 	if (options.terminalProgress) cfgTerminalShowProgress.set(settings, true);
 	const setProgress = vi.fn((_active: boolean) => {});
-	const setTitleState = vi.fn();
+	const setTitleState = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
 	const terminalActivity = new TerminalActivityController({
 		isProgressEnabled: () => options.terminalProgress === true,
 		setProgress,
@@ -49,10 +50,7 @@ function createContext(options: LoaderRecoveryContextOptions = {}) {
 		ui: { terminal: { setProgress } },
 		terminalActivity,
 
-		btwContainer: {
-			clear: vi.fn(),
-			addChild: vi.fn(),
-		},
+		btwContainer: new Container(),
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
@@ -402,6 +400,8 @@ describe("EventController loader recovery after overflow maintenance", () => {
 
 		streamState.isStreaming = true;
 		await eventController.handleEvent(AGENT_START);
+		streamState.continuation = undefined;
+		continuation.resolve();
 		streamState.isStreaming = false;
 		await eventController.handleEvent(AGENT_END);
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);

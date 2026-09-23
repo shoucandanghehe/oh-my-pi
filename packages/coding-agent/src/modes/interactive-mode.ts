@@ -29,6 +29,7 @@ import {
 	Markdown,
 	minFrameIntervalMs,
 	SEGMENT_RESET,
+	measureComponentRows,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -68,7 +69,6 @@ import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
-	APP_NAME,
 	adjustHsv,
 	formatDuration,
 	formatNumber,
@@ -80,10 +80,12 @@ import {
 	prompt,
 	sanitizeText,
 	setProjectDir,
+	toError,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { pickTableChart } from "../auto-graph/planner";
 import { restartArgv } from "../cli/flag-tables";
+import { resumeCommand } from "../utils/resume-command";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
@@ -151,7 +153,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
@@ -160,6 +162,7 @@ import {
 	type AgentSessionEvent,
 	type DroppedPrompt,
 	type ResolvedRoleModel,
+	type RestoredQueuedMessage,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { AgentViewSession } from "../session/agent-session-handle";
@@ -170,8 +173,8 @@ import { HistoryStorage } from "../session/history-storage";
 import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
-import type { ResolveContext } from "../internal-urls/index";
+import { resolveSessionMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
+import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { formatQueueShorthand } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
@@ -265,7 +268,6 @@ import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
-import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -351,6 +353,7 @@ import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcrip
 import { MainSessionPane } from "./components/main-session-pane";
 import { AutoAgentWorkspaceController } from "./controllers/auto-agent-workspace-controller";
 import { BtwController } from "./controllers/btw-controller";
+import { NativeWorkspace } from "./native-workspace/workspace";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -391,7 +394,7 @@ import {
 import { type ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { renderWorkspacePaneHeader, sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
-import { agentTranscriptSource } from "./agent-hub-runtime";
+import { agentTranscriptSource, resolveAgentTranscriptLinks } from "./agent-hub-runtime";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
@@ -410,6 +413,7 @@ import {
 } from "@oh-my-pi/pi-tui/theme";
 import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
+	AddMessageOptions,
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
 	ComposerOwner,
@@ -468,6 +472,7 @@ import {
 	cfgSymbolPreset,
 	cfgTerminalProgramStatus,
 	cfgTerminalShowImages,
+	cfgTerminalShowProgress,
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
@@ -1434,7 +1439,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Canonical composer shared by cold prepaint and the session-aware runtime. */
 	readonly composer: Composer;
 	ui: TUI;
-	chatContainer: TranscriptContainer;
+	readonly chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
 	askContainer: Container;
@@ -1464,7 +1469,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	readonly terminalActivity: TerminalActivityController;
-	readonly workspaceEnabled: boolean;
+	get workspaceEnabled(): boolean {
+		return this.#workspaceLayout !== undefined && !this.ui.nativeRendering;
+	}
+	nativeWorkspace: NativeWorkspace | undefined;
 	#workspaceLayout: WorkspaceLayout | undefined;
 	#mainScrollRoot: Container | undefined;
 	#mainStickyRoot: Container | undefined;
@@ -1472,6 +1480,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#autoAgentWorkspace: AutoAgentWorkspaceController | undefined;
 	#autoAgentWorkspaceSessionId: string | undefined;
 	#workspaceWelcome: WelcomeComponent | undefined;
+	#nativeAutomaticAgents = new Set<string>();
+	#nativeDismissedAgents = new Set<string>();
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -2112,21 +2122,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#focusController.target === undefined;
 	}
 	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
-		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
-	}
-	#linkResolveContext(): ResolveContext {
-		const session = this.viewSession;
-		return {
-			cwd: session.sessionManager.getCwd(),
-			sessionFile: session.sessionFile,
-			settings: session.settings,
-			localProtocolOptions: {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			},
-			skills: session.skills,
-			rules: session.ttsrManager?.getRules(),
-		};
+		return resolveSessionMarkdownLinkHrefs(hrefs, this.viewSession);
 	}
 	approvalOwnsComposer = false;
 	composerOwner?: ComposerOwner;
@@ -2159,8 +2155,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController.invalidatePendingFocus();
 	}
 
-	resolveViewportClickCandidates(index: number): string[] {
-		return this.composer.viewportClickCandidates(index);
+	resolveViewportClickCandidates(index: number, col?: number): string[] {
+		return this.composer.viewportClickCandidates(index, col);
 	}
 
 	/** Flip the pinned jump list between its collapsed few and the full list, overriding the setting. */
@@ -2181,8 +2177,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	setClickHoverId(id: string | undefined): void {
-		this.composer.setHoveredClickId(id);
+	setClickHoverId(id: string | undefined, col?: number): void {
+		this.composer.setHoveredClickId(id, col);
 	}
 
 	clearTransientSessionUi(options?: { viewOnly?: boolean }): void {
@@ -2333,6 +2329,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
+		this.nativeWorkspace = NativeWorkspace.fromEnvironment(this.sessionManager.getCwd());
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings),
@@ -2553,7 +2550,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A TSP terminal has no status strip: the tab title carries the PR.
 		this.statusLine.onNativePullRequest = pr => setTerminalTitlePullRequest(pr?.number);
 		this.terminalActivity = new TerminalActivityController({
-			isProgressEnabled: () => this.settings.get("terminal.showProgress"),
+			isProgressEnabled: () => cfgTerminalShowProgress.get(this.settings),
 			setProgress: active => this.ui.terminal.setProgress(active),
 			setTitleState: setTerminalTitleState,
 		});
@@ -2596,8 +2593,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
-		this.workspaceEnabled = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
-		if (this.workspaceEnabled) {
+		if (Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport") {
 			this.#mainScrollRoot = new Container();
 			this.#mainStickyRoot = new Container();
 			const mainPane = new MainSessionPane({
@@ -2643,10 +2639,104 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	#mountRuntimeSurface(): void {
+		this.composer.setPreferences({ quiet: this.workspaceEnabled || cfgStartupQuiet.get(settings) });
+		if (this.workspaceEnabled && this.#workspaceLayout) {
+			this.composer.setRuntimeChildren([this.#workspaceLayout], { chrome: "omit" });
+			if (this.#agentRegistrySubscriptionTarget) {
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				for (const ref of registry.list()) this.#autoAgentWorkspace?.handleEvent({ type: "registered", ref });
+			}
+			return;
+		}
+		const workspace = this.#workspaceLayout;
+		if (workspace) {
+			this.#autoAgentWorkspace?.reset();
+			const mainFocus = this.editorContainer.children[0] ?? this.editor;
+			for (const overlay of this.ui.overlayStack) {
+				if (overlay.preFocus && workspace.containsComponent(overlay.preFocus)) overlay.preFocus = mainFocus;
+			}
+			this.#workspacePanes?.focusMain();
+		}
+		this.composer.setRuntimeChildren(
+			[
+				this.chatContainer,
+				this.pendingShellContainer,
+				this.pendingMessagesContainer,
+				this.todoContainer,
+				this.subagentContainer,
+				this.btwContainer,
+				this.reportContainer,
+				this.omfgContainer,
+				this.cleanseContainer,
+				this.errorBannerContainer,
+				this.modelCycleContainer,
+				this.deferredCommandContainer,
+				// Judge batches and automatic downloads stay editor-anchored and update
+				// independently of transcript output, directly above the working/throughput/title row.
+				this.progressHudContainer,
+				this.askContainer,
+				// Working loader / transient status sits below the sticky todo + subagent
+				// HUDs, just above the editor's hook-widget top margin — so it reads next to
+				// the prompt while keeping the one-line gap above the editor (the band
+				// composer collapses that gap so its status band sits flush).
+				this.statusContainer,
+				this.attachmentChipsContainer,
+				this.editorTopGapContainer,
+				this.hookWidgetContainerAbove,
+				this.editorContainer,
+				this.hookWidgetContainerBelow,
+			],
+			{
+				// Roots that collapse without transcript output must not raise the post-run floor.
+				transientChrome: [
+					this.editorContainer,
+					this.askContainer,
+					this.attachmentChipsContainer,
+					this.reportContainer,
+					this.pendingShellContainer,
+					this.pendingMessagesContainer,
+					this.btwContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
+				],
+				selfClearingChrome: [
+					this.todoContainer,
+					this.subagentContainer,
+					this.modelCycleContainer,
+					this.progressHudContainer,
+				],
+				billedChrome: [this.statusContainer, this.editorTopGapContainer],
+				// Natively the HUD pills lead the dock. Hook widgets sit over the working
+				// row without the editor spacer. Attachment chips live inside the composer.
+				nativeDock: [
+					new HudPillsRow(this),
+					this.btwContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
+					this.modelCycleContainer,
+					this.deferredCommandContainer,
+					this.progressHudContainer,
+					this.hookWidgetContainerAbove,
+					this.statusContainer,
+					{ component: this.#tray, feature: "tray" },
+					this.pendingMessagesContainer,
+					this.editorContainer,
+					this.hookWidgetContainerBelow,
+				],
+				// Deferred shell output and the inline ask follow the native transcript.
+				nativeTail: [this.pendingShellContainer, this.askContainer],
+			},
+		);
+	}
+
 	#createAgentWorkspaceViewer(
 		agentId: string,
 		close: () => void,
 		registryOverride?: AgentRegistry,
+		ui: TUI = this.ui,
 	): AgentTranscriptViewer {
 		const remote = registryOverride ? undefined : this.collabGuest?.hubRemote;
 		const lifecycle = registryOverride || remote ? undefined : () => AgentLifecycleManager.global();
@@ -2659,9 +2749,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			transcript: agentTranscriptSource,
 			remote,
 			lifecycle,
-			ui: this.ui,
+			ui,
 			getTool: name => this.session.getToolByName(name),
 			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
+			getAssistantThinkingRenderers: () => this.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+			resolveLinks: (texts, cwd) =>
+				resolveAgentTranscriptLinks(
+					registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+					agentId,
+					texts,
+					cwd,
+				),
 			cwd: this.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.proseOnlyThinking,
@@ -2671,11 +2769,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				const session = (registryOverride ?? AgentRegistry.global()).get(id)?.session;
 				return session ? this.statusLine.createPeer(session) : undefined;
 			},
-			getStatusLineTransparent: () => this.settings.get("statusLine.transparent"),
+			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
 			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
 			requestRender: () => {
-				if (viewer) this.ui.requestComponentRender(viewer);
-				else this.ui.requestRender();
+				if (viewer) ui.requestComponentRender(viewer);
+				else ui.requestRender();
 			},
 			onClose: close,
 			onHubToggle: () => this.showAgentHub(),
@@ -2684,7 +2782,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async openAgentWorkspacePane(id: string): Promise<void> {
-		if (!this.#autoAgentWorkspace) {
+		if (this.ui.nativeRendering && this.nativeWorkspace) {
+			this.#nativeAutomaticAgents.delete(id);
+			await this.#openNativeAgentPane(id, false);
+			return;
+		}
+		if (!this.workspaceEnabled || !this.#autoAgentWorkspace) {
 			throw new Error("Agent workspace panes require the app-viewport render backend");
 		}
 		if (!this.#autoAgentWorkspace.openManual(id)) {
@@ -2692,9 +2795,52 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	async #openNativeAgentPane(id: string, automatic: boolean): Promise<void> {
+		const workspace = this.nativeWorkspace!;
+		await workspace.open(
+			`agent:${id}`,
+			id,
+			(ui, close) => this.#createAgentWorkspaceViewer(id, close, undefined, ui),
+			() => {
+				this.#nativeAutomaticAgents.delete(id);
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				if (registry.get(id)?.status === "running") this.#nativeDismissedAgents.add(id);
+			},
+			automatic,
+		);
+	}
+
+	async #handleNativeAgentEvent(event: RegistryEvent): Promise<void> {
+		const workspace = this.nativeWorkspace;
+		const { ref } = event;
+		if (!this.ui.nativeRendering || !workspace || ref.kind !== "sub" || event.type === "metadata_changed") return;
+		const key = `agent:${ref.id}`;
+		workspace.get(key)?.ui.requestRender();
+		if (event.type !== "removed" && ref.status === "running") {
+			const viewer = workspace.get(key)?.component;
+			if (viewer instanceof AgentTranscriptViewer) viewer.cancelAutoClose();
+			if (!workspace.has(key) && !this.#nativeDismissedAgents.has(ref.id)) {
+				this.#nativeAutomaticAgents.add(ref.id);
+				await this.#openNativeAgentPane(ref.id, true);
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				const current = registry.get(ref.id);
+				if (!current) workspace.close(key);
+				else if (current.status !== "running")
+					await this.#handleNativeAgentEvent({ type: "status_changed", ref: current });
+			}
+			return;
+		}
+		this.#nativeDismissedAgents.delete(ref.id);
+		if (!this.#nativeAutomaticAgents.has(ref.id)) return;
+		const viewer = workspace.get(key)?.component;
+		if (!(viewer instanceof AgentTranscriptViewer) || viewer.autoCloseProtected || (await workspace.isFocused(key)))
+			return;
+		viewer.startAutoClose(() => workspace.close(key));
+	}
+
 	previewSubagentExitAnimation(): void {
 		const workspacePanes = this.#workspacePanes;
-		if (!workspacePanes) {
+		if (!this.workspaceEnabled || !workspacePanes) {
 			this.showWarning("Petrification preview requires the app-viewport render backend");
 			return;
 		}
@@ -2731,6 +2877,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	openBtwWorkspacePane(component: Component): boolean {
+		if (!this.workspaceEnabled) return false;
 		return (
 			this.#workspacePanes?.open({
 				key: "btw",
@@ -2748,7 +2895,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	focusMainWorkspacePane(): void {
-		if (!this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
+		if (!this.workspaceEnabled || !this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
 	}
 
 	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
@@ -2779,7 +2926,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	isMainWorkspacePaneFocused(): boolean {
-		return !this.#workspaceLayout || this.#workspaceLayout.focusedPaneId === "main";
+		return !this.workspaceEnabled || this.#workspaceLayout?.focusedPaneId === "main";
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -2841,7 +2988,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	playWelcomeIntro(): void {
-		const welcome = this.#workspaceWelcome;
+		const welcome = this.workspaceEnabled ? this.#workspaceWelcome : undefined;
 		if (welcome) {
 			welcome.playIntro(() => this.ui.requestComponentRender(welcome));
 			return;
@@ -2946,7 +3093,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		});
 
-		if (this.workspaceEnabled) {
+		if (this.#workspaceLayout) {
 			const scrollRoot = this.#mainScrollRoot;
 			const stickyRoot = this.#mainStickyRoot;
 			const workspaceLayout = this.#workspaceLayout;
@@ -2967,122 +3114,34 @@ export class InteractiveMode implements InteractiveModeContext {
 			scrollRoot.addChild(this.todoContainer);
 			scrollRoot.addChild(this.subagentContainer);
 			scrollRoot.addChild(this.btwContainer);
-			scrollRoot.addChild(this.reportContainer);
 			scrollRoot.addChild(this.omfgContainer);
 			scrollRoot.addChild(this.cleanseContainer);
 			scrollRoot.addChild(this.errorBannerContainer);
 			scrollRoot.addChild(this.modelCycleContainer);
 			scrollRoot.addChild(this.deferredCommandContainer);
 			scrollRoot.addChild(this.statusContainer);
-			// Judge batches stay editor-anchored and update independently of eval
-			// transcript output, directly above the working/throughput/title row.
+			stickyRoot.addChild(this.reportContainer);
+			// Judge batches and automatic downloads stay editor-anchored above the working line.
 			stickyRoot.addChild(this.progressHudContainer);
+			stickyRoot.addChild(this.askContainer);
 			stickyRoot.addChild(this.statusLine);
 			stickyRoot.addChild(this.attachmentChipsContainer);
 			stickyRoot.addChild(this.editorTopGapContainer);
 			stickyRoot.addChild(this.hookWidgetContainerAbove);
 			stickyRoot.addChild(this.editorContainer);
 			stickyRoot.addChild(this.hookWidgetContainerBelow);
-			this.composer.setHeaderExtras([], []);
-			this.composer.setRuntimeChildren([workspaceLayout], { chrome: "omit" });
-			if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
-		} else {
-			this.#workspaceWelcome = undefined;
-			this.composer.setHeaderExtras(headerBefore, headerAfter);
-			this.composer.setStatusComponent(this.statusLine);
-			this.composer.setRuntimeChildren([
-				this.chatContainer,
-				this.pendingShellContainer,
-				this.pendingMessagesContainer,
-				this.todoContainer,
-				this.subagentContainer,
-				this.btwContainer,
-				this.reportContainer,
-				this.omfgContainer,
-				this.cleanseContainer,
-				this.errorBannerContainer,
-				this.modelCycleContainer,
-				this.deferredCommandContainer,
-				// Judge batches and automatic downloads stay editor-anchored and update
-				// independently of transcript output, directly above the working/throughput/title row.
-				this.progressHudContainer,
-				// The ask waiting for answers, over the working row and the composer, a blank row under it
-				// (natively it flows at the transcript's end).
-				this.askContainer,
-				// Working loader / transient status sits below the sticky todo + subagent
-				// HUDs, just above the editor's hook-widget top margin — so it reads next to
-				// the prompt while keeping the one-line gap above the editor (the band
-				// composer collapses that gap so its status band sits flush).
-				this.statusContainer,
-				this.attachmentChipsContainer,
-				this.editorTopGapContainer,
-				this.hookWidgetContainerAbove,
-				this.editorContainer,
-				this.hookWidgetContainerBelow,
-			],
-			{
-				// Roots that collapse without new transcript output must not raise the
-				// post-run chrome floor: user-driven ones (editor drafts, dialogs and
-				// selectors, staged attachments, reports, queued messages, dismissible
-				// panels and the error banner). Any root listed in neither set counts
-				// as persistent: once it holds its height after a run the floor rises
-				// to it, and its later collapse floats the editor until output fills
-				// in. Classify every new root that can collapse on its own.
-				transientChrome: [
-					this.editorContainer,
-					this.askContainer,
-					this.attachmentChipsContainer,
-					this.reportContainer,
-					this.pendingShellContainer,
-					this.pendingMessagesContainer,
-					this.btwContainer,
-					this.omfgContainer,
-					this.cleanseContainer,
-					this.errorBannerContainer,
-				],
-				// HUDs that clear themselves on a timer or registry change (todos,
-				// background subagents, model cycle, progress). Their first paint can be
-				// their tallest (a restored todo list on resume), so it is never a baseline.
-				selfClearingChrome: [
-					this.todoContainer,
-					this.subagentContainer,
-					this.modelCycleContainer,
-					this.progressHudContainer,
-				],
-				// The working row, the idle status line that replaces it, and the
-				// margin above the editor (the band composer's gap opens when that
-				// row empties; a spacer replaces it over hook widgets): billed at
-				// their current height so streamed rows reach native history as
-				// they leave the screen.
-				billedChrome: [this.statusContainer, this.editorTopGapContainer],
-				// Natively the HUD pills lead the dock, aboveEditor hook widgets sit
-				// over the working row (the tray's header, so nothing comes between
-				// the two), queued messages sit between the working row and the
-				// composer, and the attachment chips live inside the composer. The
-				// terminal spaces the dock itself, so the editor's top margin stays out.
-				nativeDock: [
-					new HudPillsRow(this),
-					this.btwContainer,
-					this.omfgContainer,
-					this.cleanseContainer,
-					this.errorBannerContainer,
-					this.modelCycleContainer,
-					this.deferredCommandContainer,
-					this.progressHudContainer,
-					this.hookWidgetContainerAbove,
-					this.statusContainer,
-					{ component: this.#tray, feature: "tray" },
-					this.pendingMessagesContainer,
-					this.editorContainer,
-					this.hookWidgetContainerBelow,
-				],
-				// Deferred shell runs are transcript output: natively they flow at its
-				// end, where they stay when they move in, not pinned over the composer.
-				// An ask waiting for answers follows them, right above the composer.
-				nativeTail: [this.pendingShellContainer, this.askContainer],
-			},
-		);
 		}
+		this.composer.setHeaderExtras(headerBefore, headerAfter);
+		this.composer.setStatusComponent(this.statusLine);
+		this.#mountRuntimeSurface();
+		this.#eventBusUnsubscribers.push(
+			this.ui.onNativeRenderingChange(() => {
+				this.#btwController.closeView();
+				if (!this.ui.nativeRendering) this.nativeWorkspace?.dispose();
+				this.#mountRuntimeSurface();
+			}),
+		);
+		if (this.workspaceEnabled && !options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 
@@ -4748,7 +4807,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
 		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {
 			this.hideToolActivity = hideToolActivity;
-			if (!hideToolActivity) this.toolOutputExpanded = false;
+			if (!hideToolActivity) {
+				this.toolOutputExpanded = false;
+				this.chatContainer.setExpanded(false);
+			}
 			for (const child of this.chatContainer.children) {
 				if (
 					!hideToolActivity &&
@@ -5296,14 +5358,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#agentRegistrySubscriptionTarget !== registry || this.#autoAgentWorkspaceSessionId !== sessionId) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#autoAgentWorkspace?.reset();
+			this.nativeWorkspace?.dispose();
+			this.#nativeAutomaticAgents.clear();
+			this.#nativeDismissedAgents.clear();
 			this.#autoAgentWorkspaceSessionId = sessionId;
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				// Restoring a roster emits one event per agent. Rebuild the badge and
 				// lists once per burst through the observer scheduler.
 				this.#scheduleObserverUiSync();
-				this.#autoAgentWorkspace?.handleEvent(event);
+				if (this.workspaceEnabled) this.#autoAgentWorkspace?.handleEvent(event);
+				void this.#handleNativeAgentEvent(event).catch(error =>
+					this.showError(`Native agent pane failed: ${toError(error).message}`),
+				);
 			});
+			if (this.ui.nativeRendering && this.nativeWorkspace) {
+				for (const ref of registry.list()) {
+					void this.#handleNativeAgentEvent({ type: "registered", ref }).catch(error =>
+						this.showError(`Native agent pane failed: ${toError(error).message}`),
+					);
+				}
+			}
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
@@ -5419,9 +5494,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their UI components while keeping the `streamingComponent` / `pendingTools`
 		// references — subsequent `message_update`/`message_end` events would then
 		// update orphaned components that never re-render and the live LLM output
-		// vanishes from the chat (#3656). Snapshot the in-flight components,
-		// clear+replay, then re-append them in their original chat-container order
-		// and restore the `pendingTools` map so streaming routes back into them.
+		// vanishes from the chat (#3656). Preserve live handles, replay them at
+		// their call sites, then restore update routing.
 		const liveComponents: Component[] = [];
 		const livePendingTools = new Map<string, ToolExecutionHandle>();
 		if (this.viewSession?.isStreaming) {
@@ -5447,60 +5521,53 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
+			keepDanglingToolCalls: this.viewSession.isStreaming,
 		});
-		const preservedLiveToolCallIds = new Set<string>();
-		// A preserved pending-tool component whose result has already landed in
-		// the replayed transcript is re-rendered by `renderSessionContext` itself
-		// (the toolResult message reconstructs the block with its output). Keeping
-		// it in the live set too re-appends a second identical block below the
-		// replayed one — the tool call renders twice (#6516). The preservation
-		// above assumes every pending-tool component is still dangling (its result
-		// lives outside `state.messages`), which stops holding the instant the
-		// result is persisted while the component lingers in `pendingTools` (a
-		// rebuild racing tool-completion, a background/displaceable snapshot).
-		// Drop the already-resolved ones and let the replay own them; only
-		// genuinely in-flight (dangling, replay-stripped) calls still need
-		// preserving.
+		const preservedLiveTools = new Map(livePendingTools);
+		// Terminal results belong to replay; a background task's initial running
+		// snapshot must not replace its live card (#6516).
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
-			const resolved = livePendingTools.get(message.toolCallId);
-			if (!resolved) continue;
-			// A background job call's initial `async.state === "running"` result is
-			// persisted while `EventController#handleToolExecutionEnd` deliberately
-			// keeps its component in `pendingTools` so a later
-			// `tool_execution_update`/`_end` settles it. Such a handle is still
-			// live — dropping it would strand those updates on the running snapshot
-			// — so keep it and let the live component retain ownership; only
-			// terminal results are owned by the replay. (Cast mirrors the async
-			// detail reads in tool-execution.ts / event-controller.ts.)
+			if (!livePendingTools.has(message.toolCallId)) continue;
 			const details = message.details as { async?: { state?: string } } | undefined;
-			if (details?.async?.state === "running") {
-				preservedLiveToolCallIds.add(message.toolCallId);
-				continue;
-			}
-			livePendingTools.delete(message.toolCallId);
-			// A `ReadToolGroupComponent` is shared by every read id it renders
-			// (ui-helpers sets the same group for each collapsed read call). While a
-			// sibling read id still points at it the component must stay on screen
-			// and preserved — splicing it here would detach the pending read's
-			// display and strand its future result on an off-screen component.
-			// Splice only once no remaining pending id shares it.
-			let stillShared = false;
-			for (const other of livePendingTools.values()) {
-				if (other === resolved) {
-					stillShared = true;
-					break;
+			if (details?.async?.state !== "running") livePendingTools.delete(message.toolCallId);
+		}
+		// A shared read group stays live while any member is pending. Keep its
+		// completed members in the display map, but not in update routing.
+		const liveToolComponents = new Set(livePendingTools.values());
+		for (const [id, component] of preservedLiveTools) {
+			if (liveToolComponents.has(component)) continue;
+			preservedLiveTools.delete(id);
+			const index = liveComponents.indexOf(component);
+			if (index >= 0) liveComponents.splice(index, 1);
+		}
+
+		// Calls folded out of display history still precede its retained tail.
+		// Use the journal boundary rather than treating every unplaced live
+		// component (including an uncommitted response) as pre-compaction.
+		if (preservedLiveTools.size > 0 && context.messages.some(message => message.role === "compactionSummary")) {
+			const replayedCallIds = new Set<string>();
+			for (const message of context.messages) {
+				if (message.role !== "assistant") continue;
+				for (const content of message.content) {
+					if (content.type === "toolCall") replayedCallIds.add(content.id);
 				}
 			}
-			if (stillShared) {
-				// The shared component still owns this completed member as well as
-				// its pending sibling. Suppress the replay copy so the group remains
-				// a single on-screen block while future results keep routing to it.
-				preservedLiveToolCallIds.add(message.toolCallId);
-				continue;
+			const branch = this.viewSession.sessionManager.getBranch();
+			const compactionIndex = branch.findLastIndex(entry => entry.type === "compaction");
+			const compactedTools = new Set<Component>();
+			for (let index = 0; index < compactionIndex; index++) {
+				const entry = branch[index];
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				for (const content of entry.message.content) {
+					if (content.type !== "toolCall" || replayedCallIds.has(content.id)) continue;
+					const component = preservedLiveTools.get(content.id);
+					if (component) compactedTools.add(component);
+				}
 			}
-			const index = liveComponents.indexOf(resolved as unknown as Component);
-			if (index >= 0) liveComponents.splice(index, 1);
+			for (const component of liveComponents) {
+				if (compactedTools.has(component)) this.chatContainer.addChild(component);
+			}
 		}
 		// Prune the settled-component cache to the messages this rebuild will
 		// actually render. Message objects stay strongly reachable through
@@ -5515,16 +5582,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.transcriptMessageComponents = retained;
 		this.renderSessionContext(context, {
 			reuseSettledComponents: options.reuseSettledComponents,
-			preservedLiveToolCallIds,
+			preservedLiveTools,
 		});
+		const placedComponents = new Set(this.chatContainer.children);
 		for (const child of liveComponents) {
-			this.chatContainer.addChild(child);
+			if (!placedComponents.has(child)) this.chatContainer.addChild(child);
 		}
-		// `renderSessionContext` clears `pendingTools` at start AND end so the
-		// reconstructed historical tool components don't leak into live tracking.
-		// Restore the in-flight entries afterwards so the next streamed tool-call
-		// delta is routed into the preserved component instead of stacking a
-		// duplicate ToolExecutionComponent below it.
+		// Restore only pending ids; completed members of a shared card remain
+		// display-only, and subsequent progress still targets the original handle.
 		for (const [id, component] of livePendingTools) {
 			this.pendingTools.set(id, component);
 		}
@@ -8650,6 +8715,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#closeAttempt?.abort();
 		this.syncIdleMaintenanceView(null);
 		this.#hidePlanReview();
+		this.#btwController.closeView();
+		this.nativeWorkspace?.dispose();
+		this.#nativeAutomaticAgents.clear();
+		this.#nativeDismissedAgents.clear();
 		this.#appearanceRefreshRequest = undefined;
 		// Settle any pending approval prompt as dismissed (deny). The
 		// controller stays aborted: approvals still queued behind the approval
@@ -9629,13 +9698,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.isKnownSlashCommand(text);
 	}
 
-	addMessageToChat(
-		message: AgentMessage,
-		options?: {
-			imageLinks?: readonly (string | undefined)[];
-			reuseSettledComponent?: boolean;
-		},
-	): Component[] {
+	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
 		return this.#uiHelpers.addMessageToChat(message, options);
 	}
 
@@ -9840,6 +9903,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#cleanseController.dispose();
 		}
 		await this.#commandController.handleForkCommand(placement);
+	}
+
+	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
+		return this.#btwController.withSessionMove(operation);
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {
@@ -10225,6 +10292,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#inputController.waitForSubmissionDispatches();
 	}
 
+	handleQueuedMessageEdit(
+		edit: (beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>,
+	): Promise<void> {
+		return this.#inputController.handleQueuedMessageEdit(edit);
+	}
+
 	handleImagePaste(): Promise<boolean> {
 		return this.#inputController.handleImagePaste();
 	}
@@ -10374,6 +10447,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	commandReportRows(): number | undefined {
+		const pane = this.#workspaceLayout?.frame?.panes.get("main");
+		if (pane && this.#mainStickyRoot) {
+			let below = 0;
+			for (const child of this.#mainStickyRoot.children) {
+				if (child !== this.reportContainer) below += measureComponentRows(child, pane.width);
+			}
+			return Math.max(1, pane.height - 1 - below);
+		}
 		const below = this.composer.rowsBelow(this.reportContainer);
 		return below === undefined ? undefined : this.ui.terminal.rows - below;
 	}

@@ -3,6 +3,14 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import type { OutputMeta } from "../tools/output-meta";
 import type { BranchSummaryMessage, CompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
+import type { IrcMessage } from "../tools/irc";
+
+declare module "@oh-my-pi/pi-ai/types" {
+	interface UserMessage {
+		/** Original IRC source of a parent steer; presentation does not change its model content. */
+		irc?: IrcMessage;
+	}
+}
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface CustomAgentMessages {
@@ -34,6 +42,22 @@ export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
 
 /** Custom message carrying a coding request delegated by the live voice model. */
 export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
+
+/** Summaries delivered from BTW threads to the main session. */
+export const BTW_SUMMARY_MESSAGE_TYPE = "btw:summary";
+
+export interface BtwSummarySource {
+	threadKey: string;
+	threadTitle: string;
+}
+
+export interface BtwSummary extends BtwSummarySource {
+	summary: string;
+}
+
+export interface BtwSummaryMessageDetails {
+	summaries: BtwSummary[];
+}
 
 /** Content shape accepted for extension-injected messages. */
 export type CustomMessageContent = string | (TextContent | MediaContent)[];

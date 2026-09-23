@@ -179,7 +179,8 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } from "../extensibility/extensions";
-import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
+import { cloneMessageNotification, extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
+import { BtwExtensionRuntime } from "./btw-extension-runtime";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
@@ -288,7 +289,6 @@ import {
 	revokeComputerControlForOwner,
 } from "../tools/computer/supervisor";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
-import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	buildResolveReminderMessage,
@@ -482,6 +482,7 @@ import {
 	SILENT_ABORT_MARKER,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	sanitizeEphemeralAssistantForPromotion,
+	sanitizeAssistantForReparentedHistory,
 	USER_INTERRUPT_LABEL,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
@@ -12012,6 +12013,60 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
+	/**
+	 * Capture one displayed message's identity for an Edit control. A stale control
+	 * cannot take a different duplicate or a message already recorded in the transcript.
+	 * Pending edits leave the run alone; live steering requires stopping the response
+	 * that already received it, not pretending that provider input can be unsent.
+	 * `beforeInterrupt` pauses the composer's loop before the live response stops.
+	 */
+	getQueuedMessageEditAction(
+		queue: "steering" | "followUp",
+		index: number,
+	): ((beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>) | undefined {
+		const messages =
+			queue === "steering"
+				? [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
+				: this.agent.peekFollowUpQueue();
+		const message = messages.filter(isUserAuthoredQueuedMessage)[index];
+		if (!message) return undefined;
+		return beforeInterrupt => this.#editQueuedMessage(message, queue, beforeInterrupt);
+	}
+
+	async #editQueuedMessage(
+		message: AgentMessage,
+		queue: "steering" | "followUp",
+		beforeInterrupt?: () => void,
+	): Promise<RestoredQueuedMessage | undefined> {
+		const pending = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
+		const index = pending.indexOf(message);
+		const restored = toRestoredQueuedMessage(message);
+		restored.text = this.#queuedMessageRawText.get(message) ?? restored.text;
+		if (index >= 0) {
+			this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(pending, index));
+			this.#reconcileQueuedMessageDrain();
+			return restored;
+		}
+		if (queue !== "steering" || !this.agent.peekLiveSteeredMessages().includes(message)) return undefined;
+		beforeInterrupt?.();
+
+		// Withdraw before abort so neither the aborted transcript nor its requeue
+		// commits the selected message. Other undelivered input returns to its
+		// original queue, and remains pending until the user explicitly resumes.
+		this.#modeExitDrainSuppressionDepth++;
+		try {
+			const withdrawn = this.agent.withdrawUndeliveredQueuedMessages();
+			const steering = [...withdrawn.steering, ...this.agent.peekSteeringQueue()];
+			const followUp = [...withdrawn.followUp, ...this.agent.peekFollowUpQueue()];
+			this.agent.replaceQueues(this.#withoutQueuedUserMessage(steering, steering.indexOf(message)), followUp);
+			await this.abort({ reason: USER_INTERRUPT_LABEL });
+			return restored;
+		} finally {
+			this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
+			this.#modeExitDrainSuppressionDepth--;
+		}
+	}
+
 	/** Last {@link getQueuedMessages} snapshot emitted as a `queue_update` event.
 	 *  Coalesces the agent's internal `onQueueChange` notification down to the
 	 *  externally observable transitions RPC/ACP/TUI subscribers actually care
@@ -14551,8 +14606,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * session's history is NOT modified by this call (a snapcompact archive's
 	 * no-reasoning view may be stored on its compaction entry).
 	 *
-	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
-	 * the snapshot + stream pipeline. The snapshot includes any in-flight
+	 * Used by extensions, idle recaps, and `OmfgController` (`/omfg`). Durable
+	 * BTW threads use `createEphemeralConversation` instead. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
 	 */
@@ -14565,6 +14620,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const sessionGeneration = this.#sessionGeneration;
 		const assertEphemeralTurnReady = () => {
 			args.signal?.throwIfAborted();
+			if (this.#isDisposed) throw new Error("Session disposed during ephemeral turn.");
 			// The side request must use the exact model snapshot captured above.
 			// `modelsAreEqual` intentionally compares only provider/id, while a
 			// replacement with that same identity can still change routing and wire
@@ -14676,7 +14732,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// conversation state with the main agent turn: IRC and /btw can run
 				// while the main turn is mid-tool-call. Keep the prompt-cache key
 				// stable, but isolate provider routing from the main conversation.
-				// Serialized BTW follow-ups reuse a topic-specific lineage; standalone
+				// Serialized follow-ups reuse a topic-specific lineage; standalone
 				// side requests retain their unique request lineage.
 				sessionId: sideSessionId,
 				// Request controls (OpenAI effort updates) still replay the main
@@ -14748,7 +14804,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					reportUsage(event.error);
 					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
 				}
-
 			}
 		} catch (error) {
 			streamAbort.abort();
@@ -14783,6 +14838,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
+	async #prepareSideHistory(history: readonly Message[], signal?: AbortSignal): Promise<AgentMessage[]> {
+		const prepared: AgentMessage[] = [];
+		for (const message of history) {
+			const normalized = await this.#normalizeAgentMessageImages(message);
+			const images =
+				normalized.role === "user" && Array.isArray(normalized.content)
+					? normalized.content.filter((part): part is ImageContent => part.type === "image")
+					: [];
+			const notice = images.length > 0 ? await this.#buildImageDescriptionNotice(images, signal) : undefined;
+			if (notice) prepared.push(notice);
+			prepared.push(normalized);
+		}
+		return prepared;
+	}
+
 	/**
 	 * Create an independent multi-turn conversation whose main-session context
 	 * is snapshotted on its first prompt. Provider routing remains stable while
@@ -14805,32 +14875,35 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: undefined;
 		const cacheSessionId = this.sessionId;
 		const sideSessionId = checkpoint?.sideSessionId ?? `${cacheSessionId}:side:${Snowflake.next()}`;
+		const mainTools = [...this.agent.state.tools];
+		let sideRuntime: BtwExtensionRuntime | undefined;
 		const child = this.agent.createChild({
 			initialState: {
 				model,
 				messages: [],
-				...(shareSummaryWithMainTool ? { tools: [...this.agent.state.tools, shareSummaryWithMainTool] } : {}),
+				tools: [],
 			},
 			sessionId: sideSessionId,
-			promptCacheKey: cacheSessionId,
+			promptCacheKey: this.agent.promptCacheKey ?? cacheSessionId,
 			streamFn: this.#sideStreamFn,
 			convertToLlm: this.#convertToLlm,
 			transformContext: async (messages, signal) => this.#transformContext(messages, signal),
-			// The side transcript renders its own restricted tool set. Its lifecycle
-			// never reaches Main's EventController, so waiting on Main's approval
-			// preview gate would deadlock before the interactive prompt can open.
-			transformToolContext: context => (context ? { ...context, toolApprovalPreview: "never" as const } : context),
+			// Side tools must never inherit Main's tool execution context. The
+			// explicit runtime supplies its own manager, restricted registry and UI.
+			transformToolContext: (_context, toolCall) => sideRuntime?.createToolContext(toolCall),
+			resolveFallbackTool: null,
 			providerSessionState: this.#providerSessionState,
 			getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
-			preferWebsockets: this.#preferWebsockets,
+			preferWebsockets: this.preferWebsockets,
 			serviceTier: this.#models.effectiveServiceTier(model),
 			beforeToolCall: ctx => {
-				if (readOnlyTools && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args)) return undefined;
+				if (readOnlyTools && sideRuntime && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args))
+					return undefined;
 				if (shareSummaryWithMainTool && ctx.toolCall.name === SHARE_SUMMARY_WITH_MAIN_TOOL_NAME) {
-					return this.#extensionRunner
+					return sideRuntime?.runner.hasUI()
 						? undefined
 						: { block: true, reason: "shareSummaryWithMain requires interactive user approval." };
 				}
@@ -14844,9 +14917,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const createCapabilityReminder = readOnlyTools
 			? createSideChannelReadonlyMessage
 			: createSideChannelNoToolsMessage;
-		return new EphemeralConversation({
+		const conversation = new EphemeralConversation({
 			snapshotBaseMessages: () => {
-				const baseMessages = this.#buildEphemeralBaseSnapshot();
+				const baseMessages = this.#buildEphemeralBaseSnapshot().map(message =>
+					readOnlyTools ? cloneMessageNotification(message) : message,
+				);
 				baseMessages.push({
 					role: "developer",
 					content: [{ type: "text", text: instructions }],
@@ -14857,6 +14932,38 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			checkpoint,
 			getTool: name => child.state.tools.find(tool => tool.name === name),
+			createExtensionRuntime: readOnlyTools
+				? async () => {
+						if (
+							!this.#preparedExtensions &&
+							((this.#extensionPaths?.length ?? 0) > 0 ||
+								(this.#extensionRunner?.getExtensionPaths?.().length ?? 0) > 0)
+						) {
+							throw new Error("BTW cannot bind Main extensions without prepared factories");
+						}
+						const toolInfos = this.getAllToolInfos();
+						const runtime = await BtwExtensionRuntime.create({
+							agent: child,
+							mainTools,
+							availableTools: toolInfos
+								.map(info => this.#tools.getToolByName(info.name))
+								.filter((tool): tool is AgentTool => tool !== undefined),
+							mountedNames: this.#tools.getMountedXdevToolNames(),
+							preparedExtensions: this.#preparedExtensions ?? [],
+							modelRegistry: this.#modelRegistry,
+							settings: this.settings,
+							cwd: this.sessionManager.getCwd(),
+							toolInfos,
+							isReadOnlyToolCall: (tool, args) => this.#tools.isReadOnlySideToolCall(tool, args),
+							shareSummaryTool: shareSummaryWithMainTool,
+							approveSummary: options?.approveSummary,
+							approvalUI: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
+						});
+						child.setTools(runtime.tools);
+						sideRuntime = runtime;
+						return runtime;
+					}
+				: undefined,
 			turnPrefixMessages: () => [createCapabilityReminder()],
 			getRuntimeState: () => ({
 				model: child.state.model,
@@ -14864,9 +14971,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				isStreaming: child.state.isStreaming,
 				streamMessage: child.state.streamMessage?.role === "assistant" ? child.state.streamMessage : null,
 			}),
-			runTurn: (messages, options) => this.#runEphemeralConversationTurn(child, messages, options),
+			runTurn: async (messages, turnOptions) => {
+				await conversation.waitForExtensionRuntimeInitialization();
+				try {
+					return await this.#runEphemeralConversationTurn(child, messages, turnOptions);
+				} finally {
+					await sideRuntime?.settleEvents();
+				}
+			},
 			sideSessionId,
 		});
+		return conversation;
 	}
 
 	async #runEphemeralConversationTurn(
@@ -14928,7 +15043,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				args.onTextDelta(replyText.slice(emittedReplyText.length));
 			}
 			return {
-				replyText: args.dedupeReply === false ? replyText : dedupeEphemeralReply(replyText),
+				replyText: args.dedupeReply === false ? replyText : dedupeEphemeralReply(replyText, args.replyMaxBytes),
 				assistantMessage,
 				intermediateMessages: turnMessages.slice(0, finalIndex),
 			};
@@ -14939,21 +15054,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			unsubscribe();
 			args.signal?.removeEventListener("abort", abortChild);
 		}
-	}
-
-	async #prepareSideHistory(history: readonly Message[], signal?: AbortSignal): Promise<AgentMessage[]> {
-		const prepared: AgentMessage[] = [];
-		for (const message of history) {
-			const normalized = await this.#normalizeAgentMessageImages(message);
-			const images =
-				normalized.role === "user" && Array.isArray(normalized.content)
-					? normalized.content.filter((part): part is ImageContent => part.type === "image")
-					: [];
-			const notice = images.length > 0 ? await this.#buildImageDescriptionNotice(images, signal) : undefined;
-			if (notice) prepared.push(notice);
-			prepared.push(normalized);
-		}
-		return prepared;
 	}
 
 	/**
@@ -15670,7 +15770,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			throw new Error("Cannot promote BTW: frozen anchor no longer exists");
 		}
 
-		this.#assertIdleForSnapshot("branch /btw");
+		this.#assertIdleForSnapshot("promote BTW");
 
 		if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -15699,7 +15799,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			POST_PROMPT_DRAIN_TIMEOUT_MS,
 			"Timed out draining post-prompt tasks before BTW promotion",
 		);
-		this.#assertIdleForSnapshot("branch /btw");
+		this.#assertIdleForSnapshot("promote BTW");
 
 		this.#pendingNextTurnMessages = [];
 		this.#pendingExcludedRows = [];
@@ -15727,8 +15827,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 				// Invalidate prompts admitted during the pre-branch awaits.
 				this.#promptGeneration++;
-				lifecycle?.prepare();
 				promotionPrepared = lifecycle !== undefined;
+				await lifecycle?.prepare();
 				if (promotionPrepared) await this.sessionManager.flush();
 				this.sessionManager.createBranchedSession(anchorLeafId);
 				this.#bash.markSessionTransition(bashTransition);
@@ -15736,7 +15836,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				sessionTransitioned = true;
 			} catch (error) {
 				if (promotionPrepared && !sessionTransitioned) {
-					lifecycle?.rollback();
+					await lifecycle?.rollback();
 					await this.sessionManager.flush();
 				}
 				throw error;

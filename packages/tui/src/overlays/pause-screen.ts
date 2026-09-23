@@ -179,6 +179,7 @@ export function renderPauseScreen(
 			if (content.length < screenHeight) content.push(titleLine);
 			if (content.length < screenHeight) content.push(clockLine);
 		}
+
 	} else {
 		if (sessionName) {
 			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());
@@ -243,8 +244,9 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 			if (statusChanged || !isNativeRendering()) this.host.ui.requestRender();
 		}, TICK_MS);
 		this.#unsubWaiters = agentPauseGate.onWaitersChange(() => {
+			if (this.#disposed) return;
 			this.#native = undefined;
-			if (!this.#disposed) this.host.ui.requestRender();
+			this.host.ui.requestRender();
 		});
 		this.host.ui.requestRender();
 		return this.#done.promise;
@@ -416,8 +418,24 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 				keyed(hero, "hero"),
 				keyed(status, "settlement-status"),
 				keyed(facts, "facts"),
+				text(
+					[
+						span(
+							agentPauseGate.ready ? "Ready to exit paused" : "Waiting for the model boundary",
+							agentPauseGate.ready ? "success" : "warning",
+						),
+						span(
+							` · ${agentPauseGate.modelWaiterCount}/${agentPauseGate.activeLoopCount} agent loops parked`,
+							"dim",
+						),
+					],
+					{ wrap: "word" },
+				),
 				actionBar([
 					null,
+					...(agentPauseGate.ready
+						? [actionButton("Exit paused", "exit", { keys: "q", title: "Exit paused; resume later with /continue" })]
+						: []),
 					actionButton("Resume", "resume", {
 						keys: resumeKey,
 						tone: "accent",
@@ -431,9 +449,11 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 		return this.#native;
 	}
 
-	/** Resume runs what Esc/Enter/Space run. */
+	/** Pointer actions follow the same barrier and outcome rules as keys. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "resume") this.handleInput("\r");
+		if (event.type !== "action") return;
+		if (event.act === "resume") this.handleInput("\r");
+		else if (event.act === "exit") this.handleInput("q");
 	}
 
 	render(width: number): readonly string[] {
