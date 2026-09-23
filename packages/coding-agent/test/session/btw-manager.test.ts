@@ -4,14 +4,11 @@ import type { Api, AssistantMessage, ImageContent, Model, ModelSpec, Usage } fro
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { BtwManager, type BtwManagerOptions } from "@oh-my-pi/pi-coding-agent/session/btw-manager";
-import {
-	BTW_THREAD_CUSTOM_TYPE,
-	type BtwThreadEvent,
-	type BtwThreadModelRef,
-	restoreBtwThreads,
-} from "@oh-my-pi/pi-coding-agent/session/btw-thread";
+import { BtwHistoryStore, type BtwHistoryRecord } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import { BtwManager, type BtwManagerOptions, type BtwThread } from "@oh-my-pi/pi-coding-agent/session/btw-manager";
+import type { BtwThreadEvent, BtwThreadModelRef } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
 import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
@@ -19,8 +16,8 @@ import {
 	type EphemeralTurnResult,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { BTW_SUMMARY_MESSAGE_TYPE, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const MODEL: BtwThreadModelRef = { provider: "anthropic", id: "claude-sonnet-4-5" };
 const usage: Usage = {
@@ -66,15 +63,58 @@ function immediateConversation(checkpoint?: EphemeralConversationCheckpoint): Ep
 	});
 }
 
-function journalEntries(events: readonly BtwThreadEvent[]): CustomEntry<BtwThreadEvent>[] {
-	return events.map((data, index) => ({
-		type: "custom",
-		customType: BTW_THREAD_CUSTOM_TYPE,
-		data,
-		id: `event-${index + 1}`,
-		parentId: "main-leaf",
-		timestamp: new Date(index * 1_000).toISOString(),
-	}));
+function historyRecord(thread: BtwThread): BtwHistoryRecord {
+	const checkpoint = thread.conversation.checkpoint();
+	if (!checkpoint.baseMessages) throw new Error("BTW thread has no frozen Main snapshot");
+	return {
+		version: 1,
+		id: thread.key,
+		title: thread.title,
+		createdAt: thread.createdAt,
+		anchorLeafId: thread.anchorLeafId,
+		model: thread.model,
+		sideSessionId: checkpoint.sideSessionId,
+		baseMessages: checkpoint.baseMessages,
+		turns: checkpoint.turns,
+		draft: thread.draft,
+		draftImages: thread.draftImages,
+		draftImageLinks: thread.draftImageLinks,
+		readThrough: thread.readThrough,
+		phase: thread.phase,
+		error: thread.error,
+		pausedRequest:
+			thread.phase === "running" && thread.request
+				? { input: thread.request.input, images: thread.request.images, timestamp: thread.request.timestamp }
+				: thread.pausedRequest,
+	};
+}
+
+function storedManager(
+	store: BtwHistoryStore,
+	options: Omit<BtwManagerOptions, "restoredThreads" | "appendEvent" | "flushEvents">,
+): BtwManager {
+	const restoredThreads = [...store.getRecords()]
+		.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+		.map(({ id, version: _version, phase, ...record }) => {
+			if (phase === "running") throw new Error(`BTW history ${id} was not recovered`);
+			return structuredClone({ ...record, key: id, phase });
+		});
+	const manager = new BtwManager({
+		...options,
+		restoredThreads,
+		appendEvent: event => {
+			if (event.op === "remove") {
+				void store.remove(event.key);
+				return;
+			}
+			const thread = manager.thread(event.key);
+			if (!thread) throw new Error(`Unknown BTW thread: ${event.key}`);
+			void store.upsert(historyRecord(thread));
+		},
+		flushEvents: () => store.flush(),
+		closeEvents: () => store.close(),
+	});
+	return manager;
 }
 
 describe("BtwManager", () => {
@@ -124,13 +164,11 @@ describe("BtwManager", () => {
 	});
 
 	it("restores an unprompted thread with its creation-time context and keeps that context across completed turns", async () => {
-		const events: BtwThreadEvent[] = [];
+		const store = await BtwHistoryStore.open(undefined);
 		const mainMessages: AgentMessage[] = [{ role: "user", content: "Original Main context", timestamp: 1 }];
 		const requests: AgentMessage[][] = [];
 		const restore = () =>
-			new BtwManager({
-				entries: journalEntries(JSON.parse(JSON.stringify(events)) as BtwThreadEvent[]),
-				appendEvent: event => events.push(event),
+			storedManager(store, {
 				createConversation: (_model, checkpoint) =>
 					new EphemeralConversation({
 						snapshotBaseMessages: () => structuredClone(mainMessages),
@@ -147,6 +185,7 @@ describe("BtwManager", () => {
 			});
 		const manager = restore();
 		const key = manager.createChild("Why?", "anchor-1", MODEL);
+		await store.flush();
 		mainMessages.push({ role: "user", content: "Later Main context", timestamp: 2 });
 
 		const beforeFirstTurn = restore();
@@ -156,6 +195,7 @@ describe("BtwManager", () => {
 			"Why?",
 		]);
 
+		await store.flush();
 		const afterFirstTurn = restore();
 		await afterFirstTurn.prompt(key, "Follow up");
 		expect(requests[1]?.filter(message => message.role === "user").map(userText)).toEqual([
@@ -175,7 +215,7 @@ describe("BtwManager", () => {
 		const pending = new Map<string, PromiseWithResolvers<EphemeralTurnResult>>();
 		let sequence = 0;
 		const manager = new BtwManager({
-			entries: [],
+			restoredThreads: [],
 			appendEvent: () => {},
 			createConversation: (_model, checkpoint) =>
 				new EphemeralConversation({
@@ -197,7 +237,9 @@ describe("BtwManager", () => {
 		const second = manager.createChild("Second", "anchor-1", MODEL);
 		const firstInitial = manager.prompt(first, "First");
 		const secondInitial = manager.prompt(second, "Second");
-		await Promise.resolve();
+		for (let attempt = 0; attempt < 100 && !pending.has("Second"); attempt++) await Promise.resolve();
+		expect(pending.has("First")).toBe(true);
+		expect(pending.has("Second")).toBe(true);
 		expect(manager.thread(first)?.phase).toBe("running");
 		expect(manager.thread(second)?.phase).toBe("running");
 		pending.get("Second")?.resolve({ replyText: "two", assistantMessage: assistant("two") });
@@ -211,7 +253,9 @@ describe("BtwManager", () => {
 
 		const firstRun = manager.prompt(first, "A");
 		const secondRun = manager.prompt(second, "B");
-		await Promise.resolve();
+		for (let attempt = 0; attempt < 100 && !pending.has("B"); attempt++) await Promise.resolve();
+		expect(pending.has("A")).toBe(true);
+		expect(pending.has("B")).toBe(true);
 		expect(manager.thread(first)).toMatchObject({ phase: "running", draft: "" });
 		expect(manager.thread(second)).toMatchObject({ phase: "running", draft: "" });
 		pending.get("B")?.resolve({ replyText: "bee", assistantMessage: assistant("bee") });
@@ -231,7 +275,7 @@ describe("BtwManager", () => {
 		const firstImage: ImageContent = { type: "image", data: "Zmlyc3Q=", mimeType: "image/png" };
 		const secondImage: ImageContent = { type: "image", data: "c2Vjb25k", mimeType: "image/png" };
 		const mainMessages: AgentMessage[] = [{ role: "user", content: "Main context", timestamp: 1 }];
-		const events: BtwThreadEvent[] = [];
+		const store = await BtwHistoryStore.open(undefined);
 		const requests: AgentMessage[][] = [];
 		let sequence = 0;
 		const createConversation = (_model: BtwThreadModelRef, checkpoint?: EphemeralConversationCheckpoint) =>
@@ -245,9 +289,7 @@ describe("BtwManager", () => {
 				},
 			});
 		const restore = () =>
-			new BtwManager({
-				entries: journalEntries(JSON.parse(JSON.stringify(events)) as BtwThreadEvent[]),
-				appendEvent: event => events.push(event),
+			storedManager(store, {
 				createConversation,
 				nextKey: () => `thread-${++sequence}`,
 				now: () => sequence * 100,
@@ -264,6 +306,7 @@ describe("BtwManager", () => {
 		manager.persistDraft(second);
 		manager.select(first);
 		expect(manager.thread(first)?.draftImages).toEqual([secondImage, firstImage]);
+		await store.flush();
 
 		const restored = restore();
 		const draft = restored.thread(first)!;
@@ -273,6 +316,7 @@ describe("BtwManager", () => {
 			role: "user",
 			content: [{ type: "text", text: "" }, secondImage, firstImage],
 		});
+		await store.flush();
 		const afterSubmit = restore();
 		expect(afterSubmit.thread(first)).toMatchObject({ draft: "", draftImages: [], draftImageLinks: [] });
 		expect(afterSubmit.thread(second)).toMatchObject({
@@ -289,11 +333,9 @@ describe("BtwManager", () => {
 		expect(mainMessages).toEqual([{ role: "user", content: "Main context", timestamp: 1 }]);
 	});
 
-	it("journals promotion removal before transition and can revoke it without replacing the live thread", async () => {
-		const events: BtwThreadEvent[] = [];
-		const manager = new BtwManager({
-			entries: [],
-			appendEvent: event => events.push(event),
+	it("removes a prepared promotion from sidecar history and restores its draft on rollback", async () => {
+		const store = await BtwHistoryStore.open(undefined);
+		const manager = storedManager(store, {
 			createConversation: (_model, checkpoint) => immediateConversation(checkpoint),
 			nextKey: () => "thread-1",
 			now: () => 100,
@@ -307,17 +349,17 @@ describe("BtwManager", () => {
 
 		expect(manager.preparePromotion(key)).toBe(true);
 		expect(manager.thread(key)).toBe(liveThread);
-		expect(restoreBtwThreads(journalEntries(events))).toEqual([]);
+		await store.flush();
+		expect(store.getRecords()).toEqual([]);
 		expect(manager.rollbackPromotion(key)).toBe(true);
 		expect(manager.thread(key)).toBe(liveThread);
-		expect(restoreBtwThreads(journalEntries(events))[0]).toMatchObject({
+		await store.flush();
+		expect(store.getRecords()[0]).toMatchObject({
 			draft: "",
 			draftImages: [image],
 			draftImageLinks: ["local://draft.png"],
 		});
-		const restored = new BtwManager({
-			entries: journalEntries(events),
-			appendEvent: event => events.push(event),
+		const restored = storedManager(store, {
 			createConversation: (_model, checkpoint) => immediateConversation(checkpoint),
 			nextKey: () => "unused",
 			now: () => 200,
@@ -329,13 +371,11 @@ describe("BtwManager", () => {
 		]);
 	});
 
-	it("creates a durable child directly, journaling it with a frozen snapshot before the first turn", async () => {
-		const events: BtwThreadEvent[] = [];
+	it("creates a durable child with a frozen snapshot before the first turn", async () => {
+		const store = await BtwHistoryStore.open(undefined);
 		const mainMessages: AgentMessage[] = [{ role: "user", content: "Main before creation", timestamp: 1 }];
 		const requests: AgentMessage[][] = [];
-		const manager = new BtwManager({
-			entries: [],
-			appendEvent: event => events.push(event),
+		const manager = storedManager(store, {
 			createConversation: (_model, checkpoint) =>
 				new EphemeralConversation({
 					snapshotBaseMessages: () => structuredClone(mainMessages),
@@ -359,9 +399,9 @@ describe("BtwManager", () => {
 			"Main before creation",
 			"Direct?",
 		]);
-		expect(restoreBtwThreads(journalEntries(events))[0]?.turns.map(turn => turn.replyText)).toEqual([
-			"reply:Direct?",
-		]);
+		await store.flush();
+		expect(store.getRecords()[0]?.turns.map(turn => turn.replyText)).toEqual(["reply:Direct?"]);
+		expect(store.getRecords()[0]?.baseMessages.map(userText)).toEqual(["Main before creation"]);
 	});
 
 	it("reads and shares an approved summary with Main during its first turn, then restores native tool history", async () => {
@@ -378,7 +418,7 @@ describe("BtwManager", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		const summary = "The package is @oh-my-pi/pi-coding-agent.";
-		const events: BtwThreadEvent[] = [];
+		const store = await BtwHistoryStore.open(undefined);
 		let sideRequests = 0;
 		const sideStreamFn: StreamFn = (_model, context) => {
 			const stream = new AssistantMessageEventStream();
@@ -424,9 +464,19 @@ describe("BtwManager", () => {
 				return { content: [{ type: "text", text: manifest.name }], details: {} };
 			},
 		};
+		const extensionRunner = {
+			clearManagedTimers: () => {},
+			consumeToolCallEmitted: () => false,
+			getRegisteredTool: () => undefined,
+			getUIContext: () => ({ select: async () => "Approve" }),
+			hasHandlers: () => false,
+			hasUI: () => true,
+			runScoped: <T>(run: () => T): T => run(),
+		} as never;
+		const wrappedReadTool = new ExtensionToolWrapper(readTool, extensionRunner);
 		const session = new AgentSession({
 			agent: new Agent({
-				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [readTool] },
+				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [wrappedReadTool] },
 				streamFn: () => {
 					const stream = new AssistantMessageEventStream();
 					queueMicrotask(() => {
@@ -439,19 +489,13 @@ describe("BtwManager", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
 			modelRegistry: { getApiKey: async () => "key", resolver: () => async () => "key" } as never,
-			extensionRunner: {
-				clearManagedTimers: () => {},
-				consumeToolCallEmitted: () => false,
-				getUIContext: () => ({ select: async () => "Approve" }),
-				hasHandlers: () => false,
-				hasUI: () => true,
-				runScoped: <T>(run: () => T): T => run(),
-			} as never,
+			extensionRunner,
+			toolRegistry: new Map([["read", wrappedReadTool]]),
+			builtInToolNames: ["read"],
 			sideStreamFn,
 		});
 		try {
-			const options: Omit<BtwManagerOptions, "entries"> = {
-				appendEvent: event => events.push(event),
+			const options: Omit<BtwManagerOptions, "restoredThreads" | "appendEvent" | "flushEvents"> = {
 				createConversation: (_model, checkpoint, sideOptions) =>
 					session.createEphemeralConversation("side instructions", checkpoint, model, sideOptions),
 				createSideOptions: source => ({
@@ -461,7 +505,7 @@ describe("BtwManager", () => {
 				nextKey: () => "thread-capabilities",
 				now: () => 100,
 			};
-			const manager = new BtwManager({ ...options, entries: [] });
+			const manager = storedManager(store, options);
 			const key = manager.createChild("Identify package", "main-leaf", { provider: model.provider, id: model.id });
 			const result = await manager.prompt(key, "Read the package and share its identity.");
 			await session.waitForIdle();
@@ -477,10 +521,7 @@ describe("BtwManager", () => {
 					summaries: [{ threadKey: key, threadTitle: "Identify package", summary }],
 				},
 			});
-			const restored = new BtwManager({
-				...options,
-				entries: journalEntries(JSON.parse(JSON.stringify(events)) as BtwThreadEvent[]),
-			});
+			const restored = storedManager(store, options);
 			const followup = await restored.prompt(key, "What did you read?");
 			expect(followup.replyText).toBe("Read the package name.");
 			expect(
@@ -495,49 +536,88 @@ describe("BtwManager", () => {
 	});
 	it("does not append a late turn after the manager is abandoned", async () => {
 		const deferred = Promise.withResolvers<EphemeralTurnResult>();
+		const started = Promise.withResolvers<void>();
 		const events: BtwThreadEvent[] = [];
 		const manager = new BtwManager({
-			entries: [],
+			restoredThreads: [],
 			appendEvent: event => events.push(event),
 			createConversation: () =>
 				new EphemeralConversation({
 					snapshotBaseMessages: () => [],
 					sideSessionId: "side-abandon",
-					runTurn: async () => deferred.promise,
+					runTurn: async () => {
+						started.resolve();
+						return deferred.promise;
+					},
 				}),
 			nextKey: () => "thread-abandon",
 			now: () => 100,
 		});
 		const key = manager.createChild("Why?", "anchor-1", MODEL);
 		const prompt = manager.prompt(key, "Why?");
-		await Promise.resolve();
+		await started.promise;
 
-		manager.abandon();
+		await manager.abandon();
 		deferred.resolve({ replyText: "late", assistantMessage: assistant("late") });
 		await prompt;
 
 		expect(events.map(event => event.op)).toEqual(["create", "request"]);
 	});
 
-	it("preserves an image-only paused request across restart and a failed continuation", async () => {
-		const entries: CustomEntry<BtwThreadEvent>[] = [];
-		const appendEvent = (event: BtwThreadEvent): void => {
-			const sequence = entries.length + 1;
-			entries.push({
-				type: "custom",
-				customType: BTW_THREAD_CUSTOM_TYPE,
-				data: event,
-				id: `event-${sequence}`,
-				parentId: sequence === 1 ? null : `event-${sequence - 1}`,
-				timestamp: new Date(sequence * 1_000).toISOString(),
+	it.each(["dispose", "abandon"] as const)(
+		"releases a running thread's file lease on %s so the same process can resume it",
+		async method => {
+			using directory = TempDir.createSync("@btw-manager-close-");
+			const store = await BtwHistoryStore.open(directory.path());
+			const started = Promise.withResolvers<void>();
+			const interrupted = storedManager(store, {
+				createConversation: () =>
+					new EphemeralConversation({
+						snapshotBaseMessages: () => [],
+						sideSessionId: "side-reopen",
+						runTurn: async (_messages, options) => {
+							const result = Promise.withResolvers<EphemeralTurnResult>();
+							options.signal?.addEventListener("abort", () => result.reject(options.signal?.reason), {
+								once: true,
+							});
+							started.resolve();
+							return result.promise;
+						},
+					}),
+				nextKey: () => "thread-reopen",
+				now: () => 100,
 			});
-		};
+			const key = interrupted.createChild("Resume me", "anchor-1", MODEL);
+			const pending = interrupted.prompt(key, "Unfinished question").catch(() => undefined);
+			await started.promise;
+			await interrupted[method]();
+			await interrupted[method]();
+			await pending;
+
+			const reopened = await BtwHistoryStore.open(directory.path());
+			const resumed = storedManager(reopened, {
+				createConversation: (_model, checkpoint) => immediateConversation(checkpoint),
+				nextKey: () => "unused",
+				now: () => 200,
+			});
+			try {
+				expect(await resumed.continuePaused()).toEqual({ continued: 1, skipped: [], complete: true });
+				expect(resumed.thread(key)?.turns.at(-1)?.replyText).toBe("reply:Unfinished question");
+				expect((await BtwHistoryStore.open(directory.path())).getRecords()[0]?.pausedRequest).toBeUndefined();
+				expect(store.getRecords()[0]?.pausedRequest?.input).toBe("Unfinished question");
+			} finally {
+				await resumed.dispose();
+			}
+		},
+		10_000,
+	);
+
+	it("preserves an image-only paused request across disposal and a failed continuation", async () => {
+		const store = await BtwHistoryStore.open(undefined);
 		const image: ImageContent = { type: "image", data: "cGF1c2Vk", mimeType: "image/png" };
 		const images = [image];
 		const turnStarted = Promise.withResolvers<void>();
-		const interrupted = new BtwManager({
-			entries: [],
-			appendEvent,
+		const interrupted = storedManager(store, {
 			createConversation: () =>
 				new EphemeralConversation({
 					snapshotBaseMessages: () => [],
@@ -562,15 +642,15 @@ describe("BtwManager", () => {
 		interrupted.setDraft(key, "Next question", [draftImage], ["local://next.png"]);
 
 		interrupted.prepareForPausedExit();
+		await interrupted.dispose();
 		await pending.catch(() => undefined);
 		expect(interrupted.thread(key)?.pausedRequest?.images).toEqual([image]);
+		await store.flush();
 
 		const requests: AgentMessage[][] = [];
 		let fail = true;
 		const restore = () =>
-			new BtwManager({
-				entries: JSON.parse(JSON.stringify(entries)) as CustomEntry<BtwThreadEvent>[],
-				appendEvent,
+			storedManager(store, {
 				createConversation: (_model, checkpoint) =>
 					new EphemeralConversation({
 						snapshotBaseMessages: () => [],
@@ -591,6 +671,7 @@ describe("BtwManager", () => {
 			skipped: ["Pause me: Provider unavailable"],
 			complete: false,
 		});
+		await store.flush();
 		fail = false;
 		const retried = restore();
 		expect(await retried.continuePaused()).toEqual({ continued: 1, skipped: [], complete: true });

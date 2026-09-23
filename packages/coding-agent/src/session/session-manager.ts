@@ -2951,6 +2951,14 @@ export class SessionManager {
 		return artifactsDirectoryFor(this.#sessionFile);
 	}
 
+	/** Reject virtual artifact paths before consumers perform direct filesystem I/O. */
+	getLocalArtifactsDir(): string | null {
+		if (this.#persist && !(this.#storage instanceof FileSessionStorage)) {
+			throw new Error("BTW sidecars require file-backed session storage");
+		}
+		return this.getArtifactsDir();
+	}
+
 	adoptArtifactManager(manager: ArtifactManager): void {
 		this.#adoptedArtifactManager = manager;
 	}

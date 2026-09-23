@@ -152,12 +152,14 @@ describe("BTW investigation capabilities", () => {
 				modelRegistry: registry,
 				sideStreamFn,
 				toolRegistry: tools,
+				builtInToolNames: new Set(tools.keys()),
 				xdev,
 			});
 			try {
 				const conversation = session.createEphemeralConversation("Investigate", undefined, undefined, {
 					readOnlyTools: true,
 				});
+				await conversation.initializeExtensionRuntime();
 				await conversation.prompt("Inspect the fixture without changing it");
 				const structural = results.find(result => result.toolCallId === "structural-search");
 				expect(structural?.content).toEqual(
