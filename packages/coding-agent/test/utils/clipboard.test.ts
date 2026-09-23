@@ -426,6 +426,16 @@ describe("isClipboardTerminalLocal", () => {
 	});
 });
 describe("readClipboardContent", () => {
+	it("pastes Windows text through the native readers without starting PowerShell", async () => {
+		setPlatform("win32");
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		vi.spyOn(native, "readImageFromClipboard").mockResolvedValue(null);
+		vi.spyOn(native, "readTextFromClipboard").mockResolvedValue("截图\r\n第二行");
+
+		expect(await readClipboardContent()).toEqual({ image: null, text: "截图\n第二行", fileUrls: [] });
+		expect(spawnSpy).not.toHaveBeenCalled();
+	});
+
 	it("reads image and Unicode text through one WSL host invocation", async () => {
 		setPlatform("linux");
 		process.env.WSL_DISTRO_NAME = "Ubuntu";

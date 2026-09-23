@@ -18,8 +18,8 @@ import { Image } from "../components/image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { getImageDimensions, ImageProtocol, imageFallback, TERMINAL } from "../terminal-capabilities";
-import { type Component, Container, type TUI } from "../tui";
-import { truncateToWidth } from "../utils";
+import { type Component, type ComponentRenderOptions, Container, type TUI } from "../tui";
+import { truncateToWidth, visibleWidth } from "../utils";
 import { measureComponentRows } from "../tui";
 import { getProjectDir, isRecord, logger, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../theme/theme";
@@ -241,7 +241,7 @@ class SafeToolRendererComponent implements Component {
 /** Minimal TUI surface ToolExecutionComponent uses to schedule repaints and share image budget. */
 export interface ToolExecutionUi {
 	requestRender(): void;
-	requestComponentRender(component: Component): void;
+	requestComponentRender(component: Component, options?: ComponentRenderOptions): void;
 	resetDisplay(): void;
 	/** Backend-aware replacement for a native-scrollback display reset. */
 	reconcileRenderTopology?(): void;
@@ -344,6 +344,23 @@ const NATIVE_STATUS_TONE: Record<TspCardStatus, TspTone | undefined> = {
  * stay in phase with every other spinner on the clock. */
 const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
 let sharedSpinnerTimer: NodeJS.Timeout | undefined;
+
+let spinnerLayoutEpoch = -1;
+let fixedSpinnerLayout = false;
+
+/** User-provided spinner frames may change wrapping; keep those ticks layout-dirty. */
+function spinnerHasFixedLayout(): boolean {
+	const epoch = getThemeEpoch();
+	if (spinnerLayoutEpoch !== epoch) {
+		spinnerLayoutEpoch = epoch;
+		const frames = theme.spinnerFrames;
+		const width = visibleWidth(frames[0] ?? "");
+		fixedSpinnerLayout =
+			frames.length > 0 &&
+			frames.every(frame => !/[\u0000-\u001f\u007f]/u.test(frame) && visibleWidth(frame) === width);
+	}
+	return fixedSpinnerLayout;
+}
 
 /**
  * Arm the shared ticker if it is not already running and spinners animate. Ticks land on the shared
@@ -1074,7 +1091,19 @@ export class ToolExecutionComponent extends Container {
 	tickSpinner(frame: number): void {
 		this.#spinnerFrame = frame;
 		this.#renderState.spinnerFrame = frame;
-		this.#ui.requestComponentRender(this);
+		// Extension callbacks can use spinnerFrame to change arbitrary content or
+		// layout. Only the bundled/default renderer's fixed-width animation is
+		// safe to leave unpainted while its block is outside the viewport.
+		const customCall = this.#tool?.renderCall;
+		const customResult = this.#tool?.renderResult;
+		const bundled =
+			(!customCall || customCall === this.#renderer?.renderCall) &&
+			(!customResult || customResult === this.#renderer?.renderResult);
+		if (bundled && spinnerHasFixedLayout()) {
+			this.#ui.requestComponentRender(this, { animationOnly: true });
+		} else {
+			this.#ui.requestComponentRender(this);
+		}
 	}
 
 	#updateTodoStrikeAnimation(): void {
@@ -1417,7 +1446,7 @@ export class ToolExecutionComponent extends Container {
 		const status = this.#nativeStatus();
 		const head = view.tool;
 		const late = this.#lateDiagnosticsParts();
-		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages(view.body)];
+		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultAttachments(view.body)];
 		if (late.section) body.push(late.section);
 		const inline = view.inline === true;
 		const hasBody = body.length > 0;
@@ -1505,7 +1534,7 @@ export class ToolExecutionComponent extends Container {
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "baseline" }, headChildren, "head"),
 			...(view.body ?? []),
-			...this.#nativeResultImages(view.body),
+			...this.#nativeResultAttachments(view.body),
 			...(late.section ? [late.section] : []),
 		];
 		const role = `omp.tool.${this.#toolName}`;
@@ -1597,7 +1626,12 @@ export class ToolExecutionComponent extends Container {
 			label: this.#toolLabel,
 			args: this.#args,
 			result: result
-				? { output: this.#nativeTextOutput(), isError: result.isError, skipped: this.#isBenignSkip() }
+				? {
+						output: this.#nativeTextOutput(),
+						hasAttachments: Boolean(this.#mediaAttachmentText()),
+						isError: result.isError,
+						skipped: this.#isBenignSkip(),
+					}
 				: undefined,
 			options,
 		});
@@ -1622,19 +1656,31 @@ export class ToolExecutionComponent extends Container {
 		return indicators ? (output ? `${output}\n${indicators}` : indicators) : output;
 	}
 
-	/** Result images under the renderer's body, minus those the body already shows (as an `image` blob or a `media` file). */
-	#nativeResultImages(body: readonly NativeChild[] | undefined): NativeNode[] {
-		if (!this.#result || !this.#showImages) return [];
+	#nativeResultAttachments(body: readonly NativeChild[] | undefined): NativeNode[] {
+		const indicators = this.#mediaAttachmentText();
+		const attachments: NativeNode[] = indicators ? [text(indicators, { wrap: "word" })] : [];
+		if (!this.#result || !this.#showImages) return attachments;
 		const shown = shownMedia(body);
 		const mediaPath = readMediaPath(this.#rawDetails);
-		if (mediaPath && shown.paths.has(mediaPath)) return [];
-		const images: NativeNode[] = [];
+		if (mediaPath && shown.paths.has(mediaPath)) return attachments;
 		this.#getAllImageBlocks().forEach((image, index) => {
 			if (!image.data || !image.mimeType) return;
 			const described = this.#nativeImages.get(`img${index}`, image.data, image.mimeType, mediaPath);
-			if (!shown.blobs.has((described.p as { blob?: string } | undefined)?.blob ?? "")) images.push(described);
+			if (!shown.blobs.has((described.p as { blob?: string } | undefined)?.blob ?? "")) attachments.push(described);
 		});
-		return images;
+		return attachments;
+	}
+
+	#mediaAttachmentText(): string {
+		return (
+			this.#result?.content
+				.filter(block => block.type === "audio" || block.type === "video")
+				.map(block => {
+					const mimeType = block.mimeType ? sanitizeDisplayLine(block.mimeType) : "";
+					return `[${block.type} attachment${mimeType ? `: ${mimeType}` : ""}]`;
+				})
+				.join("\n") ?? ""
+		);
 	}
 
 	/** Apply the transcript allocator's current viewport reservation. */
@@ -1662,6 +1708,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override releaseRenderCaches(): void {
+		this.#renderMemo = undefined;
 		super.releaseRenderCaches();
 		this.#textOutput = "";
 		this.#textOutputTrimmed = undefined;
@@ -1745,7 +1792,7 @@ export class ToolExecutionComponent extends Container {
 			);
 		}
 		const key = `${this.#displayKey()}|${this.#allocation}`;
-		if (this.#renderedImageCount === 0) {
+		if (this.#renderedImageCount === 0 && this.#figure === undefined) {
 			const memo = this.#renderMemo;
 			if (memo !== undefined && memo.width === width && memo.key === key) {
 				this.#trackPaintedShapes();
@@ -2134,13 +2181,7 @@ export class ToolExecutionComponent extends Container {
 		// silently hide attachments, just as image children are handled below.
 		if (this.#mediaIndicators) this.removeChild(this.#mediaIndicators);
 		this.#mediaIndicators = undefined;
-		const mediaIndicators = this.#result?.content
-			.filter(block => block.type === "audio" || block.type === "video")
-			.map(block => {
-				const mimeType = block.mimeType ? sanitizeDisplayLine(block.mimeType) : "";
-				return `[${block.type} attachment${mimeType ? `: ${mimeType}` : ""}]`;
-			})
-			.join("\n");
+		const mediaIndicators = this.#mediaAttachmentText();
 		if (mediaIndicators) {
 			this.#mediaIndicators = new Text(theme.fg("toolOutput", mediaIndicators), 1, 0);
 			this.addChild(this.#mediaIndicators);

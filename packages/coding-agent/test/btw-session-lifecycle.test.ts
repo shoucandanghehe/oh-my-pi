@@ -17,7 +17,7 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { restoreBtwThreads } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
+import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import type { EphemeralTurnResult } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -138,8 +138,8 @@ describe("BTW session boundaries", () => {
 		await providerStarted.promise;
 		sourceFile = manager.getSessionFile()!;
 		sourceId = manager.getSessionId();
-		const thread = restoreBtwThreads(manager.getEntries())[0];
-		if (!thread) throw new Error("Expected a durable inline thread with workspace disabled");
+		const thread = (await savedThreads(sourceFile))[0];
+		if (!thread) throw new Error("Expected a durable legacy BTW history entry with workspace disabled");
 		sourceThreadKey = thread.key;
 	});
 
@@ -157,12 +157,8 @@ describe("BTW session boundaries", () => {
 	});
 
 	async function savedThreads(file: string) {
-		const saved = await SessionManager.open(file, directory.path());
-		try {
-			return restoreBtwThreads(saved.getEntries());
-		} finally {
-			await saved.close();
-		}
+		const store = await BtwHistoryStore.open(file.slice(0, -".jsonl".length));
+		return store.getRecords().map(record => ({ ...record, key: record.id }));
 	}
 
 	async function targetSession(): Promise<string> {
@@ -238,9 +234,10 @@ describe("BTW session boundaries", () => {
 		await providerStarted.promise;
 		responses.at(-1)!("Destination answer");
 		await turns.at(-1)!.finished;
+		await btw.dispose();
 		await manager.flush();
 		const destination = await savedThreads(manager.getSessionFile()!);
-		expect(destination.find(thread => thread.title === "Destination side question")?.turns.at(-1)?.replyText).toBe(
+		expect(destination.find(thread => thread.question === "Destination side question")?.answer).toBe(
 			"Destination answer",
 		);
 		expect(destination.some(thread => thread.key === sourceThreadKey)).toBe(false);
@@ -271,7 +268,8 @@ describe("BTW session boundaries", () => {
 				if (action === "picker resume") {
 					const source = await savedThreads(sourceFile);
 					expect(source.map(thread => thread.key)).toEqual([sourceThreadKey]);
-					expect(source[0]!.turns).toEqual([]);
+					expect(source[0]).toMatchObject({ answer: "", status: "cancelled" });
+					expect(source[0]!.followUps ?? []).toEqual([]);
 				} else {
 					expect(await Bun.file(sourceFile).exists()).toBe(false);
 				}
@@ -290,7 +288,7 @@ describe("BTW session boundaries", () => {
 		await expect(operation).rejects.toThrow(failure.message);
 		expect(manager.getSessionId()).toBe(sourceId);
 		expect(await Bun.file(sourceFile).exists()).toBe(true);
-		expect(restoreBtwThreads(manager.getEntries()).map(thread => thread.key)).toEqual([sourceThreadKey]);
+		expect((await savedThreads(sourceFile)).map(thread => thread.key)).toEqual([sourceThreadKey]);
 	});
 
 	it("leaves BTW running when the delete confirmation is declined", async () => {
@@ -298,7 +296,7 @@ describe("BTW session boundaries", () => {
 		await mode.handleSessionDeleteCommand();
 		expect(manager.getSessionId()).toBe(sourceId);
 		expect(turns[0]!.signal?.aborted).toBe(false);
-		expect(restoreBtwThreads(manager.getEntries()).map(thread => thread.key)).toEqual([sourceThreadKey]);
+		expect((await savedThreads(sourceFile)).map(thread => thread.key)).toEqual([sourceThreadKey]);
 	});
 
 	it("deletes an inactive picker entry without interrupting the current BTW", async () => {
@@ -329,9 +327,7 @@ describe("BTW session boundaries", () => {
 				if (binding === "reinitialized") controller.initializeHookRunner(extensionRunner.getUIContext(), true);
 				const context = extensionRunner.createCommandContext();
 				const target =
-					action === "switchSession"
-						? await targetSession()
-						: restoreBtwThreads(manager.getEntries())[0]!.anchorLeafId;
+					action === "switchSession" ? await targetSession() : (await savedThreads(sourceFile))[0]!.leafId!;
 				const result =
 					action === "newSession"
 						? await context.newSession()
@@ -347,7 +343,8 @@ describe("BTW session boundaries", () => {
 				expect(await Bun.file(sourceFile).text()).toBe(saved);
 				const source = await savedThreads(sourceFile);
 				expect(source.map(thread => thread.key)).toEqual([sourceThreadKey]);
-				expect(source[0]!.turns).toEqual([]);
+				expect(source[0]).toMatchObject({ answer: "", status: "cancelled" });
+				expect(source[0]!.followUps ?? []).toEqual([]);
 				await completeDestinationQuestion();
 			},
 		);

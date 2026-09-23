@@ -226,14 +226,24 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 	);
 }
 
-/** Present a consumed parent steer as an IRC card without interpreting its model-facing envelope. */
-export function buildParentIrcMessageCard(
-	parentIrc: { from: string; body: string },
-	timestamp: number,
-	getExpanded: () => boolean,
-): Component {
+/** Present parent steering as IRC without changing the message consumed by the model. */
+export function buildParentIrcMessageCard(message: UserMessage, getExpanded: () => boolean): Component | undefined {
+	if (message.attribution !== "agent" || message.steering !== true) return undefined;
+	const source = message.irc;
+	let from = message.parentIrc?.from ?? source?.from;
+	let body = message.parentIrc?.body ?? source?.body;
+	if (!message.parentIrc && !source) {
+		// Older journals retained only the parent steering envelope, not the original IRC source.
+		const legacy =
+			/^\[Wait interrupted by message\]\r?\n<irc from="parent" agent="([^"]+)">\r?\n([\s\S]*)\r?\n<\/irc>\s*$/.exec(
+				userMessageDisplayText(message),
+			);
+		if (!legacy) return undefined;
+		from = legacy[1];
+		body = legacy[2];
+	}
 	return createIrcMessageCard(
-		{ kind: "incoming", from: parentIrc.from, body: parentIrc.body, timestamp },
+		{ kind: "incoming", from, body, replyTo: source?.replyTo, timestamp: message.timestamp },
 		getExpanded,
 		theme,
 	);

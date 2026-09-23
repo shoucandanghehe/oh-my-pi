@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Buffer } from "node:buffer";
 import { copyToClipboard } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as natives from "@oh-my-pi/pi-natives/clipboard";
+import * as utils from "@oh-my-pi/pi-utils";
 import { type ActiveTerminalHarness, startActiveTerminal } from "../helpers/active-terminal";
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
@@ -21,7 +22,8 @@ describe("copyToClipboard OSC 52 routing", () => {
 	beforeEach(() => {
 		// Linux keeps macOS runs off the real pbcopy; the native write is stubbed.
 		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-		vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		vi.spyOn(utils, "isWsl").mockReturnValue(false);
+		vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 	});
 
 	afterEach(() => {

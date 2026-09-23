@@ -31,9 +31,9 @@ import type {
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
-import type { AgentSession } from "../session/agent-session";
 import type { BlockedKind } from "../utils/run-status";
 import type { DroppedPrompt } from "../session/agent-session-types";
+import type { AgentSession, RestoredQueuedMessage } from "../session/agent-session";
 import type { AgentViewSession } from "../session/agent-session-handle";
 import type { PausedExitParticipant } from "../session/agent-session-types";
 import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
@@ -70,6 +70,7 @@ import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { ConversationPosition } from "./utils/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { NativeWorkspace } from "./native-workspace/workspace";
 
 export type CompactionQueuedMessage = {
 	text: string;
@@ -140,11 +141,18 @@ export interface ResumeSessionOptions {
 	continuation?: SessionContinuation;
 }
 
+export interface AddMessageOptions {
+	imageLinks?: readonly (string | undefined)[];
+	reuseSettledComponent?: boolean;
+	container?: TranscriptContainer;
+}
+
 export interface RenderSessionContextOptions {
+	container?: TranscriptContainer;
 	updateFooter?: boolean;
 	reuseSettledComponents?: boolean;
 	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
-	preservedLiveToolCallIds?: ReadonlySet<string>;
+	preservedLiveTools?: ReadonlyMap<string, ToolExecutionHandle>;
 }
 
 export interface RenderInitialMessagesOptions {
@@ -184,7 +192,7 @@ export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
 	readonly composer: Pick<Composer, "setRunActive">;
-	chatContainer: TranscriptContainer;
+	readonly chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
 	pendingMessagesContainer: Container;
@@ -238,8 +246,8 @@ export interface InteractiveModeContext {
 	unfocusSession(): Promise<void>;
 	/** Drop pending focus requests without changing the view (delegates to SessionFocusController.invalidatePendingFocus). */
 	invalidatePendingFocus(): void;
-	/** Candidate subagent ids under a mutable-viewport line, for click-to-focus. Empty when the line has no target. */
-	resolveViewportClickCandidates(index: number): string[];
+	/** Candidate subagent ids under a mutable-viewport row and optional column. */
+	resolveViewportClickCandidates(index: number, col?: number): string[];
 	/**
 	 * Deliver a click at cell `col` of a mutable-viewport line to the extension owning the link
 	 * drawn there. Returns false when no extension link is under the click.
@@ -289,9 +297,10 @@ export interface InteractiveModeContext {
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
-	setClickHoverId(id: string | undefined): void;
+	setClickHoverId(id: string | undefined, col?: number): void;
 	/** Whether the main view is mounted in the app-viewport multi-pane workspace. */
 	readonly workspaceEnabled: boolean;
+	readonly nativeWorkspace?: NativeWorkspace;
 	/** Create or focus a persistent transcript pane for an agent. */
 	openAgentWorkspacePane(id: string): Promise<void>;
 	/** Open a local fake pane and play the real subagent petrification/close path. */
@@ -566,13 +575,7 @@ export interface InteractiveModeContext {
 	/** Drops the optimistic `/skill:` row when dispatch fails or bails before reaching the agent. */
 	clearOptimisticSkillMessage(): void;
 	isKnownSlashCommand(text: string): boolean;
-	addMessageToChat(
-		message: AgentMessage,
-		options?: {
-			imageLinks?: readonly (string | undefined)[];
-			reuseSettledComponent?: boolean;
-		},
-	): Component[];
+	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[];
 	renderSessionContext(sessionContext: SessionContext, options?: RenderSessionContextOptions): void;
 	/** Render a session context in bounded chunks so terminal input runs between transcript paints. */
 	renderSessionContextIncrementally(
@@ -659,6 +662,7 @@ export interface InteractiveModeContext {
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
+	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean>;
 
 	// Selector handling
 	showSettingsSelector(): void;
@@ -700,6 +704,9 @@ export interface InteractiveModeContext {
 	/** Re-query terminal appearance for an explicit display reset, then immediately replay the display. */
 	resetDisplayAfterAppearanceRefresh(): void;
 	handleDequeue(): void;
+	handleQueuedMessageEdit(
+		edit: (beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>,
+	): Promise<void>;
 	handleImagePaste(): Promise<boolean>;
 	/** Attach a pasted image path to the main editor or an image-accepting prompt; other prompts refuse. */
 	handleImagePathPaste(path: string): Promise<void>;

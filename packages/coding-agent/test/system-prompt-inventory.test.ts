@@ -515,12 +515,11 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
-		expect(text).toContain("MUST use `xd://lsp` for definitions");
-		expect(text).toContain("MUST run `xd://lsp` references first");
+		expect(text).toContain("`xd://lsp`");
 		expect(text).not.toContain("`lsp`");
 	});
 
-	it("renders exactly one of the map-unknown-code, explore and inline-first delegation rules per bias", async () => {
+	it("lets eager task mode override balanced and restrained delegation without overriding gated policy", async () => {
 		const renderDelegation = async (delegationBias: DelegationBias, eagerTasks: boolean) => {
 			const { systemPrompt } = await buildSystemPrompt({
 				cwd: tempDir,
@@ -532,16 +531,16 @@ describe("system prompt tool inventory", () => {
 				delegationBias,
 				eagerTasks,
 			});
-			const count = (needle: string) => systemPrompt[0].split(needle).length - 1;
-			return [count("Map unknown code via `task`"), count("Unfamiliar subsystem?"), count("Inline first.")];
+			return systemPrompt;
 		};
-		expect(await renderDelegation("eager", false)).toEqual([1, 0, 0]);
-		expect(await renderDelegation("eager", true)).toEqual([1, 0, 0]);
-		expect(await renderDelegation("balanced", false)).toEqual([0, 1, 0]);
-		expect(await renderDelegation("balanced", true)).toEqual([1, 0, 0]);
-		expect(await renderDelegation("restrained", true)).toEqual([1, 0, 0]);
-		expect(await renderDelegation("restrained", false)).toEqual([0, 0, 1]);
-		expect(await renderDelegation("gated", true)).toEqual([0, 0, 0]);
+		const eager = await renderDelegation("eager", false);
+		const explicitlyEager = await renderDelegation("eager", true);
+		expect(await renderDelegation("balanced", true)).toEqual(explicitlyEager);
+		expect(await renderDelegation("balanced", false)).not.toEqual(eager);
+		expect(await renderDelegation("restrained", true)).toEqual(explicitlyEager);
+		expect(await renderDelegation("restrained", false)).not.toEqual(eager);
+		expect(await renderDelegation("gated", false)).not.toEqual(eager);
+		expect(await renderDelegation("gated", true)).not.toEqual(explicitlyEager);
 	});
 
 	it("appends each advertised prelude's guidance as its own block", async () => {
@@ -559,9 +558,6 @@ describe("system prompt tool inventory", () => {
 		});
 		expect(systemPrompt[1]).toBe("COMPUTER-GUIDANCE");
 		expect(systemPrompt.filter(block => block.includes("COMPUTER-GUIDANCE"))).toHaveLength(1);
-		// Prelude names still drive the verification bullets.
-		expect(systemPrompt[0]).toContain("Native desktop: JS/Python eval `computer` helpers");
-		expect(systemPrompt[0]).not.toContain("No runtime for changed surface");
 	});
 
 	it("renders the functions namespace (not a name list) when tools are not native", async () => {

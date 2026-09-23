@@ -791,6 +791,25 @@ describe("TranscriptContainer", () => {
 		expect(transcript.renderViewport(80, 10, frame)).toEqual(["replaced"]);
 	});
 
+	it("keeps finalized pending figures out of immutable history until their render completes", () => {
+		const transcript = new TranscriptContainer();
+		let pending = true;
+		const figure = new (class extends Block {
+			isTranscriptBlockPending(): boolean {
+				return pending;
+			}
+		})(["Drawing SVG…"], true);
+		transcript.addChild(figure);
+
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+		expect(transcript.peekFlushBatch(80)).toBeUndefined();
+
+		pending = false;
+		figure.finalize(["rendered figure"]);
+		transcript.invalidate();
+		expect(transcript.peekFinalizedBatch(80, 0)?.rows).toEqual(["rendered figure", ""]);
+	});
+
 	it("retires the settled prefix only under capacity pressure, in order", () => {
 		const transcript = new TranscriptContainer();
 		const first = new Block(["first final"], true);
@@ -1559,6 +1578,30 @@ describe("TranscriptContainer virtual viewport", () => {
 			transcript.dispose();
 			await waitForImmediate();
 		}
+	});
+
+	it("repaints a finalized assistant's replacement thinking after an asynchronous translation", async () => {
+		await initTheme(false);
+		const translation = new Block(["翻译中…"], false);
+		let requestRender: (() => void) | undefined;
+		const assistant = new AssistantMessageComponent(finalAnswer, false, undefined, [
+			context => {
+				requestRender = context.requestRender;
+				return { type: "replace", component: translation };
+			},
+		]);
+		assistant.markTranscriptBlockFinalized();
+		const transcript = new TranscriptContainer();
+		transcript.addChild(assistant);
+		transcript.addChild(new Block(["tool result"], false));
+		const viewport = { rows: 12, offset: 0, followBottom: true };
+		expect(transcript.renderVirtualViewport(80, viewport).lines.join("\n")).toContain("翻译中");
+
+		translation.update(["翻译完成"]);
+		requestRender?.();
+		const displayed = transcript.renderVirtualViewport(80, viewport).lines.join("\n");
+		expect(displayed).toContain("翻译完成");
+		expect(displayed).toContain("tool result");
 	});
 
 	it("cancels outstanding layout on clear and disposal without touching replacement content", async () => {

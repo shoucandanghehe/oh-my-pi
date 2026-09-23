@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
+import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
@@ -69,6 +69,7 @@ import { displayArgsForToolCall } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
+	AddMessageOptions,
 	CompactionQueuedMessage,
 	InteractiveModeContext,
 	RenderInitialMessagesOptions,
@@ -132,16 +133,6 @@ const TRANSCRIPT_RENDER_CHUNK_MS = 8;
  * durable in the session file and reach the display on the next rebuild.
  */
 const TRANSCRIPT_REPLAY_MAX_ATTEMPTS = 5;
-
-type QueuedMessages = {
-	steering: string[];
-	followUp: string[];
-	liveSteered: number;
-};
-type AddMessageOptions = {
-	imageLinks?: readonly (string | undefined)[];
-	reuseSettledComponent?: boolean;
-};
 
 type ImageChipSessionManager = Pick<
 	InteractiveModeContext["sessionManager"],
@@ -279,6 +270,7 @@ export class UiHelpers {
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
+		const chatContainer = options?.container ?? this.ctx.chatContainer;
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ctx.ui, message.excludeFromContext);
@@ -294,7 +286,7 @@ export class UiHelpers {
 				});
 				const block = new PresentedBlock(component, messageBlock(message));
 				block.setExpanded(this.ctx.toolOutputExpanded);
-				this.ctx.chatContainer.addChild(block);
+				chatContainer.addChild(block);
 				break;
 			}
 			case "pythonExecution": {
@@ -308,7 +300,7 @@ export class UiHelpers {
 				});
 				const block = new PresentedBlock(component, messageBlock(message));
 				block.setExpanded(this.ctx.toolOutputExpanded);
-				this.ctx.chatContainer.addChild(block);
+				chatContainer.addChild(block);
 				break;
 			}
 			case "hookMessage":
@@ -321,7 +313,7 @@ export class UiHelpers {
 							messageBlock(message),
 						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(component);
+						chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
@@ -331,25 +323,25 @@ export class UiHelpers {
 							}>
 						).details;
 						// Native: into the edit/write frames they belong to; the rest stand alone.
-						const files = routeLateDiagnostics(this.ctx.chatContainer.children, details?.files ?? []);
+						const files = routeLateDiagnostics(chatContainer.children, details?.files ?? []);
 						if (files.length === 0) break;
 						const component = new PresentedBlock(
 							new LateDiagnosticsMessageComponent(files),
 							messageBlock(message),
 						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(component);
+						chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {
 						const component = new PresentedBlock(buildLaunchCompletionBlock(message), messageBlock(message));
 						component.setExpanded(this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(component);
+						chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
 						const component = new CollabPromptMessageComponent(message as CustomMessage<CollabPromptDetails>);
-						this.ctx.chatContainer.addChild(component);
+						chatContainer.addChild(component);
 						break;
 					}
 					if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {
@@ -358,7 +350,7 @@ export class UiHelpers {
 							messageBlock(message),
 						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(component);
+						chatContainer.addChild(component);
 						break;
 					}
 					if (
@@ -368,7 +360,7 @@ export class UiHelpers {
 						message.customType === "irc:workpool"
 					) {
 						const card = buildIrcMessageCard(message, () => this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(card);
+						chatContainer.addChild(card);
 						return [card];
 					}
 					if (message.customType === "advisor") {
@@ -378,11 +370,11 @@ export class UiHelpers {
 							messageBlock(message),
 						);
 						card.setExpanded(this.ctx.toolOutputExpanded);
-						this.ctx.chatContainer.addChild(card);
+						chatContainer.addChild(card);
 						break;
 					}
 					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
-						this.ctx.chatContainer.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
+						chatContainer.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
 						break;
 					}
 					const handoffComponent = createHandoffSummaryMessageComponent(
@@ -390,45 +382,44 @@ export class UiHelpers {
 						this.ctx.toolOutputExpanded,
 					);
 					if (handoffComponent) {
-						this.ctx.chatContainer.addChild(handoffComponent);
+						chatContainer.addChild(handoffComponent);
 						break;
 					}
 					const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
 					// Both HookMessage and CustomMessage have the same structure, cast for compatibility
 					const component = new CustomMessageComponent(message as CustomMessage<unknown>, renderer);
 					component.setExpanded(this.ctx.toolOutputExpanded);
-					this.ctx.chatContainer.addChild(component);
+					chatContainer.addChild(component);
 				}
 				break;
 			}
 			case "compactionSummary": {
 				const component = new CompactionSummaryMessageComponent(message);
 				component.setExpanded(this.ctx.toolOutputExpanded);
-				this.ctx.chatContainer.addChild(component);
+				chatContainer.addChild(component);
 				break;
 			}
 			case "branchSummary": {
 				const component = new BranchSummaryMessageComponent(message);
 				component.setExpanded(this.ctx.toolOutputExpanded);
-				this.ctx.chatContainer.addChild(component);
+				chatContainer.addChild(component);
 				break;
 			}
 			case "fileMention": {
 				// Render compact file mention display
 				const block = buildFileMentionBlock(message.files, 0);
-				if (block.children.length > 0) this.ctx.chatContainer.addChild(block);
+				if (block.children.length > 0) chatContainer.addChild(block);
 				break;
 			}
 			case "user":
 			case "developer": {
-				if (message.role === "user" && message.parentIrc) {
-					const card = buildParentIrcMessageCard(
-						message.parentIrc,
-						message.timestamp,
-						() => this.ctx.toolOutputExpanded,
-					);
-					this.ctx.chatContainer.addChild(card);
-					break;
+				const ircCard =
+					message.role === "user"
+						? buildParentIrcMessageCard(message, () => this.ctx.toolOutputExpanded)
+						: undefined;
+				if (ircCard) {
+					chatContainer.addChild(ircCard);
+					return [ircCard];
 				}
 				const userText = message.role === "user" ? userMessageDisplayText(message) : "";
 				if (userText) {
@@ -452,7 +443,7 @@ export class UiHelpers {
 						});
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
-					this.ctx.chatContainer.addChild(userComponent);
+					chatContainer.addChild(userComponent);
 				}
 				break;
 			}
@@ -471,8 +462,8 @@ export class UiHelpers {
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
-				assistantComponent.pickReactionTarget(this.ctx.chatContainer.children);
-				this.ctx.chatContainer.addChild(assistantComponent);
+				assistantComponent.pickReactionTarget(chatContainer.children);
+				chatContainer.addChild(assistantComponent);
 				break;
 			}
 			case "toolResult": {
@@ -503,6 +494,7 @@ export class UiHelpers {
 		options: RenderSessionContextOptions,
 		renderChunk?: () => void,
 	): Promise<void> {
+		const chatContainer = options.container ?? this.ctx.chatContainer;
 		const steps = this.#renderSessionContextSteps(sessionContext, options);
 		let messagesSinceYield = 0;
 		let chunkStartedAt = performance.now();
@@ -514,23 +506,25 @@ export class UiHelpers {
 			) {
 				continue;
 			}
-			this.ctx.chatContainer.prepareVirtualStructure();
+			chatContainer.prepareVirtualStructure();
 			renderChunk?.();
 			await waitForImmediate();
 			messagesSinceYield = 0;
 			chunkStartedAt = performance.now();
 		}
-		this.ctx.chatContainer.prepareVirtualStructure();
+		chatContainer.prepareVirtualStructure();
 	}
 
 	*#renderSessionContextSteps(
 		sessionContext: SessionContext,
 		options: RenderSessionContextOptions = {},
 	): Generator<void, void, void> {
+		const chatContainer = options.container ?? this.ctx.chatContainer;
 		// Preserved: message_start handler owns this lifecycle (see #783)
 		this.ctx.pendingTools.clear();
 		const activeToolExecutionUpdates = this.ctx.viewSession.activeToolExecutionUpdates?.() ?? [];
 		const runningAsyncJobs = this.ctx.viewSession.getAsyncJobSnapshot?.()?.running ?? [];
+		const placedLiveTools = new Set<Component>(chatContainer.children);
 		// Reseed the cache-invalidation baseline: this rebuild re-derives every
 		// turn's marker from usage, and the last turn becomes the live baseline.
 		this.ctx.lastAssistantUsage = undefined;
@@ -572,7 +566,7 @@ export class UiHelpers {
 			if (!usageAttached) {
 				readGroup?.seal();
 				readGroup = null;
-				this.ctx.chatContainer.addChild(
+				chatContainer.addChild(
 					createUsageRowBlock(
 						pendingUsage,
 						pendingUsageDuration,
@@ -598,12 +592,8 @@ export class UiHelpers {
 			const previous = waitingPoll;
 			if (!previous) return;
 			waitingPoll = null;
-			if (
-				nextToolName === "wait" &&
-				previous.isDisplaceableBlock() &&
-				this.ctx.chatContainer.canDisplaceBlock(previous)
-			) {
-				this.ctx.chatContainer.removeChild(previous);
+			if (nextToolName === "wait" && previous.isDisplaceableBlock() && chatContainer.canDisplaceBlock(previous)) {
+				chatContainer.removeChild(previous);
 			}
 			// Sealing finalizes the block and stops the waiting-poll spinner that
 			// updateResult armed.
@@ -619,7 +609,9 @@ export class UiHelpers {
 			}
 			if (previous.canBeDisplacedBy(nextToolName)) {
 				todoSnapshot = null;
-				this.ctx.chatContainer.removeChild(previous);
+				if (chatContainer.canRemoveBlock(previous)) {
+					chatContainer.removeChild(previous);
+				}
 				previous.seal();
 				return;
 			}
@@ -648,8 +640,11 @@ export class UiHelpers {
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				const timeline = splitAssistantMessageToolTimeline(message);
-				this.ctx.addMessageToChat(message, { reuseSettledComponent: options.reuseSettledComponents });
-				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
+				this.ctx.addMessageToChat(message, {
+					reuseSettledComponent: options.reuseSettledComponents,
+					container: chatContainer,
+				});
+				const lastChild = chatContainer.children[chatContainer.children.length - 1];
 				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
 				if (assistantComponent) {
 					const usage = message.usage;
@@ -682,7 +677,7 @@ export class UiHelpers {
 						getAssistantMessageLinkTargets(this.ctx),
 						timeline.contentOffsets.get(toolCallId),
 					);
-					this.ctx.chatContainer.addChild(component);
+					chatContainer.addChild(component);
 				};
 
 				// Render tool call components
@@ -691,7 +686,12 @@ export class UiHelpers {
 						continue;
 					}
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
-					if (options.preservedLiveToolCallIds?.has(content.id)) {
+					const liveTool = options.preservedLiveTools?.get(content.id);
+					if (liveTool) {
+						if (!placedLiveTools.has(liveTool)) {
+							chatContainer.addChild(liveTool);
+							placedLiveTools.add(liveTool);
+						}
 						appendAssistantSegment(content.id);
 						continue;
 					}
@@ -706,7 +706,7 @@ export class UiHelpers {
 									showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
-								this.ctx.chatContainer.addChild(readGroup);
+								chatContainer.addChild(readGroup);
 							}
 							readGroup.updateArgs(content.arguments, content.id);
 							readGroup.updateResult(
@@ -720,7 +720,7 @@ export class UiHelpers {
 									showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 								});
 								readGroup.setExpanded(this.ctx.toolOutputExpanded);
-								this.ctx.chatContainer.addChild(readGroup);
+								chatContainer.addChild(readGroup);
 							}
 							readGroup.updateArgs(content.arguments, content.id);
 							this.ctx.pendingTools.set(content.id, readGroup);
@@ -755,7 +755,7 @@ export class UiHelpers {
 					// Persisted args are final: settle a reply's text now. Cards keep their own args-complete timing.
 					if (!partialJson && component instanceof ReplyWriteComponent) component.setArgsComplete();
 					component.setExpanded(this.ctx.toolOutputExpanded);
-					this.ctx.chatContainer.addChild(component);
+					chatContainer.addChild(component);
 
 					if (hasErrorStop && errorMessage) {
 						component.updateResult(
@@ -775,9 +775,7 @@ export class UiHelpers {
 				// lines" transcript trap).
 				const strippedToolCalls = (message as AgentMessage & StrippedToolCallsMarker).strippedToolCalls ?? 0;
 				if (strippedToolCalls > 0) {
-					this.ctx.chatContainer.addChild(
-						new StrippedToolCallsPlaceholder(strippedToolCalls, !this.ctx.hideToolActivity),
-					);
+					chatContainer.addChild(new StrippedToolCallsPlaceholder(strippedToolCalls, !this.ctx.hideToolActivity));
 				}
 				pendingUsage =
 					cfgDisplayShowTokenUsage.get(this.ctx.settings) && assistantUsageIsBilled(message.usage)
@@ -791,7 +789,7 @@ export class UiHelpers {
 					? turnElapsedMs(turnStartedAt, message)
 					: undefined;
 			} else if (message.role === "toolResult") {
-				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
+				if (options.preservedLiveTools?.has(message.toolCallId)) continue;
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
 				// Mirror the call side: resolve the wire toolName through the registry
 				// so aliased results route under the canonical name their call used.
@@ -831,7 +829,7 @@ export class UiHelpers {
 								showContentPreview: cfgReadToolResultPreview.get(this.ctx.settings),
 							});
 							readGroup.setExpanded(this.ctx.toolOutputExpanded);
-							this.ctx.chatContainer.addChild(readGroup);
+							chatContainer.addChild(readGroup);
 						}
 						const args = readToolCallArgs.get(message.toolCallId);
 						if (args) {
@@ -921,7 +919,10 @@ export class UiHelpers {
 					turnStartedAt = message.timestamp;
 				}
 				// All other messages use standard rendering
-				this.ctx.addMessageToChat(message, { reuseSettledComponent: options.reuseSettledComponents });
+				this.ctx.addMessageToChat(message, {
+					reuseSettledComponent: options.reuseSettledComponents,
+					container: chatContainer,
+				});
 			}
 		}
 		flushPendingUsage();
@@ -981,9 +982,8 @@ export class UiHelpers {
 		// so mark them complete. Idle rebuilds have no result coming: seal so the
 		// blocks can retire as history, then clear them so reconstructed historical
 		// components never leak into active tracking.
-		// (`rebuildChatFromMessages` builds its context WITHOUT dangling calls and
-		// restores its own preserved live components afterwards — for that caller
-		// the map is empty here either way.)
+		// Preserved live cards are routed by rebuildChatFromMessages after replay;
+		// this map only contains components newly constructed here.
 		if (this.ctx.viewSession.isStreaming) {
 			for (const [toolCallId, component] of this.ctx.pendingTools) {
 				component.setArgsComplete(toolCallId);
@@ -1147,8 +1147,9 @@ export class UiHelpers {
 		const previousPendingPythonComponents = this.ctx.pendingPythonComponents;
 		const previousLastAssistantUsage = this.ctx.lastAssistantUsage;
 		const previousServedModelTracker = this.ctx.servedModelTracker;
-		const renderOptions = {
+		const renderOptions: RenderSessionContextOptions = {
 			updateFooter: true,
+			container: stagedChatContainer,
 		};
 		let committed = false;
 		let replayAttempts = 0;
@@ -1160,7 +1161,6 @@ export class UiHelpers {
 			);
 			if (generation !== this.#replayGeneration) return;
 
-			this.ctx.chatContainer = stagedChatContainer;
 			this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
 			// Drops deferred bash/python blocks with the old transcript, then repaints
@@ -1218,7 +1218,6 @@ export class UiHelpers {
 				this.ctx.pendingPythonComponents = [];
 			}
 
-			this.ctx.chatContainer = visibleChatContainer;
 			if (preservedChatChildren) {
 				visibleChatContainer.clear();
 			} else {
@@ -1256,7 +1255,6 @@ export class UiHelpers {
 			}
 		} finally {
 			if (!committed) {
-				this.ctx.chatContainer = visibleChatContainer;
 				this.ctx.transcriptMessageComponents = previousTranscriptMessageComponents;
 				this.ctx.pendingTools = previousPendingTools;
 				this.ctx.pendingBashComponents = previousPendingBashComponents;
@@ -1313,26 +1311,48 @@ export class UiHelpers {
 
 	updatePendingMessagesDisplay(): void {
 		this.ctx.pendingMessagesContainer.disposeChildren();
-		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
-
-		const steeringMessages = [...queuedMessages.steering];
-		const followUpMessages = [...queuedMessages.followUp];
+		const session = this.ctx.viewSession;
+		const queuedMessages = session.getQueuedMessages();
+		const groups = [
+			{
+				label: "Steering",
+				messages: [...queuedMessages.steering],
+				edits: queuedMessages.steering.map((_, index) => session.getQueuedMessageEditAction("steering", index)),
+				liveSteered: queuedMessages.liveSteered,
+			},
+			{
+				label: "After yield",
+				messages: [...queuedMessages.followUp],
+				edits: queuedMessages.followUp.map((_, index) => session.getQueuedMessageEditAction("followUp", index)),
+			},
+		];
 		if (!this.ctx.focusedAgentId) {
-			if (this.ctx.yieldCompaction) followUpMessages.push(this.ctx.yieldCompaction.text);
-			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-				if (entry.mode === "steer") steeringMessages.push(entry.text);
-				else followUpMessages.push(entry.text);
+			if (this.ctx.yieldCompaction) {
+				groups[1].messages.push(this.ctx.yieldCompaction.text);
+				groups[1].edits.push(async () => {
+					this.ctx.restoreCompactionQueueToEditor();
+					return undefined;
+				});
+			}
+			for (const entry of this.ctx.compactionQueuedMessages) {
+				const group = groups[entry.mode === "steer" ? 0 : 1];
+				group.messages.push(entry.text);
+				group.edits.push(async () => {
+					const index = this.ctx.compactionQueuedMessages.indexOf(entry);
+					if (index < 0) return undefined;
+					this.ctx.compactionQueuedMessages.splice(index, 1);
+					return { text: entry.text, images: entry.images };
+				});
 			}
 		}
-
-		const groups = [
-			{ label: "Steering", messages: steeringMessages },
-			{ label: "After yield", messages: followUpMessages },
-		].filter(group => group.messages.length > 0);
-		if (groups.length > 0) {
+		const visibleGroups = groups.filter(group => group.messages.length > 0);
+		if (visibleGroups.length > 0) {
 			const dequeueKey = this.ctx.keybindings.getKeys("app.message.dequeue")[0] ?? "alt+up";
 			this.ctx.pendingMessagesContainer.addChild(
-				new QueuedMessagesBand(groups, dequeueKey, () => this.ctx.handleDequeue()),
+				new QueuedMessagesBand(visibleGroups, dequeueKey, (group, index) => {
+					const edit = visibleGroups[group]?.edits[index];
+					if (edit) void this.ctx.handleQueuedMessageEdit(edit);
+				}),
 			);
 		}
 		this.ctx.ui.requestComponentRender(this.ctx.pendingMessagesContainer);

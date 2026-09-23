@@ -23,6 +23,8 @@ import { measureComponentRows } from "../tui";
 import { getPaddingX, getWidthConfigEpoch } from "../utils";
 import { waitForImmediate } from "@oh-my-pi/pi-utils";
 import { withCodeHighlightingDisabledForLayout } from "../theme/tui-adapters";
+import { isAnimationOnlyRenderTarget } from "../render-targets";
+import { previewWindowRows } from "../render/render-utils";
 import { isToolActivityComponent } from "./tool-activity";
 import { directPlacementLift, ImageProtocol, iterm2ImagePayload, TERMINAL } from "../terminal-capabilities";
 
@@ -595,6 +597,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	#entriesUnverified = false;
 	/** Block list handed to the native frame provider, reused while the children are unchanged. */
 	#nativeBlocks: readonly Component[] = [];
+	#nativeExpansionDirty = true;
 	#nativeNode: NativeNode | undefined;
 	/** `true` when history ends with a compact block whose separator was withheld; history rows never change. */
 	#historyEnd: RowsAbove;
@@ -743,6 +746,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#replayRequested = false;
 		this.#lastViewportSpans = [];
 		this.#historyEnd = undefined;
+		this.#nativeExpansionDirty = true;
 		this.#virtualEntries = [];
 		this.#virtualRowIndex = new VirtualRowIndex();
 		this.#virtualMeasurementConfig = "";
@@ -820,6 +824,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#offered = offered;
 		this.#toolActivityVisible = toolActivityVisible;
 		this.#expanded = expanded;
+		this.#nativeExpansionDirty = true;
 		this.#lastFrame = lastFrame;
 		this.#virtualEntries = virtualEntries;
 		this.#virtualRowIndex = virtualRowIndex;
@@ -863,6 +868,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded === expanded) return;
 		this.#expanded = expanded;
+		this.#nativeExpansionDirty = true;
 		this.#cancelVirtualWarmup();
 		for (const entry of this.#visibleVirtualEntries) this.#applyPresentationState(entry.component);
 		this.#generation++;
@@ -1695,6 +1701,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		let owners: Component[] | undefined;
 		for (let i = 0; i < children.length; i++) {
 			const child = children[i]!;
+			if (this.#nativeExpansionDirty) setBlockExpanded(child, this.#expanded);
 			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
 			flat?.push(child);
 			owners?.push(child);
@@ -1707,6 +1714,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 				owners.push(child);
 			}
 		}
+		// Only a transcript-wide toggle overrides the terminal's per-card folds.
+		this.#nativeExpansionDirty = false;
 		const units: readonly Component[] = flat ?? children;
 		const compactAt = (at: number): boolean => isCompact((owners ?? units)[at]!);
 		// Copies only once a run forms.
@@ -2276,13 +2285,21 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		targets: readonly Component[],
 	): VirtualViewportFrame {
 		const targeted = new Set<number>();
+		const animationOnly = new Set<number>();
+		const contentTargets = new Set<number>();
 		for (const target of targets) {
 			if (target === this) return this.#renderVirtualViewport(width, request);
 			const ownerIndex = this.#ownerIndex(target);
 			if (ownerIndex < 0) return this.#renderVirtualViewport(width, request);
 			targeted.add(ownerIndex);
+			if (isAnimationOnlyRenderTarget(target) && !contentTargets.has(ownerIndex)) {
+				animationOnly.add(ownerIndex);
+			} else if (!isAnimationOnlyRenderTarget(target)) {
+				contentTargets.add(ownerIndex);
+				animationOnly.delete(ownerIndex);
+			}
 		}
-		return this.#renderVirtualViewport(width, request, targeted);
+		return this.#renderVirtualViewport(width, request, targeted, animationOnly);
 	}
 
 	override renderViewportTail(width: number, maxRows: number): readonly string[] {
@@ -2391,6 +2408,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		width: number,
 		request: VirtualViewportRequest,
 		targeted?: ReadonlySet<number>,
+		animationOnly?: ReadonlySet<number>,
 	): VirtualViewportFrame {
 		width = Math.max(1, width);
 		const rows = Math.max(0, Math.trunc(request.rows));
@@ -2410,8 +2428,21 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#commitVirtualMeasurements();
 		offset = anchoredOffset();
 		const measured = new Set<number>();
+		const offscreenAnimations = new Set<number>();
 		if (targeted) {
 			for (const index of targeted) {
+				// Spinner ticks do not change row geometry. Leave their offscreen
+				// paint cached; ordinary content targets must still measure growth
+				// before the user scrolls back, including changes in the same frame.
+				const entry = this.#virtualEntries[index];
+				if (animationOnly?.has(index) && entry && this.#hasCurrentVirtualRows(entry, width)) {
+					const start = this.#virtualRowIndex.startRow(index);
+					const end = start + this.#virtualRowIndex.separator(index) + this.#virtualRowIndex.bodyRows(index);
+					if (rows === 0 || end <= offset || start >= offset + rows) {
+						offscreenAnimations.add(index);
+						continue;
+					}
+				}
 				measured.add(index);
 				this.#measureVirtualEntry(index, width, true);
 			}
@@ -2438,6 +2469,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			let changed = false;
 			for (const needsRender of [true, false]) {
 				for (const index of candidates) {
+					if (offscreenAnimations.has(index) && (index < firstVisible || index > lastVisible)) continue;
 					if (measured.has(index)) continue;
 					if (measured.size >= maxBlocks) break;
 					if ((index < firstVisible || index > lastVisible) && performance.now() >= deadline) continue;
@@ -2445,7 +2477,9 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 					if (!this.#hasCurrentVirtualRows(entry, width) !== needsRender) continue;
 					measured.add(index);
 					if (targeted && !targeted.has(index) && this.#hasCurrentVirtualRows(entry, width)) continue;
-					changed = this.#measureVirtualEntry(index, width) || changed;
+					// Another target may have changed geometry and brought a skipped
+					// animation into view during this frame. Paint its latest state.
+					changed = this.#measureVirtualEntry(index, width, offscreenAnimations.delete(index)) || changed;
 				}
 			}
 			if (!this.#virtualEstimateSeeded) {
@@ -2499,7 +2533,9 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	}
 
 	#syncVirtualEntries(width: number): void {
-		const measurementConfig = `${getWidthConfigEpoch()}:${getPaddingX(1)}:${TERMINAL.imageProtocol}:${TERMINAL.textSizing}:${TERMINAL.hyperlinks}`;
+		// Collapsed tool previews depend on terminal height as well as width.
+		// A height-only resize must invalidate their cached offscreen extents.
+		const measurementConfig = `${getWidthConfigEpoch()}:${getPaddingX(1)}:${TERMINAL.imageProtocol}:${TERMINAL.textSizing}:${TERMINAL.hyperlinks}:${previewWindowRows()}`;
 		if (this.#virtualMeasurementConfig !== measurementConfig) {
 			this.#virtualMeasurementConfig = measurementConfig;
 			this.#generation++;

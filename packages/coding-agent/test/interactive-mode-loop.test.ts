@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
@@ -35,6 +36,7 @@ describe("InteractiveMode loop auto-submit", () => {
 		tempDir = TempDir.createSync("@pi-loop-auto-submit-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
@@ -101,6 +103,60 @@ describe("InteractiveMode loop auto-submit", () => {
 
 		expect(resolved).toHaveLength(1);
 		expect(resolved[0].text).toBe("repeat this");
+	});
+
+	it("keeps a live-steering Edit paused across the next loop auto-submit window", async () => {
+		const streaming = Promise.withResolvers<void>();
+		const claimed = Promise.withResolvers<void>();
+		let calls = 0;
+		vi.spyOn(session.agent, "streamFn").mockImplementation(async (_model, _context, options) => {
+			calls++;
+			const live = options?.liveSteering;
+			const signal = options?.signal;
+			if (!live || !signal) throw new Error("live steering was not offered");
+			const stream = new AssistantMessageEventStream();
+			signal.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
+			streaming.resolve();
+			await live.wait(signal);
+			const claim = await live.claim(signal);
+			if (!claim) throw new Error("steering was not claimed");
+			claim.accept();
+			claimed.resolve();
+			return stream;
+		});
+		mode.loopModeEnabled = true;
+		mode.loopModePaused = false;
+		mode.loopPrompt = "repeat this";
+		mode.editor.setText("draft");
+		const running = session.prompt("start");
+		await streaming.promise;
+		await session.steer("chosen");
+		await claimed.promise;
+		await session.followUp("ordinary");
+		await session.followUp("keep");
+		const pendingEdit = session.getQueuedMessageEditAction("followUp", 0);
+		if (!pendingEdit) throw new Error("missing pending Edit action");
+		await mode.handleQueuedMessageEdit(pendingEdit);
+		expect(mode.loopPrompt).toBe("repeat this");
+		expect(mode.loopModePaused).toBe(false);
+		expect(mode.editor.getText()).toBe("ordinary\n\ndraft");
+		const edit = session.getQueuedMessageEditAction("steering", 0);
+		if (!edit) throw new Error("missing live Edit action");
+		await mode.handleQueuedMessageEdit(edit);
+		await running;
+		vi.useFakeTimers();
+		const resolved: SubmittedUserInput[] = [];
+		pendingInput = mode.getUserInput();
+		void pendingInput.then(input => resolved.push(input));
+		vi.advanceTimersByTime(800);
+		await flushMicrotasks();
+		expect(resolved).toEqual([]);
+		expect(mode.editor.getText()).toBe("chosen\n\nordinary\n\ndraft");
+		expect(mode.loopModeEnabled).toBe(true);
+		expect(mode.loopModePaused).toBe(true);
+		expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["keep"], liveSteered: 0 });
+		expect(calls).toBe(1);
+		session.clearQueue({ forInterrupt: true });
 	});
 
 	it("does not recompact when a compact loop turn starts another prompt before resubmitting", async () => {

@@ -26,11 +26,19 @@ import { TuiDebugServer } from "./debug-server";
 import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
-import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
+import { assumedTspHello, NativeBackend, type NativeBackendOptions, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
-import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
+import type {
+	DescribeContext,
+	NativeNode,
+	NativeScreen,
+	NativeSurface,
+	NativeSurfaceProvider,
+	NativeUiEvent,
+} from "./native/node";
+import { withAnimationOnlyRenderTargets } from "./render-targets";
 import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
@@ -65,6 +73,7 @@ import {
 	Ellipsis,
 	getWidthConfigEpoch,
 	getWordNavKind,
+	isOsc66Line,
 	isWordNavJoiner,
 	normalizeTerminalOutput,
 	osc66MaxScale,
@@ -242,6 +251,8 @@ export type PaintListener = (paint: TuiPaint) => void;
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
 	onPaint?: PaintListener;
+	debugServer?: boolean;
+	nativeSurfaceMode?: NativeBackendOptions["mode"];
 }
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
@@ -367,6 +378,9 @@ export interface Component {
 	 */
 	describe?(cx: DescribeContext): NativeNode | null;
 
+	/** A sole root component may own the native transcript and sticky bottom regions. */
+	describeSurface?(cx: DescribeContext): NativeSurface;
+
 	/**
 	 * Props for the native `overlay` wrapper when this component is shown as
 	 * an overlay: the sheet's `role` (Tern styles `omp.overlay.*` roles as
@@ -430,7 +444,8 @@ export interface Component {
 	/**
 	 * Optional ownership seam for composed components whose descendants are not
 	 * exposed through a public `children` array. Used to route component-scoped
-	 * renders through viewport/workspace wrappers.
+	 * renders through viewport/workspace wrappers. Implementations must include
+	 * all descendants, including public children; a false result is authoritative.
 	 */
 	containsComponent?(component: Component): boolean;
 
@@ -652,6 +667,12 @@ export interface RenderRequestOptions {
 	 * normal dirty-row diff. Native-scrollback backends ignore this option.
 	 */
 	forceViewportRepaint?: boolean;
+}
+
+/** Additional guarantees for a component-scoped invalidation. */
+export interface ComponentRenderOptions {
+	/** Only visual animation changed; content and row geometry remain unchanged. */
+	animationOnly?: boolean;
 }
 /**
  * Controls how a settled terminal resize refreshes native history.
@@ -887,16 +908,21 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 	}
 
 	containsComponent(target: Component): boolean {
-		if (target === this) return true;
+		return target === this || this.#findTargetOwner(target) !== undefined;
+	}
+
+	#findTargetOwner(target: Component): Component | undefined {
 		const cached = this.#targetOwnerCache.get(target);
-		if (cached !== undefined && this.children.includes(cached) && componentContains(cached, target)) return true;
+		// Descendants can be reparented without changing this container's children.
+		// Revalidate positive hits and do not cache misses without a topology version.
+		if (cached !== undefined && this.children.includes(cached) && componentContains(cached, target)) return cached;
 		for (const child of this.children) {
 			if (!componentContains(child, target)) continue;
 			this.#targetOwnerCache.set(target, child);
-			return true;
+			return child;
 		}
 		this.#targetOwnerCache.delete(target);
-		return false;
+		return undefined;
 	}
 
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
@@ -920,16 +946,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 
 		const grouped = new Map<Component, Component[]>();
 		for (const target of targets) {
-			let owner = this.#targetOwnerCache.get(target);
-			if (owner === undefined || !children.includes(owner) || !componentContains(owner, target)) {
-				owner = undefined;
-				for (const child of children) {
-					if (!componentContains(child, target)) continue;
-					owner = child;
-					this.#targetOwnerCache.set(target, child);
-					break;
-				}
-			}
+			const owner = this.#findTargetOwner(target);
 			if (!owner) return this.render(width);
 			const childTargets = grouped.get(owner);
 			if (childTargets) childTargets.push(target);
@@ -994,7 +1011,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		const grouped = new Map<Component, Component[]>();
 		for (const target of targets) {
 			if (target === this) return this.#renderVirtualViewport(width, request);
-			const owner = this.children.find(child => componentContains(child, target));
+			const owner = this.#findTargetOwner(target);
 			if (!owner) return this.#renderVirtualViewport(width, request);
 			const childTargets = grouped.get(owner);
 			if (childTargets) childTargets.push(target);
@@ -1405,7 +1422,9 @@ interface CursorControlResult extends HardwareCursorUpdate {
 /** Depth-first identity search through public children or an ownership seam. */
 export function componentContains(root: Component, target: Component): boolean {
 	if (root === target) return true;
-	if (root.containsComponent?.(target) === true) return true;
+	// Ownership seams already search their full subtree; a miss must not walk
+	// the same public children again (including all settled transcript history).
+	if (root.containsComponent) return root.containsComponent(target);
 	const children = (root as Partial<Container>).children;
 	if (!Array.isArray(children)) return false;
 	for (const child of children) {
@@ -1811,11 +1830,13 @@ export class TUI extends Container {
 	#heldFocus: Component | null = null;
 	#appViewportBackend = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
 	#appViewportComponentTargets = new Set<Component>();
+	#appViewportAnimationTargets = new Set<Component>();
 	/** A pending full compose dominates later component-scoped requests until that frame starts. */
 	#appViewportFullComposePending = true;
 	#appViewportRootLines = new Map<Component, readonly string[]>();
 	#appViewportRootWidth = -1;
 	#appViewportActive = false;
+	#appViewportKeyboardOnEntry = false;
 	#appViewportPixelMouseSupported = false;
 	#appViewportCellSizeKnown = false;
 	#appViewportPixelMouseActive = false;
@@ -1866,6 +1887,8 @@ export class TUI extends Container {
 	#mouseTracking: MouseTrackingState = "off";
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
 	#inlineMouseProvider: (() => boolean) | undefined;
+	/** App-viewport target clicks run after pane mouse routing, before text selection. */
+	#appViewportClickHandler: ((event: SgrMouseEvent) => boolean) | undefined;
 	#altPreviousLines: string[] = [];
 	#altPreparedRows: PreparedLine[] = [];
 	#altEnterWidth = 0;
@@ -1906,6 +1929,9 @@ export class TUI extends Container {
 	// stop/start so a restart adopts the surface.
 	#native: NativeBackend | undefined;
 	#nativeLive = false;
+	#nativeRenderingListeners = new Set<(active: boolean) => void>();
+	#debugServerEnabled: boolean;
+	readonly #nativeSurfaceMode: NativeBackendOptions["mode"];
 	// Holds the first paint while the `hello` probe is outstanding, so a TSP
 	// terminal never sees a row paint it would have to erase.
 	#nativeHoldTimer: RenderTimer | undefined;
@@ -1939,6 +1965,8 @@ export class TUI extends Container {
 		super();
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
+		this.#debugServerEnabled = options?.debugServer !== false;
+		this.#nativeSurfaceMode = options?.nativeSurfaceMode;
 		if (options?.onPaint) this.#paintListeners.add(options.onPaint);
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
@@ -1981,6 +2009,9 @@ export class TUI extends Container {
 		this.#appViewportComponentTargets.clear();
 		this.#appViewportComposeStale = true;
 		this.requestRender(true);
+	}
+	setAppViewportClickHandler(handler: ((event: SgrMouseEvent) => boolean) | undefined): void {
+		this.#appViewportClickHandler = handler;
 	}
 
 	override render(width: number): readonly string[] {
@@ -2270,15 +2301,11 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Mutable normal-buffer viewport from the last provider frame: screen row
-	 * where it begins plus its row count. Inline click targets are indexed
-	 * into this window (`screenRow - top`). Empty while the alt screen owns
-	 * the display, while a resize transaction is settling, and while a Ghostty
-	 * image paint is deferred — the painted rows predate the latest spans in
-	 * all three cases, so hits would map to unrelated old rows.
-	 * The origin is in composer rows: a replay paint replaces leading composer
-	 * blanks with history rows and prepends blanks for a short viewport, so
-	 * the painted top is backed out by that net pad.
+	 * Published screen viewport for inline click targets. Normal-buffer rows
+	 * begin after visible history; an app-viewport frame starts at screen row
+	 * zero and has its own emitted row count. Empty during overlay or resize
+	 * transitions and deferred image paints, when candidate spans can predate
+	 * the actual screen.
 	 */
 	getMutableViewport(): { top: number; length: number } {
 		if (
@@ -2289,6 +2316,9 @@ export class TUI extends Container {
 			this.#ghosttyInitialImageDelayTimer !== undefined
 		) {
 			return { top: 0, length: 0 };
+		}
+		if (this.#appViewportActive) {
+			return { top: 0, length: this.#appViewportVisibleSourceRows.length };
 		}
 		return { top: this.#providerViewportTop - this.#providerViewportPadTop, length: this.#providerWindow.length };
 	}
@@ -2429,7 +2459,7 @@ export class TUI extends Container {
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
 		const debugPath = process.env.OMP_TUI_DEBUG;
-		if (debugPath !== undefined && debugPath.length > 0) {
+		if (this.#debugServerEnabled && debugPath !== undefined && debugPath.length > 0) {
 			this.#debugServer = new TuiDebugServer(this, debugPath);
 			this.#debugServer.start();
 		}
@@ -2589,6 +2619,12 @@ export class TUI extends Container {
 		return this.#nativeLive;
 	}
 
+	/** Observe this TUI's renderer, independently of other live native panes. */
+	onNativeRenderingChange(listener: (active: boolean) => void): () => void {
+		this.#nativeRenderingListeners.add(listener);
+		return () => this.#nativeRenderingListeners.delete(listener);
+	}
+
 	/**
 	 * Close the TSP surfaces ahead of {@link stop}, before the exit drains
 	 * input: the terminal answers nothing once they are closed, and whatever it
@@ -2652,8 +2688,12 @@ export class TUI extends Container {
 			return;
 		}
 		this.#native = new NativeBackend(this.#nativeHost(), hello, {
+			mode: this.#nativeSurfaceMode,
 			mirror: this.#debugServer !== undefined,
 			scheduler: this.#renderScheduler === DEFAULT_RENDER_SCHEDULER ? undefined : this.#renderScheduler,
+			onRenderingChange: active => {
+				for (const listener of this.#nativeRenderingListeners) listener(active);
+			},
 		});
 		this.#native.start();
 	}
@@ -2705,6 +2745,7 @@ export class TUI extends Container {
 		this.#cancelResizeProbe();
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
+		this.#leaveAppViewport();
 		if (this.#altActive || this.#resizeAltActive) {
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#altScreenExit()}`);
 			setAltScreenActive(false);
@@ -2733,6 +2774,8 @@ export class TUI extends Container {
 					| (TerminalFrameProvider & Partial<NativeSurfaceProvider>)
 					| undefined;
 				if (provider?.describeSurface) return provider.describeSurface(cx);
+				const root = this.children.length === 1 ? this.children[0] : undefined;
+				if (root?.describeSurface) return root.describeSurface(cx);
 				return { main: this.children, dock: [] };
 			},
 			overlays: () => {
@@ -3561,8 +3604,10 @@ export class TUI extends Container {
 	#enterAppViewport(hoverMouse: boolean): void {
 		if (this.#appViewportActive) return;
 		const pixelMouse = this.#appViewportPixelMouseSupported && this.#appViewportCellSizeKnown;
+		const keyboardEnter = this.#keyboardEnhancementEnter();
+		this.#appViewportKeyboardOnEntry = keyboardEnter !== "";
 		this.terminal.write(
-			`\x1b[?1049h${hoverMouse ? APP_VIEWPORT_HOVER_TRACKING_ON : APP_VIEWPORT_MOUSE_TRACKING_ON}${pixelMouse ? APP_VIEWPORT_PIXEL_MOUSE_ON : ""}`,
+			`\x1b[?1049h${keyboardEnter}${hoverMouse ? APP_VIEWPORT_HOVER_TRACKING_ON : APP_VIEWPORT_MOUSE_TRACKING_ON}${pixelMouse ? APP_VIEWPORT_PIXEL_MOUSE_ON : ""}`,
 		);
 		this.terminal.hideCursor();
 		this.#appViewportActive = true;
@@ -3585,6 +3630,36 @@ export class TUI extends Container {
 		this.#appViewportSelectionDrag = false;
 		this.#appViewportLastClick = null;
 	}
+	#leaveAppViewport(): void {
+		if (!this.#appViewportActive) return;
+		// Deferred startup can first enable the keyboard mode inside this alt
+		// screen. Move that frame to main instead of leaving it behind.
+		const keyboardTransfer = this.#appViewportKeyboardOnEntry ? "" : this.#keyboardEnhancementEnter();
+		this.terminal.write(
+			`${APP_VIEWPORT_MOUSE_TRACKING_OFF}${this.#keyboardEnhancementExit()}\x1b[?1049l${keyboardTransfer}`,
+		);
+		this.#appViewportActive = false;
+		this.#appViewportPixelMouseActive = false;
+		this.#appViewportHoverMouseActive = false;
+		this.#appViewportVisibleSourceRows = [];
+		this.#appViewportFrameLines = [];
+		this.#appViewportFramePreparedRows = [];
+		this.#appViewportComposeStale = true;
+		this.#appViewportFrameCursorPos = null;
+		this.#appViewportPreviousScrollRegionEnd = undefined;
+		this.#clearAppViewportSelection();
+		this.#appViewportSelectionDrag = false;
+		this.#stopAppViewportSelectionAutoScroll();
+		this.#appViewportLastClick = null;
+		this.#appViewportPreviousLines = [];
+		this.#appViewportPreparedRows = [];
+		this.#appViewportPreviousSixelRows = [];
+		this.#appViewportPreviousScrollbarGlyphs = [];
+		this.#appViewportPreviousWidth = 0;
+		this.#appViewportScrollbarMetrics = null;
+		this.#appViewportScrollbarDrag = null;
+	}
+
 	stop(): void {
 		this.#appearanceReportUnsubscribe?.();
 		this.#appearanceReportUnsubscribe = undefined;
@@ -3597,8 +3672,8 @@ export class TUI extends Container {
 		this.#clearNativeConfirm();
 		const nativeWasLive = this.#nativeLive;
 		if (nativeWasLive) {
-			this.#native!.stop();
 			this.#nativeLive = false;
+			this.#native!.stop();
 		}
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
@@ -3613,29 +3688,7 @@ export class TUI extends Container {
 		this.#resizeInPlaceActive = false;
 		this.#altToggleEchoPending = false;
 		this.#cancelResizeProbe();
-		if (this.#appViewportActive) {
-			this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}\x1b[?1049l`);
-			this.#appViewportActive = false;
-			this.#appViewportPixelMouseActive = false;
-			this.#appViewportHoverMouseActive = false;
-			this.#appViewportVisibleSourceRows = [];
-			this.#appViewportFrameLines = [];
-			this.#appViewportFramePreparedRows = [];
-			this.#appViewportComposeStale = true;
-			this.#appViewportFrameCursorPos = null;
-			this.#appViewportPreviousScrollRegionEnd = undefined;
-			this.#clearAppViewportSelection();
-			this.#appViewportSelectionDrag = false;
-			this.#stopAppViewportSelectionAutoScroll();
-			this.#appViewportLastClick = null;
-			this.#appViewportPreviousLines = [];
-			this.#appViewportPreparedRows = [];
-			this.#appViewportPreviousSixelRows = [];
-			this.#appViewportPreviousScrollbarGlyphs = [];
-			this.#appViewportPreviousWidth = 0;
-			this.#appViewportScrollbarMetrics = null;
-			this.#appViewportScrollbarDrag = null;
-		}
+		this.#leaveAppViewport();
 		if (this.#resizeAltActive) {
 			this.#resizeAltActive = false;
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#altScreenExit()}`);
@@ -3755,6 +3808,7 @@ export class TUI extends Container {
 		if (!options?.viewportOnly) {
 			this.#appViewportComposeStale = true;
 			this.#appViewportComponentTargets.clear();
+			this.#appViewportAnimationTargets.clear();
 			this.#appViewportFullComposePending = true;
 		}
 		if (force) {
@@ -3800,13 +3854,14 @@ export class TUI extends Container {
 	renderNow(options?: RenderRequestOptions): void {
 		if (this.#stopped) return;
 		this.#appViewportComponentTargets.clear();
+		this.#appViewportAnimationTargets.clear();
 		this.#appViewportFullComposePending = true;
 		this.#appViewportComposeStale = true;
 		this.#prepareForcedRender(options?.clearScrollback === true);
 		this.#renderRequested = false;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
-		this.#doRender();
+		withAnimationOnlyRenderTargets(undefined, () => this.#doRender());
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
 	}
 
@@ -3816,10 +3871,18 @@ export class TUI extends Container {
 	 * scratch — retired blocks no longer render — so a scoped request is simply
 	 * an ordinary render.
 	 */
-	requestComponentRender(component: Component): void {
+	requestComponentRender(component: Component, options?: ComponentRenderOptions): void {
 		if (this.#stopped) return;
 		this.#appViewportComposeStale = true;
-		if (!this.#appViewportFullComposePending) this.#appViewportComponentTargets.add(component);
+		if (!this.#appViewportFullComposePending) {
+			// Content changes dominate animation ticks in either arrival order.
+			if (options?.animationOnly && !this.#appViewportComponentTargets.has(component)) {
+				this.#appViewportAnimationTargets.add(component);
+			} else if (!options?.animationOnly) {
+				this.#appViewportAnimationTargets.delete(component);
+			}
+			this.#appViewportComponentTargets.add(component);
+		}
 		this.#requestOrdinaryRender();
 	}
 
@@ -3922,7 +3985,9 @@ export class TUI extends Container {
 		this.#inputRenderPending = false;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
-		this.#doRender();
+		const animationTargets = this.#appViewportFullComposePending ? undefined : this.#appViewportAnimationTargets;
+		this.#appViewportAnimationTargets = new Set();
+		withAnimationOnlyRenderTargets(animationTargets, () => this.#doRender());
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
 	}
 	/**
@@ -3959,7 +4024,7 @@ export class TUI extends Container {
 	}
 
 	#handleAppViewportInput(data: string): boolean {
-		if (!this.#appViewportBackend || this.hasOverlay()) return false;
+		if (this.#nativeLive || !this.#appViewportBackend || this.hasOverlay()) return false;
 		const inputOwner = this.#findAppViewportInputOwner();
 		if (data.startsWith("\x1b[<")) {
 			return this.#handleAppViewportMouse(data, inputOwner);
@@ -4009,6 +4074,7 @@ export class TUI extends Container {
 			}
 			return true;
 		}
+		if (this.#appViewportClickHandler?.(normalizedEvent)) return true;
 		if (event.wheel !== null) {
 			this.#appViewportScrollbarDrag = null;
 			if (this.#appViewportSelectionDrag) {
@@ -5824,6 +5890,7 @@ export class TUI extends Container {
 				);
 				return;
 			}
+			this.#forgetTransmittedForPendingReset();
 			this.#renderAppViewportFrame(width, height);
 			return;
 		}
@@ -6439,6 +6506,9 @@ export class TUI extends Container {
 	}
 
 	#renderAppViewportFrame(width: number, height: number): void {
+		// The product's inline capture probe also clears stale hover state when
+		// toggled off. App-viewport mouse reporting stays on for pane selection.
+		this.#inlineMouseProvider?.();
 		const inputOwner = this.#findAppViewportInputOwner();
 		const hoverMouse = inputOwner?.wantsAppViewportHover?.() ?? false;
 		this.#enterAppViewport(hoverMouse);
@@ -6482,9 +6552,15 @@ export class TUI extends Container {
 		}
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 
-		const cursorMarkers = this.#extractCursorMarkers(rawFrame);
+		const cursorMarkers: { row: number; col: number }[] = [];
+		const frame = this.#prepareLinesArray(
+			rawFrame,
+			contentWidth,
+			this.#appViewportFramePreparedRows,
+			rawFrame.length,
+			cursorMarkers,
+		);
 		const cursorPos = cursorMarkers[0] ?? plan?.cursor ?? null;
-		const frame = this.#prepareLinesArray(rawFrame, contentWidth, this.#appViewportFramePreparedRows);
 		this.#emitAppViewportFrame(frame, width, height, cursorPos);
 		this.#appViewportFrameCursorPos = cursorPos;
 		this.#appViewportComposeStale = false;
@@ -6545,7 +6621,14 @@ export class TUI extends Container {
 			fitted = appendBrailleScrollbar(fitted, scrollbarGlyphs, width);
 			scrollbarGlyphs = [];
 			fitted = this.#compositeOverlaysIntoWindow(fitted, width, height);
-			const overlayMarkers = this.#extractCursorMarkers(fitted);
+			const overlayMarkers: { row: number; col: number }[] = [];
+			fitted = this.#prepareLinesArray(
+				fitted,
+				width,
+				this.#appViewportPreparedRows,
+				fitted.length,
+				overlayMarkers,
+			).lines;
 			if (overlayMarkers.length > 0) fittedCursorPos = overlayMarkers[0]!;
 		}
 		// Reuse prepared source rows through scrolling and selection-only paints.
@@ -6583,6 +6666,7 @@ export class TUI extends Container {
 		let kittyCleanup = "";
 		if (this.#clearScrollbackOnNextRender && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			kittyCleanup += encodeKittyDeleteAllImages();
+			for (const id of this.#imageBudget.takeResetPurgeIds()) kittyCleanup += encodeKittyDeleteImage(id);
 			this.#imageBudget.resetPlacementEpochs();
 			this.#imageBudget.takePurgeIds();
 			this.#imageBudget.takeRetiredIds();
@@ -6616,6 +6700,16 @@ export class TUI extends Container {
 				this.#appViewportPreparedRows = preparedRows;
 				if (kittyCleanup) this.terminal.write(this.#paintBeginSequence + kittyCleanup + this.#paintEndSequence);
 				this.#writeAppViewportCursor(fittedCursorPos, height);
+				if (this.#paintListeners.size > 0) {
+					this.#notifyPaint({
+						history: [],
+						viewport: appendBrailleScrollbar(fitted, scrollbarGlyphs, width),
+						reset: false,
+						alt: false,
+						columns: width,
+						rows: height,
+					});
+				}
 				return;
 			}
 		}
@@ -6672,6 +6766,16 @@ export class TUI extends Container {
 		this.#appViewportPreviousWidth = width;
 		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
 		else this.#recordHardwareCursorHidden();
+		if (this.#paintListeners.size > 0) {
+			this.#notifyPaint({
+				history: [],
+				viewport: appendBrailleScrollbar(fitted, scrollbarGlyphs, width),
+				reset: false,
+				alt: false,
+				columns: width,
+				rows: height,
+			});
+		}
 	}
 
 	#appViewportPaintRows(

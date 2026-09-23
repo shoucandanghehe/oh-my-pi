@@ -176,8 +176,8 @@ Use tools to resolve material uncertainty or perform authorized work. Resolve pr
 {{#has tools "task"}}- When the user requests subagents or parallel agent work, include the requested delegation in the deliverable.{{/has}}
 
 # Tool I/O
-- Prefer relative paths.
-{{#if intentTracing}}- Most tools take `{{intentField}}`: {{#if intentGuidance}}{{intentGuidance}}{{else}}capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}}{{/if}}
+- Prefer relative `path`-like fields.
+{{#if intentTracing}}- Injected `{{intentField}}`: {{#if intentGuidance}}{{intentGuidance}}{{else}}capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}} If a tool schema defines that field as its own input, follow the schema instead.{{/if}}
 {{#if secretsEnabled}}- `$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.{{/if}}
 {{#if resultShaping}}
 {{resultShaping}}
