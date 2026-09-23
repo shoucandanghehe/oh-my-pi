@@ -1,6 +1,8 @@
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { calculateContextTokens, hasContextTokenUsage } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Effort, ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { ExtensionRunner } from "../extensibility/extensions/runner";
+import type { BtwExtensionRuntime } from "./btw-extension-runtime";
 
 export interface EphemeralTurnOptions {
 	promptText: string;
@@ -89,6 +91,8 @@ export interface EphemeralConversationOptions {
 		streamMessage?: AssistantMessage | null;
 		isStreaming: boolean;
 	};
+	/** Lazy: only durable BTW explicitly initializes a side-owned extension host. */
+	createExtensionRuntime?: () => Promise<BtwExtensionRuntime>;
 }
 
 /**
@@ -102,6 +106,11 @@ export class EphemeralConversation {
 	readonly #runTurn: EphemeralConversationOptions["runTurn"];
 	readonly #getTool: EphemeralConversationOptions["getTool"];
 	readonly #getRuntimeState: EphemeralConversationOptions["getRuntimeState"];
+	readonly #createExtensionRuntime: EphemeralConversationOptions["createExtensionRuntime"];
+	#extensionRuntime: BtwExtensionRuntime | undefined;
+	#extensionRuntimePending: Promise<void> | undefined;
+	#extensionRuntimeDisposePending: Promise<void> | undefined;
+	#extensionRuntimeDisposed = false;
 	readonly #sideSessionId: string;
 	readonly #turns: EphemeralConversationTurn[] = [];
 	readonly #committedUsage = {
@@ -124,6 +133,7 @@ export class EphemeralConversation {
 		this.#getTool = options.getTool;
 		this.#getRuntimeState = options.getRuntimeState;
 		this.#runTurn = options.runTurn;
+		this.#createExtensionRuntime = options.createExtensionRuntime;
 		this.#sideSessionId = options.sideSessionId;
 		this.#baseMessages = options.checkpoint?.baseMessages;
 		if (options.checkpoint) {
@@ -142,6 +152,46 @@ export class EphemeralConversation {
 
 	getTool(name: string): AgentTool | undefined {
 		return this.#getTool?.(name);
+	}
+	/** Undefined before explicit initialization and after disposal. */
+	get extensionRunner(): ExtensionRunner | undefined {
+		return this.#extensionRuntime?.runner;
+	}
+
+	async initializeExtensionRuntime(): Promise<void> {
+		if (this.#extensionRuntimeDisposed) throw new Error("BTW extension runtime was disposed");
+		if (!this.#createExtensionRuntime || this.#extensionRuntime) return;
+		this.#extensionRuntimePending ??= this.#createExtensionRuntime()
+			.then(runtime => {
+				if (this.#extensionRuntimeDisposed) {
+					return runtime.dispose();
+				}
+				this.#extensionRuntime = runtime;
+			})
+			.finally(() => {
+				this.#extensionRuntimePending = undefined;
+			});
+		await this.#extensionRuntimePending;
+	}
+	/** Waits for an already-requested host; never allocates one for QuickAsk. */
+	async waitForExtensionRuntimeInitialization(): Promise<void> {
+		await this.#extensionRuntimePending;
+		if (this.#extensionRuntimeDisposed) throw new Error("BTW extension runtime was disposed");
+	}
+
+	async disposeExtensionRuntime(): Promise<void> {
+		if (this.#extensionRuntimeDisposePending) return this.#extensionRuntimeDisposePending;
+		this.#extensionRuntimeDisposed = true;
+		this.#extensionRuntimeDisposePending = (async () => {
+			try {
+				await this.#extensionRuntimePending?.catch(() => {});
+			} finally {
+				const runtime = this.#extensionRuntime;
+				this.#extensionRuntime = undefined;
+				await runtime?.dispose();
+			}
+		})();
+		await this.#extensionRuntimeDisposePending;
 	}
 	get status(): EphemeralConversationStatus | undefined {
 		const runtime = this.#getRuntimeState?.();
@@ -250,6 +300,7 @@ export class EphemeralConversation {
 			timestamp,
 		});
 
+		if (this.#extensionRuntimeDisposed) throw new Error("BTW extension runtime was disposed");
 		this.#running = true;
 		try {
 			const result = await this.#runTurn(messages, options);

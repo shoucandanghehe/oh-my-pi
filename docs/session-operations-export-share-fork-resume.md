@@ -216,9 +216,9 @@ a new one.
 
 ## BTW threads
 
-BTW threads are stored as `btw-thread` custom events in the session journal,
-separate from Main's model conversation. Inline questions are durable from creation;
-opening the workspace changes only their presentation. See the
+BTW threads are stored in the session's `btw-history/` sidecar directory,
+independent of Main's journal and model conversation. Inline questions are durable
+from creation; opening the workspace changes only their presentation. See the
 [BTW command reference](slash-command-internals.md#11-built-in-command-note-btw)
 for follow-ups, persistence, and promotion.
 

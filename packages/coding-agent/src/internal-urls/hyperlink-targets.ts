@@ -5,6 +5,7 @@ import { getMarkdownLinkUrls, TERMINAL } from "@oh-my-pi/pi-tui";
 import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
 import { expandPath } from "../tools/path-utils";
+import type { AgentSession } from "../session/agent-session";
 
 /**
  * Resolve Markdown hyperlinks to existing local resources or absolute file URLs.
@@ -13,6 +14,7 @@ import { expandPath } from "../tools/path-utils";
 export async function resolveMarkdownLinkTargets(
 	texts: readonly string[],
 	context?: ResolveContext,
+	options?: { resolveInternalUrls?: boolean },
 ): Promise<ReadonlyMap<string, string>> {
 	const targets = new Map<string, string>();
 	const urls = new Set<string>();
@@ -34,6 +36,7 @@ export async function resolveMarkdownLinkTargets(
 				let sourcePath: string;
 				let suffix: string;
 				if (router.canHandle(href)) {
+					if (options?.resolveInternalUrls === false) return;
 					const located = await router.locate(href, context);
 					if (located === null) return;
 					sourcePath = located;
@@ -55,4 +58,21 @@ export async function resolveMarkdownLinkTargets(
 		}),
 	);
 	return targets;
+}
+
+export function resolveSessionMarkdownLinks(
+	texts: readonly string[],
+	session: AgentSession,
+): Promise<ReadonlyMap<string, string>> {
+	return resolveMarkdownLinkTargets(texts, {
+		cwd: session.sessionManager.getCwd(),
+		sessionFile: session.sessionFile,
+		settings: session.settings,
+		localProtocolOptions: {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		},
+		skills: session.skills,
+		rules: session.ttsrManager?.getRules(),
+	});
 }
