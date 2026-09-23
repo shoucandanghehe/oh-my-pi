@@ -1,7 +1,7 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { Container, type Component, type VirtualViewportProvider } from "../tui";
 import { chatTranscriptDisplayPreferences as displayPreferences } from "../chat/display-preferences";
-import type { TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
+import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "../chat/chat-transcript-builder";
 import { TranscriptContainer } from "../chrome/transcript-container";
 import {
@@ -18,9 +18,12 @@ export interface RewindPoint {
 	target: number;
 }
 
-export interface RewindHistoryItem {
+export interface RewindHistoryTarget {
 	point: RewindPoint;
 	target: OutlineTarget;
+}
+
+export interface RewindHistoryItem extends RewindHistoryTarget {
 	/** Prompt-zone-safe body rows, without the selector's gutter or outline. */
 	rows: readonly string[];
 }
@@ -128,6 +131,8 @@ export class RewindHistory {
 	#selected: RewindPoint | undefined;
 	#prepared = false;
 	#searchRows = new OutlineRowCache();
+	#targets: readonly RewindHistoryTarget[] | undefined;
+	#nativeStart = 0;
 	#view:
 		| {
 				width: number;
@@ -177,6 +182,13 @@ export class RewindHistory {
 				previousUsage = message.usage;
 		}
 		if (start < entries.length) this.#chunks.push(new RewindChunk(entries, start, entries.length, deps, chunkUsage));
+		if (initial === "last") {
+			const cutoff = entries.length - recentTranscriptEntries(entries).length;
+			this.#nativeStart = Math.max(
+				0,
+				this.#chunks.findIndex(chunk => chunk.to > cutoff),
+			);
+		}
 	}
 
 	get point(): RewindPoint | undefined {
@@ -187,6 +199,42 @@ export class RewindHistory {
 	get target(): OutlineTarget | undefined {
 		const point = this.point;
 		return point ? this.#chunks[point.chunk]!.targets[point.target] : undefined;
+	}
+
+	/** Bounded native catalogue, aligned to replay chunks so tool exchanges stay intact. */
+	get targets(): readonly RewindHistoryTarget[] {
+		return (this.#targets ??= this.#chunks.slice(this.#nativeStart).flatMap((source, offset) =>
+			source.targets.map((target, index) => ({
+				point: { chunk: this.#nativeStart + offset, target: index },
+				target,
+			})),
+		));
+	}
+
+	get truncated(): boolean {
+		return this.#nativeStart > 0;
+	}
+
+	/** Native Earlier/filter requests broaden the catalogue without replacing selection or components. */
+	loadAll(): void {
+		if (!this.truncated) return;
+		this.#nativeStart = 0;
+		this.#targets = undefined;
+	}
+
+	/** A catalogue turn's actual components, without changing the selection or measuring ANSI rows. */
+	preview(point: RewindPoint): readonly Component[] {
+		const chunk = this.#chunks[point.chunk]!;
+		const target = chunk.targets[point.target]!;
+		return chunk.builder.container.children.slice(target.start, target.end);
+	}
+
+	/** Pointer selection uses the catalogue's stable turn identity, not a second index. */
+	selectTurn(id: string): boolean {
+		const item = this.targets.find(item => item.target.turnId === id);
+		if (!item) return false;
+		this.select(item.point);
+		return true;
 	}
 
 	get position(): number {
@@ -213,6 +261,7 @@ export class RewindHistory {
 			const targets = this.#chunks[chunk]!.targets;
 			if (targets.length > 0) {
 				this.#selected = { chunk, target: delta < 0 ? targets.length - 1 : 0 };
+				if (chunk < this.#nativeStart) this.loadAll();
 				return;
 			}
 		}
@@ -232,7 +281,7 @@ export class RewindHistory {
 		);
 	}
 
-	move(delta: -1 | 1, userOnly: boolean, width: number): boolean {
+	move(delta: -1 | 1, userOnly: boolean, width?: number): boolean {
 		const current = this.point;
 		if (!current) return false;
 		let target = current.target + delta;
@@ -241,8 +290,9 @@ export class RewindHistory {
 			if (chunk !== current.chunk) target = delta < 0 ? targets.length - 1 : 0;
 			for (; target >= 0 && target < targets.length; target += delta) {
 				const next = { chunk, target };
-				if ((!userOnly || targets[target]!.isUserTurn) && this.#visible(next, width)) {
+				if ((!userOnly || targets[target]!.isUserTurn) && (width === undefined || this.#visible(next, width))) {
 					this.#selected = next;
+					if (width === undefined && chunk < this.#nativeStart) this.loadAll();
 					return true;
 				}
 			}

@@ -48,7 +48,6 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
 
-const MAX_WIDGET_LINES = 10;
 
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles

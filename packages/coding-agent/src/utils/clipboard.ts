@@ -422,10 +422,7 @@ export async function readClipboardContent(): Promise<ClipboardContent> {
 	if (!process.env.TERMUX_VERSION && isWsl()) {
 		const content = await readContentViaPowerShell();
 		if (content !== null) return content;
-		const [image, text] = await Promise.all([
-			readLocalImageFromClipboard(),
-			readLocalTextFromClipboard(),
-		]);
+		const [image, text] = await Promise.all([readLocalImageFromClipboard(), readLocalTextFromClipboard()]);
 		return { image, text, fileUrls: [] };
 	}
 	const [image, text, fileUrls] = await Promise.all([

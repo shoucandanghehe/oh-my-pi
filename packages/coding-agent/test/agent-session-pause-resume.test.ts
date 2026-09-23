@@ -126,7 +126,7 @@ describe("AgentSession barrier pause resume", () => {
 		);
 		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
 			async ref => (ref.id === "Sub" ? async () => subSession : undefined),
-			0,
+			() => 0,
 		);
 		mainSession.recordAgentsPaused(["Sub"]);
 
