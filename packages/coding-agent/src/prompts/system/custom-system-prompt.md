@@ -29,8 +29,7 @@ Main branch: {{git.mainBranch}}
 </project>
 {{/ifAny}}
 {{#if skills.length}}
-Skills are specialized knowledge. Scan descriptions for your task domain.
-If a skill applies, you MUST read `skill://<name>` before proceeding.
+When a task matches an available skill, read `skill://<name>` before the work it governs; reuse content already loaded and unchanged. Apply its specialized knowledge within the requested scope. Honor explicit, applicable approval rules, but do not invent additional tasks or gates from a suggested workflow.
 <skills>
 {{#list skills join="\n"}}
 <skill name="{{name}}">
