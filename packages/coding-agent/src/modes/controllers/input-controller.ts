@@ -4,7 +4,6 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { ClipboardImage } from "@oh-my-pi/pi-natives/clipboard";
 import {
 	type AutocompleteProvider,
-	type Component,
 	matchesKey,
 	parseSgrMouse,
 	type PasteOptions,
@@ -470,6 +469,18 @@ export class InputController {
 			// Defers to fullscreen overlays, which own mouse handling on the
 			// alternate screen.
 			this.ctx.ui.addInputListener(data => this.#handleInlineMouse(data));
+			if (this.ctx.workspaceEnabled) {
+				this.ctx.ui.setAppViewportClickHandler(event => {
+					if (!cfgTuiMouse.get(this.ctx.settings) || this.ctx.ui.hasOverlay()) return false;
+					if (event.motion) {
+						this.#updateHoverHighlight(event.row, event.col);
+						return false;
+					}
+					if (!event.leftClick || this.#viewportCandidates(event.row, event.col).length === 0) return false;
+					this.#focusClickedAgent(event.row, event.col);
+					return true;
+				});
+			}
 		}
 		this.ctx.editor.onEscape = () => {
 			// `/mcp test` advertises Esc until each owner's post-settlement grace expires.
@@ -794,11 +805,12 @@ export class InputController {
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
 		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
+		if (this.ctx.workspaceEnabled) return undefined;
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
-		if (event.motion) this.#updateHoverHighlight(event.row);
-		else if (event.leftClick) this.#focusClickedAgent(event.row);
+		if (event.motion) this.#updateHoverHighlight(event.row, event.col);
+		else if (event.leftClick) this.#focusClickedAgent(event.row, event.col);
 		return { consume: true };
 	}
 
@@ -807,22 +819,22 @@ export class InputController {
 	 * is id-anchored in the composer, so it follows an agent whose rows shift
 	 * while streaming; pointing at chrome clears it.
 	 */
-	#updateHoverHighlight(screenRow: number): void {
-		const hovered = this.#viewportCandidates(screenRow)[0];
+	#updateHoverHighlight(screenRow: number, col: number): void {
+		const hovered = this.#viewportCandidates(screenRow, col)[0];
 		if (hovered === this.#lastHoverClickId) return;
 		this.#lastHoverClickId = hovered;
-		this.ctx.setClickHoverId(hovered);
+		this.ctx.setClickHoverId(hovered, col);
 		this.ctx.ui.requestRender();
 	}
 
 	// Candidates under a screen row, or none when the published viewport is
 	// empty (resize transactions) or the row falls outside it: routing stale
 	// spans would highlight or focus an unrelated agent from old rows.
-	#viewportCandidates(screenRow: number): string[] {
+	#viewportCandidates(screenRow: number, col: number): string[] {
 		const viewport = this.ctx.ui.getMutableViewport();
 		const local = screenRow - viewport.top;
 		if (viewport.length === 0 || local < 0 || local >= viewport.length) return [];
-		return this.ctx.resolveViewportClickCandidates(local);
+		return this.ctx.resolveViewportClickCandidates(local, col);
 	}
 
 	/**
@@ -835,8 +847,8 @@ export class InputController {
 		this.#lastHoverClickId = undefined;
 	}
 
-	#focusClickedAgent(screenRow: number): void {
-		const candidates = this.#viewportCandidates(screenRow);
+	#focusClickedAgent(screenRow: number, col: number): void {
+		const candidates = this.#viewportCandidates(screenRow, col);
 		if (candidates.length === 0) return;
 		const refs = AgentRegistry.global().list();
 		const scoped = refs.filter(ref => candidates.includes(ref.id));

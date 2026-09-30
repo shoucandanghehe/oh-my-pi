@@ -1057,6 +1057,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * badge represents that same agent. Bash and eval jobs always count.
 	 */
 	runningBackgroundJobCount(): number {
+		if (this.#runtimeStatus) return 0;
 		return (
 			this.session
 				.getAsyncJobSnapshot()

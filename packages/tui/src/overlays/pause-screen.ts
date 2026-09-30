@@ -116,7 +116,9 @@ export function renderPauseScreen(width: number, height: number, state: PauseScr
 		content.push("");
 		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(state.elapsedMs)}`), width).trimEnd());
 		content.push(centerLine(theme.fg(state.ready ? "success" : "warning", barrierLabel), width).trimEnd());
-		content.push(centerLine(theme.fg("dim", state.ready ? `${esc} resume · q exit` : `${esc} to resume`), width).trimEnd());
+		content.push(
+			centerLine(theme.fg("dim", state.ready ? `${esc} resume · q exit` : `${esc} to resume`), width).trimEnd(),
+		);
 	} else {
 		if (state.sessionName) {
 			content.push(centerLine(theme.bold(state.sessionName), width).trimEnd());

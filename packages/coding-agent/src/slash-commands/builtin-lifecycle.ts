@@ -439,7 +439,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		name: "btw",
 		icon: "question",
 		description: "Ask in a durable side thread, or reopen the BTW workspace",
-		inlineHint: "[question|--clear]",
+		inlineHint: "[question|--clear|--history]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();

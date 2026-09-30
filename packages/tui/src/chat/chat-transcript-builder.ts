@@ -19,12 +19,7 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "./messages";
-import {
-	imageContent,
-	textContent,
-	type TranscriptEntryLike as TranscriptEntry,
-	transcriptEntryMessage,
-} from "./transcript-entry";
+import { imageContent, type TranscriptEntryLike as TranscriptEntry, transcriptEntryMessage } from "./transcript-entry";
 import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
-import { BtwHistoryStore, type BtwHistoryRecord } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import { BtwHistoryStore, type BtwThreadHistoryRecord } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const usage: Usage = {
@@ -29,7 +29,7 @@ function assistant(text: string): AssistantMessage {
 	};
 }
 
-function record(id: string): BtwHistoryRecord {
+function record(id: string): BtwThreadHistoryRecord {
 	return {
 		version: 1,
 		id,
@@ -86,7 +86,7 @@ describe("BtwHistoryStore", () => {
 		original.readThrough = 1;
 		original.phase = "running";
 		original.pausedRequest = { input: "", images: [imageData], timestamp: 13 };
-		const store = await BtwHistoryStore.open(temp.path(), blobs);
+		const store = await BtwHistoryStore.openThreads(temp.path(), blobs);
 		const pending = store.upsert(original);
 		// Mutating source while the write is queued cannot change the checkpoint.
 		original.draft = "later mutation";
@@ -95,7 +95,7 @@ describe("BtwHistoryStore", () => {
 		await pending;
 		await store.flush();
 		const filePath = path.join(temp.path(), "btw-history", "entry-thread-a.json");
-		const disk = (await Bun.file(filePath).json()) as Omit<BtwHistoryRecord, "draftImageLinks"> & {
+		const disk = (await Bun.file(filePath).json()) as Omit<BtwThreadHistoryRecord, "draftImageLinks"> & {
 			draftImageLinks: (string | null)[];
 		};
 		expect(isBlobRef(disk.draftImages[0]!.data)).toBe(true);
@@ -106,7 +106,7 @@ describe("BtwHistoryStore", () => {
 			expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
 			expect((await fs.stat(path.dirname(filePath))).mode & 0o777).toBe(0o700);
 		}
-		const restored = await BtwHistoryStore.open(temp.path(), blobs);
+		const restored = await BtwHistoryStore.openThreads(temp.path(), blobs);
 		expect(restored.getRecords()).toEqual([
 			{
 				...record("thread-a"),
@@ -137,50 +137,52 @@ describe("BtwHistoryStore", () => {
 
 	it("rejects concurrent revisions, including deletion, without losing the committed record", async () => {
 		using temp = TempDir.createSync("@btw-history-cas-");
-		const owner = await BtwHistoryStore.open(temp.path());
+		const owner = await BtwHistoryStore.openThreads(temp.path());
 		await owner.upsert(record("thread-a"));
-		const stale = await BtwHistoryStore.open(temp.path());
-		const staleWriter = await BtwHistoryStore.open(temp.path());
+		const stale = await BtwHistoryStore.openThreads(temp.path());
+		const staleWriter = await BtwHistoryStore.openThreads(temp.path());
 		await owner.upsert({ ...record("thread-a"), draft: "owner's latest checkpoint" });
 		await expect(staleWriter.upsert({ ...record("thread-a"), draft: "stale overwrite" })).rejects.toThrow("conflict");
 		await expect(stale.remove("thread-a")).rejects.toThrow("conflict");
 		await expect(stale.flush()).rejects.toThrow("conflict");
-		const disk = await BtwHistoryStore.open(temp.path());
+		const disk = await BtwHistoryStore.openThreads(temp.path());
 		expect(disk.getRecords()[0]?.draft).toBe("owner's latest checkpoint");
 		await owner.remove("thread-a");
-		expect((await BtwHistoryStore.open(temp.path())).getRecords()).toEqual([]);
+		expect((await BtwHistoryStore.openThreads(temp.path())).getRecords()).toEqual([]);
 	});
 
 	it("latches a failed write until a fresh store is opened", async () => {
 		using temp = TempDir.createSync("@btw-history-retry-");
-		const store = await BtwHistoryStore.open(temp.path());
+		const store = await BtwHistoryStore.openThreads(temp.path());
 		const directory = path.join(temp.path(), "btw-history");
 		await Bun.write(directory, "blocks directory creation");
 		await expect(store.upsert(record("thread-retry"))).rejects.toThrow();
 		await expect(store.flush()).rejects.toThrow();
 		await expect(store.upsert(record("other-thread"))).rejects.toThrow();
 		await fs.rm(directory);
-		const reopened = await BtwHistoryStore.open(temp.path());
+		const reopened = await BtwHistoryStore.openThreads(temp.path());
 		await reopened.upsert(record("thread-retry"));
-		expect((await BtwHistoryStore.open(temp.path())).getRecords().map(item => item.id)).toEqual(["thread-retry"]);
+		expect((await BtwHistoryStore.openThreads(temp.path())).getRecords().map(item => item.id)).toEqual([
+			"thread-retry",
+		]);
 	});
 
 	it("recovers running without a request as interrupted, preserving the original disk revision for CAS", async () => {
 		using temp = TempDir.createSync("@btw-history-recovery-");
-		const initial = await BtwHistoryStore.open(temp.path());
+		const initial = await BtwHistoryStore.openThreads(temp.path());
 		await initial.upsert({ ...record("thread-b"), phase: "running" });
 		// A process crash releases its lease; this test releases it by finishing the original writer.
 		await initial.upsert({ ...record("thread-b"), phase: "ready" });
 		const filePath = path.join(temp.path(), "btw-history", "entry-thread-b.json");
 		await Bun.write(filePath, `${JSON.stringify({ ...record("thread-b"), phase: "running" })}\n`);
-		const resumed = await BtwHistoryStore.open(temp.path());
+		const resumed = await BtwHistoryStore.openThreads(temp.path());
 		expect(resumed.getRecords()[0]).toMatchObject({ phase: "error", error: "Reply interrupted before completion" });
 		await resumed.upsert({ ...resumed.getRecords()[0]!, phase: "ready", error: undefined });
-		expect((await BtwHistoryStore.open(temp.path())).getRecords()[0]).toMatchObject({ phase: "ready" });
+		expect((await BtwHistoryStore.openThreads(temp.path())).getRecords()[0]).toMatchObject({ phase: "ready" });
 	});
 
 	it("keeps undefined-artifacts sessions wholly in memory, including deletion", async () => {
-		const store = await BtwHistoryStore.open(undefined);
+		const store = await BtwHistoryStore.openThreads(undefined);
 		await store.upsert(record("memory-only"));
 		await store.remove("memory-only");
 		await store.flush();

@@ -1641,22 +1641,24 @@ export class CommandController {
 				return;
 			}
 		}
-		const moved = await this.#withSavedSettings(async () => {
-			if (!isDirectory) {
-				const confirmed = await this.ctx.showHookConfirm(
-					"Create directory?",
-					`"${path.basename(resolvedPath)}" does not exist. Create it?`,
-				);
-				if (!confirmed) return false;
-				try {
-					await fs.mkdir(resolvedPath, { recursive: true });
-				} catch (err) {
-					this.ctx.showError(`Failed to create directory: ${err instanceof Error ? err.message : String(err)}`);
-					return false;
+		const moved = await this.ctx.withBtwSessionMove(() =>
+			this.#withSavedSettings(async () => {
+				if (!isDirectory) {
+					const confirmed = await this.ctx.showHookConfirm(
+						"Create directory?",
+						`"${path.basename(resolvedPath)}" does not exist. Create it?`,
+					);
+					if (!confirmed) return false;
+					try {
+						await fs.mkdir(resolvedPath, { recursive: true });
+					} catch (err) {
+						this.ctx.showError(`Failed to create directory: ${err instanceof Error ? err.message : String(err)}`);
+						return false;
+					}
 				}
-			}
-			return this.#relocateSession(resolvedPath);
-		});
+				return this.#relocateSession(resolvedPath);
+			}),
+		);
 		if (moved) {
 			this.ctx.present([
 				new Spacer(1),
@@ -1680,53 +1682,55 @@ export class CommandController {
 			return undefined;
 		}
 		let created: SessionWorktree | undefined;
-		await this.#withSavedSettings(async () => {
-			const branchName = branch?.trim() || defaultSessionWorktreeBranch();
-			const cwd = this.ctx.sessionManager.getCwd();
-			this.ctx.statusContainer.disposeChildren();
-			const loader = new Loader(
-				this.ctx.ui,
-				spinner => theme.fg("accent", spinner),
-				text => theme.fg("muted", text),
-				`Creating worktree on ${branchName}…`,
-				getSymbolTheme().spinnerFrames,
-			);
-			this.ctx.statusContainer.addChild(loader);
-			this.ctx.ui.requestRender();
-			let worktree: SessionWorktree;
-			try {
-				worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
-			} catch (err) {
-				this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
-				return false;
-			} finally {
-				loader.stop();
+		await this.ctx.withBtwSessionMove(() =>
+			this.#withSavedSettings(async () => {
+				const branchName = branch?.trim() || defaultSessionWorktreeBranch();
+				const cwd = this.ctx.sessionManager.getCwd();
 				this.ctx.statusContainer.disposeChildren();
-			}
-			if (worktree.cloneError) {
-				logger.warn("worktree clone fell back to plain checkout", {
-					path: worktree.path,
-					error: worktree.cloneError,
-				});
-			}
-			if (!(await this.#relocateSession(worktree.path))) return false;
-			created = worktree;
-			const cleanup = worktree.keptChanges
-				? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
-				: { cleaned: false, errorMessage: undefined };
-			if (cleanup.errorMessage !== undefined) {
-				this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
-			}
-			this.ctx.present([
-				new Spacer(1),
-				new Text(
-					`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, cleanup.cleaned)}`)}`,
-					1,
-					1,
-				),
-			]);
-			return true;
-		});
+				const loader = new Loader(
+					this.ctx.ui,
+					spinner => theme.fg("accent", spinner),
+					text => theme.fg("muted", text),
+					`Creating worktree on ${branchName}…`,
+					getSymbolTheme().spinnerFrames,
+				);
+				this.ctx.statusContainer.addChild(loader);
+				this.ctx.ui.requestRender();
+				let worktree: SessionWorktree;
+				try {
+					worktree = await createSessionWorktree(cwd, this.ctx.settings, branchName, options);
+				} catch (err) {
+					this.ctx.showError(`Worktree creation failed: ${err instanceof Error ? err.message : String(err)}`);
+					return false;
+				} finally {
+					loader.stop();
+					this.ctx.statusContainer.disposeChildren();
+				}
+				if (worktree.cloneError) {
+					logger.warn("worktree clone fell back to plain checkout", {
+						path: worktree.path,
+						error: worktree.cloneError,
+					});
+				}
+				if (!(await this.#relocateSession(worktree.path))) return false;
+				created = worktree;
+				const cleanup = worktree.keptChanges
+					? await cleanSourceCheckoutIfConfigured(cwd, this.ctx.settings)
+					: { cleaned: false, errorMessage: undefined };
+				if (cleanup.errorMessage !== undefined) {
+					this.ctx.showWarning(`Worktree created, but cleaning source checkout failed: ${cleanup.errorMessage}`);
+				}
+				this.ctx.present([
+					new Spacer(1),
+					new Text(
+						`${theme.fg("accent", `${theme.status.success} ${formatSessionWorktreeSummary(worktree, cleanup.cleaned)}`)}`,
+						1,
+						1,
+					),
+				]);
+				return true;
+			}),
+		);
 		return created;
 	}
 
@@ -1745,15 +1749,6 @@ export class CommandController {
 	/** Relocate after source settings are saved; false means no successful move. */
 	async #relocateSession(resolvedPath: string): Promise<boolean> {
 		if (resolvedPath === path.resolve(this.ctx.sessionManager.getCwd())) return false;
-		try {
-			await this.ctx.prepareBtwForRelocation();
-		} catch (error) {
-			this.ctx.showError(
-				`Cannot move session while BTW history is unwritten: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			return false;
-		}
-
 		const previousState = this.ctx.sessionManager.captureState();
 		try {
 			await this.ctx.session.moveSession(resolvedPath);

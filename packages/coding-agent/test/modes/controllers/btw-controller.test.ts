@@ -1,9 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
@@ -80,7 +80,7 @@ function makeFakeSession(
 ): InteractiveModeContext["session"] {
 	return {
 		sessionId: "session-1",
-		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+		model: { api: "anthropic-messages", provider: "anthropic", id: "claude-sonnet-4-5" },
 		isStreaming: false,
 		createEphemeralConversation: (_instructions: string, checkpoint?: EphemeralConversationCheckpoint) =>
 			new EphemeralConversation({
@@ -110,7 +110,7 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 		ui: {
 			requestRender: vi.fn(),
 			requestComponentRender: vi.fn(),
-			showOverlay: vi.fn(() => ({ hide: vi.fn() })),
+			showOverlay: vi.fn(() => ({ hide: vi.fn(), setHidden: vi.fn(), isHidden: () => false })),
 			setFocus: vi.fn(),
 			terminal: { rows: 30 },
 		} as unknown as TUI,
@@ -118,8 +118,8 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		btwContainer,
 		session,
-		workspaceEnabled: false,
-		keybindings: { getKeys: () => [] },
+		workspaceEnabled: true,
+		dictationSpaceHold: () => ({ enabled: () => false, onStart: () => {}, onEnd: () => {} }),
 		openBtwWorkspacePane: vi.fn(() => true),
 		closeBtwWorkspacePane: vi.fn(() => true),
 		statusLine: {
@@ -1076,12 +1076,13 @@ describe("BtwController", () => {
 		await controller.dispose();
 	});
 
-	it("restores an inline-only thread after dismiss and controller disposal", async () => {
+	it("restores a rich thread in the workspace after dismiss and controller disposal", async () => {
 		const run = vi.fn(async () => ({
 			replyText: "Saved answer",
 			assistantMessage: createAssistantMessage("Saved answer"),
 		}));
 		const ctx = makeCtx(makeFakeSession(run));
+		const openPane = vi.spyOn(ctx, "openBtwWorkspacePane");
 		const controller = new BtwController(ctx);
 		await controller.start("Keep this");
 		await drainBtwRequest();
@@ -1090,13 +1091,14 @@ describe("BtwController", () => {
 		const resumed = new BtwController(ctx);
 		await resumed.start("");
 		expect(run).toHaveBeenCalledTimes(1);
-		expect(Bun.stripANSI(ctx.btwContainer.render(100).join("\n"))).toContain("Saved answer");
+		const pane = openPane.mock.calls.at(-1)?.[0] as BtwConversationPane;
+		expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("Saved answer");
 		expect(resumed.handlesOpenThreadKey()).toBe(false);
 		expect(ctx.sessionManager.getEntries()).toEqual([]);
 		await resumed.dispose();
 	});
 
-	it("replaces a previous request by aborting it before issuing the next runEphemeralTurn", async () => {
+	it("replaces a previous request by aborting it before issuing the next side turn", async () => {
 		const signals: AbortSignal[] = [];
 		const first = Promise.withResolvers<RunEphemeralTurnResult>();
 		const firstPromise = first.promise;
@@ -1293,6 +1295,7 @@ describe("BtwController", () => {
 			assistantMessage: createAssistantMessage("Worker answer"),
 		}));
 		const ctx = makeCtx(makeFakeSession(mainTurn));
+		Object.assign(ctx, { workspaceEnabled: false });
 		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
 		const mainManager = SessionManager.create(directory, directory);
 		ctx.sessionManager = mainManager;
@@ -1470,15 +1473,15 @@ describe("BtwController", () => {
 				anchorLeafId: "leaf-1",
 				sessionId: "session-1",
 				turns: [
-					{
+					expect.objectContaining({
 						input: "Question?",
 						replyText: "Answer",
 						assistantMessage,
 						timestamp: expect.any(Number),
-					},
+					}),
 				],
 			},
-			undefined,
+			expect.objectContaining({ prepare: expect.any(Function), rollback: expect.any(Function) }),
 		);
 		expect(controller.hasActiveRequest()).toBe(false);
 		expect(ctx.btwContainer.children).toHaveLength(0);
@@ -1651,20 +1654,22 @@ describe("BtwController", () => {
 		expect(ctx.handleBtwBranch).not.toHaveBeenCalled();
 	});
 
-	it("reopens a dismissed inline thread without asking the model again", async () => {
+	it("reopens a dismissed rich thread in the workspace without asking the model again", async () => {
 		const runEphemeralTurn = vi.fn(async () => ({
 			replyText: "Answer",
 			assistantMessage: createAssistantMessage("Answer"),
 		}));
-		const escapeController = new BtwController(makeCtx(makeFakeSession(runEphemeralTurn)));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const openPane = vi.spyOn(ctx, "openBtwWorkspacePane");
+		const escapeController = new BtwController(ctx);
 		await escapeController.start("Question?");
 		await drainBtwRequest();
 		expect(escapeController.canBranch()).toBe(true);
 		expect(escapeController.handleEscape()).toBe(true);
 		expect(escapeController.hasActiveRequest()).toBe(false);
 		await escapeController.start("");
-		expect(escapeController.hasActiveRequest()).toBe(true);
-		expect(escapeController.canBranch()).toBe(true);
+		const pane = openPane.mock.calls.at(-1)?.[0] as BtwConversationPane;
+		expect(Bun.stripANSI(pane.render(100).join("\n"))).toContain("Answer");
 		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
 
 		const disposeController = new BtwController(makeCtx(makeFakeSession(runEphemeralTurn)));

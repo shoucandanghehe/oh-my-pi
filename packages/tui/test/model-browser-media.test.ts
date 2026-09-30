@@ -5,6 +5,7 @@ import { buildBrowserItems, ModelBrowser, type ModelBrowserSource } from "@oh-my
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const source: ModelBrowserSource = {
+	revision: 0,
 	defaultThinkingLevel: "off",
 	modelProviderOrder: [],
 	knownRoleIds: [],

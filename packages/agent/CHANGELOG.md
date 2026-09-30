@@ -91,6 +91,16 @@
 - Fixed completed tool calls being retried after a transient provider-stream read error; incomplete calls from the affected turn are now discarded.
 - Fixed previously read code being removed from context when a subsequent read returned a summary, truncated content, or an error.
 - Fixed intent tracing for tools that define i as a real argument, preserving the argument and its declared schema order.
+### Added
+
+- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
+- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
+- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
+- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
+
+### Changed
+
+- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
 
 ## [18.4.11] - 2026-10-02
 
@@ -216,15 +226,6 @@
 - Fixed stream finalization when a provider ends without emitting a completion or error event, ensuring the final assistant message is preserved and corresponding message lifecycle events are emitted.
 - Fixed tool execution being incorrectly skipped when host steering callbacks reject during a tool batch.
 - Fixed stream hangs and preserved the original error when host aside-commit or discard callbacks fail.
-### Added
-
-- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
-- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
-- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
-
-### Changed
-
-- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
 
 ## [18.2.5] - 2026-09-17
 
@@ -466,9 +467,6 @@
 ### Fixed
 
 - Provider-native compaction failures now surface their transport error instead of silently switching to generic summarization; streaming V2 still falls back to native V1 when available.
-### Added
-
-- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
 
 ## [17.1.7] - 2026-07-27
 

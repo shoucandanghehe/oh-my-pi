@@ -148,8 +148,7 @@ function parseThreadRecord(value: unknown): BtwThreadHistoryRecord {
 				typeof r.pausedRequest.input !== "string" ||
 				!isTimestamp(r.pausedRequest.timestamp) ||
 				(r.pausedRequest.images !== undefined && !isImages(r.pausedRequest.images)) ||
-				(!r.pausedRequest.input &&
-					!(Array.isArray(r.pausedRequest.images) && r.pausedRequest.images.length)))) ||
+				(!r.pausedRequest.input && !(Array.isArray(r.pausedRequest.images) && r.pausedRequest.images.length)))) ||
 		Object.keys(r).some(key => !RECORD_FIELDS[key])
 	) {
 		throw new Error("Invalid BTW history record");
@@ -202,7 +201,7 @@ function snapshotRecord<T extends HistoryRecord>(record: T, recover = false): T 
 		...record,
 		status: recover && record.status === "running" ? "interrupted" : record.status,
 		...(record.followUps ? { followUps: Object.freeze(record.followUps.map(snapshotTurn)) } : {}),
-	}) as T;
+	}) as unknown as T;
 }
 
 function recordFileName(id: string): string {
@@ -225,7 +224,8 @@ async function readRecord(filePath: string): Promise<StoredRecord | undefined> {
 		if (!stat.isFile()) throw new Error("Expected a regular file");
 		const bytes = await fs.readFile(filePath);
 		const record = parseRecord(JSON.parse(bytes.toString("utf8")));
-		if (path.basename(filePath) !== recordFileName(record.id)) throw new Error("Record id does not match its filename");
+		if (path.basename(filePath) !== recordFileName(record.id))
+			throw new Error("Record id does not match its filename");
 		return { record, revision: hash(bytes) };
 	} catch (error) {
 		if (isEnoent(error)) return undefined;
@@ -415,7 +415,9 @@ export class BtwHistoryStore<T extends HistoryRecord = BtwHistoryRecord> {
 			}
 			this.#records.set(snapshot.id, snapshot);
 			this.#refreshSnapshot();
-			const running = isThreadRecord(snapshot) ? snapshot.phase === "running" : getBtwLatestTurn(snapshot).status === "running";
+			const running = isThreadRecord(snapshot)
+				? snapshot.phase === "running"
+				: getBtwLatestTurn(snapshot).status === "running";
 			if (!running) this.#release(snapshot.id);
 		});
 		this.#track(write);

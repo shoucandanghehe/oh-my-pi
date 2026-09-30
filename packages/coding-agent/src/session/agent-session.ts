@@ -161,7 +161,7 @@ import type {
 	TreePreparation,
 } from "../extensibility/extensions";
 import { emitSessionShutdownEvent, TOP_LEVEL_AGENT } from "../extensibility/extensions";
-import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
+import { cloneMessageNotification, extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { BtwExtensionRuntime } from "./btw-extension-runtime";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
@@ -406,6 +406,7 @@ import {
 	SILENT_ABORT_MARKER,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	sanitizeEphemeralAssistantForPromotion,
+	sanitizeAssistantForReparentedHistory,
 	USER_INTERRUPT_LABEL,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
@@ -11547,7 +11548,7 @@ export class AgentSession implements SettingsScope {
 		const conversation = new EphemeralConversation({
 			snapshotBaseMessages: () => {
 				const baseMessages = this.#buildEphemeralBaseSnapshot().map(message =>
-					readOnlyTools ? cloneMessageEndNotification(message) : message,
+					readOnlyTools ? cloneMessageNotification(message) : message,
 				);
 				baseMessages.push({
 					role: "developer",
@@ -12341,7 +12342,7 @@ export class AgentSession implements SettingsScope {
 			throw new Error("Cannot promote BTW: frozen anchor no longer exists");
 		}
 
-		this.#assertIdleForSnapshot("branch /btw");
+		this.#assertIdleForSnapshot("promote BTW");
 
 		if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -12364,7 +12365,7 @@ export class AgentSession implements SettingsScope {
 			POST_PROMPT_DRAIN_TIMEOUT_MS,
 			"Timed out draining post-prompt tasks before BTW promotion",
 		);
-		this.#assertIdleForSnapshot("branch /btw");
+		this.#assertIdleForSnapshot("promote BTW");
 
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;

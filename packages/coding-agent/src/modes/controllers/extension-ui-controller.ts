@@ -43,8 +43,6 @@ import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 
-const MAX_WIDGET_LINES = 10;
-
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
  * the keys, so the host can't know its bindings: advertise the defaults.
