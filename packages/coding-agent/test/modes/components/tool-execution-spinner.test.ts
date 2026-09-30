@@ -58,7 +58,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			vi.advanceTimersByTime(120);
 			const secondFrame = stripVTControlCharacters(component.render(80).join("\n"));
 
-			expect(requestComponentRender).toHaveBeenCalledWith(component);
+			expect(requestComponentRender).toHaveBeenCalledWith(component, { animationOnly: true });
 			expect(requestRender).not.toHaveBeenCalled();
 			expect(firstFrame).toContain("time.sleep(10)");
 			expect(secondFrame).toContain("time.sleep(10)");

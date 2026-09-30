@@ -81,6 +81,7 @@
 
 ### Fixed
 
+- Reduced background work during app-viewport tool animations while preserving offscreen content growth and scrolling.
 - Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
 - Workspace panes can retain their layout while hidden on small terminals, and nested panes support independent text selection and drag capture.
 - Added estimated-height virtual viewport providers for tall component trees.

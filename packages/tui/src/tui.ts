@@ -31,6 +31,7 @@ import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
+import { withAnimationOnlyRenderTargets } from "./render-targets";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
@@ -400,7 +401,8 @@ export interface Component {
 	/**
 	 * Optional ownership seam for composed components whose descendants are not
 	 * exposed through a public `children` array. Used to route component-scoped
-	 * renders through viewport/workspace wrappers.
+	 * renders through viewport/workspace wrappers. Implementations must include
+	 * all descendants, including public children; a false result is authoritative.
 	 */
 	containsComponent?(component: Component): boolean;
 
@@ -612,6 +614,12 @@ export interface RenderRequestOptions {
 	 * normal dirty-row diff. Native-scrollback backends ignore this option.
 	 */
 	forceViewportRepaint?: boolean;
+}
+
+/** Additional guarantees for a component-scoped invalidation. */
+export interface ComponentRenderOptions {
+	/** Only visual animation changed; content and row geometry remain unchanged. */
+	animationOnly?: boolean;
 }
 /**
  * Controls how a settled terminal resize refreshes native history.
@@ -834,16 +842,21 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 	}
 
 	containsComponent(target: Component): boolean {
-		if (target === this) return true;
+		return target === this || this.#findTargetOwner(target) !== undefined;
+	}
+
+	#findTargetOwner(target: Component): Component | undefined {
 		const cached = this.#targetOwnerCache.get(target);
-		if (cached !== undefined && this.children.includes(cached) && componentContains(cached, target)) return true;
+		// Descendants can be reparented without changing this container's children.
+		// Revalidate positive hits and do not cache misses without a topology version.
+		if (cached !== undefined && this.children.includes(cached) && componentContains(cached, target)) return cached;
 		for (const child of this.children) {
 			if (!componentContains(child, target)) continue;
 			this.#targetOwnerCache.set(target, child);
-			return true;
+			return child;
 		}
 		this.#targetOwnerCache.delete(target);
-		return false;
+		return undefined;
 	}
 
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
@@ -867,16 +880,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 
 		const grouped = new Map<Component, Component[]>();
 		for (const target of targets) {
-			let owner = this.#targetOwnerCache.get(target);
-			if (owner === undefined || !children.includes(owner) || !componentContains(owner, target)) {
-				owner = undefined;
-				for (const child of children) {
-					if (!componentContains(child, target)) continue;
-					owner = child;
-					this.#targetOwnerCache.set(target, child);
-					break;
-				}
-			}
+			const owner = this.#findTargetOwner(target);
 			if (!owner) return this.render(width);
 			const childTargets = grouped.get(owner);
 			if (childTargets) childTargets.push(target);
@@ -941,7 +945,7 @@ export class Container implements Component, TargetedRender, ViewportTailProvide
 		const grouped = new Map<Component, Component[]>();
 		for (const target of targets) {
 			if (target === this) return this.#renderVirtualViewport(width, request);
-			const owner = this.children.find(child => componentContains(child, target));
+			const owner = this.#findTargetOwner(target);
 			if (!owner) return this.#renderVirtualViewport(width, request);
 			const childTargets = grouped.get(owner);
 			if (childTargets) childTargets.push(target);
@@ -1334,7 +1338,9 @@ interface CursorControlResult extends HardwareCursorUpdate {
 /** Depth-first identity search through public children or an ownership seam. */
 export function componentContains(root: Component, target: Component): boolean {
 	if (root === target) return true;
-	if (root.containsComponent?.(target) === true) return true;
+	// Ownership seams already search their full subtree; a miss must not walk
+	// the same public children again (including all settled transcript history).
+	if (root.containsComponent) return root.containsComponent(target);
 	const children = (root as Partial<Container>).children;
 	if (!Array.isArray(children)) return false;
 	for (const child of children) {
@@ -1702,6 +1708,7 @@ export class TUI extends Container {
 	#inputDeferred = false;
 	#appViewportBackend = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
 	#appViewportComponentTargets = new Set<Component>();
+	#appViewportAnimationTargets = new Set<Component>();
 	/** A pending full compose dominates later component-scoped requests until that frame starts. */
 	#appViewportFullComposePending = true;
 	#appViewportRootLines = new Map<Component, readonly string[]>();
@@ -3474,6 +3481,7 @@ export class TUI extends Container {
 		if (!options?.viewportOnly) {
 			this.#appViewportComposeStale = true;
 			this.#appViewportComponentTargets.clear();
+			this.#appViewportAnimationTargets.clear();
 			this.#appViewportFullComposePending = true;
 		}
 		if (force) {
@@ -3502,13 +3510,14 @@ export class TUI extends Container {
 	renderNow(options?: RenderRequestOptions): void {
 		if (this.#stopped) return;
 		this.#appViewportComponentTargets.clear();
+		this.#appViewportAnimationTargets.clear();
 		this.#appViewportFullComposePending = true;
 		this.#appViewportComposeStale = true;
 		this.#prepareForcedRender(options?.clearScrollback === true);
 		this.#renderRequested = false;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
-		this.#doRender();
+		withAnimationOnlyRenderTargets(undefined, () => this.#doRender());
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
 	}
 
@@ -3518,10 +3527,18 @@ export class TUI extends Container {
 	 * scratch — retired blocks no longer render — so a scoped request is simply
 	 * an ordinary render.
 	 */
-	requestComponentRender(component: Component): void {
+	requestComponentRender(component: Component, options?: ComponentRenderOptions): void {
 		if (this.#stopped) return;
 		this.#appViewportComposeStale = true;
-		if (!this.#appViewportFullComposePending) this.#appViewportComponentTargets.add(component);
+		if (!this.#appViewportFullComposePending) {
+			// Content changes dominate animation ticks in either arrival order.
+			if (options?.animationOnly && !this.#appViewportComponentTargets.has(component)) {
+				this.#appViewportAnimationTargets.add(component);
+			} else if (!options?.animationOnly) {
+				this.#appViewportAnimationTargets.delete(component);
+			}
+			this.#appViewportComponentTargets.add(component);
+		}
 		this.#requestOrdinaryRender();
 	}
 
@@ -3619,7 +3636,9 @@ export class TUI extends Container {
 		if (this.#deferRenderForOutputBacklog()) return;
 		const start = this.#renderScheduler.now();
 		this.#lastRenderAt = start;
-		this.#doRender();
+		const animationTargets = this.#appViewportFullComposePending ? undefined : this.#appViewportAnimationTargets;
+		this.#appViewportAnimationTargets = new Set();
+		withAnimationOnlyRenderTargets(animationTargets, () => this.#doRender());
 		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
 	}
 	/**

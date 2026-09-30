@@ -6,8 +6,8 @@ import { Image } from "../components/image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { getImageDimensions, ImageProtocol, imageFallback, TERMINAL } from "../terminal-capabilities";
-import { type Component, Container, type TUI } from "../tui";
-import { truncateToWidth } from "../utils";
+import { type Component, type ComponentRenderOptions, Container, type TUI } from "../tui";
+import { truncateToWidth, visibleWidth } from "../utils";
 import { measureComponentRows } from "../tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Theme } from "../theme/theme";
@@ -200,7 +200,7 @@ class SafeToolRendererComponent implements Component {
 /** Minimal TUI surface ToolExecutionComponent uses to schedule repaints and share image budget. */
 export interface ToolExecutionUi {
 	requestRender(): void;
-	requestComponentRender(component: Component): void;
+	requestComponentRender(component: Component, options?: ComponentRenderOptions): void;
 	resetDisplay(): void;
 	/** Backend-aware replacement for a native-scrollback display reset. */
 	reconcileRenderTopology?(): void;
@@ -257,6 +257,23 @@ export function sharedSpinnerFrame(frameCount: number, now: number = performance
  * each independently waking the render scheduler (issue #8731). */
 const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
 let sharedSpinnerTimer: NodeJS.Timeout | undefined;
+
+let spinnerLayoutEpoch = -1;
+let fixedSpinnerLayout = false;
+
+/** User-provided spinner frames may change wrapping; keep those ticks layout-dirty. */
+function spinnerHasFixedLayout(): boolean {
+	const epoch = getThemeEpoch();
+	if (spinnerLayoutEpoch !== epoch) {
+		spinnerLayoutEpoch = epoch;
+		const frames = theme.spinnerFrames;
+		const width = visibleWidth(frames[0] ?? "");
+		fixedSpinnerLayout =
+			frames.length > 0 &&
+			frames.every(frame => !/[\u0000-\u001f\u007f]/u.test(frame) && visibleWidth(frame) === width);
+	}
+	return fixedSpinnerLayout;
+}
 
 /** Arm the shared spinner ticker if it is not already running. */
 function ensureSharedSpinnerTicker(): void {
@@ -734,7 +751,19 @@ export class ToolExecutionComponent extends Container {
 	tickSpinner(frame: number): void {
 		this.#spinnerFrame = frame;
 		this.#renderState.spinnerFrame = frame;
-		this.#ui.requestComponentRender(this);
+		// Extension callbacks can use spinnerFrame to change arbitrary content or
+		// layout. Only the bundled/default renderer's fixed-width animation is
+		// safe to leave unpainted while its block is outside the viewport.
+		const customCall = this.#tool?.renderCall;
+		const customResult = this.#tool?.renderResult;
+		const bundled =
+			(!customCall || customCall === this.#renderer?.renderCall) &&
+			(!customResult || customResult === this.#renderer?.renderResult);
+		if (bundled && spinnerHasFixedLayout()) {
+			this.#ui.requestComponentRender(this, { animationOnly: true });
+		} else {
+			this.#ui.requestComponentRender(this);
+		}
 	}
 
 	#updateTodoStrikeAnimation(): void {
