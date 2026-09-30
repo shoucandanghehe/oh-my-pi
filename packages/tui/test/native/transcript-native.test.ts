@@ -17,6 +17,7 @@ import { buildAsyncResultBlock, buildFileMentionBlock } from "@oh-my-pi/pi-tui/c
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { text } from "@oh-my-pi/pi-tui/native/describe";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -115,6 +116,49 @@ describe("native transcript", () => {
 		const final = h.byId(md!.id);
 		expect(final?.p).toMatchObject({ text: "Hello, streaming world" });
 		expect(final?.p).not.toHaveProperty("stream");
+		expect(h.errors).toEqual([]);
+	});
+
+	it("uses thinking replacements and appended components in the native document", async () => {
+		const component = new AssistantMessageComponent(
+			assistant([{ type: "thinking", thinking: "original reasoning must be replaced" }]),
+			false,
+			undefined,
+			[
+				() => ({ type: "replace", component: new Text("replacement reasoning") }),
+				() => new Text("appended annotation"),
+			],
+		);
+		const h = await startWith(h => h.tui.addChild(component));
+		const document = JSON.stringify(h.doc());
+		expect(document).toContain("replacement reasoning");
+		expect(document).toContain("appended annotation");
+		expect(document).not.toContain("original reasoning must be replaced");
+		expect(h.errors).toEqual([]);
+	});
+
+	it("replaces native thinking after an asynchronous renderer refresh", async () => {
+		let ready = false;
+		let requestRender: (() => void) | undefined;
+		const component = new AssistantMessageComponent(
+			assistant([{ type: "thinking", thinking: "pending reasoning" }]),
+			false,
+			undefined,
+			[
+				context => {
+					requestRender = context.requestRender;
+					return ready ? { type: "replace", component: new Text("translated reasoning") } : undefined;
+				},
+			],
+		);
+		const h = await startWith(h => h.tui.addChild(component));
+		expect(JSON.stringify(h.doc())).toContain("pending reasoning");
+		ready = true;
+		requestRender!();
+		await Promise.resolve();
+		await h.render();
+		expect(JSON.stringify(h.doc())).toContain("translated reasoning");
+		expect(JSON.stringify(h.doc())).not.toContain("pending reasoning");
 		expect(h.errors).toEqual([]);
 	});
 

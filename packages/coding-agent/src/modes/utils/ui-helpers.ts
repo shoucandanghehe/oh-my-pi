@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
-import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
+import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger, waitForImmediate } from "@oh-my-pi/pi-utils";
@@ -34,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
-import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { imageContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
 import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
@@ -379,6 +379,7 @@ export class UiHelpers {
 		this.ctx.pendingTools.clear();
 		const activeToolExecutionUpdates = this.ctx.viewSession.activeToolExecutionUpdates?.() ?? [];
 		const runningAsyncJobs = this.ctx.viewSession.getAsyncJobSnapshot?.()?.running ?? [];
+		const placedLiveTools = new Set<Component>(this.ctx.chatContainer.children);
 		// Reseed the cache-invalidation baseline: this rebuild re-derives every
 		// turn's marker from usage, and the last turn becomes the live baseline.
 		this.ctx.lastAssistantUsage = undefined;
@@ -539,7 +540,12 @@ export class UiHelpers {
 						continue;
 					}
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
-					if (options.preservedLiveToolCallIds?.has(content.id)) {
+					const liveTool = options.preservedLiveTools?.get(content.id);
+					if (liveTool) {
+						if (!placedLiveTools.has(liveTool)) {
+							this.ctx.chatContainer.addChild(liveTool);
+							placedLiveTools.add(liveTool);
+						}
 						appendAssistantSegment(afterToolSegment);
 						continue;
 					}
@@ -641,7 +647,7 @@ export class UiHelpers {
 					? turnElapsedMs(turnStartedAt, message)
 					: undefined;
 			} else if (message.role === "toolResult") {
-				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
+				if (options.preservedLiveTools?.has(message.toolCallId)) continue;
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
 				const isReadGroupResult =
 					message.toolName === "read" &&
@@ -800,9 +806,8 @@ export class UiHelpers {
 		// so mark them complete. Idle rebuilds have no result coming: seal so the
 		// blocks can retire as history, then clear them so reconstructed historical
 		// components never leak into active tracking.
-		// (`rebuildChatFromMessages` builds its context WITHOUT dangling calls and
-		// restores its own preserved live components afterwards — for that caller
-		// the map is empty here either way.)
+		// Preserved live cards are routed by rebuildChatFromMessages after replay;
+		// this map only contains components newly constructed here.
 		if (this.ctx.viewSession.isStreaming) {
 			for (const [toolCallId, component] of this.ctx.pendingTools) {
 				component.setArgsComplete(toolCallId);

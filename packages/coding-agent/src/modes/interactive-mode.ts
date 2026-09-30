@@ -56,7 +56,6 @@ import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
-	APP_NAME,
 	adjustHsv,
 	formatDuration,
 	formatNumber,
@@ -70,6 +69,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { restartArgv } from "../cli/flag-tables";
+import { resumeCommand } from "../utils/resume-command";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
@@ -199,7 +199,6 @@ import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
-import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -1636,8 +1635,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController.invalidatePendingFocus();
 	}
 
-	resolveViewportClickCandidates(index: number): string[] {
-		return this.composer.viewportClickCandidates(index);
+	resolveViewportClickCandidates(index: number, col?: number): string[] {
+		return this.composer.viewportClickCandidates(index, col);
 	}
 
 	/** Flip the pinned jump list between its collapsed few and the full list, overriding the setting. */
@@ -1658,8 +1657,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	setClickHoverId(id: string | undefined): void {
-		this.composer.setHoveredClickId(id);
+	setClickHoverId(id: string | undefined, col?: number): void {
+		this.composer.setHoveredClickId(id, col);
 	}
 
 	clearTransientSessionUi(): void {
@@ -2340,6 +2339,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			scrollRoot.addChild(this.deferredCommandContainer);
 			scrollRoot.addChild(this.statusContainer);
 			// Judge batches and automatic downloads stay editor-anchored above the working line.
+			stickyRoot.addChild(this.reportContainer);
 			stickyRoot.addChild(this.progressHudContainer);
 			stickyRoot.addChild(this.statusLine);
 			stickyRoot.addChild(this.attachmentChipsContainer);
@@ -2353,58 +2353,55 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#workspaceWelcome = undefined;
 			this.composer.setHeaderExtras(headerBefore, headerAfter);
 			this.composer.setStatusComponent(this.statusLine);
-			this.composer.setRuntimeChildren([
-				this.chatContainer,
-				this.pendingMessagesContainer,
-				this.todoContainer,
-				this.subagentContainer,
-				this.btwContainer,
-				this.reportContainer,
-				this.omfgContainer,
-				this.cleanseContainer,
-				this.errorBannerContainer,
-				this.modelCycleContainer,
-				this.deferredCommandContainer,
-				// Judge batches and automatic downloads stay editor-anchored and update
-				// independently of transcript output, directly above the working/throughput/title row.
-				this.progressHudContainer,
-				// Working loader / transient status sits below the sticky todo + subagent
-				// HUDs, just above the editor's hook-widget top margin — so it reads next to
-				// the prompt while keeping the one-line gap above the editor (the band
-				// composer collapses that gap so its status band sits flush).
-				this.statusContainer,
-				this.attachmentChipsContainer,
-				this.hookWidgetContainerAbove,
-				this.editorContainer,
-				this.hookWidgetContainerBelow,
-			],
-			{
-				// Inline dialogs and a tall multi-line draft swap into the editor
-				// container and collapse again, as a command report above it closes
-				// on Esc: they clip the transcript instead of retiring it to
-				// scrollback, so the editor returns to the bottom when they go.
-				// Everything else is turn-scoped.
-				transient: [this.editorContainer, this.reportContainer],
-				// Natively the HUD pills lead the dock, queued messages sit between
-				// the working row and the composer, and the attachment chips live
-				// inside the composer.
-				nativeDock: [
-					new HudPillsRow(this),
+			this.composer.setRuntimeChildren(
+				[
+					this.chatContainer,
+					this.pendingMessagesContainer,
+					this.todoContainer,
+					this.subagentContainer,
 					this.btwContainer,
+					this.reportContainer,
 					this.omfgContainer,
 					this.cleanseContainer,
 					this.errorBannerContainer,
 					this.modelCycleContainer,
 					this.deferredCommandContainer,
+					// Judge batches and automatic downloads stay editor-anchored and update
+					// independently of transcript output, directly above the working/throughput/title row.
 					this.progressHudContainer,
+					// Working loader / transient status sits below the sticky todo + subagent
+					// HUDs, just above the editor's hook-widget top margin — so it reads next to
+					// the prompt while keeping the one-line gap above the editor (the band
+					// composer collapses that gap so its status band sits flush).
 					this.statusContainer,
-					this.pendingMessagesContainer,
+					this.attachmentChipsContainer,
 					this.hookWidgetContainerAbove,
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
-			},
-		);
+				{
+					// Inline dialogs, tall drafts and reports clip the transcript instead of retiring it.
+					transient: [this.editorContainer, this.reportContainer],
+					// Natively the HUD pills lead the dock, queued messages sit between
+					// the working row and the composer, and the attachment chips live
+					// inside the composer.
+					nativeDock: [
+						new HudPillsRow(this),
+						this.btwContainer,
+						this.omfgContainer,
+						this.cleanseContainer,
+						this.errorBannerContainer,
+						this.modelCycleContainer,
+						this.deferredCommandContainer,
+						this.progressHudContainer,
+						this.statusContainer,
+						this.pendingMessagesContainer,
+						this.hookWidgetContainerAbove,
+						this.editorContainer,
+						this.hookWidgetContainerBelow,
+					],
+				},
+			);
 		}
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
@@ -4017,9 +4014,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their UI components while keeping the `streamingComponent` / `pendingTools`
 		// references — subsequent `message_update`/`message_end` events would then
 		// update orphaned components that never re-render and the live LLM output
-		// vanishes from the chat (#3656). Snapshot the in-flight components,
-		// clear+replay, then re-append them in their original chat-container order
-		// and restore the `pendingTools` map so streaming routes back into them.
+		// vanishes from the chat (#3656). Preserve live handles, replay them at
+		// their call sites, then restore update routing.
 		const liveComponents: Component[] = [];
 		const livePendingTools = new Map<string, ToolExecutionHandle>();
 		if (this.viewSession?.isStreaming) {
@@ -4041,60 +4037,53 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
+			keepDanglingToolCalls: this.viewSession.isStreaming,
 		});
-		const preservedLiveToolCallIds = new Set<string>();
-		// A preserved pending-tool component whose result has already landed in
-		// the replayed transcript is re-rendered by `renderSessionContext` itself
-		// (the toolResult message reconstructs the block with its output). Keeping
-		// it in the live set too re-appends a second identical block below the
-		// replayed one — the tool call renders twice (#6516). The preservation
-		// above assumes every pending-tool component is still dangling (its result
-		// lives outside `state.messages`), which stops holding the instant the
-		// result is persisted while the component lingers in `pendingTools` (a
-		// rebuild racing tool-completion, a background/displaceable snapshot).
-		// Drop the already-resolved ones and let the replay own them; only
-		// genuinely in-flight (dangling, replay-stripped) calls still need
-		// preserving.
+		const preservedLiveTools = new Map(livePendingTools);
+		// Terminal results belong to replay; a background task's initial running
+		// snapshot must not replace its live card (#6516).
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
-			const resolved = livePendingTools.get(message.toolCallId);
-			if (!resolved) continue;
-			// A background task's initial `async.state === "running"` result is
-			// persisted while `EventController#handleToolExecutionEnd` deliberately
-			// keeps its component in `pendingTools` so a later
-			// `tool_execution_update`/`_end` settles it. Such a handle is still
-			// live — dropping it would strand those updates on the running snapshot
-			// — so keep it and let the live component retain ownership; only
-			// terminal results are owned by the replay. (Cast mirrors the async
-			// detail reads in tool-execution.ts / event-controller.ts.)
+			if (!livePendingTools.has(message.toolCallId)) continue;
 			const details = message.details as { async?: { state?: string } } | undefined;
-			if (details?.async?.state === "running") {
-				preservedLiveToolCallIds.add(message.toolCallId);
-				continue;
-			}
-			livePendingTools.delete(message.toolCallId);
-			// A `ReadToolGroupComponent` is shared by every read id it renders
-			// (ui-helpers sets the same group for each collapsed read call). While a
-			// sibling read id still points at it the component must stay on screen
-			// and preserved — splicing it here would detach the pending read's
-			// display and strand its future result on an off-screen component.
-			// Splice only once no remaining pending id shares it.
-			let stillShared = false;
-			for (const other of livePendingTools.values()) {
-				if (other === resolved) {
-					stillShared = true;
-					break;
+			if (details?.async?.state !== "running") livePendingTools.delete(message.toolCallId);
+		}
+		// A shared read group stays live while any member is pending. Keep its
+		// completed members in the display map, but not in update routing.
+		const liveToolComponents = new Set(livePendingTools.values());
+		for (const [id, component] of preservedLiveTools) {
+			if (liveToolComponents.has(component)) continue;
+			preservedLiveTools.delete(id);
+			const index = liveComponents.indexOf(component);
+			if (index >= 0) liveComponents.splice(index, 1);
+		}
+
+		// Calls folded out of display history still precede its retained tail.
+		// Use the journal boundary rather than treating every unplaced live
+		// component (including an uncommitted response) as pre-compaction.
+		if (preservedLiveTools.size > 0 && context.messages.some(message => message.role === "compactionSummary")) {
+			const replayedCallIds = new Set<string>();
+			for (const message of context.messages) {
+				if (message.role !== "assistant") continue;
+				for (const content of message.content) {
+					if (content.type === "toolCall") replayedCallIds.add(content.id);
 				}
 			}
-			if (stillShared) {
-				// The shared component still owns this completed member as well as
-				// its pending sibling. Suppress the replay copy so the group remains
-				// a single on-screen block while future results keep routing to it.
-				preservedLiveToolCallIds.add(message.toolCallId);
-				continue;
+			const branch = this.viewSession.sessionManager.getBranch();
+			const compactionIndex = branch.findLastIndex(entry => entry.type === "compaction");
+			const compactedTools = new Set<Component>();
+			for (let index = 0; index < compactionIndex; index++) {
+				const entry = branch[index];
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				for (const content of entry.message.content) {
+					if (content.type !== "toolCall" || replayedCallIds.has(content.id)) continue;
+					const component = preservedLiveTools.get(content.id);
+					if (component) compactedTools.add(component);
+				}
 			}
-			const index = liveComponents.indexOf(resolved as unknown as Component);
-			if (index >= 0) liveComponents.splice(index, 1);
+			for (const component of liveComponents) {
+				if (compactedTools.has(component)) this.chatContainer.addChild(component);
+			}
 		}
 		// Prune the settled-component cache to the messages this rebuild will
 		// actually render. Message objects stay strongly reachable through
@@ -4109,16 +4098,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.transcriptMessageComponents = retained;
 		this.renderSessionContext(context, {
 			reuseSettledComponents: options.reuseSettledComponents,
-			preservedLiveToolCallIds,
+			preservedLiveTools,
 		});
+		const placedComponents = new Set(this.chatContainer.children);
 		for (const child of liveComponents) {
-			this.chatContainer.addChild(child);
+			if (!placedComponents.has(child)) this.chatContainer.addChild(child);
 		}
-		// `renderSessionContext` clears `pendingTools` at start AND end so the
-		// reconstructed historical tool components don't leak into live tracking.
-		// Restore the in-flight entries afterwards so the next streamed tool-call
-		// delta is routed into the preserved component instead of stacking a
-		// duplicate ToolExecutionComponent below it.
+		// Restore only pending ids; completed members of a shared card remain
+		// display-only, and subsequent progress still targets the original handle.
 		for (const [id, component] of livePendingTools) {
 			this.pendingTools.set(id, component);
 		}
@@ -7885,8 +7872,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleForkCommand();
 	}
 
-	prepareBtwForRelocation(): Promise<void> {
-		return this.#btwController.dispose();
+	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
+		return this.#btwController.withSessionMove(operation);
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {

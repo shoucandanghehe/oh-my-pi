@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TspKind, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
 import type { SessionMessageEntryLike } from "../src/chat/transcript-entry";
+import { span, text } from "../src/native/describe";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
 import type { TUI } from "../src/index";
@@ -81,8 +82,16 @@ const typeText = (component: { handleInput(data: string): void }, text: string) 
 };
 
 describe("rewind page", () => {
+	const selectors: RewindSelectorComponent[] = [];
+	beforeEach(() => setNativeRendering(true));
+	afterEach(() => {
+		for (const selector of selectors) selector.dispose();
+		selectors.length = 0;
+		setNativeRendering(false);
+	});
+
 	function rewind(deps: { selected?: string[]; cancelled?: { count: number }; siblings?: BranchVariantPath[] } = {}) {
-		return new RewindSelectorComponent(transcript(), {
+		const selector = new RewindSelectorComponent(transcript(), {
 			ui,
 			cwd: "/tmp",
 			requestRender: () => {},
@@ -92,6 +101,8 @@ describe("rewind page", () => {
 				if (deps.cancelled) deps.cancelled.count++;
 			},
 		});
+		selectors.push(selector);
+		return selector;
 	}
 
 	const UP = "\x1b[A";
@@ -117,11 +128,22 @@ describe("rewind page", () => {
 		return JSON.stringify(caption);
 	}
 
+	function pageText(children: readonly NativeChild[]): string {
+		return children
+			.map(child => {
+				const described = "k" in child ? child : child.describe?.(pickerCx);
+				return described ? `${JSON.stringify(described.p)}\n${pageText(described.c ?? [])}` : "";
+			})
+			.join("\n");
+	}
+
 	test("opens on the newest turn: the transcript as blocks, the turn picked under its caption", () => {
 		const page = rewind().describeScreen(pickerCx);
 		expect(page.role).toBe("omp.rewind");
 		expect(marks(page.main)).toEqual(["-", "here:main:u2", "pick"]);
 		expect(captionText(page.main)).toContain("nothing below to drop");
+		expect(pageText(page.main)).toContain("find the ack");
+		expect(pageText(page.main)).toContain("thanks");
 		expect(page.dock).toHaveLength(1);
 		expect(JSON.stringify((page.dock[0] as RewindSelectorComponent).describe(pickerCx))).toContain("4/4");
 	});
@@ -159,15 +181,10 @@ describe("rewind page", () => {
 		const selector = rewind({ cancelled });
 		selector.handleInput("f");
 		// Under TSP the filter matches turn text, not rendered rows.
-		setNativeRendering(true);
-		try {
-			typeText(selector, "thanks");
-			expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["here:main:u2", "pick"]);
-			typeText(selector, "zzz");
-			expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["omp.rewind.empty"]);
-		} finally {
-			setNativeRendering(false);
-		}
+		typeText(selector, "thanks");
+		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["here:main:u2", "pick"]);
+		typeText(selector, "zzz");
+		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["omp.rewind.empty"]);
 		selector.handleNativeEvent({ type: "action", key: "cancel", act: "cancel", mods: [] });
 		expect(cancelled.count).toBe(0);
 		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:u2", "pick"]);
@@ -203,6 +220,170 @@ describe("rewind page", () => {
 		expect(marks(next?.c ?? [])).toEqual(["omp.rewind.branch.head", "here:u3:u3", "pick", "drop"]);
 		selector.handleInput("\r");
 		expect(selected).toEqual(["u3"]);
+		selector.handleInput("\x1b[B");
+		const [, moved] = ((selector.describeScreen(pickerCx).main.at(-1) as NativeNode).c ?? []) as NativeNode[];
+		expect(captionText(moved?.c ?? [])).toContain("here:u3:a3");
+		selector.describeScreen(pickerCx);
+		selector.describe(pickerCx);
+		selector.handleNativeEvent({ type: "action", key: "rewind", act: "rewind", mods: [] });
+		selector.handleInput("\x1b[D");
+		selector.describeScreen(pickerCx);
+		selector.handleInput("\r");
+		expect(selected).toEqual(["u3", "a3", "u2"]);
+		selector.dispose();
+	});
+
+	test("describing and invalidating the page never changes the folded rewind point", () => {
+		const selected: string[] = [];
+		const selector = rewind({ selected });
+		try {
+			selector.handleInput(UP);
+			selector.handleInput(UP);
+			const first = selector.describeScreen(pickerCx).main;
+			expect(marks(first)).toEqual(["-", "here:main:a1", "pick", "drop"]);
+			const picked = first.filter(child => !("k" in child) && child.describe?.(pickerCx)?.p?.mark === "pick");
+			selector.invalidate();
+			const second = selector.describeScreen(pickerCx).main;
+			const pickedAgain = second.filter(child => !("k" in child) && child.describe?.(pickerCx)?.p?.mark === "pick");
+			expect(pickedAgain).toHaveLength(picked.length);
+			for (let index = 0; index < picked.length; index++) expect(pickedAgain[index]).toBe(picked[index]);
+			selector.describe(pickerCx);
+			selector.handleInput("\r");
+			expect(selected).toEqual(["t1"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("editing inside the filter preserves its caret and only rewinds matching turns", () => {
+		const selected: string[] = [];
+		const selector = rewind({ selected });
+		const inputProps = () => {
+			const bar = selector.describe(pickerCx);
+			const input = bar.c?.find(child => !("k" in child));
+			if (!input || "k" in input) throw new Error("expected the docked filter Input");
+			const described = input.describe?.(pickerCx);
+			if (described?.k !== "input") throw new Error("expected a described filter Input");
+			return described.p;
+		};
+		try {
+			selector.handleInput("f");
+			typeText(selector, "ack");
+			selector.handleInput("\x01");
+			typeText(selector, "find ");
+			expect([inputProps()?.text, inputProps()?.cursor]).toEqual(["find ack", 5]);
+			expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["here:main:u1", "pick"]);
+			selector.handleInput("\x02");
+			expect(inputProps()?.cursor).toBe(4);
+			selector.handleInput("\x7f");
+			expect([inputProps()?.text, inputProps()?.cursor]).toEqual(["fin ack", 3]);
+			expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["omp.rewind.empty"]);
+			selector.handleInput("\r");
+			selector.handleNativeEvent({ type: "action", key: "rewind", act: "rewind", mods: [] });
+			expect(selected).toEqual([]);
+			selector.handleInput("d");
+			selector.handleInput("\r");
+			expect(selected).toEqual(["u1"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("stepping above the native tail broadens the page without changing the rewind point", () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(
+			Array.from({ length: 640 }, (_, index) =>
+				entry(`u${index}`, index ? `u${index - 1}` : null, user(`prompt ${index}`)),
+			),
+			{ ui, cwd: "/tmp", requestRender() {}, onSelect: id => selected.push(id), onCancel() {} },
+		);
+		try {
+			const tail = selector.describeScreen(pickerCx).main;
+			expect(marks(tail)).toEqual(["omp.rewind.earlier", "-", "here:main:u639", "pick"]);
+			expect(tail).toHaveLength(602);
+			for (let index = 0; index < 600; index++) selector.handleInput(UP);
+			expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:u39", "pick", "drop"]);
+			selector.handleInput("\r");
+			expect(selected).toEqual(["u39"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("native pages replay only the recent chunks; Earlier and raw search reach old turns without ANSI", () => {
+		let constructed = 0;
+		let rendered = 0;
+		let measured = 0;
+		const entries = Array.from({ length: 800 }, (_, index) => [
+			entry(`u${index}`, index ? `c${index - 1}` : null, user(`prompt ${index}`)),
+			entry(`c${index}`, `u${index}`, {
+				role: "custom",
+				customType: "native-history",
+				content: index === 0 ? "ancient needle" : `answer ${index}`,
+				display: true,
+				timestamp: index,
+			} as AgentMessage),
+		]).flat();
+		const selected: string[] = [];
+		const create = () =>
+			new RewindSelectorComponent(entries, {
+				ui,
+				cwd: "/tmp",
+				requestRender() {},
+				getMessageRenderer: () => () => {
+					constructed++;
+					return {
+						render: () => {
+							rendered++;
+							return ["not the raw text"];
+						},
+						measureRows: () => {
+							measured++;
+							return 1;
+						},
+						describe: () => text([span("native custom answer")]),
+					};
+				},
+				onSelect: id => selected.push(id),
+				onCancel() {},
+			});
+		const selector = create();
+		try {
+			expect(marks(selector.describeScreen(pickerCx).main)).toEqual([
+				"omp.rewind.earlier",
+				"-",
+				"here:main:c799",
+				"pick",
+			]);
+			expect(pageText(selector.describeScreen(pickerCx).main)).toContain("native custom answer");
+			expect(constructed).toBeGreaterThan(0);
+			expect(constructed).toBeLessThan(400);
+			selector.handleInput(UP);
+			selector.handleInput("a");
+			expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:u799", "pick", "drop"]);
+			expect(constructed).toBe(800);
+			selector.handleInput("\r");
+			expect(selected).toEqual(["u799"]);
+		} finally {
+			selector.dispose();
+		}
+		const searched = create();
+		try {
+			searched.describeScreen(pickerCx);
+			searched.handleInput("f");
+			typeText(searched, "needle");
+			expect(marks(searched.describeScreen(pickerCx).main)).toEqual(["here:main:c0", "pick"]);
+			expect(pageText(searched.describeScreen(pickerCx).main)).toContain("native custom answer");
+			searched.handleInput("\r");
+			searched.handleInput("\x1b");
+			searched.handleInput("\x1b[B");
+			expect(captionText(searched.describeScreen(pickerCx).main)).toContain("here:main:u1");
+			searched.handleInput("\r");
+			expect(selected).toEqual(["u799", "c0", "u1"]);
+			expect([rendered, measured]).toEqual([0, 0]);
+		} finally {
+			searched.dispose();
+		}
 	});
 });
 

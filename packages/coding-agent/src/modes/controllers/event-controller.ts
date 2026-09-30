@@ -42,6 +42,7 @@ import { nextActionableTask } from "../../tools/todo";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import { setTerminalTitleState } from "../../utils/title-generator";
 import {
 	assistantMessageLinkTargets,
 	createAssistantMessageComponent,
@@ -252,7 +253,6 @@ export class EventController {
 	#toolArgsReveal: ToolArgsRevealController;
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
-	#terminalProgressActive = false;
 	/** Bumped at every `agent_start`; an async-wait watch stands down once a new run begins. */
 	#runEpoch = 0;
 	/** Epoch of the in-flight {@link #finishWhenAsyncWorkDrains} watch, if any. */

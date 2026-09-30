@@ -100,7 +100,7 @@ export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
 	reuseSettledComponents?: boolean;
 	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
-	preservedLiveToolCallIds?: ReadonlySet<string>;
+	preservedLiveTools?: ReadonlyMap<string, ToolExecutionHandle>;
 }
 
 export interface AgentHubOpenOptions {
@@ -152,12 +152,12 @@ export interface InteractiveModeContext {
 	unfocusSession(): Promise<void>;
 	/** Drop pending focus requests without changing the view (delegates to SessionFocusController.invalidatePendingFocus). */
 	invalidatePendingFocus(): void;
-	/** Candidate subagent ids under a mutable-viewport line, for click-to-focus. Empty when the line has no target. */
-	resolveViewportClickCandidates(index: number): string[];
+	/** Candidate subagent ids under a mutable-viewport row and optional column. */
+	resolveViewportClickCandidates(index: number, col?: number): string[];
 	/** Flip the pinned jump list between its collapsed few and the full list. */
 	togglePinnedHudExpanded(): void;
 	/** Point the inline hover band at a click-candidate id (or clear it). */
-	setClickHoverId(id: string | undefined): void;
+	setClickHoverId(id: string | undefined, col?: number): void;
 	/** Whether the main view is mounted in the app-viewport multi-pane workspace. */
 	readonly workspaceEnabled: boolean;
 	/** Create or focus a persistent transcript pane for an agent. */
@@ -495,7 +495,7 @@ export interface InteractiveModeContext {
 	/** Reload session skills and derived `/skill:<name>` commands. */
 	refreshSkillState(): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
-	prepareBtwForRelocation(): Promise<void>;
+	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean>;
 
 	// Selector handling
 	showSettingsSelector(): void;

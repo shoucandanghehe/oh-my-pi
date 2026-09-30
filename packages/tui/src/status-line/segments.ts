@@ -348,11 +348,7 @@ const modelSegment: StatusLineSegment = {
 	render(ctx) {
 		const runtime = ctx.runtimeStatus;
 		const modelName = modelDisplayName(ctx);
-		let thinkingDisplay = modelThinkingDisplay(ctx);
-
-		if (ctx.startupPlaceholder && thinkingDisplay) {
-			thinkingDisplay = withIcon(leadingGlyph(thinkingDisplay), STARTUP_PLACEHOLDER);
-		}
+		const thinkingDisplay = modelThinkingDisplay(ctx);
 
 		// A focused side thread uses the agents icon. Otherwise compact mode
 		// swaps the model icon for the thinking-level glyph and drops the level tail.
@@ -388,7 +384,7 @@ const modelSegment: StatusLineSegment = {
 
 		// Anthropic usage-limit stage (wrap-up allowance or low priority): a
 		// warning-colored badge so past-the-limit service is never mistaken for normal.
-		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
+		const slowModeLabel = ctx.runtimeStatus ? undefined : ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) content += theme.fg("warning", `${theme.sep.dot}${slowModeLabel}`);
 		return { content, visible: true };
 	},
@@ -399,10 +395,19 @@ const modelSegment: StatusLineSegment = {
 		const spans: TspSpan[] = [span(modelDisplayName(ctx), token)];
 		const advisor = modelAdvisorBadge(ctx);
 		if (advisor) spans.push(span(` ${advisor.icon}`, advisor.color));
-		if (ctx.session.isFastModeActive() && theme.icon.fast) spans.push(span(` ${theme.icon.fast}`, token));
-		const level = ctx.options.model?.showThinkingLevel === false ? undefined : thinkingLevelWord(ctx.session);
+		if (!ctx.runtimeStatus && ctx.session.isFastModeActive() && theme.icon.fast) {
+			spans.push(span(` ${theme.icon.fast}`, token));
+		}
+		const level =
+			ctx.options.model?.showThinkingLevel === false
+				? undefined
+				: ctx.runtimeStatus
+					? ctx.runtimeStatus.model?.thinking
+						? (ctx.runtimeStatus.thinkingLevel ?? "auto")
+						: undefined
+					: thinkingLevelWord(ctx.session);
 		if (level !== undefined) spans.push(span(" · ", "dim"), span(level, thinkingLevelToken(level)));
-		const slowModeLabel = ctx.session.getAnthropicSlowModeLabel?.();
+		const slowModeLabel = ctx.runtimeStatus ? undefined : ctx.session.getAnthropicSlowModeLabel?.();
 		if (slowModeLabel) spans.push(span(`${theme.sep.dot}${slowModeLabel}`, "warning"));
 		return segView(spans, "model", slowModeLabel ? "warning" : undefined);
 	},
@@ -972,7 +977,7 @@ const sessionSegment: StatusLineSegment = {
 	render(ctx) {
 		const sessionId = ctx.runtimeStatus?.sessionId ?? ctx.session.sessionManager?.getSessionId?.();
 		const runtimeId = ctx.runtimeStatus ? sessionId?.split(":side:").at(-1) : sessionId;
-		const display = statusValue(ctx, runtimeId?.slice(0, 8) || "new");
+		const display = runtimeId?.slice(0, 8) || "new";
 
 		return { content: withIcon(theme.icon.session, display), visible: true };
 	},

@@ -621,9 +621,6 @@ export function composeAppendPrompt(appendParts: readonly string[], appendSystem
 	if (!appendSystemPrompt || appendSystemPrompt.trim().length === 0) {
 		return generated;
 	}
-	if (!generated) {
-		return appendSystemPrompt;
-	}
 	return renderUserAppend({ generatedAppend: generated, userAppend: appendSystemPrompt });
 }
 
