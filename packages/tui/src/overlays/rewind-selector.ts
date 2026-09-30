@@ -27,7 +27,7 @@ import { expandKeyHint } from "../render/render-utils";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { ScrollView } from "../components/scroll-view";
-import { RewindHistory, type RewindHistoryItem } from "./rewind-history";
+import { RewindHistory, type RewindHistoryItem, type RewindHistoryTarget } from "./rewind-history";
 import {
 	composeOutlineColumn,
 	type OutlineTarget,
@@ -47,7 +47,6 @@ import {
 	EARLIER_TURNS_KEY,
 	earlierTurnsItem,
 	TIMELINE_COLUMNS,
-	TimelineItems,
 	targetCopy,
 	timelineItem,
 	turnItem,
@@ -109,16 +108,12 @@ export class RewindSelectorComponent implements Component {
 	get #filter(): string | undefined {
 		return this.#filterInput?.getValue();
 	}
-	/** Native filter haystack: lowercased turn text per main target (no rendered rows under TSP). */
-	#nativeTexts: { targets: OutlineTarget[]; texts: string[] } | undefined;
-	/** Last described root and the state it was built from. */
-	#native: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
-	/** Main-path list items, rebuilt only when the replayed targets change. */
-	#nativeItems: { targets: OutlineTarget[]; truncated: boolean; items: NativeNode[] } | undefined;
-	/** Timeline picker items of the replayed main path. */
-	#pickerItems = new TimelineItems();
-	/** Last described picker and the state it was built from. */
-	#picker: { memo: string; targets: OutlineTarget[]; node: NativeNode } | undefined;
+	/** Native search uses raw turn text, not terminal layout or collapsed rows. */
+	#nativeTexts = new WeakMap<OutlineTarget, string>();
+	#native: { memo: string; node: NativeNode } | undefined;
+	#nativeItems: { targets: readonly RewindHistoryTarget[]; items: NativeNode[] } | undefined;
+	#pickerItems: { targets: readonly RewindHistoryTarget[]; items: TspPickerItem[] } | undefined;
+	#picker: { memo: string; node: NativeNode } | undefined;
 	#filterItems: RewindHistoryItem[] = [];
 
 	constructor(
@@ -133,6 +128,8 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	invalidate(): void {
+		this.#native = undefined;
+		this.#picker = undefined;
 		this.#history.invalidate();
 		for (const columns of this.#variantCache.values()) for (const column of columns) column.history.invalidate();
 	}
@@ -160,6 +157,14 @@ export class RewindSelectorComponent implements Component {
 		}
 		this.#variantCache.set(target.turnId, columns);
 		return columns;
+	}
+
+	#outlinedHistory(): RewindHistory | undefined {
+		return this.#activeVariant > 0 ? this.#stripColumns()[this.#activeVariant - 1]?.history : this.#history;
+	}
+
+	#outlinedTarget(): OutlineTarget | undefined {
+		return this.#outlinedHistory()?.target;
 	}
 
 	#stopSlide(): void {
@@ -191,7 +196,7 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#moveMain(delta: -1 | 1, userOnly: boolean): void {
-		if (!this.#history.move(delta, userOnly, Math.max(1, this.#width - 1))) return;
+		if (!this.#history.move(delta, userOnly, isNativeRendering() ? undefined : Math.max(1, this.#width - 1))) return;
 		this.#activeVariant = 0;
 		this.#stopSlide();
 		this.#scrollToSelection = true;
@@ -205,7 +210,7 @@ export class RewindSelectorComponent implements Component {
 		}
 		const history = this.#stripColumns()[this.#activeVariant - 1]?.history;
 		const width = Math.max(24, Math.floor((this.#width - 1 - STRIP_GAP) / 2));
-		if (history?.move(delta, false, width)) {
+		if (history?.move(delta, false, isNativeRendering() ? undefined : width)) {
 			this.#scrollToSelection = true;
 			this.deps.requestRender();
 		} else if (delta === -1) {
@@ -255,23 +260,19 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, "left")) {
-			if (this.#activeVariant > 0) this.#slideTo(this.#activeVariant - 1);
-			else this.#moveMain(-1, true);
+			this.#left();
 			return;
 		}
 		if (matchesKey(data, "right")) {
-			const columns = this.#stripColumns();
-			if (this.#activeVariant < columns.length) {
-				columns[this.#activeVariant]!.history.resetSelection();
-				this.#slideTo(this.#activeVariant + 1);
-			} else if (this.#activeVariant === 0) this.#moveMain(1, true);
+			this.#right();
+			return;
+		}
+		if (isNativeRendering() && (data === "a" || data === "A")) {
+			this.#loadEarlier();
 			return;
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			const history =
-				this.#activeVariant > 0 ? this.#stripColumns()[this.#activeVariant - 1]?.history : this.#history;
-			const target = history?.target;
-			if (target) this.deps.onSelect(target.entryId);
+			this.#selectOutlined();
 			return;
 		}
 		if (this.#scrollView.handleScrollKey(data)) {
@@ -282,6 +283,7 @@ export class RewindSelectorComponent implements Component {
 
 	/** `f`: open the filter over the whole branch. */
 	#openFilter(): void {
+		if (isNativeRendering()) this.#history.loadAll();
 		this.#scrollToSelection = true;
 		const input = new Input();
 		input.prompt = `${theme.fg("accent", "filter:")} `;
@@ -360,7 +362,7 @@ export class RewindSelectorComponent implements Component {
 			return;
 		}
 		if (input.handleInput(data)) {
-			if (input.getValue() !== before) this.#setFilter(input.getValue());
+			if (input.getValue() !== before) this.#filterChanged();
 			else this.deps.requestRender();
 			return;
 		}
@@ -377,16 +379,15 @@ export class RewindSelectorComponent implements Component {
 		this.deps.requestRender();
 	}
 
-	#setFilter(query: string): void {
-		this.#filterInput?.setValue(query);
+	#filterChanged(): void {
 		this.#refreshFilter();
 		this.#scrollToSelection = true;
 		this.deps.requestRender();
 	}
 
-	/** Search materializes rendered targets only while the filter is open. */
+	/** ANSI search measures rows; native search uses the catalogue without rendering. */
 	#refreshFilter(): void {
-		this.#filterItems = this.#history.items(Math.max(1, this.#width - 1));
+		if (!isNativeRendering()) this.#filterItems = this.#history.items(Math.max(1, this.#width - 1));
 		const matches = this.#filterMatches();
 		const point = this.#history.point;
 		if (!point || matches.some(item => item.target.entryId === this.#history.target?.entryId)) return;
@@ -429,16 +430,29 @@ export class RewindSelectorComponent implements Component {
 	 * `ls` matches `ls -la` but not `tools`). Other scripts match substrings so
 	 * a Chinese query can find text inside a sentence without spaces.
 	 * All visible targets match an empty query.
-	 * Matching the rendered rows keeps results honest: collapsed tool output
-	 * only matches once Ctrl+O expands it.
+	 * ANSI matches rendered rows (including expansion state); native matches
+	 * raw turn text, commands and tool output without terminal layout.
 	 */
-	#filterMatches(): RewindHistoryItem[] {
+	#filterMatches(): readonly RewindHistoryTarget[] {
 		const words = (this.#filter ?? "").toLowerCase().split(/\s+/).filter(Boolean);
 		const patterns = words.map(word =>
 			/^[\p{Script=Latin}\p{N}_]+$/u.test(word)
 				? new RegExp(`(?<![\\p{L}\\p{N}_])${RegExp.escape(word)}(?![\\p{L}\\p{N}_])`, "u")
 				: new RegExp(RegExp.escape(word), "u"),
 		);
+		if (isNativeRendering()) {
+			return this.#history.targets.filter(({ target }) => {
+				let text = this.#nativeTexts.get(target);
+				if (text === undefined) {
+					const blocks = collectBlocks(target.entries);
+					text = [targetCopy(target, blocks).content, ...blocks.map(block => block.content)]
+						.join("\n")
+						.toLowerCase();
+					this.#nativeTexts.set(target, text);
+				}
+				return patterns.every(pattern => pattern.test(text));
+			});
+		}
 		return this.#filterItems.filter(item => {
 			const text = Bun.stripANSI(item.rows.join("\n")).toLowerCase();
 			return patterns.every(pattern => pattern.test(text));
@@ -459,7 +473,7 @@ export class RewindSelectorComponent implements Component {
 		const variant = Number(value);
 		if (!Number.isInteger(variant) || variant === this.#activeVariant) return;
 		if (variant < 0 || variant > this.#stripColumns().length) return;
-		this.#siblingSelected = 0;
+		if (variant > 0) this.#stripColumns()[variant - 1]!.history.resetSelection();
 		if (variant === 0) {
 			this.#activeVariant = 0;
 			this.#stopSlide();
@@ -485,7 +499,8 @@ export class RewindSelectorComponent implements Component {
 					return;
 				case "lateral":
 					// A click steps back a user turn, or on to the next branch (wrapping to the current path).
-					if (this.#filter !== undefined || this.#stripColumns().length === 0) this.#left();
+					if (this.#filter !== undefined) this.#stepFiltered(-1, true);
+					else if (this.#stripColumns().length === 0) this.#left();
 					else if (this.#activeVariant < this.#stripColumns().length) this.#right();
 					else this.#showVariant("0");
 					return;
@@ -493,7 +508,7 @@ export class RewindSelectorComponent implements Component {
 					this.#openFilter();
 					return;
 				case "earlier":
-					this.#loadFullHistory();
+					this.#loadEarlier();
 					return;
 				case "close":
 					if (this.#filter === undefined) this.deps.onCancel();
@@ -514,23 +529,23 @@ export class RewindSelectorComponent implements Component {
 		}
 	}
 
+	#loadEarlier(): void {
+		this.#history.loadAll();
+		this.deps.requestRender();
+	}
+
 	/** Outline the turn `id`: on the active branch tab, or on the main path (leaving the tab). */
 	#outline(id: string): boolean {
-		if (this.#activeVariant > 0) {
-			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
-			const index = targets.findIndex(target => target.turnId === id);
-			if (index >= 0) {
-				this.#siblingSelected = index;
-				return true;
-			}
+		const branch = this.#activeVariant > 0 ? this.#outlinedHistory() : undefined;
+		if (branch?.selectTurn(id)) {
+			this.#scrollToSelection = true;
+			return true;
 		}
-		const index = this.#targets.findIndex(target => target.turnId === id);
-		if (index < 0) return false;
-		if (this.#filter !== undefined && !this.#filterMatches().includes(index)) return false;
-		this.#selected = index;
+		if (this.#filter !== undefined && !this.#filterMatches().some(item => item.target.turnId === id)) return false;
+		if (!this.#history.selectTurn(id)) return false;
 		this.#activeVariant = 0;
-		this.#siblingSelected = 0;
 		this.#stopSlide();
+		this.#scrollToSelection = true;
 		return true;
 	}
 
@@ -548,29 +563,30 @@ export class RewindSelectorComponent implements Component {
 		// A click on an item outlines it and rewinds there, as Enter would.
 		if (event.key === "list") {
 			if (event.item === EARLIER_TURNS_KEY) {
-				this.#loadFullHistory();
+				this.#loadEarlier();
 				return;
 			}
-			const index = this.#targets.findIndex(target => target.turnId === event.item);
-			if (index < 0) return;
-			this.#selected = index;
+			if (this.#filter !== undefined && !this.#filterMatches().some(item => item.target.turnId === event.item))
+				return;
+			if (!this.#history.selectTurn(event.item)) return;
 			this.#activeVariant = 0;
-			this.#siblingSelected = 0;
 			this.#stopSlide();
 		} else if (event.key === "branch" && this.#activeVariant > 0) {
-			const targets = this.#stripColumns()[this.#activeVariant - 1]?.targets ?? [];
-			const index = targets.findIndex(target => target.turnId === event.item);
-			if (index < 0) return;
-			this.#siblingSelected = index;
+			if (!this.#outlinedHistory()?.selectTurn(event.item)) return;
 		} else {
 			return;
 		}
+		this.#scrollToSelection = true;
 		this.deps.requestRender();
 		this.#selectOutlined();
 	}
 
 	describe(cx: DescribeContext): NativeNode {
 		return cx.supports("picker") ? this.#describePicker() : this.#describeCard();
+	}
+
+	#nativeMemo(): string {
+		return `${this.#history.target?.turnId}|${this.#activeVariant}|${this.#outlinedTarget()?.turnId}|${this.#history.truncated}|${this.#expanded}|${this.#filter ?? "\0"}|${this.#filterInput?.getCursor()}`;
 	}
 
 	/**
@@ -580,11 +596,16 @@ export class RewindSelectorComponent implements Component {
 	 */
 	#describePicker(): NativeNode {
 		const filter = this.#filter;
-		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${filter ?? "\0"}|${this.#filterInput?.getCursor()}`;
+		const memo = this.#nativeMemo();
 		const cached = this.#picker;
-		if (cached?.memo === memo && cached.targets === this.#targets) return cached.node;
+		if (cached?.memo === memo) return cached.node;
 
-		const main = this.#pickerItems.of(this.#targets);
+		const targets = this.#history.targets;
+		const selected = targets.findIndex(item => item.target === this.#history.target);
+		if (this.#pickerItems?.targets !== targets) {
+			this.#pickerItems = { targets, items: targets.map(item => timelineItem(item.target)) };
+		}
+		const main = this.#pickerItems.items;
 		const columns = filter === undefined ? this.#stripColumns() : [];
 		const column = columns[this.#activeVariant - 1];
 		const matches = filter === undefined ? undefined : this.#filterMatches();
@@ -600,13 +621,13 @@ export class RewindSelectorComponent implements Component {
 			placeholder: "Filter turns…",
 			columns: TIMELINE_COLUMNS,
 			items: main,
-			selected: this.#targets[this.#selected]?.turnId ?? null,
-			total: this.#targets.length,
+			selected: this.#history.target?.turnId ?? null,
+			total: targets.length,
 			empty: "Nothing to rewind to",
 		};
 		if (matches) {
-			props.order = matches.map(index => this.#targets[index]!.turnId);
-			if (!matches.includes(this.#selected)) props.selected = null;
+			props.order = matches.map(item => item.target.turnId);
+			if (!matches.some(item => item.target === this.#history.target)) props.selected = null;
 		}
 		if (columns.length > 0) {
 			props.tabs = [
@@ -621,29 +642,32 @@ export class RewindSelectorComponent implements Component {
 		if (column) {
 			// The shared history above the fork, then the alternate branch.
 			if (column.pickerItems?.main !== main) {
-				column.pickerItems = { main, items: [...main, ...column.targets.map(timelineItem)] };
+				column.pickerItems = {
+					main,
+					items: [...main, ...column.history.targets.map(item => timelineItem(item.target))],
+				};
 			}
 			props.items = column.pickerItems.items;
 			props.order = [
-				...this.#targets.slice(0, this.#selected).map(target => target.turnId),
-				...column.targets.map(target => target.turnId),
+				...targets.slice(0, selected).map(item => item.target.turnId),
+				...column.history.targets.map(item => item.target.turnId),
 			];
-			props.selected = column.targets[this.#siblingSelected]?.turnId ?? null;
+			props.selected = column.history.target?.turnId ?? null;
 		}
 		props.actions = compact([
 			pickerAction("rewind", "Rewind here", "enter", { primary: true }),
 			pickerAction("lateral", columns.length > 0 ? "Branches" : "User turns", ["left", "right"]),
 			filter === undefined ? pickerAction("filter", "Filter", "f") : undefined,
-			filter === undefined && this.#truncated ? pickerAction("earlier", "Earlier turns", "a") : undefined,
+			filter === undefined && this.#history.truncated ? pickerAction("earlier", "Earlier turns", "a") : undefined,
 			filter === undefined ? CLOSE_ACTION : { ...CLOSE_ACTION, label: "Show all" },
 		]);
 
 		const preview: NativeChild[] = [];
-		const outlined = column ? column.targets[this.#siblingSelected] : this.#targets[this.#selected];
+		const outlined = this.#outlinedTarget();
 		if (outlined && props.selected !== null) {
 			// A user turn rewinds past itself (its text returns to the editor); anything else keeps itself.
-			const kept = column || this.#targets[this.#selected]!.isUserTurn ? this.#selected : this.#selected + 1;
-			const dropped = this.#targets.length - kept;
+			const kept = column || outlined.isUserTurn ? selected : selected + 1;
+			const dropped = targets.length - kept;
 			preview.push(
 				text(
 					dropped > 0
@@ -654,22 +678,22 @@ export class RewindSelectorComponent implements Component {
 						: [span("Continue from here: nothing below to drop", "warning")],
 					{ role: "omp.rewind.drop" },
 				),
-				...(column?.builder ?? this.#builder).container.children.slice(outlined.start, outlined.end),
+				...(column?.history ?? this.#history).preview,
 			);
 		}
 		const root = picker(props, preview);
-		this.#picker = { memo, targets: this.#targets, node: root };
+		this.#picker = { memo, node: root };
 		return root;
 	}
 
 	#describeCard(): NativeNode {
-		const memo = `${this.#selected}|${this.#activeVariant}|${this.#siblingSelected}|${this.#truncated}|${this.#filter ?? "\0"}|${this.#filterInput?.getCursor()}`;
+		const memo = this.#nativeMemo();
 		const cached = this.#native;
-		if (cached?.memo === memo && cached.targets === this.#targets) return cached.node;
+		if (cached?.memo === memo) return cached.node;
 
 		const filter = this.#filter;
 		const children: NativeChild[] = [];
-		const allItems = this.#mainItems();
+		const allItems = this.#history.targets;
 		const columns = filter === undefined ? this.#stripColumns() : [];
 		const matches = filter === undefined ? undefined : this.#filterMatches();
 		if (filter !== undefined && matches) {
@@ -678,13 +702,15 @@ export class RewindSelectorComponent implements Component {
 				node(
 					"list",
 					{
-						selected: matches.includes(this.#selected) ? (this.#targets[this.#selected]?.turnId ?? null) : null,
+						selected: matches.some(item => item.target === this.#history.target)
+							? this.#history.target!.turnId
+							: null,
 						filter,
 						empty: `No items match "${filter}"`,
 						virtual: true,
 						max: 0.5,
 					},
-					matches.map(index => allItems[index + (this.#truncated ? 1 : 0)]!),
+					matches.map(item => turnItem(item.target)),
 					"list",
 				),
 			);
@@ -693,12 +719,12 @@ export class RewindSelectorComponent implements Component {
 				node(
 					"list",
 					{
-						selected: this.#targets[this.#selected]?.turnId ?? null,
+						selected: this.#history.target?.turnId ?? null,
 						empty: "Nothing to rewind to",
 						virtual: true,
 						max: 0.5,
 					},
-					allItems,
+					this.#mainItems(allItems),
 					"list",
 				),
 			);
@@ -720,19 +746,19 @@ export class RewindSelectorComponent implements Component {
 			);
 			const column = columns[this.#activeVariant - 1];
 			if (column) {
-				column.nativeItems ??= column.targets.map(target => turnItem(target));
+				column.nativeItems ??= column.history.targets.map(item => turnItem(item.target));
 				children.push(
 					node(
 						"list",
-						{ selected: column.targets[this.#siblingSelected]?.turnId ?? null, virtual: true, max: 0.4 },
+						{ selected: column.history.target?.turnId ?? null, virtual: true, max: 0.4 },
 						column.nativeItems,
 						"branch",
 					),
 				);
 			}
 		}
-		const outlined = filter === undefined ? this.#outlinedTarget() : this.#targets[this.#selected];
-		if (outlined && (!matches || matches.includes(this.#selected))) {
+		const outlined = this.#outlinedTarget();
+		if (outlined && (!matches || matches.some(item => item.target === outlined))) {
 			const item = targetCopy(outlined, collectBlocks(outlined.entries));
 			children.push(
 				node("section", { head: [span(item.label, "strong")] }, [turnPreview(outlined, item.content)], "preview"),
@@ -747,7 +773,7 @@ export class RewindSelectorComponent implements Component {
 							{ keys: ["left", "right"], label: columns.length > 0 ? "branches" : "user turns" },
 							{ keys: ["f"], label: "filter" },
 							{ keys: ["enter"], label: "rewind" },
-							this.#truncated ? { keys: ["a"], label: "earlier turns" } : undefined,
+							this.#history.truncated ? { keys: ["a"], label: "earlier turns" } : undefined,
 							actionHint("tui.select.cancel", "cancel"),
 						]
 					: [
@@ -767,17 +793,17 @@ export class RewindSelectorComponent implements Component {
 			],
 			children,
 		);
-		this.#native = { memo, targets: this.#targets, node: root };
+		this.#native = { memo, node: root };
 		return root;
 	}
 
-	#mainItems(): NativeNode[] {
-		const cached = this.#nativeItems;
-		if (cached?.targets === this.#targets && cached.truncated === this.#truncated) return cached.items;
-		const items = this.#targets.map(target => turnItem(target));
-		if (this.#truncated) items.unshift(earlierTurnsItem);
-		this.#nativeItems = { targets: this.#targets, truncated: this.#truncated, items };
-		return items;
+	#mainItems(targets: readonly RewindHistoryTarget[]): NativeNode[] {
+		if (this.#nativeItems?.targets !== targets) {
+			const items = targets.map(item => turnItem(item.target));
+			if (this.#history.truncated) items.unshift(earlierTurnsItem);
+			this.#nativeItems = { targets, items };
+		}
+		return this.#nativeItems.items;
 	}
 
 	// ========================================================================
@@ -837,8 +863,12 @@ export class RewindSelectorComponent implements Component {
 		this.#scrollToSelection = false;
 		this.#scrollView.setLines(visible);
 		const lateral = columns.length > 0 ? "branches" : "user turns";
-		const footer = filtered?.footer ??
-			theme.fg("dim", `message ${this.#history.position}/${this.#history.entries.length}  ${editorKeys("tui.select.up", "tui.select.down")} step  ${formatKeyHints(["left", "right"])} ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`);
+		const footer =
+			filtered?.footer ??
+			theme.fg(
+				"dim",
+				`message ${this.#history.position}/${this.#history.entries.length}  ${editorKeys("tui.select.up", "tui.select.down")} step  ${formatKeyHints(["left", "right"])} ${lateral}  ${formatKeyHint("f")} filter  ${formatKeyHint("enter")} rewind  ${expandKeyHint()} expand  ${editorKey("tui.select.cancel")} cancel`,
+			);
 		return [
 			...this.#border.render(width),
 			` ${theme.icon.rewind} ${theme.bold("Rewind")}${theme.sep.dot}${theme.fg("dim", "pick the point to continue from")}`,
@@ -850,7 +880,8 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#filterColumn(width: number): { column: ViewportOutlineColumn; footer: string } {
-		const matches = this.#filterMatches();
+		const matching = new Set(this.#filterMatches().map(item => item.target));
+		const matches = this.#filterItems.filter(item => matching.has(item.target));
 		const rows = matches.map(item => item.rows);
 		const targets: OutlineTarget[] = matches.map((item, index) => ({
 			...item.target,

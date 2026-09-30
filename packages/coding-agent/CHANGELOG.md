@@ -9,6 +9,7 @@
 - Pinned Subagents rows can show each agent's current (or most recent) tool call with a one-line detail and an elapsed marker; enable with `display.subagentLivePreview` (off by default) ([#3821](https://github.com/can1357/oh-my-pi/pull/3821) by [@abilliontokens](https://github.com/abilliontokens))
 - Model presets: save every role assignment plus the default thinking level under a name and switch between them with `/modelpreset save|switch|delete|list`, pick one interactively with `/modelpreset`, or press `s` in the `/models` Roles view to save the current setup ([#5253](https://github.com/can1357/oh-my-pi/pull/5253) by [@abilliontokens](https://github.com/abilliontokens))
 - Subagent tool previews name the files a freeform edit (`apply_patch`, sloppy, hashline) touches ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+- Audio and video files can now be attached from startup arguments or interactive `@file` mentions.
 
 ### Changed
 
@@ -26,6 +27,114 @@
 - `omp plugin upgrade <name>` now upgrades npm- and git-installed plugins (e.g. `ida-mcp` installed from `github:HexRaysSA/ida-mcp#latest`, which `hcli mcp install` relies on) and resolves a bare marketplace plugin name, instead of failing with "Invalid plugin ID"; the plugin's enabled state and feature selection are kept ([#13812](https://github.com/can1357/oh-my-pi/pull/13812) by [@H4vC](https://github.com/H4vC))
 - Extension providers that offer `/login` and also name an env var as their `apiKey` (e.g. the Nexos provider's `NEXOS_API_KEY`) now use the key saved by `/login` when that env var is unset, instead of sending the env var's name as the key, which made their models fail to load or disappear ([#13815](https://github.com/can1357/oh-my-pi/pull/13815) by [@H4vC](https://github.com/H4vC))
 - Reduced memory held by finished subagents during long sessions ([#13624](https://github.com/can1357/oh-my-pi/pull/13624) by [@iliaal](https://github.com/iliaal)).
+- Reworked agent, planning, delegation, and recovery guidance around evidence-driven execution, scoped autonomy, explicit approval boundaries, and proportionate verification.
+- Inline `/btw` questions are now durable threads from creation; Enter opens the same thread without an upgrade or repeated request, and dismissing a panel keeps its history.
+- BTW threads can now use web and structural search, memory lookups, and read-only LSP/GitHub operations, including `xd://` devices, while mutation and execution tools remain blocked.
+- App-viewport subagents now share a stable auxiliary area with up to two visible transcripts and overflow tabs (Alt+Left/Right); completed panes still close automatically, while focused and manually opened panes stay available.
+- Very large sessions now resume faster, while large agent transcript panes load incrementally and reflow only visible rows during split-pane resizing.
+- Changed durable BTW knowledge sharing: `shareSummaryWithMain` now publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
+- Changed durable BTW panes to open with the thread rail collapsed by default, provide a `+ New BTW` action that immediately creates a blank thread, and let `/new` omit its first question.
+- BTW thread-rail hover previews and pinned expand/collapse actions now use a short interruptible slide animation.
+- Agent Hub now opens selected agents in persistent app-viewport workspace panes beside the sticky main-session editor, with pane-local transcript scrolling and the existing native-scrollback behavior preserved on other backends.
+- Agent transcript workspace panes now use the same reserved-column, draggable Braille scrollbar as the Main pane and global app viewport.
+- Pane drag-and-drop now previews the dragged transcript inside a themed destination frame without reflowing the live workspace.
+- Messageable Agent transcript panes now use the Main composer's full-width chrome, focus styling, labeled border, and empty-input placeholder.
+- Agent transcript workspace panes now use a responsive Main-style conversation shell with workspace-owned identity headers, rich composer metadata, compact low-height rendering, stable read-only Advisor geometry, and hover-aware interaction.
+- Resuming a session exited while paused no longer synthesizes an interrupted-turn abort; the transcript stays idle until `/continue`.
+- Updated the app-viewport preview workflow to build native addons through the Bazel pipeline after the legacy `build-native` action was removed.
+- User-appended instructions now retain their provenance even without generated append content and no longer claim to override higher-priority rules or approval requirements.
+- Workspace task clicks and hover highlights now honor session-level mouse settings.
+- Extension ask dialogs can now disable custom answers with `allowCustomInput: false`, consistently hiding the `Other (type your own)` option on host and collaboration guest UIs.
+- Interactive extensions can now detect `allowCustomInput` support through `ctx.ui.askDialogCapabilities` before relying on custom-answer suppression.
+- Added a return-to-bottom control beneath the Main app viewport scrollbar when transcript scrolling is detached, with hover feedback and click-to-resume following.
+- Added a host-local `localAskDialog` extension UI method for rich, scrollable decisions that must never be delegated to collaboration guests.
+- Added `/delete` to remove the selected durable BTW thread.
+- Added durable BTW thread upgrades: threads can be created directly from the pane (`/new <question>` or just typing when no thread exists), durable threads get read-only tools (`read`/`glob`/`grep`), a `steerMain` tool that delivers a one-way message into the main agent's input queue (replacing the `/steer` pane command), slash-command autocomplete in the pane editor, and streaming rendering of thinking blocks while a reply runs.
+- `/btw` now keeps disposable QuickAsk replies inline and upgrades the exact turn with Enter into a durable SideThread inside the app-viewport workspace.
+- `/pause` waits until every live agent loop parks before the next model call, then allows `q` to exit with a durable `agents_paused` marker (`session_exit.kind = "paused"`).
+- `/continue` restarts agents after `omp --resume`; dismissing the pause screen resumes same-process loops, and neither path injects user-visible text.
+- Added explicit assistant thinking renderer result arms for extensions: `{ type: "append", component: Component }` keeps the existing supplemental rendering behavior, while `{ type: "replace", component: Component }` suppresses the default thinking Markdown so extensions can render the block themselves. Bare `Component` returns remain the legacy append shorthand. Thinking render contexts now include parent assistant message metadata and provider thinking content metadata for async renderer state.
+- Fixed app-viewport preview binaries failing to build.
+- Session shutdown now shows closing progress before waiting for live commands or session cleanup, and stops progress updates when cleanup completes or fails.
+- Double-Escape rewind opens quickly in long sessions, loading earlier turns and alternate branches as you navigate without discarding history.
+- Long app-viewport sessions restore and resize with visible content first, refining offscreen row counts in the background without shifting the reading position or text selection.
+- Reduced unrelated pane redraws during BTW, agent-transcript, and tool-progress updates.
+- Local agent panes now display their own extension widgets and statuses, including live TPS widgets, with cleanup on close and restoration on reopen.
+- Agent transcripts now open as ordinary draggable, resizable workspace panes without an enclosing Agents pane or a two-pane limit; automatic placement follows available space and preserves manually arranged panes.
+- Agents can leave optional tool, prompt, and harness feedback through `xd://roast`, saved locally in `roast.db` without uploading.
+- Clipboard images and text stay in the focused split-pane composer, including BTW drafts and replies, instead of leaking into Main.
+- Pasting an image and immediately pressing Enter waits for the attachment before submitting.
+- Clipboard copy no longer blocks terminal rendering, and Windows/WSL paste avoids repeated clipboard probes and waits that outlive subprocess timeouts.
+- Large app-viewport sessions no longer stutter while pending tool activity animates or the transcript scrolls.
+- Large app-viewport sessions now open and resize faster by keeping offscreen height measurement layout-only.
+- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
+- Double-Escape now opens a fullscreen transcript rewind selector that outlines the target item with a dotted border — ↑/↓ step through rendered items, ←/→ jump between user turns, Enter rewinds (branching on user prompts, in-place leaf moves elsewhere); it replaces both the previous user-message list and the tree route (`doubleEscapeAction` is now `rewind` or `none`)
+- The rewind selector shows alternate session-tree branches at a fork as side-by-side half-width transcript columns; ←/→ slide between them with an animated camera, a dot rail with edge ellipses tracks position when branches overflow the window, and Enter rewinds into the chosen branch
+- `/copy` now uses the same fullscreen transcript selector as esc-esc: step the dotted outline over rendered items and Enter copies the turn's text, or press → to descend into its inner blocks (fenced code, quotes, bash/eval commands, tool output) and copy one verbatim
+- Workspace panes now reorganize into a balanced grid when a new subagent pane cannot fit the current split tree.
+- Fixed an issue where custom model overrides were lost during configuration updates
+- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
+- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
+- Revived historical subagents now reopen their background transcript panes.
+- BTW workspace panes now preserve the current scrolled position when tool-using replies finish.
+- Large resumed sessions now compute transcript height once without repeatedly syntax-highlighting offscreen history, keeping scrollbar geometry stable and subsequent frames responsive.
+- Added automatic background panes for running subagents; completed panes petrify through a multi-tone gray gradient before closing unless the user interacts with them.
+- Added `/debug petrify` and a matching Debug Tools entry to preview subagent pane petrification without starting a model or subagent.
+- Fixed dark stripes appearing across styled pane rows during the subagent petrification animation.
+- Fixed app-viewport Main, BTW, and subagent panes preserving live-tail following across text selection and exposing a working return-to-bottom control.
+- Fixed app-viewport text selections moving away from the pointer when output refreshes during a held drag.
+- Fixed app-viewport scroll jumps after session restore and while reading a streaming BTW reply.
+- Fixed the working-status spinner and elapsed time freezing during model output.
+- Fixed app-viewport startup and typing stalls in large sessions.
+- Fixed large-session scrollbar jumps and Ctrl+O/rapid-scroll stalls, including cold code blocks first entering the viewport; kept text selections fixed while output streams and made `/tree` selections update before branch replay.
+- Fixed concurrent app-viewport repaints leaving submitted text visible or freezing BTW input until the terminal resized.
+- Fixed long-session scrollbars filling the Main pane and full-history rendering during page or drag navigation.
+- Fixed app-viewport frame time growing with transcript size whenever new messages or tool cards were appended to large sessions.
+- Fixed Main pane wheel scrolling stopping above Todo and BTW cards in split-pane workspaces.
+- Fixed subagent pane updates shifting or overwriting content in the Main workspace pane.
+- Fixed inline BTW shortcuts stealing composer input after the panel was dismissed or while attachments were pending, and prevented late BTW operations from mutating replaced sessions.
+- Fixed durable BTW tools that require approval hanging before the prompt opens because the side transcript was waiting on Main's unrelated tool-preview gate.
+- Fixed durable BTW panes diverging from Main's transcript rendering: live and completed side turns now use the same tool cards, runtime tool metadata, and streamed-argument decoding.
+- Fixed the durable BTW pane's `New BTW` action to render as a hoverable button, reuse the active blank thread, and delete untouched blank threads when the pane closes.
+- Fixed durable BTW capability gaps: bare `/btw` now opens an empty pane for direct thread creation, promoted QuickAsk conversations gain durable read-only and `steerMain` capabilities without rewriting their original no-tools prompt history, Main-bound messages use the session queue while Main is streaming, and inherited object keys cannot bypass the read-only tool whitelist.
+- Fixed durable BTW `steerMain` autonomy: the model may call it only for an explicit user request, and every proposed message now requires user approval before delivery to Main.
+- Fixed BTW promotion dropping unsubmitted drafts of sibling threads: `abandon()` after a session transition must not write into the new session, so every durable child's draft is persisted before the branch is attempted.
+- Fixed silent loss of pane input submitted while a durable BTW reply is streaming: the submit is now consumed at the editor layer (the editor clears itself unconditionally on submit), keeping the drafted question and reporting that the reply is still running.
+- Fixed durable BTW pane status lines to follow the selected side thread's model, context usage, usage totals, session identity, and streaming state instead of Main, including live updates when switching threads.
+- Fixed Codex web search falling through GPT-5.6 Responses-Lite models to GPT-5.5: Lite models now use the native `/alpha/search` transport, including configured Codex proxy endpoints, while non-Lite models retain hosted Responses search ([#7319](https://github.com/can1357/oh-my-pi/issues/7319)).
+- Fixed plan approval freezing the TUI for the whole approved-plan run: the `xd://propose` completion started `handlePlanApproval` inside the event controller's serialized dispatch chain, so the operator's review choice and the blocking synthetic execution turn parked every subsequent agent event (streamed deltas, tool cards) behind an in-chain `await` — the agent executed with zero live rendering and the transcript only materialized after the run settled. The approval flow now runs off-chain, so events render in real time while the review is open and while the plan executes.
+- Fixed app-viewport selection copies replacing transcript rows that scrolled beyond the pane with blank lines in Main, Agent, and BTW panes.
+- Fixed tabbed lines in multiline Eval display values expanding across app-viewport workspace geometry and erasing the divider between conversation panes.
+- Fixed collapsed BTW thread-rail previews shifting the transcript and pane chrome left by one column when the overlay boundary crossed a double-width CJK character.
+- Fixed BTW thread-selection clicks being ignored while the thread rail was expanding.
+- Fixed selecting a thread from a hover preview either pinning the rail open or collapsing it immediately; the rail now stays temporary until the pointer leaves, while fixed rails remain open.
+- Fixed durable BTW conversations ending with an empty reply when a model attempted a tool call; denied calls now return an error tool result to the isolated child loop so it can continue with plain text, and the rejection history survives session restore.
+- Fixed right-clicking selected prompt text recalled with Up pasting the clipboard instead of copying the selection.
+- `/context`, `/session info`, and other immediate slash-command output now appears in the app viewport as soon as the command completes instead of remaining hidden until another prompt triggers a render.
+- Fixed Ctrl+O appearing to freeze large Advisor transcripts by expanding one viewport-anchored synthetic session update at a time while preserving its full Markdown rendering, instead of synchronously laying out every historical replay dump.
+- Fixed app-viewport sash dragging re-rendering the full main-session history, and restored Agent Hub toggle shortcuts while an agent pane has keyboard focus.
+- Restored the Main pane's proportional virtual scrollbar after moving transcript scrolling into the app-viewport workspace component, reusing the global viewport's Braille thumb style, reserved content column, and drag behavior.
+- Fixed pane drag-and-drop previews alternating between terminal white and the covered content's foreground color instead of using the active accent color.
+- Fixed dragged transcript previews appearing one cell down and right from their framed destination.
+- Fixed clicks in the app-viewport Main pane moving keyboard focus from an active `ask` or hook dialog to the detached editor, which made dialog navigation keys appear unresponsive.
+- Fixed copied text from app-viewport Main and agent panes including visual wrap newlines, per-row gutters, and pane scrollbars instead of logical transcript text, while keeping column-zero tool block content selectable.
+- Fixed active selections in app-viewport Main and agent panes staying on stale screen rows, failing to follow a stationary pointer during wheel scrolling, changing copied content, being cleared when a drag anchor moved offscreen, or highlighting the fixed input outside the origin scroll region.
+- Fixed Agent Hub opening as a partial, two-cell-narrow transparent overlay over an app-viewport workspace instead of an opaque bordered surface covering the full terminal geometry.
+- Fixed terminal progress and run-state titles switching to idle when either side of a concurrent main-session continuation and `/btw` request completed before the other; activity is now aggregated by owner, and non-terminal `agent_end` scheduling boundaries retain main-session ownership.
+- Fixed QuickAsk and durable BTW replies inheriting IRC's 4 KiB flood limit, which truncated visible history and branch promotion while the model retained the full reply.
+- Fixed app-viewport pane focus chrome: all workspace headers now share `●`/`○` markers and focused/muted title colors, unfocused side-pane composers remain visible without showing hint text while focused, Agent/BTW composers use peer instances of Main's `StatusLineComponent` with the same live settings and exact segment/layout/background/cap/overflow rendering, and the BTW thread rail uses a centered divider chevron with a larger hover target; hovering the collapsed chevron peeks the rail without reflowing the transcript, spatial and brief leave tolerance prevent accidental closure, clicking a hovered thread pins it, and single-thread hover feedback remains active.
+- Fixed multi-turn BTW conversations cold-missing Kimi and Anthropic-compatible prompt caches by keeping the no-tools reminder in the frozen side-thread prefix instead of moving it after each completed turn; persisted pre-fix side threads are migrated on restore so the reminder remains present.
+- Fixed Agent workspace panes silently rendering Main's status line when their live `AgentSession` was unavailable; the pane now stays open, reports the missing session in its own status line, and switches in place to the target's `StatusLineComponent` when the session returns.
+- Fixed long-session UI lag during streaming and app-viewport scrolling: every compose re-rendered each settled `ToolExecutionComponent` (thousands of blocks re-walking their Box/renderer subtrees per frame, ~20µs × ~1.5k blocks ≈ 30ms per frame on a real 4k-message transcript). Settled tool blocks now memoize their rendered rows on (width, display key), cutting full frames from ~56ms to ~6ms; blocks with live inline images still re-render every frame to preserve image-budget side effects.
+- Fixed long app-viewport transcripts re-rendering every historical block for tail spinner and streaming updates by reusing unaffected transcript segments.
+- Fixed oversized Todo and BTW live panels hiding the editor in the app viewport; their rows now participate in viewport scrolling.
+- Fixed paused exits losing in-progress durable BTW requests; `/continue` now resumes them after session restore.
+- Fixed long durable BTW threads rebuilding their full transcript on every streaming update.
+
+### Removed
+
+- Removed the durable BTW `/refresh` command and refresh journal event so a thread's frozen Main context and promotion anchor remain immutable for its lifetime.
+- Removed redundant hover/click guidance and the duplicate thread-count heading from the BTW thread rail.
 
 ## [18.4.4] - 2026-09-29
 
@@ -525,9 +634,6 @@
 - Edits targeting auto-generated files now return a tool-scoped rejection instead of aborting the whole turn ([#12499](https://github.com/can1357/oh-my-pi/pull/12499) by [@Dante-dan](https://github.com/Dante-dan)).
 - Subagents with an ordered model fallback keep it reachable on startup when the parent default role shares the same primary model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
 - omp-plugins MCP servers now substitute `${CLAUDE_PLUGIN_ROOT}`/`${OMP_PLUGIN_ROOT}` in `command`, `args`, and `cwd` ([#12801](https://github.com/can1357/oh-my-pi/pull/12801) by [@holny](https://github.com/holny)).
-### Added
-
-- Audio and video files can now be attached from startup arguments or interactive `@file` mentions.
 
 ## [18.2.8] - 2026-09-21
 
@@ -590,126 +696,6 @@
 - Fixed edit operations that could loop after empty insertions or fail on Unicode no-op and overlapping duplicate matches.
 - Fixed live subagent messages being delayed by agent discovery and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery and routing for PrismML Bonsai 2 27B GGUF models, including support for cached models and the Qwen 3.8 thinking-level ladder.
-- Extension ask dialogs can now disable custom answers with `allowCustomInput: false`, consistently hiding the `Other (type your own)` option on host and collaboration guest UIs.
-- Interactive extensions can now detect `allowCustomInput` support through `ctx.ui.askDialogCapabilities` before relying on custom-answer suppression.
-- Added a return-to-bottom control beneath the Main app viewport scrollbar when transcript scrolling is detached, with hover feedback and click-to-resume following.
-- Added a host-local `localAskDialog` extension UI method for rich, scrollable decisions that must never be delegated to collaboration guests.
-- Added `/delete` to remove the selected durable BTW thread.
-- Added durable BTW thread upgrades: threads can be created directly from the pane (`/new <question>` or just typing when no thread exists), durable threads get read-only tools (`read`/`glob`/`grep`), a `steerMain` tool that delivers a one-way message into the main agent's input queue (replacing the `/steer` pane command), slash-command autocomplete in the pane editor, and streaming rendering of thinking blocks while a reply runs.
-- `/btw` now keeps disposable QuickAsk replies inline and upgrades the exact turn with Enter into a durable SideThread inside the app-viewport workspace.
-- `/pause` waits until every live agent loop parks before the next model call, then allows `q` to exit with a durable `agents_paused` marker (`session_exit.kind = "paused"`).
-- `/continue` restarts agents after `omp --resume`; dismissing the pause screen resumes same-process loops, and neither path injects user-visible text.
-- Added explicit assistant thinking renderer result arms for extensions: `{ type: "append", component: Component }` keeps the existing supplemental rendering behavior, while `{ type: "replace", component: Component }` suppresses the default thinking Markdown so extensions can render the block themselves. Bare `Component` returns remain the legacy append shorthand. Thinking render contexts now include parent assistant message metadata and provider thinking content metadata for async renderer state.
-
-- Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
-
-### Fixed
-
-- Fixed app-viewport preview binaries failing to build.
-- Session shutdown now shows closing progress before waiting for live commands or session cleanup, and stops progress updates when cleanup completes or fails.
-- Double-Escape rewind opens quickly in long sessions, loading earlier turns and alternate branches as you navigate without discarding history.
-- Long app-viewport sessions restore and resize with visible content first, refining offscreen row counts in the background without shifting the reading position or text selection.
-- Reduced unrelated pane redraws during BTW, agent-transcript, and tool-progress updates.
-- Local agent panes now display their own extension widgets and statuses, including live TPS widgets, with cleanup on close and restoration on reopen.
-- Agent transcripts now open as ordinary draggable, resizable workspace panes without an enclosing Agents pane or a two-pane limit; automatic placement follows available space and preserves manually arranged panes.
-- Agents can leave optional tool, prompt, and harness feedback through `xd://roast`, saved locally in `roast.db` without uploading.
-- Clipboard images and text stay in the focused split-pane composer, including BTW drafts and replies, instead of leaking into Main.
-- Pasting an image and immediately pressing Enter waits for the attachment before submitting.
-- Clipboard copy no longer blocks terminal rendering, and Windows/WSL paste avoids repeated clipboard probes and waits that outlive subprocess timeouts.
-- Large app-viewport sessions no longer stutter while pending tool activity animates or the transcript scrolls.
-- Large app-viewport sessions now open and resize faster by keeping offscreen height measurement layout-only.
-- Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
-- Double-Escape now opens a fullscreen transcript rewind selector that outlines the target item with a dotted border — ↑/↓ step through rendered items, ←/→ jump between user turns, Enter rewinds (branching on user prompts, in-place leaf moves elsewhere); it replaces both the previous user-message list and the tree route (`doubleEscapeAction` is now `rewind` or `none`)
-- The rewind selector shows alternate session-tree branches at a fork as side-by-side half-width transcript columns; ←/→ slide between them with an animated camera, a dot rail with edge ellipses tracks position when branches overflow the window, and Enter rewinds into the chosen branch
-- `/copy` now uses the same fullscreen transcript selector as esc-esc: step the dotted outline over rendered items and Enter copies the turn's text, or press → to descend into its inner blocks (fenced code, quotes, bash/eval commands, tool output) and copy one verbatim
-- Workspace panes now reorganize into a balanced grid when a new subagent pane cannot fit the current split tree.
-- Fixed an issue where custom model overrides were lost during configuration updates
-- Fixed "Please use nerdfont" notification incorrectly persisting after theme configuration
-- Fixed sampling parameter errors for newer Anthropic models (Opus 4.7+, Sonnet 5+)
-- Revived historical subagents now reopen their background transcript panes.
-- BTW workspace panes now preserve the current scrolled position when tool-using replies finish.
-- Large resumed sessions now compute transcript height once without repeatedly syntax-highlighting offscreen history, keeping scrollbar geometry stable and subsequent frames responsive.
-- Added automatic background panes for running subagents; completed panes petrify through a multi-tone gray gradient before closing unless the user interacts with them.
-- Added `/debug petrify` and a matching Debug Tools entry to preview subagent pane petrification without starting a model or subagent.
-- Fixed dark stripes appearing across styled pane rows during the subagent petrification animation.
-- Fixed app-viewport Main, BTW, and subagent panes preserving live-tail following across text selection and exposing a working return-to-bottom control.
-- Fixed app-viewport text selections moving away from the pointer when output refreshes during a held drag.
-- Fixed app-viewport scroll jumps after session restore and while reading a streaming BTW reply.
-- Fixed the working-status spinner and elapsed time freezing during model output.
-- Fixed app-viewport startup and typing stalls in large sessions.
-- Fixed large-session scrollbar jumps and Ctrl+O/rapid-scroll stalls, including cold code blocks first entering the viewport; kept text selections fixed while output streams and made `/tree` selections update before branch replay.
-- Fixed concurrent app-viewport repaints leaving submitted text visible or freezing BTW input until the terminal resized.
-- Fixed long-session scrollbars filling the Main pane and full-history rendering during page or drag navigation.
-- Fixed app-viewport frame time growing with transcript size whenever new messages or tool cards were appended to large sessions.
-- Fixed Main pane wheel scrolling stopping above Todo and BTW cards in split-pane workspaces.
-- Fixed subagent pane updates shifting or overwriting content in the Main workspace pane.
-- Fixed inline BTW shortcuts stealing composer input after the panel was dismissed or while attachments were pending, and prevented late BTW operations from mutating replaced sessions.
-- Fixed durable BTW tools that require approval hanging before the prompt opens because the side transcript was waiting on Main's unrelated tool-preview gate.
-- Fixed durable BTW panes diverging from Main's transcript rendering: live and completed side turns now use the same tool cards, runtime tool metadata, and streamed-argument decoding.
-- Fixed the durable BTW pane's `New BTW` action to render as a hoverable button, reuse the active blank thread, and delete untouched blank threads when the pane closes.
-- Fixed durable BTW capability gaps: bare `/btw` now opens an empty pane for direct thread creation, promoted QuickAsk conversations gain durable read-only and `steerMain` capabilities without rewriting their original no-tools prompt history, Main-bound messages use the session queue while Main is streaming, and inherited object keys cannot bypass the read-only tool whitelist.
-- Fixed durable BTW `steerMain` autonomy: the model may call it only for an explicit user request, and every proposed message now requires user approval before delivery to Main.
-- Fixed BTW promotion dropping unsubmitted drafts of sibling threads: `abandon()` after a session transition must not write into the new session, so every durable child's draft is persisted before the branch is attempted.
-- Fixed silent loss of pane input submitted while a durable BTW reply is streaming: the submit is now consumed at the editor layer (the editor clears itself unconditionally on submit), keeping the drafted question and reporting that the reply is still running.
-- Fixed durable BTW pane status lines to follow the selected side thread's model, context usage, usage totals, session identity, and streaming state instead of Main, including live updates when switching threads.
-- Fixed Codex web search falling through GPT-5.6 Responses-Lite models to GPT-5.5: Lite models now use the native `/alpha/search` transport, including configured Codex proxy endpoints, while non-Lite models retain hosted Responses search ([#7319](https://github.com/can1357/oh-my-pi/issues/7319)).
-- Fixed plan approval freezing the TUI for the whole approved-plan run: the `xd://propose` completion started `handlePlanApproval` inside the event controller's serialized dispatch chain, so the operator's review choice and the blocking synthetic execution turn parked every subsequent agent event (streamed deltas, tool cards) behind an in-chain `await` — the agent executed with zero live rendering and the transcript only materialized after the run settled. The approval flow now runs off-chain, so events render in real time while the review is open and while the plan executes.
-- Fixed app-viewport selection copies replacing transcript rows that scrolled beyond the pane with blank lines in Main, Agent, and BTW panes.
-- Fixed tabbed lines in multiline Eval display values expanding across app-viewport workspace geometry and erasing the divider between conversation panes.
-- Fixed collapsed BTW thread-rail previews shifting the transcript and pane chrome left by one column when the overlay boundary crossed a double-width CJK character.
-- Fixed BTW thread-selection clicks being ignored while the thread rail was expanding.
-- Fixed selecting a thread from a hover preview either pinning the rail open or collapsing it immediately; the rail now stays temporary until the pointer leaves, while fixed rails remain open.
-- Fixed durable BTW conversations ending with an empty reply when a model attempted a tool call; denied calls now return an error tool result to the isolated child loop so it can continue with plain text, and the rejection history survives session restore.
-- Fixed right-clicking selected prompt text recalled with Up pasting the clipboard instead of copying the selection.
-- `/context`, `/session info`, and other immediate slash-command output now appears in the app viewport as soon as the command completes instead of remaining hidden until another prompt triggers a render.
-- Fixed Ctrl+O appearing to freeze large Advisor transcripts by expanding one viewport-anchored synthetic session update at a time while preserving its full Markdown rendering, instead of synchronously laying out every historical replay dump.
-- Fixed app-viewport sash dragging re-rendering the full main-session history, and restored Agent Hub toggle shortcuts while an agent pane has keyboard focus.
-- Restored the Main pane's proportional virtual scrollbar after moving transcript scrolling into the app-viewport workspace component, reusing the global viewport's Braille thumb style, reserved content column, and drag behavior.
-- Fixed pane drag-and-drop previews alternating between terminal white and the covered content's foreground color instead of using the active accent color.
-- Fixed dragged transcript previews appearing one cell down and right from their framed destination.
-- Fixed clicks in the app-viewport Main pane moving keyboard focus from an active `ask` or hook dialog to the detached editor, which made dialog navigation keys appear unresponsive.
-- Fixed copied text from app-viewport Main and agent panes including visual wrap newlines, per-row gutters, and pane scrollbars instead of logical transcript text, while keeping column-zero tool block content selectable.
-- Fixed active selections in app-viewport Main and agent panes staying on stale screen rows, failing to follow a stationary pointer during wheel scrolling, changing copied content, being cleared when a drag anchor moved offscreen, or highlighting the fixed input outside the origin scroll region.
-- Fixed Agent Hub opening as a partial, two-cell-narrow transparent overlay over an app-viewport workspace instead of an opaque bordered surface covering the full terminal geometry.
-- Fixed terminal progress and run-state titles switching to idle when either side of a concurrent main-session continuation and `/btw` request completed before the other; activity is now aggregated by owner, and non-terminal `agent_end` scheduling boundaries retain main-session ownership.
-- Fixed QuickAsk and durable BTW replies inheriting IRC's 4 KiB flood limit, which truncated visible history and branch promotion while the model retained the full reply.
-- Fixed app-viewport pane focus chrome: all workspace headers now share `●`/`○` markers and focused/muted title colors, unfocused side-pane composers remain visible without showing hint text while focused, Agent/BTW composers use peer instances of Main's `StatusLineComponent` with the same live settings and exact segment/layout/background/cap/overflow rendering, and the BTW thread rail uses a centered divider chevron with a larger hover target; hovering the collapsed chevron peeks the rail without reflowing the transcript, spatial and brief leave tolerance prevent accidental closure, clicking a hovered thread pins it, and single-thread hover feedback remains active.
-- Fixed multi-turn BTW conversations cold-missing Kimi and Anthropic-compatible prompt caches by keeping the no-tools reminder in the frozen side-thread prefix instead of moving it after each completed turn; persisted pre-fix side threads are migrated on restore so the reminder remains present.
-- Fixed Agent workspace panes silently rendering Main's status line when their live `AgentSession` was unavailable; the pane now stays open, reports the missing session in its own status line, and switches in place to the target's `StatusLineComponent` when the session returns.
-- Fixed long-session UI lag during streaming and app-viewport scrolling: every compose re-rendered each settled `ToolExecutionComponent` (thousands of blocks re-walking their Box/renderer subtrees per frame, ~20µs × ~1.5k blocks ≈ 30ms per frame on a real 4k-message transcript). Settled tool blocks now memoize their rendered rows on (width, display key), cutting full frames from ~56ms to ~6ms; blocks with live inline images still re-render every frame to preserve image-budget side effects.
-- Fixed long app-viewport transcripts re-rendering every historical block for tail spinner and streaming updates by reusing unaffected transcript segments.
-- Fixed oversized Todo and BTW live panels hiding the editor in the app viewport; their rows now participate in viewport scrolling.
-- Fixed paused exits losing in-progress durable BTW requests; `/continue` now resumes them after session restore.
-- Fixed long durable BTW threads rebuilding their full transcript on every streaming update.
-
-- Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.
-- Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
-- Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
-- Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
-- Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
-
-### Changed
-
-- Reworked agent, planning, delegation, and recovery guidance around evidence-driven execution, scoped autonomy, explicit approval boundaries, and proportionate verification.
-- Inline `/btw` questions are now durable threads from creation; Enter opens the same thread without an upgrade or repeated request, and dismissing a panel keeps its history.
-- BTW threads can now use web and structural search, memory lookups, and read-only LSP/GitHub operations, including `xd://` devices, while mutation and execution tools remain blocked.
-- App-viewport subagents now share a stable auxiliary area with up to two visible transcripts and overflow tabs (Alt+Left/Right); completed panes still close automatically, while focused and manually opened panes stay available.
-- Very large sessions now resume faster, while large agent transcript panes load incrementally and reflow only visible rows during split-pane resizing.
-- Changed durable BTW knowledge sharing: `shareSummaryWithMain` now publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
-- Changed durable BTW panes to open with the thread rail collapsed by default, provide a `+ New BTW` action that immediately creates a blank thread, and let `/new` omit its first question.
-- BTW thread-rail hover previews and pinned expand/collapse actions now use a short interruptible slide animation.
-- Agent Hub now opens selected agents in persistent app-viewport workspace panes beside the sticky main-session editor, with pane-local transcript scrolling and the existing native-scrollback behavior preserved on other backends.
-- Agent transcript workspace panes now use the same reserved-column, draggable Braille scrollbar as the Main pane and global app viewport.
-- Pane drag-and-drop now previews the dragged transcript inside a themed destination frame without reflowing the live workspace.
-- Messageable Agent transcript panes now use the Main composer's full-width chrome, focus styling, labeled border, and empty-input placeholder.
-- Agent transcript workspace panes now use a responsive Main-style conversation shell with workspace-owned identity headers, rich composer metadata, compact low-height rendering, stable read-only Advisor geometry, and hover-aware interaction.
-- Resuming a session exited while paused no longer synthesizes an interrupted-turn abort; the transcript stays idle until `/continue`.
-- Updated the app-viewport preview workflow to build native addons through the Bazel pipeline after the legacy `build-native` action was removed.
-
-### Removed
-
-- Removed the durable BTW `/refresh` command and refresh journal event so a thread's frozen Main context and promotion anchor remain immutable for its lifetime.
-- Removed redundant hover/click guidance and the duplicate thread-count heading from the BTW thread rail.
 
 ## [18.2.6] - 2026-09-18
 
@@ -1772,6 +1758,7 @@
 - Fixed a native crash (and multi-gigabyte committed-memory growth held until exit) when git status ran over worktrees with tens of thousands of untracked files: whole-worktree porcelain status now runs through the git CLI with bounded output capture, falling back to the in-process gitoxide walk only when git is not installed, and any panic escaping a native VCS operation now surfaces as a structured `VcsError` instead of a process-level failure.
 
 Older entries are archived in [packages\coding-agent\CHANGELOG.md@07e9197a3012](https://github.com/can1357/oh-my-pi/blob/07e9197a3012f58c459f1faabeb324decc21f41d/packages\coding-agent\CHANGELOG.md).
+
 ## [18.1.0] - 2026-09-01
 
 ### Added
@@ -1922,6 +1909,7 @@ Older entries are archived in [packages\coding-agent\CHANGELOG.md@07e9197a3012](
 - Fixed `omp usage` to report Codex Chat and Spark capacity meters separately when they share a usage window.
 
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@9856625e0aa1](https://github.com/can1357/oh-my-pi/blob/9856625e0aa1bc24e718ec9adde3b52c8ae856fd/packages/coding-agent/CHANGELOG.md).
+
 ## [18.0.8] - 2026-08-27
 
 ### Added
@@ -1957,500 +1945,3 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@9856625e0aa1](
 - Added custom RPC launcher builders so embedded clients can transport omp RPC through SSH and remote process managers.
 
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@2d6380d359c0](https://github.com/can1357/oh-my-pi/blob/2d6380d359c09edcbbe46d56ddefe76692470659/packages/coding-agent/CHANGELOG.md).
-## [18.0.7] - 2026-08-26
-
-### Added
-
-- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
-- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
-- Include token usage statistics in inspect_image tool output
-- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
-- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
-- Added nonblocking shared model-catalog refresh with cached startup hydration and source freshness diagnostics, allowing newly published models for known providers to appear without a binary release.
-- Added `omp usage clients` to report per-client token usage recorded by the auth broker, including the machine and application responsible for usage by provider. Supports `--days` and `--json` output.
-
-### Changed
-
-- Enforce a 5-minute timeout and 8 MiB output limit for GitHub CLI operations
-- Apply a 30-minute timeout for marketplace plugin repository cloning
-- Improve large file handling with blob streaming and explicit truncation support
-
-### Fixed
-
-- Fixed the VCS status line counting every file inside an untracked directory instead of collapsing it to one entry like `git status`.
-- Fixed git TUI sidebar wheel scrolling snapping back to the selected row after staging or collapsing entries; the list now follows the selection only when it actually changes.
-- Fixed `inspect_image` selecting a text-only vision/default role when an image-capable model was available on the active provider.
-- Improved unexpected-stop recovery for reasoning-only stalls by requiring the next concrete tool action instead of repeated analysis.
-- The edit tool now repairs a stray closing marker typed in place of the divider in a selection (`old⟫new` inside one selection instead of `old│new`) and applies the intended replacement with a note, instead of failing with an unmatched-marker error.
-
-## [18.0.7] - 2026-08-26
-
-### Added
-
-- Added nonblocking shared model-catalog refresh with cached startup hydration and source freshness diagnostics, allowing newly published models for known providers to appear without a binary release.
-- Added `omp usage clients` to report per-client token usage recorded by the auth broker, including the machine and application responsible for usage by provider. Supports `--days` and `--json` output.
-
-### Changed
-
-- Improved `omp git` responsiveness by streaming file contents, rendering complete lines promptly, progressively applying syntax highlighting, and deferring large commit statistics until after the first interactive frame.
-- Expanded `omp git` navigation and editing shortcuts: refresh with `r`, stage or unstage files and directories with `s`, `u`, or `space`, navigate hunks and files with keyboard shortcuts, use Vim-style motions in both panes, select diff views with `1`–`4`, and open the commit form with `c`.
-- Standardized completed edit results across edit modes with hashline-style paths and numbered previews.
-- Documented browser relay behavior more clearly, including that `browser.relay` can enable relay access independently of `app.relay` and that a relayed session operates in the user's logged-in browser.
-- Clarified the computer tool documentation: `desktop.window()` must be awaited, and `win.ax()` returns a textual accessibility-tree snapshot rather than a structured node list.
-
-### Fixed
-
-- Fixed the VCS status line counting every file inside an untracked directory instead of collapsing it to one entry like `git status`.
-- Fixed git TUI sidebar wheel scrolling snapping back to the selected row after staging or collapsing entries; the list now follows the selection only when it actually changes.
-- Fixed `inspect_image` selecting a text-only vision/default role when an image-capable model was available on the active provider.
-- Improved unexpected-stop recovery for reasoning-only stalls by requiring the next concrete tool action instead of repeated analysis.
-- The edit tool now repairs a stray closing marker typed in place of the divider in a selection (`old⟫new` inside one selection instead of `old│new`) and applies the intended replacement with a note, instead of failing with an unmatched-marker error.
-- Fixed hub process waits being incorrectly prolonged or satisfied by a replacement process after an automatic restart.
-- Preserved an explicitly empty `tools: []` configuration for agent definitions instead of adding default work tools.
-- Corrected MCP per-tool approval configuration documentation and behavior to use registered tool names for deny policies.
-- Made `/branch` consistently open the branch-from-message selector regardless of the `doubleEscapeAction` setting.
-- Improved ACP behavior when prompting during an active turn by returning a typed `session_busy` JSON-RPC error instead of an opaque internal error.
-- Fixed `--model <id>:<effort>` losing its effort setting when cycling back to the `default` role; an explicit `--thinking` setting continues to take precedence.
-- Fixed extension-registered Codex models configured with `preferWebsockets: false` from attempting a WebSocket connection.
-- Fixed stale command-generated provider and model-override credentials after HTTP 401 responses by refreshing credentials before retrying.
-- Fixed extensions configured in `.omp/config.yml` not exposing their bundled skills, hooks, tools, commands, rules, prompts, and MCP configuration for discovery.
-- Fixed compiled extensions that could not import public coding-agent registry modules.
-- Fixed extension-provided environment variables being lost in user shell commands and prevented environment changes from one hook from affecting later commands.
-- Fixed imported and legacy sessions with missing usage metadata from dropping RPC lifecycle events.
-- Fixed GitHub and GitHub Enterprise issue, pull-request, and tool lookups to preserve and use the repository's actual host.
-- Fixed binary installation when GitHub returns minified release metadata.
-- Fixed `omp bench` and `omp if-bench` resolving credential-scoped dynamic models already listed by `omp models`.
-- Fixed checkpoint and rewind recovery in Codex Code Mode.
-- Fixed truncated `ask` questions being displayed incorrectly when expanded with Ctrl+O.
-- Fixed the welcome screen and transcript layout not adapting correctly after terminal resizes.
-- Made `omp if-bench` retry transient Anthropic cyber-safety refusals before treating them as run-ending failures.
-- Fixed streamed assistant responses when later provider updates revise earlier Markdown.
-- Fixed abandoned foreground tool cards and fast tool completions from blocking transcript scrolling or later output.
-- Improved transcript replay and shutdown behavior so terminal resizes and exits do not duplicate, lose, or unnecessarily re-render committed output.
-- Fixed cache-miss status messages from disrupting completed streamed assistant responses.
-- Fixed YAML rewrites for settings, migrated configuration, and keybindings from adding trailing spaces to nested mapping headers.
-- Fixed `/model` role-cycle icons overlapping their ordinal on terminals with full-width icon rendering.
-- Improved `/collab` QR-code fallbacks so the browser join URL remains visible when the code is clipped or cannot fit.
-- Fixed hub and child peer listings from exposing parked agents as active model context, while restoring accurate running, idle, parked, shown, and truncated counts.
-- Fixed browser relay clients hanging when enabling the Runtime domain on a tab shared with another client.
-- Fixed browser relay sessions leaving Chrome's debugging infobar attached after the last client releases a tab.
-- Fixed interactive TTSR interruptions being displayed as errors when the rule injection succeeded.
-- Fixed cold interactive launches duplicating the welcome header in Windows console scrollback.
-- Fixed Git TUI hunk navigation and sidebar selection after staging or unstaging files, including correct handling of CRLF files on Windows.
-- Fixed long sessions becoming unrecoverable when a provider rejects histories that exceed its message-count limit.
-- Improved `/dump` output with readable titles for system notices and fenced XML payloads.
-- Fixed kernel session recovery when a dead kernel reports cancellation.
-- Applied advisor tool-call loop limits to advisor runs as well as regular model runs.
-- Fixed `lsp rename_file` error handling for unreadable source paths and destination checks.
-- Fixed LSP clients with different process arguments, initialization options, or settings from incorrectly sharing one process; `lsp reload *` now replaces superseded clients.
-- Fixed auto-retry countdowns appearing frozen during long provider-specified waits.
-- Fixed the Todo HUD after viewing a subagent and returning to the main session.
-- Fixed child task results from linking unreadable artifacts and from replaying result bodies that had already been delivered.
-- Fixed `omp update` showing a Unix reinstall command on Windows after a package-rename migration verification failure.
-- Preserved `thinking.requiresEffort: false` in custom model configuration so supported local models can explicitly disable thinking.
-- Prevented incompatible non-object values in shared project settings from silently replacing an entire settings group; such values are dropped with a warning.
-- Jina Reader now uses configured credentials for authenticated rate limits while remaining available anonymously.
-- Improved advisor session recovery and listing performance for large advisor transcripts.
-- Fixed failed `browser.open` calls from leaving OMP-spawned application processes running when no tab could be acquired.
-- Browser handles now fail fast with a specific per-operation timeout error instead of hanging an entire browser cell.
-- Fixed autonomous runs becoming idle when a thinking-only length stop overlaps speculative handoff and compaction recovery.
-- Kept completed assistant replies visible when viewport pressure prevents older active content from being retired.
-- Accelerated SHA-2 and SHA-3 checksum builtins on supported ARM64 hardware.
-- Fixed joined collaboration guests becoming inconsistent with the host after host-side compaction.
-- Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
-
-## [18.0.6] - 2026-08-26
-
-### Added
-
-- Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
-- The git TUI sidebar now supports collapsing and expanding the Unstaged and Staged sections, with keyboard shortcuts to stage or unstage an entire section.
-- Long streaming thinking and reasoning output now continues into terminal scrollback during a turn instead of remaining clipped to the viewport.
-
-### Changed
-
-- `omp commit --legacy` now uses the same conventional commit message generation as the git TUI.
-- The git TUI sidebar now groups new files separately from tracked changes in the Unstaged section, while Staged and commit file lists use a unified status-based view.
-- Improved resilience when streaming output changes during rendering, preventing incomplete blocks from causing further display updates to fail.
-
-### Fixed
-
-- Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
-- Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
-- Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
-
-## [18.0.5] - 2026-08-25
-
-### Added
-
-- Added append-only transcript declarations and stable-row APIs for components with immutable history prefixes.
-- Added the `:img` read selector to rasterize local SVG and SVGZ files for vision input.
-- Added side-by-side image and SVG previews to `omp git`, including Git LFS object resolution and clear placeholders for unavailable or unsupported binary content.
-- Added the `omp if-bench` command for zero-tool instruction-following and working-memory benchmarking across models, with live progress and ranked results.
-- Added `q` to quit the git TUI.
-- Added advanced whitespace filtering to the git TUI, including formatting-only changes and import-only changes in TypeScript, JavaScript, Rust, and Go.
-- Improved the git TUI sidebar by compressing single-child directory chains and separating new or untracked files from tracked changes.
-- Added Yolo-Auto to `/login` and documented the `YOLO_AUTO_API_KEY` environment variable.
-- Updated the OpenRouter `/login` flow to support browser-based sign-in and automatic API-key provisioning, while retaining support for pasted `sk-or-…` keys.
-- Added DeepInfra support for the `image_gen` and `tts` tools, including provider selection and MP3 or WAV output for text-to-speech.
-
-### Changed
-
-- Standardized completed edit results with hashline-style paths and numbered previews across edit modes.
-- Improved `omp git` responsiveness with immediate file rendering, progressive syntax highlighting, and deferred large-commit statistics.
-- Documented that `retry.maxDelayMs: 0` permits provider-requested quota waits to continue until automatic retry, rather than enforcing a wait ceiling.
-- Expanded git TUI navigation and file-management shortcuts, including refresh, stage/unstage, directory operations, hunk and file navigation, pane movement, diff-view selection, commit-form access, and paging.
-
-### Fixed
-
-- Fixed race condition where tunnel startup was incorrectly reported as failure on quick process exit
-- Fixed Obsidian theme task instructions and usage-limit text becoming unreadable against dark backgrounds.
-- Fixed marketplace-installed plugins failing to discover their `rules/` directories.
-- Fixed advisor notes in `/tree` displaying internal XML wrappers instead of readable text.
-- Fixed successful agent and subagent results being discarded when cleanup exceeded its deadline.
-- Fixed exiting plan mode mid-turn so the active turn now stops immediately.
-- Fixed Windows workstation context reporting a virtual display adapter instead of the physical GPU.
-- Fixed numbered selector menus such as `/review` ignoring digit-key selection.
-- Fixed the welcome screen failing to reflow after terminal resizing.
-- Fixed transcript layout issues that could clip assistant text, leave stale tool cards, disrupt scrolling, or make large-session rendering and shutdown unreliable.
-- Fixed streamed assistant responses failing when later provider updates revised earlier Markdown.
-- Fixed cache-miss status placement after streamed assistant output.
-- Fixed `/model` role-cycle icons overlapping their ordinal on full-width terminals.
-- Fixed constrained `/collab` QR codes rendering as empty rows; the browser URL hint is now shown instead.
-- Fixed `hub list` and child peer rosters incorrectly including parked agents in model context and restored accurate status counts.
-- Fixed browser relay clients hanging when enabling the Runtime domain on a shared tab.
-- Fixed interactive TTSR interruptions being displayed as errors after successful rule injection.
-- Fixed fast tool completions leaving a persistent running summary that obstructed later output.
-- Fixed the Windows console welcome header being duplicated after cold launch.
-- Fixed git TUI hunk navigation feedback when the sidebar has focus and preserved file selection after staging or unstaging.
-- Fixed long sessions becoming unrecoverable when providers reject histories exceeding message-count limits.
-- Improved `/dump` output with readable system-notice titles and XML-fenced raw payloads.
-- Fixed kernel sessions failing to recover when cancellation was reported by a dead kernel.
-- Applied advisor tool-call loop limits to prevent repeated failing calls from continuing without bound.
-- Fixed `lsp rename_file` incorrectly reporting inaccessible paths as nonexistent and mishandling uncertain destination checks.
-- Fixed LSP clients with different launch or initialization configurations incorrectly sharing one process; reloading now replaces superseded clients.
-- Fixed the browser relay leaving Chrome's debugging infobar attached after the last client released a tab.
-- Fixed auto-retry countdowns appearing frozen during long provider-requested waits.
-- Fixed the Todo HUD becoming stale after viewing a subagent and returning to the main session.
-- Fixed child-task artifact links and duplicate `hub jobs` result bodies.
-- Fixed `omp update` showing a POSIX reinstall command on Windows after a package-rename migration failure.
-- Preserved `thinking.requiresEffort: false` in custom model configuration so supported local Qwen templates can disable thinking explicitly.
-- Fixed project settings from shared capability files being able to replace an entire settings group when a conflicting non-object value is present; the conflicting value is now ignored with a warning.
-- Jina Reader requests now use configured credentials for higher authenticated rate limits while remaining available anonymously.
-- Fixed advisor session persistence and loading performance for repeated retries and unusually large advisor transcripts.
-- Fixed failed `browser.open` calls leaving OMP-spawned application processes running when no tab could be acquired.
-- Improved browser-handle failures with prompt, operation-specific timeout errors instead of waiting for the entire browser cell.
-- Fixed autonomous runs becoming idle after thinking-only length stops during speculative handoff.
-- Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
-- Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
-- Fixed large MCP tool payloads being stored redundantly on disk.
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@dfbf3cc34eeb](https://github.com/can1357/oh-my-pi/blob/dfbf3cc34eeb5653580f51bfbcae558a9840f697/packages/coding-agent/CHANGELOG.md).
-## [18.0.4] - 2026-08-24
-
-### Added
-
-- Added the `omp git` command (and `/git` slash command): an interactive, fullscreen repository TUI featuring a split/inline/hunk diff viewer with minimap scrollbar, syntax highlighting, a staging sidebar with line-level staging, commit composer with amend support, and author avatars. Supports keyboard navigation, full mouse interaction, and pinning views to specific commits via `omp git <revision>`.
-- Overhauled the `/extensions` Extension Control Center into a fullscreen alternate-screen dashboard with mouse support, tab navigation, unified inspector views across extension types, live MCP connection management, and expandable details (`Ctrl+O`).
-- Added support for live syntax highlighting in streaming markdown code blocks.
-- Added an immediately editable startup composer for interactive launches, preserving drafts typed while session initialization is in progress.
-
-### Changed
-
-- Improved streaming markdown and thinking block rendering performance on long sessions by batching token updates and eliminating redundant re-processing.
-- Optimized streaming edit verification and session restoration for large files and history-heavy sessions.
-
-### Fixed
-
-- Fixed invalid streamed edit patches occasionally reaching the edit tool instead of being stopped early.
-- Fixed `!` shell commands on zsh/fish by running them inside a real PTY, resolving terminal option errors and preserving ANSI color formatting.
-- Fixed transcript layout corruption and viewport compression caused by interrupted streams, empty blocks, or collapsed wrapped diff lines.
-- Fixed transcript scrollback loss where output below sticky cards (such as hub-wait or todo) failed to commit to terminal history.
-- Improved HTTP 413 error handling: accurately distinguish between true token-context overflows and provider byte/media budget limits, persist terminal errors across sessions, and enable proper fallback-chain model switching.
-- Fixed discovery-backed session models failing to restore when resuming sessions with `omp --resume` or `--continue`.
-- Fixed browser tool initial launch timeouts on slow or cold host environments.
-- Fixed eval runtime probes hanging on Windows due to inherited stdin handles.
-- Fixed Claude models replaying partial thinking blocks as conversation text when interrupted mid-turn.
-- Fixed image request failures with Kimi Code and Moonshot models by ensuring inline base64 image delivery.
-- Fixed SQLite WAL-mode databases without sidecars failing to open in the Read tool.
-- Fixed pasted image thumbnail rendering in the composer attachment preview.
-- Fixed Linux startup event loop delays caused by legacy extension cache fsync churn.
-- Fixed subagent advisors abandoning reviews on the final yield turn during session teardown.
-- Fixed `/todo` expand/collapse commands and corrected `/shake thinking` reporting.
-
-## [18.0.3] - 2026-08-23
-
-### Added
-
-- Added opt-in edit auto-repair (`edit.autoRepair.enabled`): when an edit breaks a file's AST parse, the smol model repairs the broken region in place — validated by re-parse, revert-rejected, and surfaced as a diff in the tool result — instead of only warning.
-
-### Fixed
-
-- Resolved cursor drift and text duplication caused by overlapping or out-of-bounds spelling ranges
-- Squeezed transcript tool rows no longer render as a bare unstyled `╭─ Hub` frame: a squeezed block keeps its real render whenever it fits the allocated rows, and blocks that genuinely overflow fold to a themed frame that names the tool's activity (e.g. `Hub · send → Main`).
-- Python/Ruby/Julia eval cells that hit their wall-clock timeout during a `parallel()`/`agent()`/`tool.*` fan-out no longer get their kernel force-killed (losing all session state): the timeout now aborts in-flight bridge calls so the runner unwinds as a clean KeyboardInterrupt and the kernel survives.
-- Multi-select ask options whose labels end in `(Recommended)` now show their checked state and avoid duplicate recommendation suffixes ([#9452](https://github.com/can1357/oh-my-pi/issues/9452)).
-
-## [18.0.2] - 2026-08-23
-
-### Added
-
-- Added update channels: `omp update --canary` installs canary prereleases from the npm `canary` dist-tag and `omp update --stable` switches back; the chosen channel persists and drives the startup update check.
-
-### Changed
-
-- Unexpected Stops now offers None, Mechanical (default), and Smart modes; Smart adds small-model classification to recover text-only stops.
-
-### Fixed
-
-- Fixed crash during update output when theme configuration is missing
-- Fixed flickering typo undercurls while typing by projecting state during revalidation
-- Fixed self-update on Windows leaving the `omp` command missing or stuck on the previous version when package-manager reinstalls fail on running files
-- Ctrl+T now toggles every thinking block in the transcript, including blocks already retired to terminal history ([#9440](https://github.com/can1357/oh-my-pi/issues/9440)).
-- Copilot Grok 4.6 Responses streams that repeatedly close after thinking now stop after one same-model retry instead of consuming the full retry budget ([#9427](https://github.com/can1357/oh-my-pi/issues/9427)).
-- `/mcp test` now reports cancellation immediately when Esc is pressed during a slow config lookup, instead of staying suspended until the read settles ([#9419](https://github.com/can1357/oh-my-pi/issues/9419)).
-- Fixed remote browser relay endpoints advertising a client-local CDP WebSocket URL: `/json/version` now reflects a valid request `Host` and falls back to the relay's loopback address when it is absent or unusable.
-- Restored red/green and syntax highlighting in edit-tool result bodies ([#9439](https://github.com/can1357/oh-my-pi/issues/9439)).
-- Fixed goal mode failing to start (`No such tool: xd://goal`) when `goal.enabled` was turned on after the session had already started; the `goal` tool is now registered lazily on goal-mode entry ([#9444](https://github.com/can1357/oh-my-pi/issues/9444)).
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@d95ba9ea5e83](https://github.com/can1357/oh-my-pi/blob/d95ba9ea5e8370e1cc0e7fc83cef7c7db862b543/packages/coding-agent/CHANGELOG.md).
-## [18.0.1] - 2026-08-23
-
-### Added
-
-- Plan review can save a plan to a chosen path and start a new session.
-- Edit results now warn when an edit leaves a previously parsing file unparseable, independent of the `edit.blackbox.enabled` recorder.
-- Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
-- Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
-- Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
-
-### Changed
-
-- Bash commands now automatically transition to the background by default when exceeding the threshold
-- Transcript blocks now retire to terminal history as explicit ordered batches, active tools collapse to compact indicators under viewport pressure, and the `tui.scrollbackRebuild` and `tui.resizeScrollback` settings were removed.
-- Transcript retirement is now capacity-driven: finalized blocks (and the welcome header) stay live in the viewport — reflowing to the current width on resize and visible the instant a message is submitted — and only commit to immutable terminal history when the screen runs out of room.
-- Resizing no longer duplicates the editor and status rows: the settled repaint recovers its anchor from the terminal's own cursor-position report after reflow.
-- The Advisor agent's guidance now prioritizes concrete technical risks and transcript-evident execution failures, while strictly prohibiting meta-advice on user intent, ceremony, or workflow narration.
-- Edit-tool inline selections whose text contains the divider character itself (box-drawing code) are now resolved instead of failing the batch: a trailing divider reads as a deletion, an odd count splits at the middle divider, an even count reads as a deletion of the selected text, each with an advisory note.
-- The welcome screen's recent-sessions list no longer content-scans every session file in the project directory: session titles are indexed in history.db as they are created/renamed, and startup resolves the newest files by mtime with a per-file scan fallback that backfills the index (cuts the pre-input startup transition by ~250ms per 10k sessions).
-- Interactive startup no longer re-runs slash-command discovery: the composer's autocomplete reuses the discovery pass that session construction already performed.
-- Interactive startup now reuses the prepaint composer's in-flight recent-session load, starts custom-command discovery with the other independent filesystem scans, and overlaps auth-cache/config reads with settings initialization instead of repeating or serializing them.
-- Interactive startup now commits the complete composer frame synchronously before `session_start` hooks, lazily materializes only cached model providers needed by the configured default role, and starts cache-aware online runtime-provider discovery after the first UI paint.
-- Advisor criteria for `concern` and `blocker` levels are expanded to better identify serializing independent tasks, bypassing specialized tools, ignoring verified sources, and premature yielding before convergence.
-- The Advisor is now explicitly instructed to promote clean code cutovers (deleting obsolete paths and tests) unless backwards compatibility is required by the user or project rules.
-- The advisor now flags transcript-evident execution failures—missed parallelism, overplanning, ungrounded assumptions, unnecessary abstraction, incomplete scope, stubs, and thin verification—before they force user steering.
-- Slash-command autocomplete now collapses skills into a single `/skill:` row; the individual skills list once the prefix reaches `/skill:` (accepting the row with Tab/Enter expands it in place).
-- `omp cleanse` and `/cleanse` now dispatch repair subagents while checkers are still running: diagnostics stream in (parsed from partial checker output every 5s), new files spawn workers up to the agent cap with least-loaded batching, and late diagnostics for a file being repaired are steered into the owning worker's chat instead of waiting for the full diagnostic pass.
-- Suggested plan save filenames now come from a dedicated 1-3 word topic prompt instead of the sentence-length session title (e.g. `PYO3_METHODS_PLAN.md` instead of `SPLIT_PYENVIRONMENTBACKEND_REQUEST_INTO_PYO3_METHODS_PLAN.md`), with verbose fallbacks trimmed at a word boundary.
-- Subagents in a shared working tree no longer run formatters, linters, or project-wide builds/test suites unless their assignment asks for it; validation runs once by the main agent.
-- Context file deduplication now checks paragraph containment instead of byte-exact matching: a less-authoritative file whose normalized paragraphs appear contiguously within a more authoritative file is omitted, reducing redundant prompt context.
-- Context file containment dedup now sorts by depth descending internally, treating files without a depth as least authoritative, so concatenated multi-root or user-level context cannot drop a closer-to-cwd file.
-- Paragraph splitting for containment comparison is now fenced-code-block-aware: text inside a fenced example in a more authoritative file no longer counts as a contained instruction, preventing active context rules from being discarded.
-
-### Fixed
-
-- Fixed UI jitter in the edit tool gutter by reserving space for line counts
-- Edit-tool add lines written directly above a `` gap now insert under their anchor line instead of splicing at the post-gap anchor, often mid-line without a newline.
-- Edit-tool add lines may contain literal selection-marker glyphs; such payloads previously failed with an unusable corrected payload.
-- A bare edit selection whose REWRITE restates the whole line now replaces the full line instead of duplicating the line's prefix and suffix around the span.
-- A mid-line `…` in an edit REWRITE no longer re-emits a multi-line capture, so literal ellipses inside strings survive.
-- Fixed double-Esc (session tree / branch selector) appearing dead on long sessions: opening it no longer replays the entire transcript through the terminal (which blocked for tens of seconds on PTY backpressure and cleared native scrollback), only the viewport repaints.
-- Fixed prompt history whitespace duplicates: prompts are normalized on save (CRLF folded, per-line trailing padding stripped) so terminal-copy resubmissions upsert instead of adding a near-identical row, and a one-time pass collapses existing padded duplicates keeping the latest submission's metadata.
-- Fixed prompt history duplicates: each prompt is now stored once with its latest project path, session ID, and submission time, and session resume or transcript rebuilds no longer repopulate persistent history.
-- `/models` no longer shows dead sidebar tabs for unconfigured Ollama, llama.cpp, and LM Studio endpoints; explicitly configured endpoints remain visible for diagnosis ([#2761](https://github.com/can1357/oh-my-pi/issues/2761)).
-- Fixed prompt input lag under CPU load while file and macOS spelling completions are active.
-- Fixed blank `mnemopi.dbPath` settings silently creating volatile memory banks instead of using persistent agent storage ([#9360](https://github.com/can1357/oh-my-pi/issues/9360)).
-- Fixed legacy Pi extensions being reparsed on every startup because their persistent parse cache could not be created ([#9339](https://github.com/can1357/oh-my-pi/pull/9339) by [@walodayeet](https://github.com/walodayeet)).
-- Fixed Kitty text-sized Markdown headings activating before `tui.textSizing` is enabled.
-- Fixed terminal-title updates racing the TUI's off-thread output pump, which could tear an escape sequence mid-frame and print the title (e.g. `0;π ∴ <session title>`) into the editor line as if typed.
-- Fixed the edit tool corrupting files on unified-diff-shaped payloads: missing-separator recovery no longer hijacks `-`/`+` bodies (which deleted matched anchors and duplicated the surrounding block); they now flow to the unified-diff reinterpretation.
-- Fixed the edit tool writing literal `…` lines: a whole-line rewrite gap with no captured MATCH gap now fails closed with guidance instead of splicing an ellipsis into the file.
-- Fixed status text retaining hidden DCS, PM, and APC payloads after escape-sequence sanitization.
-- Fixed extension load errors truncating explicitly excluded package import specifiers.
-- Fixed subagents crashing before their first turn when an extension contributed a tool or skill without a `description`; the context-breakdown token estimate now coalesces missing descriptions and system-prompt sections instead of passing `undefined` to the tokenizer ([#9331](https://github.com/can1357/oh-my-pi/issues/9331)).
-- Clarified that Mnemopi `/memory enqueue` only promotes working memories older than the configured consolidation gate (12 hours by default) and that normal shutdown does not run bank sleep ([#9356](https://github.com/can1357/oh-my-pi/issues/9356)).
-- Fixed asynchronous V2 remote compaction dropping user and tool messages added after its speculative snapshot ([#9351](https://github.com/can1357/oh-my-pi/issues/9351)).
-- Fixed startup crashes when temporary Git worktrees point to repository metadata that the current user cannot access.
-- Hidden custom tools (`hidden: true`) stay out of the parent session's active set and `/tools` unless `--tools` or an agent `tools:` list names them. They used to be always-included.
-- Hidden custom tools (`hidden: true`) stay out of the parent session's active set and the TUI's `/tools` list unless `--tools` or an agent `tools:` list names them. They used to be always-included.
-- Fixed edit retries suggesting the same invalid payload and permission prompts showing unknown paths for sloppy edits ([#9350](https://github.com/can1357/oh-my-pi/issues/9350)).
-- Fixed Agent Hub aborted rows failing to open their read-only transcript when selected with Enter.
-- Fixed `/mcp test` leaving a stale "(esc to cancel)" hint after the test finished and swallowing Esc presses during the grace window; the hint now stops advertising Esc once the test settles, a late Esc shows an "already finished" status instead of silently doing nothing, and one Esc press consumes the cancellation ownership so the next Esc reaches the running turn ([#9173](https://github.com/can1357/oh-my-pi/issues/9173)).
-- Fixed MCP request timeouts surfacing as `Unexpected end of JSON input` instead of `Request timeout after Nms` when the abort lands mid-JSON-body read, including when the caller's signal aborts after the timer fires ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
-- Fixed streamed `xd://` device writes (including MCP tools) looking like a hung in-flight call while the model is still thinking; they now show as queued until the tool actually starts.
-- Fixed `/clear` and `/new` keeping a stale `AGENTS.md` (and other context files) in the system prompt; a new session now re-reads them from disk ([#9273](https://github.com/can1357/oh-my-pi/issues/9273)).
-- Auto-continue turns that die mid-tool-call with `OpenAI completions stream closed before a finish_reason was received` (and the Responses/Azure "closed before a terminal response event" variants): premature gateway stream closes now classify like idle stalls and HTTP/2 resets, so a resolved tool turn is continued after its preserved partial output instead of surfacing the error.
-- Todo tool schemas now identify `items` as valid for single-phase `init` and `append`.
-- Fixed Todo tool guidance to clarify that blocked tasks never auto-promote after state-changing operations (#8121).
-- Fixed timed-out or interrupted glob searches keeping native filesystem workers alive and blocking subsequent agent turns.
-- Fixed legacy Pi extensions being re-parsed on every launch instead of using the persistent cache ([#9170](https://github.com/can1357/oh-my-pi/pull/9170) by [@fmguerreiro](https://github.com/fmguerreiro)).
-- `/mcp reload` now picks up external edits to `mcp.json`.
-- Fixed `lsp reload` clearing active language-server settings instead of reapplying them.
-- Fixed workspace diagnostics skipping lower-priority languages in polyglot project roots ([#8385](https://github.com/can1357/oh-my-pi/issues/8385)).
-- Fixed isolated task cleanup deleting the only branch that retained an agent's commits after apply-back failed ([#9216](https://github.com/can1357/oh-my-pi/pull/9216), thanks [@Mustaqeem66](https://github.com/Mustaqeem66)).
-- Fixed bare `hub wait` calls reporting nothing to wait for while an already-queued bus message remained unread.
-- Fixed Code Mode activating for sessions whose caller never enabled `eval`, which handed restricted subagents an unrestricted JS runtime; the eval transport must now be part of the caller's own tool set.
-- Fixed Code Mode dropping `write` from the direct surface when plan mode starts, and dropping `task` delegation guidance from the plan prompt once `task` is reachable only through the eval bridge.
-- Fixed the eval tool advertising bridged declarations for tools the model can still call directly, such as a plan-mode transport `write`, by reading the partition the session actually applied.
-- Fixed Code Mode turn metadata resolving a wire-name collision by tool registry order, and mishandling tools named after `Object.prototype` members or after the eval bridge's own internal operations (`__agent__`, `__budget__`, `__completion__`, `__concurrency__`).
-- Fixed generated Code Mode declarations rendering an array of a union as `"a" | "b"[]`, which models read as a scalar-or-array type and submitted invalid arguments against.
-- Fixed SDK sessions with a custom agent directory inheriting process-global model overrides instead of loading that directory's own `models.yml`.
-- Fixed Eval guidance that implied `agent()` children share parent kernel state and advertised them when spawning was disabled.
-- Fixed Bash guidance that implied raising `timeout` extends foreground execution beyond the auto-background threshold.
-- Fixed Bash and Eval guidance that implied raising `timeout` extends foreground execution beyond the auto-background threshold ([#9155](https://github.com/can1357/oh-my-pi/pull/9155) by [@MikeeI](https://github.com/MikeeI)).
-- Status-line usage no longer combines quota windows scoped to different models or tiers ([#9138](https://github.com/can1357/oh-my-pi/issues/9138)).
-- Fixed `PI_PROXY` being ignored outside provider streams: the CLI now installs it on the process-wide `fetch` at startup, so OAuth token refresh/login, usage probes, and model discovery are proxied too. Combined with the Anthropic transport fix in `pi-ai`, a region-blocked machine reaching Anthropic through a proxy no longer fails with `403 Request not allowed`.
-- Subagent failures now name the resolved provider and model that produced the error ([#9137](https://github.com/can1357/oh-my-pi/pull/9137) by [@Mustaqeem66](https://github.com/Mustaqeem66))
-- Fixed read-only subagents (`scout`, restricted-tool custom agents) crashing before their first prompt when extensions register callable tool schemas.
-- Fixed smart paste dropping text from X11 clipboard owners whose image read fails instead of reporting no image.
-- Fixed `formatContent` silently swallowing formatter errors: the empty `catch {}` was replaced with per-server error tracking, and failed formatter requests now surface as `FileFormatResult.FAILED` instead of being misclassified as unchanged ([#8388](https://github.com/can1357/oh-my-pi/issues/8388)).
-- Fixed `formatContent` reporting no-formatter as unchanged: when no configured server supports formatting, the result is now correctly classified as `FileFormatResult.UNSUPPORTED` ([#8388](https://github.com/can1357/oh-my-pi/issues/8388)).
-- Fixed MCP request timeouts surfacing as `Unexpected end of JSON input` instead of `Request timeout after Nms` when the abort lands mid-JSON-body read.
-- Fixed CJS modules being misclassified as ESM when imported from an ESM parent module. The extension loader now identifies unshadowed CommonJS syntax from Babel's parsed AST before deferring to the importer's module kind. This resolves `SyntaxError: Missing 'default' export` for packages with conditional exports (e.g. playwright-core) where an ESM wrapper re-exports from a CJS entry, while ambiguous files continue to inherit their importer's classification.
-
-## [18.0.0] - 2026-08-22
-
-### Added
-
-- Added the `omp render` command to replay session threads and benchmark transcript pipeline performance.
-- Added configurable typo detection (`Ctrl+.` suggestions), Tab word completion, and opt-in autocorrect to the macOS prompt editor.
-- Added a live benchmark dashboard to `omp bench` with real-time performance estimates, p50/p95 statistics, distinct input/output throughput metrics, cost tracking, mixed challenge suites by default, and a `--prefill-bytes` option for synthetic prefill benchmarks.
-- Added the `/shake thinking` command to strip model reasoning blocks from session history.
-- Added icon support and usage-frequency ranking to slash-command autocomplete suggestions.
-- Enhanced the edit tool to support `＋`-prefixed line insertions, unified diff formats, bare selection replacements, and robust recovery for common syntax variations and ambiguous match spans.
-- Startup composer now renders immediately using cached session and theme data, allowing typing before session initialization finishes without dropping keystrokes.
-
-### Changed
-
-- Session history rewinds (via `Esc-Esc` or `/tree`) now truncate transcript tails in place instead of clearing and replaying the entire terminal scrollback.
-- Switched the fallback edit mode to `sloppy` for models lacking hashline support.
-- macOS spelling checks now run in the background to avoid blocking editor rendering and keystroke responsiveness.
-- Word completions accepted via Tab now insert a trailing space when not immediately followed by whitespace or punctuation.
-- Increased default visible autocomplete dropdown rows to 10 and added the `autocompleteMaxVisible` configuration setting.
-- Slash-command descriptions in the autocomplete popup now truncate to two lines instead of wrapping indefinitely.
-
-### Fixed
-
-- Fixed streaming code blocks not rendering syntax highlighting live until completion.
-- Fixed an issue where interrupting Claude during reasoning would replay partial thinking blocks on subsequent turns and cause API rejection errors.
-- Fixed session resume performance by avoiding redundant edit-matching execution across historical transcripts.
-- Fixed image requests to Kimi Code / Moonshot failing with 400 errors by sending inline base64 images directly.
-- Fixed reading WAL-mode SQLite databases that do not have active `-wal` or `-shm` files.
-- Fixed terminal transcript layout corruption on Windows caused by collapsed edit results with long wrapped diff lines ([#9302](https://github.com/can1357/oh-my-pi/issues/9302)).
-- Fixed disappearing terminal scrollback history below updating cards such as background jobs or hub status cards.
-- Fixed pasted image attachment thumbnails rendering as blank boxes in Kitty terminal graphics mode.
-- Fixed context gauge display issues in the status line for unnamed sessions.
-- Fixed accurate benchmark input token counts on providers with automatic prompt caching.
-- Fixed C# files incorrectly displaying D3.js icons in edit results ([#9323](https://github.com/can1357/oh-my-pi/issues/9323)).
-- Fixed incorrect token delta reporting in expanded context compaction summaries when pre-compaction usage was omitted by the provider ([#9293](https://github.com/can1357/oh-my-pi/issues/9293)).
-
-## [17.4.4] - 2026-08-22
-
-### Added
-
-- Added the `tui.resizeScrollback` setting (default `append`) controlling how a settled width resize refreshes pane scrollback when the terminal repaints in place (tmux/screen/Zellij panes, in-place direct terminals). Multiplexers rewrap old output naively on width changes, leaving history hard-broken at the old width; `append` re-emits the transcript at the new width below it (one fresh copy per settled resize), `rebuild` clears pane history first so it holds exactly one current-width copy (needs a host that honors ED3, like tmux; erases pre-session scrollback), and `preserve` keeps the old-width history untouched with zero growth ([#8193](https://github.com/can1357/oh-my-pi/issues/8193)).
-
-### Fixed
-
-- Fixed the composer image chip painting its right border inside the card and mangling the thumbnail's first row: the Kitty placement prefix was counted as visible width, breaking the thumbnail centering.
-- Fixed edit-tool whole-line inserts (an insert selection alone on its own line) splicing into the anchor line instead of landing on a new line when the anchor was the last matched line, preceded a blank line, or sat at EOF.
-- Edit tool prompt now documents whole-line insert selections and that a REWRITE `…` with no captured MATCH gap is written to the file literally.
-- Fixed multiplexer width resizes (tmux/screen/Zellij/cmux/Herdr panes) replaying the entire transcript into pane history — one duplicated transcript copy and seconds of visible scrolling per width change. The width-epoch boundary now resolves for real transcripts: finalized blocks without `getTranscriptBlockVersion` are treated as immutable per the documented contract, Container-derived blocks without a nested epoch source fall back to whole-segment stability instead of failing, and bash/eval/tool/read-group blocks report a block version for their genuine post-finalize mutations. The interactive resize listener no longer marks every SIGWINCH as "render pending", which forced the conservative replay-from-row-zero fallback on every settled resize ([#8193](https://github.com/can1357/oh-my-pi/issues/8193), [#7026](https://github.com/can1357/oh-my-pi/issues/7026)).
-
-## [17.4.3] - 2026-08-21
-
-### Fixed
-
-- Fixed the edit tool rejecting payloads containing a glued `«»` line: after MATCH it now reads as the mistyped `»` separator, elsewhere as a stray terminator to drop.
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@da359efe2858](https://github.com/can1357/oh-my-pi/blob/da359efe2858f68baa4ae290574c7c4c9c8da3c3/packages/coding-agent/CHANGELOG.md).
-## [17.4.2] - 2026-08-21
-
-### Added
-
-- Added an opt-in image URL broker (`images.urls.enabled`) that publishes outgoing images through an ordered chain of backends instead of sending inline base64 to URL-fetching providers
-- Composer attachment chips (ported from omp2): pasted images and large text pastes stage as rounded preview cards above the prompt — image cards show a live thumbnail (Kitty Unicode placeholders) with pixel dimensions, text cards a snippet with `+N lines`/`N chars` — while the editor buffer holds a compact `<icon> #N` token in the card's identity color.
-
-### Changed
-
-- Pasted images now insert only the `[Image #N, WxH]` marker; the redundant trailing `attachment://N` URI is no longer added to the composer.
-- Added a consolidated CLI reference (`docs/cli-reference.md`) documenting every top-level subcommand and launch flag, including headless print mode (`--print`/`-p`, `--print-thoughts`) ([#9252](https://github.com/can1357/oh-my-pi/issues/9252))
-
-### Fixed
-
-- Fixed unreadable colors in macOS Terminal.app by using its supported 256-color mode ([#9162](https://github.com/can1357/oh-my-pi/issues/9162)).
-- Fixed Esc after a fast `/mcp test` result aborting the active agent turn instead of consuming the advertised cancellation input ([#9173](https://github.com/can1357/oh-my-pi/issues/9173)).
-- Fixed task spawns crashing when legacy boolean per-agent prewalk or advisor overrides are present in `config.yml`.
-- Fixed ACP `session/prompt` requests hanging forever when a builtin slash command's residual prompt (e.g. `/force:<tool> /some-command`) resolved locally, which also wedged all subsequent prompts on the session ([#9206](https://github.com/can1357/oh-my-pi/issues/9206)).
-- Fixed eval-spawned subagent output being omitted from per-turn output-token budgets, including failed and isolated runs ([#9187](https://github.com/can1357/oh-my-pi/issues/9187)).
-- Fixed `/compact` over RPC blocking the serialized command queue for the full summarization round-trip, so a follow-up `abort` could not interrupt it ([#9200](https://github.com/can1357/oh-my-pi/issues/9200)).
-- Fixed RPC UI select requests dropping option descriptions, allowing hosts to render described choices ([#9175](https://github.com/can1357/oh-my-pi/issues/9175)).
-- Fixed `/todo edit` failing with "Could not parse Markdown" when checklist items had backslash-escaped brackets (`- \[x\]`), which editors and markdown renderers commonly emit ([#9188](https://github.com/can1357/oh-my-pi/issues/9188)).
-- Fixed `omp setup --check`/`--json` with no component printing usage text to stdout and exiting 0; it now errors on stderr and exits non-zero so scripted JSON health checks fail loudly ([#9221](https://github.com/can1357/oh-my-pi/issues/9221)).
-- Fixed an aggressive `task.maxRuntimeMs` mislabeling committed subagent outcomes: a budget-killed run is no longer reported as a runtime-limit timeout, and a subagent that yielded a complete result before the deadline is no longer reported as aborted when teardown crosses the deadline ([#9191](https://github.com/can1357/oh-my-pi/issues/9191)).
-- Fixed startup fallback-chain warnings for discovered OpenCode Zen, OpenCode Go, and GitHub Copilot models cached under credential-scoped IDs ([#9205](https://github.com/can1357/oh-my-pi/issues/9205)).
-- Fixed interactive `/models` and Ctrl+P cycling omitting an `enabledModels`/`--models` model discovered by a background provider refresh (e.g. `opencode-go/ox-alpha-free`) after startup, by rebuilding the scoped list once discovery completes ([#9220](https://github.com/can1357/oh-my-pi/issues/9220)).
-- Documented how to enable, trigger, target, and manually re-arm prewalk ([#9179](https://github.com/can1357/oh-my-pi/issues/9179)).
-- Pasted images and large text pastes appear in the composer as compact icon tokens instead of bracketed markers; the bracketed form remains the outgoing/stored format, and the transcript renders it back as the compact chip.
-- Deleting an attachment's inline token now removes the attachment from the submission (surviving image markers are renumbered).
-- Restored prompts (esc-esc, `/tree`, branch, queued-message dequeue, failed-submit recovery) collapse image markers back into clickable atomic chip tokens and re-materialize their file links instead of degrading to dead text.
-
-## [17.4.1] - 2026-08-21
-
-### Added
-
-- Added `PERSONALITY.md` support: `~/.omp/agent/PERSONALITY.md` (profile/XDG-aware agent dir) replaces the system prompt's personality block text; `personality: none` still omits the block ([#8528](https://github.com/can1357/oh-my-pi/issues/8528))
-- Sloppy edits now support inline replacements with `⟪old│new⟫` syntax (`⟪old│⟫` for deletions and `⟪│new⟫` for insertions), alongside automatic recovery for common formatting mistakes without needing a retry.
-- Sloppy edits now recover operations that mix `⟪old│new⟫` inline replacements with a `»` REWRITE instead of failing the payload: a redundant REWRITE is dropped, a diverging one is applied as the final text, and a note explains the interpretation.
-- Expanded archive support in `read` and `write` tools: `read` can now inspect and extract members from `.rar`, `.7z`, `.iso`, `.cab`, `.deb`, `.rpm`, `.cpio`, `.ar`/`.a`, `.lzh`, `.arj`, compressed tar files (`.tar.bz2`, `.tar.xz`, `.tar.zst`), package formats (`.whl`, `.ipa`, `.xpi`, `.vsix`, `.nupkg`, `.cbz`, `.cbr`), `.asar` archives, and single-file compressed streams; `write` can create `.tar.zst` and update `.asar` archives.
-- Added Code Mode for Codex `code_mode_only` models via `providers.openai-codex.codeMode` (`off`/`on`/`auto`), demoting non-essential tools into an eval bridge with generated TypeScript definitions.
-- MCP tool names longer than 64 characters are now automatically truncated with a deterministic hash suffix to comply with strict provider validators.
-- Marketplace-installed plugins with manifest settings can now be configured through `omp plugin config` and Settings → Plugins.
-- Configured discovery providers with `authHeader` now preserve cached models across application restarts.
-- Added repeat read warning hints when identical file content is read multiple times.
-- Explicit DAP adapters can now attach without a PID or port when `attachDefaults` provide the target arguments.
-- Added `isProjectTrusted()` compatibility shim to `ExtensionContext` for extensions targeting upstream per-directory trust gates.
-
-### Changed
-
-- Added `compaction.asyncEnabled` (default: on) to speculatively summarize context in the background before hitting threshold limits, avoiding blocking summarization pauses.
-- Replaced `compaction.strategy` and `compaction.remoteEnabled` with an ordered `compaction.methodOrder` preference list.
-- Handoff maintenance (`/handoff` and automatic handoff compaction) now commits generated summaries directly to the active session instead of starting a new session.
-- Added `extendedContext` setting (`/settings` → Context → General, default: on) to optionally clamp models with premium long-context pricing tiers (such as OpenAI GPT-5.6 Sol/Terra/Luna) to standard-pricing token limits before compaction triggers.
-- Token counting and token estimations are now dynamically scoped to each specific model tokenizer rather than using a single process-global tokenizer.
-- `omp cleanse` and `/cleanse` now feature a live interactive status board displaying active checkers, repair subagents, tool metrics, and token/cost totals in real time.
-- Eval-bridge nested `tool.<name>()` calls now enforce ACP permission gates and tool allowlists identically to direct tool calls.
-- Added `tokenizer` option to custom models and `modelOverrides` to allow overriding the local tokenizer family for proxied model endpoints.
-- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema to configure or disable reasoning effort flags for strict local inference servers.
-- Settings menus now support click-to-toggle and drag-to-reorder for list items, as well as warning indicators and risk notes on sensitive options such as External Thinking.
-- Supervised process completion notices now render as compact single-line entries.
-- The todo HUD header now displays a consolidated progress bar showing task completion across all stages.
-- `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
-
-### Fixed
-
-- Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
-- Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.
-- Fixed an issue where Nix-packaged builds failed to load on-demand native addons (`onnxruntime-node`/`sherpa-onnx`) due to missing shared C++ runtime library paths.
-- Fixed external editor spawning (Ctrl+G, plan review, `/todo edit`) failing to attach to visible terminals for editors like `emacsclient`.
-- Fixed `omp --resume` spinning at 100% CPU when new session entries arrived during initial transcript rendering.
-- Fixed session resume hints and fatal exit messages omitting the active `--profile` argument.
-- Fixed MCP OAuth authorization requests failing on pre-registered clients with restricted scopes by using RFC 9728 `scopes_supported`.
-- Fixed isolated task subagents causing out-of-memory crashes on repositories with large uncommitted binary files by pre-sizing diffs and enforcing snapshot limits.
-- Fixed LM Studio and lazy-loaded local models retaining uninitialized context lengths by re-probing loaded context lengths after initial inference.
-- Fixed project-scoped Claude Code marketplace plugins incorrectly loading into sessions in other projects.
-- Fixed configured advisors backed by discoverable providers remaining inactive on initial session startup until manually toggled.
-- Fixed resolving `--model @<role>` failing for roles backed by discovery providers like oMLX, Ollama, and llama-swap.
-- Fixed retry fallback chains stopping prematurely when encountering nested fallback configurations, and fixed session role priority during fallback chain selection.
-- Fixed cancelled prompts disappearing upon abort during turn setup, properly restoring user text and attachments to the input editor.
-- Fixed built-in shell utilities (`grep`, `rg`, `diff`, `find`, `timeout`, `top`, `date`, `head`, `tail`, `stat`, `truncate`, `kill`) across numerous POSIX/GNU/BSD compatibility edge cases and early-pipeline SIGPIPE handling.
-- Fixed Cursor sessions missing standard string-replacement edit tooling after server tool injection.
-- Fixed `hub wait` duplicating frozen rows into native scrollback during viewport overflow.
-- Fixed dark-theme contrast issues on markdown code-fence headers.
-- Fixed prompt guidance and descriptions for Task tools and SSH usage.
-- ACP editor clients that support elicitation forms (Zed) can now use `ask`, so the agent can pose single-choice, multi-select, and free-text questions inline instead of guessing.
-- `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
-- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
-- Extensions can provide a normalized `usage` provider through `pi.registerProvider()`. Its reports now flow through AuthStorage caching, history, and usage displays, and the override is removed when the extension provider is unregistered.
-
-Older entries are archived in [packages/coding-agent/CHANGELOG.md@4c6407864c6e](https://github.com/can1357/oh-my-pi/blob/4c6407864c6e2b66d3d1e7852beab736058abb0f/packages/coding-agent/CHANGELOG.md).

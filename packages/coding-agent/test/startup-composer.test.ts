@@ -21,6 +21,7 @@ import {
 	takeStartupComposerLease,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { createStartupStatusLine } from "@oh-my-pi/pi-tui/status-line/startup";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -644,7 +645,16 @@ describe("Composer prepaint", () => {
 		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
 		const terminal = new CountingTerminal(80, 10);
 		const composer = new Composer({ preferences: config, terminal });
-		const rootStatus = new MutableRows([]);
+		const rootStatus = createStartupStatusLine({
+			settings: {},
+			gitEnabled: false,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+		const rootStatusRender = vi.spyOn(rootStatus, "render").mockReturnValue([]);
 		const main = new MutableRows(["MAIN-CONTENT"]);
 		const agent = new MutableRows(["AGENT-CONTENT"]);
 		const model = WorkspaceModel.single("main");
@@ -674,7 +684,7 @@ describe("Composer prepaint", () => {
 			const before = readMain();
 			expect(Bun.stripANSI(terminal.getViewport()[0] ?? "").trimEnd()).toStartWith(">Main");
 
-			rootStatus.setRows(["LATE-ROOT-STATUS"]);
+			rootStatusRender.mockReturnValue(["LATE-ROOT-STATUS"]);
 			agent.setRows([
 				`Validation failed for tool "hub": ${"received arguments ".repeat(20)}`,
 				...Array.from({ length: 20 }, (_value, index) => `agent-error-${index}`),
@@ -686,6 +696,8 @@ describe("Composer prepaint", () => {
 			expect(Bun.stripANSI(terminal.getViewport()[0] ?? "").trimEnd()).toStartWith(">Main");
 		} finally {
 			composer.stop();
+			rootStatus.dispose();
+			rootStatusRender.mockRestore();
 			if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
 			else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
 		}

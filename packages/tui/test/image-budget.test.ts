@@ -1786,7 +1786,7 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
-	it("retransmits current images after a destructive redraw", async () => {
+	it.each(["native", "app-viewport"])("retransmits current images after a destructive redraw (%s)", async backend => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
@@ -1795,6 +1795,8 @@ describe("TUI inline-image budget", () => {
 			realWrite(data);
 		});
 
+		const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+		Bun.env.PI_TUI_RENDER_BACKEND = backend;
 		const tui = new TUI(term);
 		tui.setMaxInlineImages(3); // high cap: no demotion in this test
 		tui.addChild(makeImage(tui.imageBudget, "only"));
@@ -1818,46 +1820,55 @@ describe("TUI inline-image budget", () => {
 			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
+			if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+			else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
 		}
 	});
-	it("deletes every kitty image on a destructive display reset", async () => {
-		const originalGraphics = { ...getKittyGraphics() };
-		const term = new VirtualTerminal(40, 12);
-		const writes: string[] = [];
-		const realWrite = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation((data: string) => {
-			writes.push(data);
-			realWrite(data);
-		});
+	it.each(["native", "app-viewport"])(
+		"deletes every kitty image on a destructive display reset (%s)",
+		async backend => {
+			const originalGraphics = { ...getKittyGraphics() };
+			const term = new VirtualTerminal(40, 12);
+			const writes: string[] = [];
+			const realWrite = term.write.bind(term);
+			vi.spyOn(term, "write").mockImplementation((data: string) => {
+				writes.push(data);
+				realWrite(data);
+			});
 
-		setKittyGraphics({ unicodePlaceholders: false });
-		const tui = new TUI(term);
-		tui.setMaxInlineImages(3);
-		tui.addChild(makeImage(tui.imageBudget, "only"));
+			setKittyGraphics({ unicodePlaceholders: false });
+			const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+			Bun.env.PI_TUI_RENDER_BACKEND = backend;
+			const tui = new TUI(term);
+			tui.setMaxInlineImages(3);
+			tui.addChild(makeImage(tui.imageBudget, "only"));
 
-		try {
-			tui.start();
-			await settle(term);
-			writes.length = 0;
+			try {
+				tui.start();
+				await settle(term);
+				writes.length = 0;
 
-			tui.resetDisplay();
-			await settle(term);
+				tui.resetDisplay();
+				await settle(term);
 
-			// ED2/ED3 erase text but leave graphics untouched. d=A also removes
-			// untracked placements; current images must be re-sent and re-placed.
-			const repaint = writes.join("");
-			const deleteIndex = repaint.indexOf("\x1b_Ga=d,d=A,q=2\x1b\\");
-			expect(deleteIndex).toBeGreaterThanOrEqual(0);
-			const transmitIndex = repaint.indexOf("\x1b_Ga=t", deleteIndex);
-			const placeIndex = repaint.indexOf("\x1b_Ga=p", transmitIndex);
-			expect(transmitIndex).toBeGreaterThan(deleteIndex);
-			expect(placeIndex).toBeGreaterThan(transmitIndex);
-			expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
-		} finally {
-			tui.stop();
-			setKittyGraphics(originalGraphics);
-		}
-	});
+				// ED2/ED3 erase text but leave graphics untouched. d=A also removes
+				// untracked placements; current images must be re-sent and re-placed.
+				const repaint = writes.join("");
+				const deleteIndex = repaint.indexOf("\x1b_Ga=d,d=A,q=2\x1b\\");
+				expect(deleteIndex).toBeGreaterThanOrEqual(0);
+				const transmitIndex = repaint.indexOf("\x1b_Ga=t", deleteIndex);
+				const placeIndex = repaint.indexOf("\x1b_Ga=p", transmitIndex);
+				expect(transmitIndex).toBeGreaterThan(deleteIndex);
+				expect(placeIndex).toBeGreaterThan(transmitIndex);
+				expect(repaint).toContain(BASE64_ONE_PIXEL_PNG);
+			} finally {
+				tui.stop();
+				setKittyGraphics(originalGraphics);
+				if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+				else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
+			}
+		},
+	);
 
 	it("holds the first Ghostty image paint until the startup settle window passes", () => {
 		const originalId = terminal.id;

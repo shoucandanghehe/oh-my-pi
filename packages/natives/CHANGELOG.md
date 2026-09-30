@@ -7,6 +7,17 @@
 - Fixed `computer.windows()` on macOS marking every window of the frontmost app as focused. One window is marked now: the app's accessibility focused window, or its frontmost window when Accessibility permission is not granted. With the permission, `computer.focusedWindow()` no longer returns a floating panel such as TextEdit's Fonts panel in front of the document ([#13673](https://github.com/can1357/oh-my-pi/pull/13673) by [@will-bogusz](https://github.com/will-bogusz)).
 - Fixed non-Latin prompts that quote code in backticks or fences losing most of their prose score, which made the typing predictor's vocabulary refuse to learn them ([#13758](https://github.com/can1357/oh-my-pi/pull/13758) by [@jchanghong023](https://github.com/jchanghong023)).
 - Fixed `computer.window(...).ax()` leaving out everything inside an unnamed container. On macOS, Reminders, Contacts, Notes and Font Book windows showed only their toolbar and window buttons, and Calendar lost its month grid; Windows and Linux trees now also keep content under unnamed containers such as custom panes, lists and fillers ([#13822](https://github.com/can1357/oh-my-pi/pull/13822) by [@will-bogusz](https://github.com/will-bogusz)).
+### Breaking Changes
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Fixed
+
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.4.4] - 2026-09-29
 
@@ -141,17 +152,6 @@
 
 - Fixed Mermaid rendering issues involving arrowhead alignment and duplicate edge junctions around mixed-width node shapes.
 - Fixed sloppy edit grammar compatibility with Codex constrained decoding.
-### Added
-
-- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
-
-### Breaking Changes
-
-- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
-
-### Fixed
-
-- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.2.1] - 2026-09-15
 

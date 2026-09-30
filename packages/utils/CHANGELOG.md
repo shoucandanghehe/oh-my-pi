@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
+
 ## [18.4.4] - 2026-09-29
 
 ### Added
@@ -51,9 +55,6 @@
 ### Fixed
 
 - Fixed a startup crash when PI_TIMING profiled modules loaded via require() or TypeScript declaration assets.
-### Fixed
-
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.2.5] - 2026-09-17
 

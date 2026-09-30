@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { TspKind, TspPickerProps, TspProps } from "@oh-my-pi/pi-wire";
 import type { SessionMessageEntryLike } from "../src/chat/transcript-entry";
@@ -81,6 +81,15 @@ const typeText = (component: { handleInput(data: string): void }, text: string) 
 };
 
 describe("rewind picker", () => {
+	beforeEach(() => setNativeRendering(true));
+	afterEach(() => setNativeRendering(false));
+
+	function previewText(child: NativeChild): string {
+		const described = "k" in child ? child : child.describe?.(pickerCx);
+		if (!described) return "";
+		return [JSON.stringify(described.p), ...(described.c ?? []).map(previewText)].join("\n");
+	}
+
 	function rewind(selected: string[] = [], cancelled: { count: number } = { count: 0 }) {
 		return new RewindSelectorComponent(transcript(), {
 			ui,
@@ -142,22 +151,256 @@ describe("rewind picker", () => {
 
 		selector.handleInput("f");
 		// Under TSP the filter matches turn text, not rendered rows.
-		setNativeRendering(true);
-		try {
-			typeText(selector, "ack");
-			const filtered = props(selector.describe(pickerCx));
-			expect(filtered.query).toBe("ack");
-			expect(filtered.items).toBe(items);
-			expect(filtered.order).toEqual(["u1", "a1", "a2"]);
-		} finally {
-			setNativeRendering(false);
-		}
+		typeText(selector, "ack");
+		const filtered = props(selector.describe(pickerCx));
+		expect(filtered.query).toBe("ack");
+		expect(filtered.items).toBe(items);
+		expect(filtered.order).toEqual(["u1", "a1", "a2"]);
 
 		selector.handleNativeEvent({ type: "action", key: "", act: "close", mods: [] });
 		expect(props(selector.describe(pickerCx)).query).toBeNull();
 		expect(cancelled.count).toBe(0);
 		selector.handleNativeEvent({ type: "action", key: "", act: "close", mods: [] });
 		expect(cancelled.count).toBe(1);
+	});
+
+	test("editing inside the query keeps the Input caret and rewinds only to the matching turn", () => {
+		const selected: string[] = [];
+		const selector = rewind(selected);
+		try {
+			selector.handleInput("f");
+			typeText(selector, "ack");
+			selector.handleInput("\x01"); // Ctrl+A: start of the query
+			typeText(selector, "find ");
+			let p = props(selector.describe(pickerCx));
+			expect([p.query, p.cursor, p.order, p.selected]).toEqual(["find ack", 5, ["u1"], "u1"]);
+			selector.handleInput("\x02"); // Ctrl+B: move left without stepping the history
+			p = props(selector.describe(pickerCx));
+			expect(p.cursor).toBe(4);
+			selector.handleInput("\x7f");
+			p = props(selector.describe(pickerCx));
+			expect([p.query, p.cursor, p.order, p.selected]).toEqual(["fin ack", 3, [], null]);
+			selector.handleInput("\r");
+			selector.handleNativeEvent({ type: "activate", key: "", item: "u1" });
+			expect(selected).toEqual([]);
+			selector.handleInput("d");
+			selector.handleInput("\r");
+			expect(selected).toEqual(["u1"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("branch tabs, pointer selection and keyboard navigation share the branch's rewind point", () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(transcript(), {
+			ui,
+			cwd: "/tmp",
+			requestRender() {},
+			onSelect: id => selected.push(id),
+			onCancel() {},
+			siblingPaths: id =>
+				id === "u2"
+					? [
+							{
+								rootId: "b1",
+								entries: [
+									entry("b1", "a2", user("alternate request")),
+									entry(
+										"ba",
+										"b1",
+										assistant([
+											{ type: "toolCall", id: "bc", name: "grep", arguments: { pattern: "branch" } },
+										]),
+									),
+									entry("bt", "ba", toolResult("bc", "branch output")),
+									entry("b2", "bt", user("branch continuation")),
+								],
+							},
+						]
+					: [],
+		});
+		try {
+			selector.handleNativeEvent({ type: "action", key: "", act: "tab", value: "1", mods: [] });
+			let p = props(selector.describe(pickerCx));
+			expect(p.order).toEqual(["u1", "a1", "a2", "b1", "ba", "b2"]);
+			expect(p.selected).toBe("b1");
+			selector.handleNativeEvent({ type: "select", key: "", item: "ba" });
+			expect(selected).toEqual([]);
+			expect(props(selector.describe(pickerCx)).selected).toBe("ba");
+			selector.handleInput("\r");
+			selector.handleInput("\x1b[B");
+			const root = selector.describe(pickerCx);
+			expect(props(root).selected).toBe("b2");
+			expect((root.c ?? []).map(previewText).join("\n")).toContain("branch continuation");
+			selector.handleNativeEvent({ type: "action", key: "", act: "rewind", mods: [] });
+			selector.handleNativeEvent({ type: "action", key: "", act: "tab", value: "0", mods: [] });
+			p = props(selector.describe(pickerCx));
+			expect(p.selected).toBe("u2");
+			selector.handleInput("\r");
+			expect(selected).toEqual(["bt", "b2", "u2"]);
+			// A shared-prefix row leaves the branch, preserving the main history point.
+			selector.handleNativeEvent({ type: "action", key: "", act: "tab", value: "1", mods: [] });
+			selector.handleNativeEvent({ type: "select", key: "", item: "a1" });
+			selector.handleInput("\r");
+			expect(selected.at(-1)).toBe("t1");
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("generic card clicks use branch and main turn IDs but rewind to folded result entries", () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(transcript(), {
+			ui,
+			cwd: "/tmp",
+			requestRender() {},
+			onSelect: id => selected.push(id),
+			onCancel() {},
+			siblingPaths: id =>
+				id === "u2"
+					? [
+							{
+								rootId: "b",
+								entries: [
+									entry("b", "a2", user("alternate")),
+									entry("ba", "b", assistant([{ type: "toolCall", id: "bc", name: "grep", arguments: {} }])),
+									entry("bt", "ba", toolResult("bc", "alternate output")),
+								],
+							},
+						]
+					: [],
+		});
+		try {
+			selector.describe(genericCx);
+			selector.handleNativeEvent({ type: "select", key: "branches", item: "1" });
+			selector.describe(genericCx);
+			selector.handleNativeEvent({ type: "select", key: "branch", item: "ba" });
+			selector.handleInput("\r");
+			selector.handleNativeEvent({ type: "select", key: "list", item: "a1" });
+			selector.handleInput("\r");
+			expect(selected).toEqual(["bt", "bt", "t1", "t1"]);
+			selector.handleInput("f");
+			typeText(selector, "missing");
+			selector.handleNativeEvent({ type: "select", key: "list", item: "u1" });
+			expect(selected).toEqual(["bt", "bt", "t1", "t1"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("stepping above the native tail expands the catalogue and keeps the same history point for Enter", () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(
+			Array.from({ length: 640 }, (_, index) =>
+				entry(`u${index}`, index ? `u${index - 1}` : null, user(`prompt ${index}`)),
+			),
+			{ ui, cwd: "/tmp", requestRender() {}, onSelect: id => selected.push(id), onCancel() {} },
+		);
+		try {
+			expect(props(selector.describe(pickerCx)).items?.[0]?.id).toBe("u40");
+			selector.handleNativeEvent({ type: "select", key: "", item: "u40" });
+			selector.handleInput("\x1b[A");
+			const p = props(selector.describe(pickerCx));
+			expect(p.items?.[0]?.id).toBe("u0");
+			expect(p.selected).toBe("u39");
+			selector.handleInput("\r");
+			expect(selected).toEqual(["u39"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("the filtered User turns action skips nonmatching prompts just like Left", () => {
+		const selected: string[] = [];
+		const selector = new RewindSelectorComponent(
+			[entry("u1", null, user("apple")), entry("u2", "u1", user("pear")), entry("u3", "u2", user("apple"))],
+			{ ui, cwd: "/tmp", requestRender() {}, onSelect: id => selected.push(id), onCancel() {} },
+		);
+		try {
+			selector.handleInput("f");
+			typeText(selector, "apple");
+			selector.handleNativeEvent({ type: "action", key: "", act: "lateral", mods: [] });
+			expect(props(selector.describe(pickerCx)).selected).toBe("u1");
+			selector.handleNativeEvent({ type: "action", key: "", act: "rewind", mods: [] });
+			expect(selected).toEqual(["u1"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	test("native startup replays only the recent catalogue; earlier and raw-text search reach old chunks without ANSI", () => {
+		let constructed = 0;
+		let rendered = 0;
+		let measured = 0;
+		const entries = Array.from({ length: 800 }, (_, index) => [
+			entry(`u${index}`, index ? `c${index - 1}` : null, user(`prompt ${index}`)),
+			entry(`c${index}`, `u${index}`, {
+				role: "custom",
+				customType: "native-history",
+				content: index === 0 ? "ancient needle" : `answer ${index}`,
+				display: true,
+				timestamp: index,
+			} as AgentMessage),
+		]).flat();
+		const selected: string[] = [];
+		const create = () =>
+			new RewindSelectorComponent(entries, {
+				ui,
+				cwd: "/tmp",
+				requestRender() {},
+				getMessageRenderer: () => () => {
+					constructed++;
+					return {
+						render: () => {
+							rendered++;
+							return ["not the raw text"];
+						},
+						measureRows: () => {
+							measured++;
+							return 1;
+						},
+					};
+				},
+				onSelect: id => selected.push(id),
+				onCancel() {},
+			});
+		const selector = create();
+		try {
+			let p = props(selector.describe(pickerCx));
+			expect(p.items?.[0]?.id).toBe("u500");
+			expect(p.items?.at(-1)?.id).toBe("c799");
+			expect(constructed).toBeLessThan(400);
+			expect(constructed).toBeGreaterThan(0);
+			selector.handleInput("\x1b[A");
+			selector.handleInput("\r");
+			selector.handleNativeEvent({ type: "action", key: "", act: "earlier", mods: [] });
+			p = props(selector.describe(pickerCx));
+			expect(p.items?.[0]?.id).toBe("u0");
+			expect(p.selected).toBe("u799");
+			selector.handleNativeEvent({ type: "activate", key: "", item: "c0" });
+			expect(selected).toEqual(["u799", "c0"]);
+		} finally {
+			selector.dispose();
+		}
+		// Opening search itself must broaden the bounded catalogue.
+		const searched = create();
+		try {
+			searched.describe(pickerCx);
+			searched.handleInput("f");
+			typeText(searched, "needle");
+			const p = props(searched.describe(pickerCx));
+			expect(p.order).toEqual(["c0"]);
+			expect(p.selected).toBe("c0");
+			searched.handleInput("\r");
+			searched.handleInput("\x1b");
+			searched.handleInput("\x1b[B");
+			searched.handleInput("\r");
+			expect(selected).toEqual(["u799", "c0", "c0", "u1"]);
+			expect([rendered, measured]).toEqual([0, 0]);
+		} finally {
+			searched.dispose();
+		}
 	});
 });
 

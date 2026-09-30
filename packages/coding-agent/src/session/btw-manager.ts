@@ -418,6 +418,7 @@ export class BtwManager {
 	}
 
 	flushEvents(): Promise<void> {
+		for (const thread of this.#threads.values()) this.persistDraft(thread.key);
 		return this.#flushEvents?.() ?? Promise.resolve();
 	}
 

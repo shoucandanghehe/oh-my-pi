@@ -55,7 +55,6 @@ import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspTreeNode } from "
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
-	APP_NAME,
 	adjustHsv,
 	formatDuration,
 	formatNumber,
@@ -70,6 +69,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { restartArgv } from "../cli/flag-tables";
+import { resumeCommand } from "../utils/resume-command";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
@@ -198,7 +198,6 @@ import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { openPath } from "../utils/open";
-import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -1616,8 +1615,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController.invalidatePendingFocus();
 	}
 
-	resolveViewportClickCandidates(index: number): string[] {
-		return this.composer.viewportClickCandidates(index);
+	resolveViewportClickCandidates(index: number, col?: number): string[] {
+		return this.composer.viewportClickCandidates(index, col);
 	}
 
 	/** Flip the pinned jump list between its collapsed few and the full list, overriding the setting. */
@@ -1638,8 +1637,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	setClickHoverId(id: string | undefined): void {
-		this.composer.setHoveredClickId(id);
+	setClickHoverId(id: string | undefined, col?: number): void {
+		this.composer.setHoveredClickId(id, col);
 	}
 
 	clearTransientSessionUi(): void {
@@ -2360,54 +2359,55 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#workspaceWelcome = undefined;
 			this.composer.setHeaderExtras(headerBefore, headerAfter);
 			this.composer.setStatusComponent(this.statusLine);
-			this.composer.setRuntimeChildren([
-				this.chatContainer,
-				this.pendingMessagesContainer,
-				this.todoContainer,
-				this.subagentContainer,
-				this.btwContainer,
-				this.omfgContainer,
-				this.cleanseContainer,
-				this.errorBannerContainer,
-				this.modelCycleContainer,
-				this.deferredCommandContainer,
-				// Judge batches and automatic downloads stay editor-anchored and update
-				// independently of transcript output, directly above the working/throughput/title row.
-				this.progressHudContainer,
-				// Working loader / transient status sits below the sticky todo + subagent
-				// HUDs, just above the editor's hook-widget top margin — so it reads next to
-				// the prompt while keeping the one-line gap above the editor (the band
-				// composer collapses that gap so its status band sits flush).
-				this.statusContainer,
-				this.attachmentChipsContainer,
-				this.hookWidgetContainerAbove,
-				this.editorContainer,
-				this.hookWidgetContainerBelow,
-			],
-			{
-				// Inline dialogs and a tall multi-line draft swap into the editor
-				// container and collapse again; everything else is turn-scoped.
-				transient: [this.editorContainer],
-				// Natively the HUD pills lead the dock, queued messages sit between
-				// the working row and the composer, and the attachment chips live
-				// inside the composer.
-				nativeDock: [
-					new HudPillsRow(this),
+			this.composer.setRuntimeChildren(
+				[
+					this.chatContainer,
+					this.pendingMessagesContainer,
+					this.todoContainer,
+					this.subagentContainer,
 					this.btwContainer,
 					this.omfgContainer,
 					this.cleanseContainer,
 					this.errorBannerContainer,
 					this.modelCycleContainer,
 					this.deferredCommandContainer,
+					// Judge batches and automatic downloads stay editor-anchored and update
+					// independently of transcript output, directly above the working/throughput/title row.
 					this.progressHudContainer,
+					// Working loader / transient status sits below the sticky todo + subagent
+					// HUDs, just above the editor's hook-widget top margin — so it reads next to
+					// the prompt while keeping the one-line gap above the editor (the band
+					// composer collapses that gap so its status band sits flush).
 					this.statusContainer,
-					this.pendingMessagesContainer,
+					this.attachmentChipsContainer,
 					this.hookWidgetContainerAbove,
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
 				],
-			},
-		);
+				{
+					// Inline dialogs and a tall multi-line draft swap into the editor
+					// container and collapse again; everything else is turn-scoped.
+					transient: [this.editorContainer],
+					// Natively the HUD pills lead the dock, queued messages sit between
+					// the working row and the composer, and the attachment chips live
+					// inside the composer.
+					nativeDock: [
+						new HudPillsRow(this),
+						this.btwContainer,
+						this.omfgContainer,
+						this.cleanseContainer,
+						this.errorBannerContainer,
+						this.modelCycleContainer,
+						this.deferredCommandContainer,
+						this.progressHudContainer,
+						this.statusContainer,
+						this.pendingMessagesContainer,
+						this.hookWidgetContainerAbove,
+						this.editorContainer,
+						this.hookWidgetContainerBelow,
+					],
+				},
+			);
 		}
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
@@ -7486,7 +7486,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#updateWelcomeLspServers(): void {
 		const lspServers = this.#getWelcomeLspServers();
 		this.composer.updateWelcome({ lspServers });
-		this.#workspaceWelcome?.setLspServers(lspServers);
+		if (this.#workspaceWelcome) {
+			this.#workspaceWelcome.setLspServers(lspServers);
+			this.ui.requestRender();
+		}
 	}
 
 	#clearWorkingMessageAccentCache(): void {
@@ -7844,8 +7847,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleForkCommand();
 	}
 
-	prepareBtwForRelocation(): Promise<void> {
-		return this.#btwController.dispose();
+	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
+		return this.#btwController.withSessionMove(operation);
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {

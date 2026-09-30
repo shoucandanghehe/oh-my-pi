@@ -176,22 +176,8 @@ export class FooterComponent implements Component {
 	 */
 	describe(): NativeNode {
 		const state = this.session.state;
-		let input = 0;
-		let output = 0;
-		let cacheRead = 0;
-		let cacheWrite = 0;
-		let cost = 0;
-		let premiumRequests = 0;
-		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message?.role === "assistant") {
-				input += entry.message.usage.input;
-				output += entry.message.usage.output;
-				cacheRead += entry.message.usage.cacheRead;
-				cacheWrite += entry.message.usage.cacheWrite;
-				cost += entry.message.usage.cost.total;
-				premiumRequests += entry.message.usage.premiumRequests ?? 0;
-			}
-		}
+		const { input, output, cacheRead, cacheWrite, cost, premiumRequests } =
+			this.session.sessionManager.getAssistantUsageStatistics();
 		const segs: NativeNode[] = [];
 		const seg = (key: string, props: TspProps<"seg">): void => {
 			segs.push(node("seg", { role: `omp.footer.${key}`, ...props }, undefined, key));

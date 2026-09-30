@@ -1721,6 +1721,8 @@ export class TUI extends Container {
 	#mouseTracking: MouseTrackingState = "off";
 	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
 	#inlineMouseProvider: (() => boolean) | undefined;
+	/** App-viewport target clicks run after pane mouse routing, before text selection. */
+	#appViewportClickHandler: ((event: SgrMouseEvent) => boolean) | undefined;
 	#altPreviousLines: string[] = [];
 	#altPreparedRows: PreparedLine[] = [];
 	#altEnterWidth = 0;
@@ -1812,6 +1814,9 @@ export class TUI extends Container {
 		this.#appViewportComponentTargets.clear();
 		this.#appViewportComposeStale = true;
 		this.requestRender(true);
+	}
+	setAppViewportClickHandler(handler: ((event: SgrMouseEvent) => boolean) | undefined): void {
+		this.#appViewportClickHandler = handler;
 	}
 
 	override render(width: number): readonly string[] {
@@ -2092,15 +2097,11 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Mutable normal-buffer viewport from the last provider frame: screen row
-	 * where it begins plus its row count. Inline click targets are indexed
-	 * into this window (`screenRow - top`). Empty while the alt screen owns
-	 * the display, while a resize transaction is settling, and while a Ghostty
-	 * image paint is deferred — the painted rows predate the latest spans in
-	 * all three cases, so hits would map to unrelated old rows.
-	 * The origin is in composer rows: a replay paint replaces leading composer
-	 * blanks with history rows and prepends blanks for a short viewport, so
-	 * the painted top is backed out by that net pad.
+	 * Published screen viewport for inline click targets. Normal-buffer rows
+	 * begin after visible history; an app-viewport frame starts at screen row
+	 * zero and has its own emitted row count. Empty during overlay or resize
+	 * transitions and deferred image paints, when candidate spans can predate
+	 * the actual screen.
 	 */
 	getMutableViewport(): { top: number; length: number } {
 		if (
@@ -2111,6 +2112,9 @@ export class TUI extends Container {
 			this.#ghosttyInitialImageDelayTimer !== undefined
 		) {
 			return { top: 0, length: 0 };
+		}
+		if (this.#appViewportActive) {
+			return { top: 0, length: this.#appViewportVisibleSourceRows.length };
 		}
 		return { top: this.#providerViewportTop - this.#providerViewportPadTop, length: this.#providerWindow.length };
 	}
@@ -3530,6 +3534,7 @@ export class TUI extends Container {
 			}
 			return true;
 		}
+		if (this.#appViewportClickHandler?.(normalizedEvent)) return true;
 		if (event.wheel !== null) {
 			this.#appViewportScrollbarDrag = null;
 			if (this.#appViewportSelectionDrag) {
@@ -5033,6 +5038,7 @@ export class TUI extends Container {
 				);
 				return;
 			}
+			this.#forgetTransmittedForPendingReset();
 			this.#renderAppViewportFrame(width, height);
 			return;
 		}
@@ -5622,6 +5628,9 @@ export class TUI extends Container {
 	}
 
 	#renderAppViewportFrame(width: number, height: number): void {
+		// The product's inline capture probe also clears stale hover state when
+		// toggled off. App-viewport mouse reporting stays on for pane selection.
+		this.#inlineMouseProvider?.();
 		const inputOwner = this.#findAppViewportInputOwner();
 		const hoverMouse = inputOwner?.wantsAppViewportHover?.() ?? false;
 		this.#enterAppViewport(hoverMouse);
@@ -5665,9 +5674,15 @@ export class TUI extends Container {
 		}
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 
-		const cursorMarkers = this.#extractCursorMarkers(rawFrame);
+		const cursorMarkers: { row: number; col: number }[] = [];
+		const frame = this.#prepareLinesArray(
+			rawFrame,
+			contentWidth,
+			this.#appViewportFramePreparedRows,
+			rawFrame.length,
+			cursorMarkers,
+		);
 		const cursorPos = cursorMarkers[0] ?? plan?.cursor ?? null;
-		const frame = this.#prepareLinesArray(rawFrame, contentWidth, this.#appViewportFramePreparedRows);
 		this.#emitAppViewportFrame(frame, width, height, cursorPos);
 		this.#appViewportFrameCursorPos = cursorPos;
 		this.#appViewportComposeStale = false;
@@ -5728,7 +5743,14 @@ export class TUI extends Container {
 			fitted = appendBrailleScrollbar(fitted, scrollbarGlyphs, width);
 			scrollbarGlyphs = [];
 			fitted = this.#compositeOverlaysIntoWindow(fitted, width, height);
-			const overlayMarkers = this.#extractCursorMarkers(fitted);
+			const overlayMarkers: { row: number; col: number }[] = [];
+			fitted = this.#prepareLinesArray(
+				fitted,
+				width,
+				this.#appViewportPreparedRows,
+				fitted.length,
+				overlayMarkers,
+			).lines;
 			if (overlayMarkers.length > 0) fittedCursorPos = overlayMarkers[0]!;
 		}
 		// Reuse prepared source rows through scrolling and selection-only paints.
@@ -5766,6 +5788,7 @@ export class TUI extends Container {
 		let kittyCleanup = "";
 		if (this.#clearScrollbackOnNextRender && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			kittyCleanup += encodeKittyDeleteAllImages();
+			for (const id of this.#imageBudget.takeResetPurgeIds()) kittyCleanup += encodeKittyDeleteImage(id);
 			this.#imageBudget.resetPlacementEpochs();
 			this.#imageBudget.takePurgeIds();
 			this.#imageBudget.takeRetiredIds();

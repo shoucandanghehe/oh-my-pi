@@ -274,16 +274,18 @@ From the pause screen, press Esc, Enter, Space, or Ctrl+C to resume. Ctrl+C resu
 
 ## 11) Built-in command note: `/btw`
 
-`/btw <question>` creates an independent, durable side thread and displays its
-first reply in the inline panel. There is no temporary QuickAsk or upgrade step.
-The thread's Main snapshot is frozen and journaled before its first request.
-Later Main messages do not enter an existing BTW thread automatically.
+In the Main workspace, `/btw <question>` creates an independent, durable side
+thread and displays its first reply inline. The thread's Main snapshot is frozen
+and saved in its sidecar before the first model request. Later Main messages do
+not enter an existing BTW thread automatically.
 
 In the app-viewport workspace, `Enter` opens the same inline thread in the BTW pane,
 even while its reply is running. Opening the pane does not recreate the conversation,
 repeat the question, or change its provider lineage. If the pane cannot open, the
-inline panel stays visible. Bare `/btw` opens the shared BTW workspace; without the
-workspace backend, it reopens the selected saved thread inline.
+inline panel stays visible. Bare `/btw` opens the shared BTW workspace;
+`/btw --history` opens earlier sidecar answers for follow-up. Without the
+workspace backend, bare `/btw` opens that history directly. A focused
+subagent's `/btw` uses its own scoped history rather than the Main workspace.
 
 - `Esc` or `/btw --clear` dismisses the inline panel and cancels its running request,
   but does not delete the thread. A new `/btw <question>` starts another thread.
