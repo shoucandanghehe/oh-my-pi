@@ -3,10 +3,14 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "../app-keybindings";
 import type { AutocompleteProvider } from "../autocomplete";
+import { sanitizeErrorLine } from "../chrome/error-block";
 import type { EditorTopBorder } from "../components/composer";
 import { ScrollView } from "../components/scroll-view";
 import { matchesKey } from "../keys";
 import { type MouseRoutable, routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
+import { node, span } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import { isNativeRendering } from "../native/state";
 import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "../text-selection";
 import {
 	type AppViewportHoverProvider,
@@ -69,6 +73,9 @@ function sanitizeNotice(text: string, maxWidth: number): string {
 		.replace(/\/[^\s'")\]]+/g, path => shortenPath(path));
 	return truncateToWidth(singleLine, Math.max(10, maxWidth));
 }
+
+/** Native text is truncated by the terminal, within the sanitizer's i32 width limit. */
+const NATIVE_LINE_WIDTH = 0x7fff_ffff;
 
 /** Shared transcript, scrolling, selection, editor, and pane chrome. */
 export class ChatTranscriptPane
@@ -482,6 +489,11 @@ export class ChatTranscriptPane
 		}
 		for (const key of this.options.expandKeys) {
 			if (matchesKey(data, key)) {
+				if (isNativeRendering()) {
+					this.#builder.setExpanded(!this.#builder.expanded);
+					this.options.builder.requestRender();
+					return;
+				}
 				const startRow = this.#scrollView.getScrollOffset();
 				const endRow = startRow + Math.max(1, this.#selectionViewportHeight) - 1;
 				const visibleBlocks = this.#builder.container.getVirtualBlocksInRowRange(
@@ -500,6 +512,47 @@ export class ChatTranscriptPane
 			// Editor.onChange also covers asynchronous clipboard completion.
 			this.options.builder.requestRender();
 		}
+	}
+
+	/** Describe the same transcript and draft owners without VT viewport slicing. */
+	describe(_cx: DescribeContext): NativeNode {
+		const children: NativeChild[] = [
+			this.#builder.isEmpty
+				? node(
+						"text",
+						{
+							spans: [
+								span(
+									sanitizeErrorLine(this.options.getPlaceholder(NATIVE_LINE_WIDTH), NATIVE_LINE_WIDTH),
+									"dim",
+								),
+							],
+							wrap: "word",
+						},
+						undefined,
+						"placeholder",
+					)
+				: node("col", { grow: 1 }, [this.#builder.container], "transcript"),
+		];
+		const notice = this.#notice ?? this.options.getNotice?.();
+		if (notice) {
+			children.push(
+				node(
+					"text",
+					{ text: sanitizeErrorLine(notice, NATIVE_LINE_WIDTH), tone: "error", truncate: "end" },
+					undefined,
+					"notice",
+				),
+			);
+		}
+		if (this.options.aboveEditor) children.push(this.options.aboveEditor);
+		if (this.options.editor?.readOnly) {
+			children.push(node("text", { spans: [span(this.options.editor.label, "dim")] }, undefined, "read-only"));
+		} else if (this.#editor) {
+			children.push(this.#editor);
+		}
+		if (this.options.belowEditor) children.push(this.options.belowEditor);
+		return node("col", { grow: 1 }, children);
 	}
 
 	render(width: number): readonly string[] {

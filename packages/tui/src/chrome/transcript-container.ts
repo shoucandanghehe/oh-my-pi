@@ -1173,7 +1173,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#syncEntries();
 		const children = this.children;
 		for (const child of children) {
-			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
+			if (!isNativeSettled(child) && isBlockFinalized(child)) settleNative(child);
 		}
 		const previous = this.#nativeBlocks;
 		if (previous.length === children.length && previous.every((child, index) => child === children[index])) {

@@ -41,7 +41,7 @@ function agent(id: string, lastActivity: number, extra?: Partial<AgentRecordLike
 function createHub(agents: AgentRecordLike[], focused: string[] = []): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
 		observers: new SessionObserverRegistry(),
-		transcript: { fs, parseEntries: () => [] },
+		transcript: { fs, parseEntries: () => [], visitEntries: async () => {} },
 		loadPersisted: async () => {},
 		hubKeys: [],
 		onDone: () => {},

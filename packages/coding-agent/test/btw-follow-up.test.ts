@@ -2,12 +2,17 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import {
+	EphemeralConversation,
+	type EphemeralConversationCheckpoint,
+} from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
@@ -17,7 +22,7 @@ import { SPACE_HOLD_MECHANICAL_RUN, type SpaceHoldHandler } from "@oh-my-pi/pi-t
 
 interface TurnArgs {
 	promptText: string;
-	history?: readonly Message[];
+	history?: readonly AgentMessage[];
 	conversationKey?: string;
 	onTextDelta?: (delta: string) => void;
 	signal?: AbortSignal;
@@ -86,16 +91,39 @@ async function harness() {
 	const manager = SessionManager.create(directory, directory);
 	const managers = [manager];
 	const requests: PendingTurn[] = [];
-	const runEphemeralTurn = vi.fn((args: TurnArgs) => {
+	const runSideTurn = vi.fn((args: TurnArgs) => {
 		const pending = Promise.withResolvers<TurnResult>();
 		requests.push({ args, resolve: pending.resolve, reject: pending.reject });
 		return pending.promise;
 	});
+	const createEphemeralConversation = vi.fn(
+		(_instructions: string, checkpoint: EphemeralConversationCheckpoint) =>
+			new EphemeralConversation({
+				snapshotBaseMessages: () => [],
+				sideSessionId: checkpoint.sideSessionId,
+				checkpoint,
+				runTurn: (messages, options) => {
+					const prompt = messages.at(-1);
+					const promptText =
+						prompt?.role === "user"
+							? typeof prompt.content === "string"
+								? prompt.content
+								: prompt.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("")
+							: "";
+					return runSideTurn({
+						...options,
+						promptText,
+						history: messages.slice(0, -1),
+						conversationKey: checkpoint.sideSessionId,
+					});
+				},
+			}),
+	);
 	const dictationTargets: DictationTarget[] = [];
 	const session = {
-		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+		model: { api: "anthropic-messages", provider: "anthropic", id: "claude-sonnet-4-5" },
 		isStreaming: false,
-		runEphemeralTurn,
+		createEphemeralConversation,
 	} as unknown as InteractiveModeContext["session"];
 	const ctx = {
 		ui: {
@@ -106,6 +134,7 @@ async function harness() {
 			terminal: { rows: 30 },
 		} as unknown as TUI,
 		btwContainer: new Container(),
+		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		session,
 		sessionManager: manager,
 		showStatus: vi.fn(),
@@ -149,7 +178,7 @@ async function harness() {
 		ctx,
 		controller,
 		requests,
-		runEphemeralTurn,
+		runSideTurn,
 		complete,
 		root,
 		dictationTargets,
@@ -298,7 +327,7 @@ describe("BTW follow-up lifecycle", () => {
 			],
 		});
 		expect(await h.controller.startFollowUp(topic.id, "Stale question")).toBe(false);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(h.runSideTurn).toHaveBeenCalledTimes(1);
 		expect((await records(h.manager))[0]?.followUps?.map(turn => turn.question)).toEqual(["Other process question"]);
 
 		const originalStart = h.controller.startFollowUp.bind(h.controller);
@@ -507,7 +536,7 @@ describe("BTW follow-up lifecycle", () => {
 				release.resolve();
 				expect(await settled.promise).toBe(false);
 				await h.controller.flush();
-				expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+				expect(h.runSideTurn).toHaveBeenCalledTimes(1);
 				const saved = (await records(h.manager))[0]!;
 				expect(saved.answer).toBe("Original answer");
 				if (boundary === "BTW checkpoint") {
@@ -525,7 +554,7 @@ describe("BTW follow-up lifecycle", () => {
 				panel.pasteText("Accepted follow-up");
 				panel.handleInput("\r");
 				expect(await settled.promise).toBe(true);
-				expect(h.runEphemeralTurn).toHaveBeenCalledTimes(2);
+				expect(h.runSideTurn).toHaveBeenCalledTimes(2);
 				expect(h.requests.at(-1)!.args.signal?.aborted).toBe(false);
 				await h.complete("Accepted answer");
 				expect((await records(h.manager))[0]!.followUps?.at(-1)).toMatchObject({
@@ -576,7 +605,7 @@ describe("BTW follow-up lifecycle", () => {
 		expect(h.controller.hasActiveRequest()).toBe(false);
 		const panel = overlay.mock.calls.at(-1)?.[0];
 		if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW follow-up composer");
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(2);
+		expect(h.runSideTurn).toHaveBeenCalledTimes(2);
 		const started = Promise.withResolvers<boolean>();
 		const start = h.controller.startFollowUp.bind(h.controller);
 		vi.spyOn(h.controller, "startFollowUp").mockImplementation(async (...args) => {
@@ -587,7 +616,7 @@ describe("BTW follow-up lifecycle", () => {
 		panel.pasteText("Continue this topic");
 		panel.handleInput("\r");
 		expect(await started.promise).toBe(true);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(3);
+		expect(h.runSideTurn).toHaveBeenCalledTimes(3);
 		const request = h.requests.at(-1)!.args;
 		expect(JSON.stringify(request.history)).toContain("Current answer");
 		expect(JSON.stringify(request.history)).not.toContain("Earlier answer");
@@ -675,11 +704,14 @@ describe("BTW follow-up lifecycle", () => {
 			"user",
 			"assistant",
 		]);
-		const texts = request.history?.map(message =>
-			typeof message.content === "string"
+		const texts = request.history?.map(message => {
+			if (message.role !== "user" && message.role !== "assistant") {
+				throw new Error(`Unexpected BTW history role: ${message.role}`);
+			}
+			return typeof message.content === "string"
 				? message.content
-				: message.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join(""),
-		);
+				: message.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+		});
 		expect(texts?.[0]).toBe(originalPrompt);
 		expect(texts?.[1]).toBe("Selected root answer");
 		expect(texts?.[2]).toContain("First follow-up question");
@@ -752,7 +784,7 @@ describe("BTW follow-up lifecycle", () => {
 		const before = await records(h.manager);
 		expect(await h.controller.startFollowUp(root.id, " \n\t ")).toBe(false);
 		expect(await records(h.manager)).toEqual(before);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(h.runSideTurn).toHaveBeenCalledTimes(1);
 
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -767,7 +799,7 @@ describe("BTW follow-up lifecycle", () => {
 		expect(await starting).toBe(true);
 		await h.controller.start("Overlapping new root");
 		expect(await h.controller.startFollowUp(root.id, "Overlapping running turn")).toBe(false);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(2);
+		expect(h.runSideTurn).toHaveBeenCalledTimes(2);
 		expect(h.requests.at(-1)!.args.signal?.aborted).toBe(false);
 		await h.complete("Accepted answer");
 		const saved = await records(h.manager);
@@ -849,7 +881,7 @@ describe("BTW follow-up lifecycle", () => {
 		h.ctx.sessionManager = next;
 		release.resolve();
 		expect(await starting).toBe(false);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(h.runSideTurn).toHaveBeenCalledTimes(1);
 		expect(await records(next)).toEqual([]);
 		expect((await records(h.manager))[0]!.followUps ?? []).toEqual([]);
 	});

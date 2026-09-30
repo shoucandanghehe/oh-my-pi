@@ -76,7 +76,10 @@ function assistantMessageWithReplyText(assistantMessage: AssistantMessage, reply
 	if (!replacedText) content.push({ type: "text", text: replyText });
 	return { ...assistantMessage, content, providerPayload: undefined };
 }
-const memoryHistoryStores = new WeakMap<object, { sessionId: string; store: BtwHistoryStore<BtwThreadHistoryRecord> }>();
+const memoryHistoryStores = new WeakMap<
+	object,
+	{ sessionId: string; store: BtwHistoryStore<BtwThreadHistoryRecord> }
+>();
 
 export class BtwController {
 	#activeRequest: BtwRequest | undefined;
@@ -126,7 +129,8 @@ export class BtwController {
 
 	/** Whether the inline panel owns Escape. */
 	hasActiveRequest(): boolean {
-		return this.#activeRequest !== undefined;
+		const request = this.#activeRequest;
+		return request !== undefined && this.ctx.btwContainer.children.includes(request.component);
 	}
 
 	canOpenThread(): boolean {
@@ -304,6 +308,7 @@ export class BtwController {
 		if (!request || !isHistoryRequest(request) || getBtwLatestTurn(request.record).status !== "running") return false;
 		this.#updateRequest(request, { status: "cancelled", updatedAt: Date.now() });
 		request.abortController.abort();
+		this.ctx.terminalActivity.release(request);
 		request.component.markAborted();
 		void this.#persist(request);
 		this.#refreshHistory();

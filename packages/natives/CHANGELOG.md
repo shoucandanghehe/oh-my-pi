@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Fixed
+
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
+
 ## [18.4.10] - 2026-10-02
 
 ### Fixed
@@ -167,17 +179,6 @@
 
 - Fixed Mermaid rendering issues involving arrowhead alignment and duplicate edge junctions around mixed-width node shapes.
 - Fixed sloppy edit grammar compatibility with Codex constrained decoding.
-### Added
-
-- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
-
-### Breaking Changes
-
-- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
-
-### Fixed
-
-- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.2.1] - 2026-09-15
 

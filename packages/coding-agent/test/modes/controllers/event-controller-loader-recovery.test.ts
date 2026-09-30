@@ -10,7 +10,7 @@ import {
 	type EphemeralConversationCheckpoint,
 	type EphemeralTurnResult,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
-import { Loader } from "@oh-my-pi/pi-tui";
+import { Container, Loader } from "@oh-my-pi/pi-tui";
 import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -49,10 +49,7 @@ function createContext(options: LoaderRecoveryContextOptions = {}) {
 		ui: { terminal: { setProgress } },
 		terminalActivity,
 
-		btwContainer: {
-			clear: vi.fn(),
-			addChild: vi.fn(),
-		},
+		btwContainer: new Container(),
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;

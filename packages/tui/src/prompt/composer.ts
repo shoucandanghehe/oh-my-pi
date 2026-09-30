@@ -153,7 +153,7 @@ export interface ViewportClickSpan {
 	start: number;
 	end: number;
 	/** Candidate subagent ids for a span-local row. */
-	candidates: (local: number) => string[];
+	candidates: (local: number, col?: number) => string[];
 }
 
 /**
@@ -169,11 +169,11 @@ export interface ViewportClickRowTarget {
  * Pure seam for tests; the caller intersects with the live registry, which
  * decides focusability and recency.
  */
-export function routeViewportClick(spans: readonly ViewportClickSpan[], index: number): string[] {
+export function routeViewportClick(spans: readonly ViewportClickSpan[], index: number, col?: number): string[] {
 	if (!Number.isInteger(index) || index < 0) return [];
 	for (const span of spans) {
 		if (index < span.start || index >= span.end) continue;
-		return span.candidates(index - span.start);
+		return span.candidates(index - span.start, col);
 	}
 	return [];
 }
@@ -264,10 +264,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 	// it still holds; a settled replay owns every byte it emits, so it
 	// recomposes the header at the replay width and refreshes these rows.
 	#retiredHeaderRows: readonly string[] | undefined;
-	/** Click spans of the last `renderFrame` viewport, in viewport coordinates. */
+	/** Click spans of the last normal or app viewport frame, in frame-local rows. */
 	#lastClickSpans: ViewportClickSpan[] = [];
 	/** Click-candidate id under the pointer, painted with the hover band. Id-anchored so it follows streaming rows. */
 	#hoveredClickId: string | undefined;
+	#hoveredClickCol: number | undefined;
 	// Hard-row prefix currently above the native viewport. The first resize
 	// frame may pull part of it down before the normal buffer is borrowed.
 	#retiredHeaderStart = 0;
@@ -559,7 +560,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 		const painted = viewport.map((line, index) => {
 			for (const span of spans) {
 				if (index < span.start || index >= span.end) continue;
-				if (!span.candidates(index - span.start).includes(hovered)) continue;
+				if (!span.candidates(index - span.start, this.#hoveredClickCol).includes(hovered)) continue;
 				banded = true;
 				// A wrapping band loses to background opens nested inside the row
 				// (live card rows carry the pending-tint bg, which would paint over
@@ -577,20 +578,25 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 	 * Empty when the line has no click target (chrome, separators, retired rows
 	 * are never in the viewport). Callers intersect with the live registry.
 	 */
-	viewportClickCandidates(index: number): string[] {
-		return routeViewportClick(this.#lastClickSpans, index);
+	viewportClickCandidates(index: number, col?: number): string[] {
+		return routeViewportClick(this.#lastClickSpans, index, col);
 	}
 
 	/**
 	 * Point the hover band at a click-candidate id (or clear it). Takes effect
 	 * on the next frame; callers repaint only when the target actually changes.
 	 */
-	setHoveredClickId(id: string | undefined): void {
+	setHoveredClickId(id: string | undefined, col?: number): void {
 		this.#hoveredClickId = id;
+		this.#hoveredClickCol = col;
+		for (const root of this.#runtimeChildren) {
+			(root as Partial<{ setHoveredClickId(id: string | undefined): void }>).setHoveredClickId?.(id);
+		}
 	}
 
 	renderAppViewportFrame(viewport: ViewportSize, targets: readonly Component[]): AppViewportFramePlan {
 		if (!this.#started || this.#stopped) {
+			this.#lastClickSpans = [];
 			return {
 				viewport: [],
 				estimatedTotalRows: 0,
@@ -603,6 +609,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 		const width = Math.max(1, viewport.columns);
 		const rows = Math.max(0, viewport.rows);
 		if (!this.#runtimeMounted) {
+			this.#lastClickSpans = [];
 			const scroll = this.#header.render(width);
 			const sticky = this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
 			const stickyRows = Math.min(rows, sticky.length);
@@ -623,28 +630,37 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 			};
 		}
 		const roots = this.#runtimeChildren;
-		let rendered: string[];
-		if (targets.length === 0) {
-			rendered = this.#renderRoots(roots, width);
-		} else {
-			const grouped = roots.map(root => ({
-				root,
-				targets: targets.filter(target => componentContains(root, target)),
-			}));
-			const matched = grouped.reduce((total, group) => total + group.targets.length, 0);
-			rendered =
-				matched === targets.length
-					? grouped.flatMap(group =>
-							group.targets.length > 0
-								? renderTargeted(group.root, width, group.targets)
-								: group.root.render(width),
-						)
-					: this.#renderRoots(roots, width);
+		const grouped = targets.map(target => roots.find(root => componentContains(root, target)));
+		const targeted = targets.length > 0 && grouped.every(root => root !== undefined);
+		const rendered: string[] = [];
+		const spans: ViewportClickSpan[] = [];
+		for (const root of roots) {
+			const start = rendered.length;
+			const rootTargets = targeted ? targets.filter((_target, index) => grouped[index] === root) : [];
+			const lines = rootTargets.length > 0 ? renderTargeted(root, width, rootTargets) : root.render(width);
+			rendered.push(...lines);
+			const resolve = (
+				root as Partial<{
+					getClickFocusAgentIdsAtRow(row: number, col?: number): string[];
+				}>
+			).getClickFocusAgentIdsAtRow;
+			if (resolve) {
+				spans.push({ start, end: rendered.length, candidates: (row, col) => resolve.call(root, row, col) });
+			}
 		}
 		const offset = Math.max(0, rendered.length - rows);
 		const visible = rendered.slice(offset, offset + rows);
+		this.#lastClickSpans = spans
+			.filter(span => span.end > offset)
+			.map(span => ({
+				start: Math.max(0, span.start - offset),
+				end: Math.min(visible.length, span.end - offset),
+				candidates: (row, col) => span.candidates(row + Math.max(0, offset - span.start), col),
+			}));
 		return {
-			viewport: visible,
+			viewport: roots.some(root => "setHoveredClickId" in root)
+				? visible
+				: this.#paintHoverBand(visible, this.#lastClickSpans),
 			estimatedTotalRows: rendered.length,
 			offset,
 			stickyRows: 0,
