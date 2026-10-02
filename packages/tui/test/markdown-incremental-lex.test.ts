@@ -171,6 +171,26 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		).toBe("alpha beta gamma");
 	});
 
+	it("tail row cache preserves paragraph selection while the following code fence streams", () => {
+		const prefix = "lead\n\nalpha beta gamma\n```ts\n";
+		const streaming = new Markdown(`${prefix}one`, 1, 0, THEME);
+		streaming.transientRenderCache = true;
+		streaming.render(9);
+
+		streaming.setText(`${prefix}one two\nthree`);
+		const lines = streaming.render(9);
+		const firstRow = lines.findIndex(line => Bun.stripANSI(line).trim() === "alpha");
+		const separatorRow = lines.findIndex((line, row) => row > firstRow && Bun.stripANSI(line).trim() === "");
+		expect(firstRow).toBeGreaterThanOrEqual(0);
+		expect(separatorRow).toBeGreaterThan(firstRow);
+		expect(
+			streaming.getTextSelection({
+				start: { row: firstRow, col: 1 },
+				end: { row: separatorRow - 1, col: 7 },
+			}),
+		).toBe("alpha beta gamma");
+	});
+
 	it("a width change mid-stream still matches a cold render at the new width", () => {
 		const streaming = new Markdown("", 0, 0, THEME);
 		// Warm the stream cache at width 80 across the whole message.

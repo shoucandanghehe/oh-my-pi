@@ -396,6 +396,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"web-search-model": { key: "webSearchModel", set: "catalog", shape: "scalar" },
 	"hosted-image": { key: "hostedImage", set: "catalog", shape: "scalar", values: [true, false] },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
+	"image-edit-format": { key: "imageEditFormat", set: "catalog", shape: "scalar", values: ["multipart"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },

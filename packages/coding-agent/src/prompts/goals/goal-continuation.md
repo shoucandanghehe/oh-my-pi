@@ -1,4 +1,4 @@
-<!-- Hidden continuation steer. role=user, suppressed from visible transcript. -->
+<!-- Hidden agent-authored continuation steer. Provider role=developer; suppressed from visible transcript. -->
 
 Continue active goal.
 

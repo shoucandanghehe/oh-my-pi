@@ -15,11 +15,7 @@ import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
-import {
-	normalizeAssistantUsage,
-	parseSessionEntries,
-	visitEntriesFromFileStream,
-} from "../session/session-loader";
+import { normalizeAssistantUsage, parseSessionEntries, visitEntriesFromFileStream } from "../session/session-loader";
 import { resolveMarkdownLinkTargets, resolveSessionMarkdownLinks } from "../internal-urls/hyperlink-targets";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */

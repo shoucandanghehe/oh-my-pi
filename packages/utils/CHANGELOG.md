@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
@@ -24,9 +28,6 @@
 
 - Fixed SQLite error messages doubling every backslash in Windows database paths
 - Fixed corrupt-database recovery failing with `EBUSY` on Windows when several in-process openers of the same store failed at once
-### Fixed
-
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.4.12] - 2026-10-02
 

@@ -72,7 +72,7 @@ export async function generateOpenAIImage(
 		});
 	} else {
 		try {
-			if (model.provider === "openai") {
+			if (model.imageEditFormat === "multipart" || model.provider === "openai") {
 				const form = new FormData();
 				form.set("model", model.requestModelId ?? model.id);
 				form.set("prompt", request.prompt);

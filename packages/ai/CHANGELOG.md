@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
+- Image edits can upload reference files to proxy endpoints that require multipart requests.
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
@@ -34,10 +40,6 @@
 ### Fixed
 
 - Fixed AWS `credential_process` on Windows stripping backslashes from unquoted paths such as `C:\Users\me\helper.exe`; commands are now split with Windows command-line rules there, matching the AWS CLI.
-### Fixed
-
-- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
-- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
 
 ## [18.4.12] - 2026-10-02
 

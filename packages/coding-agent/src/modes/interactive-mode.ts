@@ -33,6 +33,7 @@ import {
 	getWidthConfigEpoch,
 	Loader,
 	Markdown,
+	measureComponentRows,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -2338,8 +2339,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			scrollRoot.addChild(this.modelCycleContainer);
 			scrollRoot.addChild(this.deferredCommandContainer);
 			scrollRoot.addChild(this.statusContainer);
-			// Judge batches and automatic downloads stay editor-anchored above the working line.
 			stickyRoot.addChild(this.reportContainer);
+			// Judge batches and automatic downloads stay editor-anchored above the working line.
 			stickyRoot.addChild(this.progressHudContainer);
 			stickyRoot.addChild(this.statusLine);
 			stickyRoot.addChild(this.attachmentChipsContainer);
@@ -8302,6 +8303,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	commandReportRows(): number | undefined {
+		const pane = this.#workspaceLayout?.frame?.panes.get("main");
+		if (pane && this.#mainStickyRoot) {
+			let below = 0;
+			for (const child of this.#mainStickyRoot.children) {
+				if (child !== this.reportContainer) below += measureComponentRows(child, pane.width);
+			}
+			return Math.max(1, pane.height - 1 - below);
+		}
 		const below = this.composer.rowsBelow(this.reportContainer);
 		return below === undefined ? undefined : this.ui.terminal.rows - below;
 	}

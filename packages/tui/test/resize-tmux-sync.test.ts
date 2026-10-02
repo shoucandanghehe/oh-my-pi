@@ -25,7 +25,7 @@ class RecordingTerminal extends VirtualTerminal {
 	mirror = true;
 	report?: PrivateModeReportHandler;
 
-	onPrivateModeReport(callback: PrivateModeReportHandler): void {
+	override onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.report = callback;
 	}
 
