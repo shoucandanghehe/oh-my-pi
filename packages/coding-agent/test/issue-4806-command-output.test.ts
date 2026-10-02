@@ -94,7 +94,7 @@ describe("issue #4806 command output during streaming", () => {
 		await terminal.waitForRender();
 	}
 
-	it("docks a short report above the editor without touching the streaming transcript; Esc removes it", () => {
+	it("shows a docked report in the workspace without touching the streaming transcript; Esc removes it", async () => {
 		const streamedReply = new Text("agent is streaming", 0, 0);
 		mode.chatContainer.addChild(streamedReply);
 		mode.ui.setFocus(mode.editor);
@@ -104,12 +104,17 @@ describe("issue #4806 command output during streaming", () => {
 		mode.handleToolsCommand();
 
 		expect(mode.chatContainer.children).toEqual([streamedReply]);
-		expect(mode.reportContainer.render(80).join("\n")).toContain("Available Tools");
+		await terminal.waitForRender(() =>
+			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Available Tools")),
+		);
 		// The editor keeps focus: typing still goes to the prompt.
 		expect(mode.ui.getFocused()).toBe(mode.editor);
 
 		// The editor's Esc closes the report before it would interrupt the streaming turn.
-		mode.editor.onEscape?.();
+		terminal.sendInput("\x1b");
+		await terminal.waitForRender(() =>
+			terminal.getViewport().every(row => !Bun.stripANSI(row).includes("Available Tools")),
+		);
 		expect(mode.reportContainer.children).toHaveLength(0);
 		expect(abort).not.toHaveBeenCalled();
 		expect(mode.chatContainer.children).toEqual([streamedReply]);
