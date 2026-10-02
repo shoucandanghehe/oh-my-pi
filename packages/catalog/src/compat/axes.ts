@@ -482,6 +482,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * splits larger requests. Unassigned: the endpoint takes any batch size.
 	 */
 	"judgment-questions-max": { key: "judgmentQuestionsMax", set: "catalog", shape: "scalar" },
+	"image-edit-format": { key: "imageEditFormat", set: "catalog", shape: "scalar", values: ["multipart"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },
