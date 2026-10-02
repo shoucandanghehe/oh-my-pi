@@ -8,6 +8,7 @@ import { bindPreparedExtensions } from "../extensibility/extensions/loader";
 import { ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions/runner";
 import type { ExtensionUIContext, PreparedExtension, ToolInfo } from "../extensibility/extensions/types";
 import { ExtensionToolWrapper, RegisteredToolAdapter } from "../extensibility/extensions/wrapper";
+import { applyToolProxy } from "../extensibility/tool-proxy";
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import { unwrapHashlineHeaderPath } from "../tools/plan-mode-guard";
 import { dispatchXdevTool, type XdevState, xdevDocs, xdevListing } from "../tools/xdev";
@@ -85,6 +86,7 @@ export class BtwExtensionRuntime {
 		toolInfos: readonly ToolInfo[];
 		isReadOnlyToolCall: (tool: AgentTool, args: Record<string, unknown>) => boolean;
 		shareSummaryTool?: AgentTool;
+		approveSummary?: (summary: string, signal?: AbortSignal) => Promise<boolean>;
 		approvalUI?: ExtensionUIContext;
 	}): Promise<BtwExtensionRuntime> {
 		const { agent, modelRegistry, settings } = options;
@@ -125,28 +127,26 @@ export class BtwExtensionRuntime {
 			// Main's wrapper must never execute in BTW, even for xd:// devices.
 			const native = mainTool instanceof ExtensionToolWrapper ? mainTool.unwrap() : mainTool;
 			if (native instanceof RegisteredToolAdapter || native instanceof ExtensionToolWrapper) continue;
-			const guarded = new Proxy(native, {
-				get(target, key, receiver) {
-					if (key !== "execute") return Reflect.get(target, key, receiver);
-					return async (...args: Parameters<AgentTool["execute"]>) => {
-						if (!options.isReadOnlyToolCall(target, args[1] as Record<string, unknown>)) {
-							throw new Error("Tool call is not permitted in a read-only BTW conversation");
-						}
-						const input = args[1];
-						const path = input && typeof input === "object" && "path" in input ? input.path : undefined;
-						const device =
-							target.name === "read" && typeof path === "string"
-								? parseXdUrl(unwrapHashlineHeaderPath(path))
-								: null;
-						if (device) {
-							const text = device.name === null ? xdevListing(xdev) : xdevDocs(xdev, device.name);
-							return { content: [{ type: "text", text }] };
-						}
-						return target.execute(...args);
-					};
+			const guarded = {
+				execute: async (...args: Parameters<AgentTool["execute"]>) => {
+					if (!options.isReadOnlyToolCall(native, args[1] as Record<string, unknown>)) {
+						throw new Error("Tool call is not permitted in a read-only BTW conversation");
+					}
+					const input = args[1];
+					const path = input && typeof input === "object" && "path" in input ? input.path : undefined;
+					const device =
+						native.name === "read" && typeof path === "string"
+							? parseXdUrl(unwrapHashlineHeaderPath(path))
+							: null;
+					if (device) {
+						const text = device.name === null ? xdevListing(xdev) : xdevDocs(xdev, device.name);
+						return { content: [{ type: "text", text }] };
+					}
+					return native.execute(...args);
 				},
-			});
-			const sideTool = new ExtensionToolWrapper(guarded, runner);
+			} satisfies Pick<AgentTool, "execute">;
+			applyToolProxy(native, guarded);
+			const sideTool = new ExtensionToolWrapper(guarded as AgentTool, runner);
 			xdev.tools.set(sideTool.name, sideTool);
 			xdev.builtInNames.add(sideTool.name);
 			if (mountedNames.has(sideTool.name)) xdev.mountedNames.add(sideTool.name);
@@ -156,33 +156,30 @@ export class BtwExtensionRuntime {
 		if (mainWrite && safeNames.has("write") && xdev.mountedNames.size > 0) {
 			const native = mainWrite instanceof ExtensionToolWrapper ? mainWrite.unwrap() : mainWrite;
 			if (!(native instanceof RegisteredToolAdapter) && !(native instanceof ExtensionToolWrapper)) {
-				const deviceWrite = new Proxy(native, {
-					get(target, key, receiver) {
-						if (key === "description") return writeDeviceOnlyDescription;
-						if (key === "approval")
-							return (args: unknown) => {
-								const resolved = resolveReadOnlyDevice(args);
-								return resolved ? ("read" as const) : ("exec" as const);
-							};
-						if (key !== "execute") return Reflect.get(target, key, receiver);
-						return async (...args: Parameters<AgentTool["execute"]>) => {
-							const input = args[1];
-							const resolved = resolveReadOnlyDevice(input);
-							if (!resolved) throw new Error("Only read-only xd:// devices are available in BTW");
-							const { result, xdev: dispatch } = await dispatchXdevTool(
-								xdev,
-								resolved.name,
-								resolved.content,
-								args[0],
-								args[2],
-								args[3],
-								args[4] ? { ...args[4], xdevApproved: true } : undefined,
-							);
-							return { ...result, details: { xdev: dispatch } };
-						};
+				const deviceWrite = {
+					description: writeDeviceOnlyDescription,
+					approval: (args: unknown) => {
+						const resolved = resolveReadOnlyDevice(args);
+						return resolved ? ("read" as const) : ("exec" as const);
 					},
-				});
-				tools.push(new ExtensionToolWrapper(deviceWrite, runner));
+					execute: async (...args: Parameters<AgentTool["execute"]>) => {
+						const input = args[1];
+						const resolved = resolveReadOnlyDevice(input);
+						if (!resolved) throw new Error("Only read-only xd:// devices are available in BTW");
+						const { result, xdev: dispatch } = await dispatchXdevTool(
+							xdev,
+							resolved.name,
+							resolved.content,
+							args[0],
+							args[2],
+							args[3],
+							args[4] ? { ...args[4], xdevApproved: true } : undefined,
+						);
+						return { ...result, details: { xdev: dispatch } };
+					},
+				};
+				applyToolProxy(native, deviceWrite);
+				tools.push(new ExtensionToolWrapper(deviceWrite as AgentTool, runner));
 			}
 		}
 		function resolveReadOnlyDevice(input: unknown): { name: string; content: string } | undefined {
@@ -213,15 +210,26 @@ export class BtwExtensionRuntime {
 		const side = new BtwExtensionRuntime(runner, agent, tools, sessionManager, queryRegistry);
 		const ui = options.approvalUI;
 		const sideUI =
-			ui && options.shareSummaryTool ? (Object.create(runner.getUIContext()) as ExtensionUIContext) : undefined;
-		if (sideUI && ui) {
-			sideUI.select = (title, choices, dialogOptions) =>
-				title.includes("shareSummaryWithMain") &&
-				choices.length === 2 &&
-				choices[0] === "Approve" &&
-				choices[1] === "Deny"
-					? ui.select(title, choices, dialogOptions)
-					: Promise.resolve(undefined);
+			options.shareSummaryTool && (ui || options.approveSummary)
+				? (Object.create(runner.getUIContext()) as ExtensionUIContext)
+				: undefined;
+		if (sideUI) {
+			sideUI.select = async (title, choices, dialogOptions) => {
+				const approval = dialogOptions?.toolApproval;
+				if (
+					!approval ||
+					approval.toolName !== options.shareSummaryTool?.name ||
+					choices.length !== 2 ||
+					choices[0] !== "Approve" ||
+					choices[1] !== "Deny"
+				)
+					return undefined;
+				if (options.approveSummary) {
+					const args = approval.args as { summary: string };
+					return (await options.approveSummary(args.summary, dialogOptions?.signal)) ? "Approve" : "Deny";
+				}
+				return ui?.select(title, choices, dialogOptions);
+			};
 		}
 		runner.initialize(
 			{

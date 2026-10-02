@@ -582,6 +582,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	#entriesUnverified = false;
 	/** Block list handed to the native frame provider, reused while the children are unchanged. */
 	#nativeBlocks: readonly Component[] = [];
+	#nativeExpansionDirty = true;
 	#nativeNode: NativeNode | undefined;
 	/** `true` when history ends with a compact block whose separator was withheld; history rows never change. */
 	#historyEnd: RowsAbove;
@@ -724,6 +725,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#replayRequested = false;
 		this.#lastViewportSpans = [];
 		this.#historyEnd = undefined;
+		this.#nativeExpansionDirty = true;
 		this.#virtualEntries = [];
 		this.#virtualRowIndex = new VirtualRowIndex();
 		this.#virtualMeasurementConfig = "";
@@ -801,6 +803,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#offered = offered;
 		this.#toolActivityVisible = toolActivityVisible;
 		this.#expanded = expanded;
+		this.#nativeExpansionDirty = true;
 		this.#lastFrame = lastFrame;
 		this.#virtualEntries = virtualEntries;
 		this.#virtualRowIndex = virtualRowIndex;
@@ -844,6 +847,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded === expanded) return;
 		this.#expanded = expanded;
+		this.#nativeExpansionDirty = true;
 		this.#cancelVirtualWarmup();
 		for (const entry of this.#visibleVirtualEntries) this.#applyPresentationState(entry.component);
 		this.#generation++;
@@ -1597,6 +1601,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		let owners: Component[] | undefined;
 		for (let i = 0; i < children.length; i++) {
 			const child = children[i]!;
+			if (this.#nativeExpansionDirty) setBlockExpanded(child, this.#expanded);
 			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
 			flat?.push(child);
 			owners?.push(child);
@@ -1609,6 +1614,8 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 				owners.push(child);
 			}
 		}
+		// Only a transcript-wide toggle overrides the terminal's per-card folds.
+		this.#nativeExpansionDirty = false;
 		const units: readonly Component[] = flat ?? children;
 		const compactAt = (at: number): boolean => isCompact((owners ?? units)[at]!);
 		// Copies only once a run forms.

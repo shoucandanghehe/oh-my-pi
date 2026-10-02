@@ -1,7 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
+import type { ExtensionPresentationSource } from "@oh-my-pi/pi-tui/chat/extension-types";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import type { AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
@@ -51,6 +52,7 @@ function viewer(
 	h: TspHarness,
 	ref: AgentRecordLike,
 	deps: Partial<AgentTranscriptViewerDeps> = {},
+	overlay = false,
 ): AgentTranscriptViewer {
 	const result = new AgentTranscriptViewer({
 		agentId: ref.id,
@@ -67,7 +69,8 @@ function viewer(
 		...deps,
 	});
 	component = result;
-	h.tui.addChild(result);
+	if (overlay) h.tui.showOverlay(result, { width: "100%", margin: 0, fullscreen: true });
+	else h.tui.addChild(result);
 	h.tui.setFocus(result);
 	return result;
 }
@@ -90,11 +93,22 @@ describe("native shared transcript viewer", () => {
 		});
 		harness = await TspHarness.start();
 		const h = harness;
-		viewer(h, ref);
+		let closed = false;
+		viewer(
+			h,
+			ref,
+			{
+				onClose: () => {
+					closed = true;
+				},
+			},
+			true,
+		);
 		await h.render();
 		expect(h.find(node => node.k === "progress")?.p).toMatchObject({ value: 0.25 });
 		expect(h.find(node => node.k === "badge")?.p).toMatchObject({ text: "running", tone: "success" });
 		expect(JSON.stringify(h.doc())).toContain("$1.25");
+		expect(h.find(node => node.p?.role === "omp.hub.transcript")).toBeDefined();
 
 		tokens = 50;
 		cost = 2.5;
@@ -112,6 +126,9 @@ describe("native shared transcript viewer", () => {
 		expect(JSON.stringify(h.doc())).not.toContain("$2.50");
 		expect(h.find(node => node.k === "badge")?.p).toMatchObject({ text: "parked", tone: "muted" });
 		expect(h.errors).toEqual([]);
+		const close = h.find(node => node.p?.actions?.click === "close")!;
+		h.event({ ev: "action", sf: h.terminal.surface!, id: close.id, act: "close" });
+		expect(closed).toBe(true);
 	});
 
 	it("submits the described image draft through the viewer and replaces cleared input with its send error", async () => {
@@ -143,6 +160,98 @@ describe("native shared transcript viewer", () => {
 		await h.render();
 		const error = h.find(node => node.k === "text" && node.p?.tone === "error");
 		expect(textValue(error)).toMatch(/Send +failed retry/);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps native focus, Escape and automatic-close protection with the independent composer owner", async () => {
+		harness = await TspHarness.start();
+		const h = harness;
+		let closed = 0;
+		const v = viewer(h, agent(), {
+			onClose: () => closed++,
+			lifecycle: () => ({ ensureLive: async () => ({ prompt: async () => {} }) }),
+		});
+		v.focused = false;
+		await h.render();
+		const editor = h.find(node => node.k === "editor")!;
+		h.event({ ev: "focus", sf: h.terminal.surface!, id: editor.id });
+		await h.render();
+		expect(v.autoCloseProtected).toBe(true);
+		h.terminal.send("focused draft");
+		await h.render();
+		expect(textValue(h.find(node => node.k === "editor"))).toBe("focused draft");
+		h.terminal.send("\x1b");
+		await h.render();
+		expect(textValue(h.find(node => node.k === "editor"))).toBe("");
+		expect(closed).toBe(0);
+		h.terminal.send("\x1b");
+		await h.render();
+		expect(closed).toBe(1);
+		expect(h.errors).toEqual([]);
+	});
+
+	it("keeps the independent root transcript flowing and session widgets, draft and status in the dock", async () => {
+		harness = await TspHarness.start();
+		const h = harness;
+		const response: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Worker response" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			timestamp: 1,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		const ref = agent({
+			thinkingLevel: undefined,
+			model: undefined,
+			agent: { state: { messages: [], streamMessage: response } },
+			getSessionStats: () => ({
+				tokens: { input: 0, output: 0, cacheWrite: 0 },
+				assistantMessages: 0,
+				toolCalls: 2,
+				cost: 1.25,
+			}),
+			abort: async () => {},
+		});
+		const presentation: ExtensionPresentationSource = {
+			observePresentation(observer) {
+				observer.setWidget("above", ["Worker above"], { placement: "aboveEditor" });
+				observer.setWidget("below", ["Worker below"], { placement: "belowEditor" });
+				return () => {};
+			},
+		};
+		viewer(h, ref, {
+			lifecycle: () => ({ ensureLive: async () => ({ prompt: async () => {} }) }),
+			createStatusLine: () => ({
+				getTopBorder: () => ({ content: "Worker status", width: 13, revision: 0 }),
+				render: () => ["Worker owned status"],
+				dispose: () => {},
+			}),
+			getExtensionPresentation: () => presentation,
+		})
+			.getPasteTarget()!
+			.setText("Worker draft");
+		await h.render();
+		expect(JSON.stringify(h.region("main"))).toContain("Worker response");
+		expect(JSON.stringify(h.region("dock"))).not.toContain("Worker response");
+		expect(JSON.stringify(h.region("main"))).not.toContain("Worker draft");
+		expect(JSON.stringify(h.region("dock"))).toContain("Worker draft");
+		expect(JSON.stringify(h.region("dock"))).toContain("Worker above");
+		expect(JSON.stringify(h.region("dock"))).toContain("Worker below");
+		expect(JSON.stringify(h.region("dock"))).toContain("Worker owned status");
+		expect(h.find(node => node.p?.role === "omp.hub.transcript")).toBeUndefined();
+		expect(h.find(node => node.p?.role === "omp.overlay.hints")).toBeUndefined();
+		expect(h.find(node => node.k === "progress")).toBeUndefined();
+		expect(JSON.stringify(h.doc())).not.toContain("$1.25");
 		expect(h.errors).toEqual([]);
 	});
 
@@ -180,12 +289,13 @@ describe("native shared transcript viewer", () => {
 		await h.render();
 		expect(h.find(node => node.k === "editor")).toBeUndefined();
 		expect(JSON.stringify(h.doc())).toContain("read-only · advisor");
-		expect(JSON.stringify(h.find(node => node.p?.role === "omp.overlay.hints"))).not.toContain('"send"');
+		expect(JSON.stringify(h.region("dock"))).toContain("read-only · advisor");
+		expect(JSON.stringify(h.region("main"))).not.toContain("read-only · advisor");
 		expect(h.errors).toEqual([]);
 	});
 
-	it("replaces placeholders, appends transcript blocks and switches draft owners while preserving widgets", async () => {
-		harness = await TspHarness.start();
+	it("keeps transcript blocks independently virtualizable while switching drafts and scrolling the main region", async () => {
+		harness = await TspHarness.start(undefined, { features: ["scroll"], nativeSurfaceMode: "screen" });
 		const h = harness;
 		const above = new Text("Before draft");
 		const below = new Text("After draft");
@@ -203,12 +313,15 @@ describe("native shared transcript viewer", () => {
 		h.tui.setFocus(pane);
 		await h.render();
 		expect(JSON.stringify(h.doc())).toContain("Waiting for transcript");
+		expect(h.frames.at(-1)?.ops).toContainEqual(["scroll", "main", "end"]);
 		pane.rebuild([{ role: "user", content: "Initial message", timestamp: 1 }]);
 		pane.setEditorText("First draft");
 		await h.render();
 		expect(JSON.stringify(h.doc())).not.toContain("Waiting for transcript");
 		expect(textValue(h.find(node => node.k === "md"))).toBe("Initial message");
 		expect(textValue(h.find(node => node.k === "editor"))).toBe("First draft");
+		const firstBlock = h.region("main")?.c?.find(node => node.p?.role === "omp.user");
+		expect(firstBlock?.k).toBe("card");
 
 		pane.append([{ role: "user", content: "Appended message", timestamp: 2 }]);
 		pane.selectEditor("second", "Second draft");
@@ -216,11 +329,21 @@ describe("native shared transcript viewer", () => {
 		await h.render();
 		expect(h.findAll(node => node.k === "md").map(textValue)).toEqual(["Initial message", "Appended message"]);
 		expect(textValue(h.find(node => node.k === "editor"))).toBe("Second draft");
+		const blocks = h.region("main")?.c?.filter(node => node.p?.role === "omp.user") ?? [];
+		expect(blocks).toHaveLength(2);
+		expect(blocks[0]?.id).toBe(firstBlock!.id);
 		expect(JSON.stringify(h.doc())).toContain("Updated widget");
 		expect(JSON.stringify(h.doc())).toContain("After draft");
 		pane.selectEditor(undefined, "ignored replacement");
 		await h.render();
 		expect(textValue(h.find(node => node.k === "editor"))).toBe("First draft");
+		pane.setEditorText("");
+		h.terminal.send("\x1b[5~");
+		await h.render();
+		expect(h.frames.at(-1)?.ops).toContainEqual(["scroll", "main", "page-up"]);
+		pane.setEditorText("Updated draft");
+		await h.render();
+		expect(h.frames.at(-1)?.ops.some(op => op[0] === "scroll")).toBe(false);
 		expect(h.errors).toEqual([]);
 	});
 

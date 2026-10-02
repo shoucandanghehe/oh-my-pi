@@ -51,7 +51,6 @@ const runtime: {
 	reported: undefined,
 };
 
-
 /**
  * Base64 of `text` as one line of control-free UTF-8 within the `msg` limit, or
  * undefined when nothing printable remains. A terminal discards the whole

@@ -48,11 +48,11 @@ import { getNativeBlob, type NativeBlob } from "./blobs";
 import { node } from "./describe";
 import { encodeTspJson, encodeTspMessage, type TspHello, TspReader, splitTspMessage } from "./encode";
 import { estimateRows } from "./measure";
-import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "./node";
+import type { DescribeContext, NativeChild, NativeNode, NativeScroll, NativeSurface, NativeUiEvent } from "./node";
 import { NARROW_SHEET_COLS } from "./overlay";
 import { resetQuietMotion } from "./quiet";
 import { nativeComponentId, Reconciler } from "./reconcile";
-import { setNativeButtons, setNativePacing, setNativeRendering } from "./state";
+import { isNativeRendering, setNativeButtons, setNativePacing, setNativeRendering } from "./state";
 
 /** Share of the viewport's rows a centered sheet's content must reach to fill a narrow pane. */
 const SHEET_FILL_FRACTION = 0.5;
@@ -96,6 +96,8 @@ export interface NativeHost {
 }
 
 export interface NativeBackendOptions {
+	/** Independent panes own a screen; the primary session retains inline history. */
+	readonly mode?: "inline" | "screen";
 	/** Keep the reference document and recent frames for debugging. */
 	readonly mirror?: boolean;
 	/** Append every TSP message to this JSONL file. Defaults to `PI_TUI_TSP_RECORD`. */
@@ -104,6 +106,8 @@ export interface NativeBackendOptions {
 	readonly stats?: boolean;
 	/** Clock and timers (stall wake-up); defaults to `Date.now` and unref'd `setTimeout`. */
 	readonly scheduler?: RenderScheduler;
+	/** Notify the owning TUI after surface activation, before its first frame. */
+	readonly onRenderingChange?: (active: boolean) => void;
 }
 
 /** Real clock and timers that never keep the process alive on their own. */
@@ -301,13 +305,14 @@ export class NativeBackend {
 	#limit: number;
 	#credits: number;
 	#reader = new TspReader();
-	#inline: Surface;
+	#base: Surface;
 	#screen: Surface | null = null;
 	#nextSurface = 1;
 	#mirror: boolean;
 	#recordPath: string | undefined;
 	#stats: boolean;
 	#scheduler: RenderScheduler;
+	#onRenderingChange: ((active: boolean) => void) | undefined;
 	/** Wakes a render when the oldest unacked frame of a credit-blocked surface turns stalled. */
 	#stallTimer: RenderTimer | undefined;
 	#recent: TspFrame[] = [];
@@ -337,7 +342,8 @@ export class NativeBackend {
 		this.#recordPath = options.recordPath ?? (Bun.env.PI_TUI_TSP_RECORD || undefined);
 		this.#stats = options.stats ?? Bun.env.PI_TUI_NATIVE_STATS === "1";
 		this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
-		this.#inline = this.#newSurface("inline");
+		this.#onRenderingChange = options.onRenderingChange;
+		this.#base = this.#newSurface(options.mode ?? "inline");
 	}
 
 	/** The terminal's hello reply. */
@@ -352,11 +358,11 @@ export class NativeBackend {
 
 	/** `rows` fallback nodes in the last frame. */
 	get fallbackCount(): number {
-		return (this.#screen ?? this.#inline).reconciler.fallbackCount;
+		return (this.#screen ?? this.#base).reconciler.fallbackCount;
 	}
 
 	/**
-	 * Open the inline surface and send the first frame. Native rendering is
+	 * Open the base surface and send the first frame. Native rendering is
 	 * announced only once the surface is open: Tern drops the shell's title
 	 * when a command's first surface opens, so the tab title set on the change
 	 * has to follow the `o`.
@@ -366,8 +372,9 @@ export class NativeBackend {
 		this.#live = true;
 		this.#useNerdSymbols(true);
 		this.#watchMotion();
-		this.#open(this.#inline);
-		setNativeRendering(true);
+		this.#open(this.#base);
+		setNativeRendering(true, this);
+		this.#onRenderingChange?.(true);
 		this.render();
 	}
 
@@ -393,6 +400,7 @@ export class NativeBackend {
 	 * user's saved setting) while a surface is live.
 	 */
 	#useNerdSymbols(on: boolean): void {
+		if (!on && isNativeRendering()) return;
 		if (setNativeSymbolPreset(on ? "nerd" : undefined)) this.#host.invalidate();
 	}
 
@@ -405,13 +413,16 @@ export class NativeBackend {
 		this.#live = false;
 		if (this.#screen) this.#close(this.#screen, false);
 		this.#screen = null;
-		this.#close(this.#inline, keep);
-		this.#inline.doc?.close();
-		setNativeRendering(false);
-		setNativeButtons(false);
-		setNativePacing(false);
+		this.#close(this.#base, keep && this.#base.mode === "inline");
+		this.#base.doc?.close();
+		setNativeRendering(false, this);
+		if (!isNativeRendering()) {
+			setNativeButtons(false);
+			setNativePacing(false);
+		}
 		this.#unbindMotion?.();
 		this.#unbindMotion = undefined;
+		this.#onRenderingChange?.(false);
 		this.#useNerdSymbols(false);
 		this.#clearStallTimer();
 		// Replies no longer reach the backend: forget the queries outright.
@@ -420,9 +431,8 @@ export class NativeBackend {
 	}
 
 	/**
-	 * After a stop/start cycle (external editor, suspend): adopt the closed
-	 * inline surface so the transcript continues in place instead of being
-	 * printed again. A `gone` reply for it opens a fresh surface.
+	 * Restore a stopped session: inline history is adopted, while a discarded
+	 * screen document is recreated. A failed inline adopt opens a fresh surface.
 	 */
 	resume(hello: TspHello): void {
 		if (this.#live) return;
@@ -432,17 +442,23 @@ export class NativeBackend {
 		this.#useNerdSymbols(true);
 		this.#resetBlobs();
 		this.#watchMotion();
-		const surface = this.#inline;
-		surface.reconciler.detachLive();
-		surface.unacked = [];
-		surface.acked = surface.seq;
-		surface.stalledSince = undefined;
-		surface.stallResets = 0;
-		surface.focus = null;
-		surface.dirty = false;
-		this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
+		if (this.#base.mode === "screen") {
+			this.#base = this.#newSurface("screen");
+			this.#open(this.#base);
+		} else {
+			const surface = this.#base;
+			surface.reconciler.detachLive();
+			surface.unacked = [];
+			surface.acked = surface.seq;
+			surface.stalledSince = undefined;
+			surface.stallResets = 0;
+			surface.focus = null;
+			surface.dirty = false;
+			this.#write("o", { id: surface.id, mode: "inline", title: "omp", role: SESSION_ROLE, adopt: true });
+		}
 		// After the `o`, as in `start()`.
-		setNativeRendering(true);
+		setNativeRendering(true, this);
+		this.#onRenderingChange?.(true);
 		this.render();
 	}
 
@@ -496,6 +512,7 @@ export class NativeBackend {
 		let surface: Surface;
 		let main: readonly NativeChild[];
 		let dock: readonly NativeChild[];
+		let scroll: NativeScroll | undefined;
 		let layer: NativeChild[];
 		if (fullscreen >= 0) {
 			const component = overlays[fullscreen]!.component;
@@ -510,16 +527,18 @@ export class NativeBackend {
 			surface = this.#screen;
 			main = page?.main ?? [component];
 			dock = page?.dock ?? [];
+			scroll = page?.scroll;
 			layer = overlays.slice(fullscreen + 1).map(overlay => this.#overlayNode(overlay));
 		} else {
 			if (this.#screen) {
 				this.#close(this.#screen, false);
 				this.#screen = null;
 			}
-			surface = this.#inline;
+			surface = this.#base;
 			const described = this.#host.describeSurface(this.#cx);
 			main = described.main;
 			dock = described.dock;
+			scroll = described.scroll;
 			layer = overlays.map(overlay => this.#overlayNode(overlay));
 		}
 		this.#pruneOverlayNodes(overlays);
@@ -529,7 +548,7 @@ export class NativeBackend {
 			return;
 		}
 		surface.dirty = false;
-		const ops = surface.reconciler.reconcile({ main, dock, layer }, this.#cx);
+		const ops = surface.reconciler.reconcile({ main, dock, layer, scroll }, this.#cx);
 		const focused = this.#host.focused();
 		const focus = focused ? surface.reconciler.focusTarget(focused) : null;
 		if (focus !== surface.focus) {
@@ -561,7 +580,7 @@ export class NativeBackend {
 
 	/** Reference document of the live surface (mirror mode only). */
 	document(): TspNode | undefined {
-		return (this.#screen ?? this.#inline).doc?.snapshot();
+		return (this.#screen ?? this.#base).doc?.snapshot();
 	}
 
 	/** Last sent frames, oldest first (mirror mode only). */
@@ -777,7 +796,7 @@ export class NativeBackend {
 	}
 
 	#surfaceFor(sf: string | undefined): Surface | null {
-		if (sf === undefined || sf === this.#inline.id) return this.#inline;
+		if (sf === undefined || sf === this.#base.id) return this.#base;
 		return this.#screen?.id === sf ? this.#screen : null;
 	}
 
@@ -823,11 +842,11 @@ export class NativeBackend {
 				logger.warn("TSP: terminal reported an error", event);
 				return;
 			case "gone":
-				if (event.ids.includes(this.#inline.id)) {
+				if (event.ids.includes(this.#base.id)) {
 					// Adopt found nothing (evicted, or another pane): start over.
 					this.#resetBlobs();
-					this.#inline = this.#newSurface("inline");
-					if (this.#live) this.#open(this.#inline);
+					this.#base = this.#newSurface(this.#base.mode);
+					if (this.#live) this.#open(this.#base);
 					this.#host.requestRender();
 					return;
 				}

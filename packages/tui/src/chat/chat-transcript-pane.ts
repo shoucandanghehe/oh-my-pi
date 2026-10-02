@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { TspScrollBy } from "@oh-my-pi/pi-wire";
 import type { KeyId } from "../app-keybindings";
 import type { AutocompleteProvider } from "../autocomplete";
 import { sanitizeErrorLine } from "../chrome/error-block";
@@ -9,7 +10,7 @@ import { ScrollView } from "../components/scroll-view";
 import { matchesKey } from "../keys";
 import { type MouseRoutable, routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { node, span } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import type { DescribeContext, NativeChild, NativeNode, NativeScroll, NativeSurface } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "../text-selection";
 import {
@@ -27,7 +28,7 @@ import type { SessionMessageEntryLike, TranscriptEntryLike } from "./transcript-
 import { replaceTabs, shortenPath, truncateToWidth } from "../render/render-utils";
 import { compactImageMarkers } from "../prompt/composer-attachments";
 import { getEditorTheme, theme } from "../theme/theme";
-import { matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import { matchesSelectDown, matchesSelectPageDown, matchesSelectPageUp, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "./chat-transcript-builder";
 import { CustomEditor } from "../prompt/custom-editor";
 
@@ -111,6 +112,8 @@ export class ChatTranscriptPane
 	#returnToBottomCol = -1;
 	#returnToBottomHovered = false;
 	#linkEpoch = 0;
+	#nativeScroll: NativeScroll | undefined;
+	#nativeScrollSupported = false;
 
 	constructor(private readonly options: ChatTranscriptPaneOptions) {
 		this.#builder = new ChatTranscriptBuilder({
@@ -135,6 +138,8 @@ export class ChatTranscriptPane
 				})),
 		);
 		editor.setPlaceholder(options.editor.placeholder);
+		const placeholder = options.editor.placeholder;
+		editor.describePlaceholder = () => placeholder;
 		editor.setMaxHeight(4);
 		editor.onExit = options.onClose;
 		editor.disableSubmit = options.editor.readOnly === true;
@@ -513,12 +518,28 @@ export class ChatTranscriptPane
 			this.options.builder.requestRender();
 		}
 	}
+	describeSurface(cx: DescribeContext): NativeSurface {
+		return {
+			main: this.#nativeTranscriptChildren(cx),
+			dock: [this.describeComposer()],
+			scroll: this.#nativeScroll ?? { by: "end", n: 0 },
+		};
+	}
 
 	/** Describe the same transcript and draft owners without VT viewport slicing. */
-	describe(_cx: DescribeContext): NativeNode {
-		const children: NativeChild[] = [
-			this.#builder.isEmpty
-				? node(
+	describe(cx: DescribeContext): NativeNode {
+		return node("col", { grow: 1 }, [this.describeTranscript(cx), this.describeComposer()]);
+	}
+
+	describeTranscript(cx: DescribeContext): NativeNode {
+		return { ...node("col", { grow: 1 }, this.#nativeTranscriptChildren(cx), "body"), scroll: this.#nativeScroll };
+	}
+
+	#nativeTranscriptChildren(cx: DescribeContext): readonly NativeChild[] {
+		this.#nativeScrollSupported = cx.feature("scroll");
+		const children: NativeChild[] = this.#builder.isEmpty
+			? [
+					node(
 						"text",
 						{
 							spans: [
@@ -531,9 +552,9 @@ export class ChatTranscriptPane
 						},
 						undefined,
 						"placeholder",
-					)
-				: node("col", { grow: 1 }, [this.#builder.container], "transcript"),
-		];
+					),
+				]
+			: [...this.#builder.container.nativeBlocks()];
 		const notice = this.#notice ?? this.options.getNotice?.();
 		if (notice) {
 			children.push(
@@ -545,6 +566,11 @@ export class ChatTranscriptPane
 				),
 			);
 		}
+		return children;
+	}
+
+	describeComposer(): NativeNode {
+		const children: NativeChild[] = [];
 		if (this.options.aboveEditor) children.push(this.options.aboveEditor);
 		if (this.options.editor?.readOnly) {
 			children.push(node("text", { spans: [span(this.options.editor.label, "dim")] }, undefined, "read-only"));
@@ -552,7 +578,7 @@ export class ChatTranscriptPane
 			children.push(this.#editor);
 		}
 		if (this.options.belowEditor) children.push(this.options.belowEditor);
-		return node("col", { grow: 1 }, children);
+		return node("col", { shrink: 0 }, children, "composer");
 	}
 
 	render(width: number): readonly string[] {
@@ -762,6 +788,34 @@ export class ChatTranscriptPane
 	}
 
 	#handleScroll(data: string): boolean {
+		if (isNativeRendering()) {
+			const by: TspScrollBy | undefined =
+				matchesKey(data, "k") || matchesKey(data, "up") || matchesKey(data, "shift+up") || matchesSelectUp(data)
+					? "line-up"
+					: matchesKey(data, "j") ||
+						  matchesKey(data, "down") ||
+						  matchesKey(data, "shift+down") ||
+						  matchesSelectDown(data)
+						? "line-down"
+						: matchesKey(data, "pageUp") || matchesSelectPageUp(data)
+							? "page-up"
+							: matchesKey(data, "pageDown") || matchesSelectPageDown(data)
+								? "page-down"
+								: data === "g" || matchesKey(data, "home")
+									? "start"
+									: data === "G" || matchesKey(data, "end")
+										? "end"
+										: undefined;
+			if (!by) return false;
+			if (this.#nativeScrollSupported) {
+				const steps = matchesKey(data, "shift+up") || matchesKey(data, "shift+down") ? 5 : 1;
+				this.#nativeScroll = { by, n: (this.#nativeScroll?.n ?? 0) + steps };
+			} else {
+				this.#notice = "This terminal does not support keyboard transcript scrolling.";
+			}
+			this.options.builder.requestRender();
+			return true;
+		}
 		if (this.#scrollView.handleScrollKey(data)) {
 			this.#syncFollow();
 			this.options.builder.requestRender();

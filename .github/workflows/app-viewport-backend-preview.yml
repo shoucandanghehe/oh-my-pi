@@ -46,11 +46,13 @@ jobs:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: ./.github/actions/bun-install
 
-         - uses: ./.github/actions/bazel-natives
-           with:
-              targets: win32-x64-baseline
-              cache-scope: app-viewport-win32-x64
-              output-cache: "true"
+         - id: native-cache
+           uses: ./.github/actions/bazel-cache
+
+         - name: Build Windows native addon
+           env:
+              OMP_BAZEL_RC: ${{ steps.native-cache.outputs.rc }}
+           run: bun scripts/bazel-natives.ts win32-x64-baseline --dest packages/natives/native
 
          - name: Build Windows preview binary
            env:
@@ -95,11 +97,15 @@ jobs:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
          - uses: ./.github/actions/bun-install
 
-         - uses: ./.github/actions/bazel-natives
-           with:
-              targets: linux-x64-baseline linux-x64-modern
-              cache-scope: app-viewport-linux-x64
-              output-cache: "true"
+         - id: native-cache
+           uses: ./.github/actions/bazel-cache
+
+         - name: Build Linux native addons
+           env:
+              OMP_BAZEL_RC: ${{ steps.native-cache.outputs.rc }}
+           run: |
+              bun scripts/bazel-natives.ts linux-x64-baseline --dest packages/natives/native
+              bun scripts/bazel-natives.ts linux-x64-modern --dest packages/natives/native
 
          - name: Build Linux preview binary
            env:

@@ -99,6 +99,8 @@ export interface NativeSurface {
 	readonly main: readonly NativeChild[];
 	/** Sticky bottom chrome while live (editor, status line, HUDs). */
 	readonly dock: readonly NativeChild[];
+	/** Scroll the main region after its children are added, including an initial request. */
+	readonly scroll?: NativeScroll;
 }
 
 /**

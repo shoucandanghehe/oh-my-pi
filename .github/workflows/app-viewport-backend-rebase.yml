@@ -54,11 +54,15 @@ jobs:
          - uses: ./.github/actions/bun-install
            if: steps.rebase.outputs.changed == 'true'
 
-         - uses: ./.github/actions/bazel-natives
+         - id: native-cache
+           uses: ./.github/actions/bazel-cache
            if: steps.rebase.outputs.changed == 'true'
-           with:
-              targets: linux-x64-modern
-              cache-scope: app-viewport-rebase-linux-x64
+
+         - name: Build host native addon
+           if: steps.rebase.outputs.changed == 'true'
+           env:
+              OMP_BAZEL_RC: ${{ steps.native-cache.outputs.rc }}
+           run: bun scripts/bazel-natives.ts linux-x64-modern --dest packages/natives/native
 
          - name: Run app viewport regression tests
            if: steps.rebase.outputs.changed == 'true'
