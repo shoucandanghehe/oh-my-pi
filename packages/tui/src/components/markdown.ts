@@ -2158,6 +2158,10 @@ function rewoundLineCache(
 		marks: cache.marks.slice(0, i),
 	};
 }
+interface TailTokenRows extends RenderCacheEntry {
+	logicalLineCount: number;
+}
+
 /**
  * Per-token row cache for the *unfrozen tail* (PoC H). The tail re-lexes every
  * streaming frame, but the token sequence is prefix-stable under append-only
@@ -2191,7 +2195,7 @@ interface TailRowCache extends RenderSignature {
 	cachedThrough: number;
 	// Per-token final content rows (1:1 with the rendered content lines),
 	// indexed relative to `tokenStart`; undefined for uncacheable tokens.
-	rows: (readonly string[] | undefined)[];
+	rows: (TailTokenRows | undefined)[];
 	// Raw snapshot per token (string value gate).
 	raws: (string | undefined)[];
 	// type of token[i+1] when the rows were produced (blank/spacing gate).
@@ -2225,7 +2229,7 @@ interface StreamingListCache {
  * rows for every token whose raw text and following-token type match.
  */
 interface TailRenderRecorder {
-	rows: (readonly string[] | undefined)[];
+	rows: (TailTokenRows | undefined)[];
 	raws: (string | undefined)[];
 	nextTypes: (string | undefined)[];
 }
@@ -3302,12 +3306,13 @@ export class Markdown implements Component {
 			contentStartCol: 0,
 		}));
 		const contentLogicalLineOffset = emptyLines.length;
-		for (const row of contentSelectionRows) row.logicalLine += contentLogicalLineOffset;
+		const paddedContentSelectionRows = contentSelectionRows.map(row => ({
+			...row,
+			logicalLine: row.logicalLine + contentLogicalLineOffset,
+		}));
 		const bottomLogicalLine =
 			contentLogicalLineOffset +
-			(contentSelectionRows.length > 0
-				? Math.max(...contentSelectionRows.map(row => row.logicalLine - contentLogicalLineOffset)) + 1
-				: 0);
+			(contentSelectionRows.length > 0 ? Math.max(...contentSelectionRows.map(row => row.logicalLine)) + 1 : 0);
 		const bottomSelectionRows: RenderedTextSelectionRow[] = emptyLines.map((_line, index) => ({
 			logicalLine: bottomLogicalLine + index,
 			source: "",
@@ -3315,7 +3320,7 @@ export class Markdown implements Component {
 			sourceEnd: 0,
 			contentStartCol: 0,
 		}));
-		this.#selectionRows = [...topSelectionRows, ...contentSelectionRows, ...bottomSelectionRows];
+		this.#selectionRows = [...topSelectionRows, ...paddedContentSelectionRows, ...bottomSelectionRows];
 		this.#selectionInset = selectionInset(contentSelectionRows, paddingX);
 
 		// Update caches and hand the array out by reference. Callers must not
@@ -3497,7 +3502,15 @@ export class Markdown implements Component {
 		if (cache !== undefined) {
 			spliceEnd = this.#tailSpliceEnd(cache, start, signature, tokens);
 			for (let i = start; i < spliceEnd; i++) {
-				appendLines(out, cache.rows[i - start]!);
+				const cachedRows = cache.rows[i - start]!;
+				appendLines(out, cachedRows.lines);
+				if (this.#activeTextSelectionRows) {
+					const offset = this.#activeTextSelectionLogicalLine;
+					this.#activeTextSelectionRows.push(
+						...cachedRows.selectionRows.map(row => ({ ...row, logicalLine: row.logicalLine + offset })),
+					);
+					this.#activeTextSelectionLogicalLine += cachedRows.logicalLineCount;
+				}
 			}
 		}
 
@@ -3520,7 +3533,7 @@ export class Markdown implements Component {
 		// unfrozen tail instead of the whole token list every frame.
 		const tailCount = tokens.length - start;
 		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
-		const rows: (readonly string[] | undefined)[] = new Array(tailCount).fill(undefined);
+		const rows: (TailTokenRows | undefined)[] = new Array(tailCount).fill(undefined);
 		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 		const raws: (string | undefined)[] = new Array(tailCount).fill(undefined);
 		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
@@ -3595,12 +3608,14 @@ export class Markdown implements Component {
 		// Wrapped-row span per absolute token index. Call-local: stale values
 		// are never read across renders.
 		const tokenWrappedRowCounts: number[] = [];
+		const tokenLogicalLineCounts: number[] = [];
 		const logicalLines: string[] = [];
 		for (let i = start; i < end; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
 			const tokenWrappedRowStart = wrappedLines.length;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
+			tokenLogicalLineCounts[i] = renderedTokenLines.length;
 			for (const renderedRow of renderedTokenLines) {
 				logicalLines.push(renderedRow.text);
 				// Lists wrap while their structural prefixes are still available, so
@@ -3651,8 +3666,10 @@ export class Markdown implements Component {
 				};
 			}
 		}
+		const selectionLineOffset = this.#activeTextSelectionLogicalLine;
+		let selectionRows: RenderedTextSelectionRow[] = [];
 		if (this.#activeTextSelectionRows) {
-			const selectionRows = mapLogicalTextSelectionRows(
+			selectionRows = mapLogicalTextSelectionRows(
 				logicalLines,
 				contentWidth,
 				signature.paddingX,
@@ -3726,6 +3743,7 @@ export class Markdown implements Component {
 			const nextTypes = tailRecorder.nextTypes;
 			let wrappedStart = 0;
 			let contentCursor = 0;
+			let tokenLogicalLine = selectionLineOffset;
 			for (let i = start; i < end; i++) {
 				const token = tokens[i]!;
 				const wrappedEnd = wrappedStart + tokenWrappedRowCounts[i]!;
@@ -3739,9 +3757,16 @@ export class Markdown implements Component {
 				if (token.type === "table") {
 					rows[i - start] = undefined;
 				} else {
-					rows[i - start] = contentLines.slice(contentCursor, contentCursor + rowCount);
+					rows[i - start] = {
+						lines: contentLines.slice(contentCursor, contentCursor + rowCount),
+						selectionRows: selectionRows
+							.slice(contentCursor, contentCursor + rowCount)
+							.map(row => ({ ...row, logicalLine: row.logicalLine - tokenLogicalLine })),
+						logicalLineCount: tokenLogicalLineCounts[i]!,
+					};
 				}
 				contentCursor += rowCount;
+				tokenLogicalLine += tokenLogicalLineCounts[i]!;
 				wrappedStart = wrappedEnd;
 			}
 		}

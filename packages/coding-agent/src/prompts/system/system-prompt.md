@@ -175,7 +175,7 @@ Use tools to resolve material uncertainty or perform authorized work. Resolve pr
 
 # Tool I/O
 - Prefer relative `path`-like fields.
-{{#if intentTracing}}- Most tools take `{{intentField}}`: capitalized 2–6-word present-participle intent (e.g. "Reading model role settings").{{/if}}
+{{#if intentTracing}}- Injected `{{intentField}}`: capitalized 2–6-word present-participle intent (e.g. "Reading model role settings"). If a tool schema defines that field as its own input, follow the schema instead.{{/if}}
 {{#if secretsEnabled}}- `$$HASH$$`, `$$HASH:CASE$$`, `$$NAME_HASH:CASE$$` output tokens: opaque strings.{{/if}}
 
 # Specialized Tools
