@@ -155,6 +155,17 @@
 ### Fixed
 
 - Fixed short snapcompact PNGs being emitted below the minimum dimensions accepted by some vision backends ([#14355](https://github.com/can1357/oh-my-pi/issues/14355)).
+### Breaking Changes
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Fixed
+
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.6.1] - 2026-10-04
 
@@ -176,17 +187,6 @@
 ### Fixed
 
 - Fixed Ctrl+V on Windows sometimes pasting text with a few characters replaced by unrelated glyphs (for example `https://` turning into `՞ttp缀難//`); clipboard reads and writes no longer run at the same time ([#14144](https://github.com/can1357/oh-my-pi/pull/14144) by [@H4vC](https://github.com/H4vC))
-### Breaking Changes
-
-- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
-
-### Added
-
-- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
-
-### Fixed
-
-- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.4.10] - 2026-10-02
 

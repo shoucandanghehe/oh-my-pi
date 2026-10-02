@@ -402,6 +402,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"image-tokenization": { key: "imageTokenization", set: "catalog", shape: "object" },
 	"image-model": { key: "imageModel", set: "catalog", shape: "scalar" },
 	"inline-image-byte-budget": { key: "inlineImageByteBudget", set: "catalog", shape: "scalar" },
+	"image-edit-format": { key: "imageEditFormat", set: "catalog", shape: "scalar", values: ["multipart"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"prompt-cache": { key: "promptCache", set: "catalog", shape: "object" },

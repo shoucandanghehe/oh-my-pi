@@ -52,6 +52,9 @@
 ### Breaking Changes
 
 - Replaced the `cursorPosition` option of `TerminalQueryResponder` with `hostCursorHandshake`, which leaves only the PTY host's own session-start cursor query unanswered instead of every cursor-position query
+### Fixed
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.5.1] - 2026-10-03
 
@@ -75,9 +78,6 @@
 
 - Fixed SQLite error messages doubling every backslash in Windows database paths
 - Fixed corrupt-database recovery failing with `EBUSY` on Windows when several in-process openers of the same store failed at once
-### Fixed
-
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.4.12] - 2026-10-02
 
