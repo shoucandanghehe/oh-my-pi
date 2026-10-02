@@ -6,6 +6,7 @@
 
 - `/dump all` writes a zip to the temp directory with the main transcript, the LLM request JSON, and one file per subagent transcript (nested subagents included, killed ones marked aborted); the TUI copies the archive path to the clipboard. Plain `/dump` is unchanged ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
 - Audio and video files can now be attached from startup arguments or interactive `@file` mentions.
+- Custom image models can now use the OpenAI-compatible Images API in `models.yml`.
 
 ### Fixed
 

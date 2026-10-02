@@ -23,6 +23,15 @@ provider "openai-codex" {
 		kind "image"
 	}
 
+	// CLIProxyAPI exposes these image ids through its standalone Images API.
+	// They are configured explicitly; do not advertise them on the native Codex host.
+	on-api "openai-images" {
+		models "gpt-image-2.5" "gpt-image-2.5-flare" "gpt-image-2.5-sunburst" {
+			kind "image"
+			image-edit-format "multipart"
+		}
+	}
+
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
 	service-tier-cost {
 		flex 0.5

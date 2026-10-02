@@ -101,6 +101,7 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	else if (catalog.hostedImage === false) delete model.hostedImage;
 	if (typeof catalog.imageModel === "string") model.imageModel = catalog.imageModel;
 	else if (catalog.imageModel === false) delete model.imageModel;
+	if (catalog.imageEditFormat === "multipart") model.imageEditFormat = "multipart";
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
