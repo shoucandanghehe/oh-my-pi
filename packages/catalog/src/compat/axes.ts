@@ -546,6 +546,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * splits larger requests. Unassigned: the endpoint takes any batch size.
 	 */
 	"judgment-questions-max": { key: "judgmentQuestionsMax", set: "catalog", shape: "scalar" },
+	"image-edit-format": { key: "imageEditFormat", set: "catalog", shape: "scalar", values: ["multipart"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	/** Seeds `maxTokens` only when the row reports none; applied after `limits-patch`. */
 	"max-tokens-fallback": { key: "maxTokensFallback", set: "catalog", shape: "scalar" },
