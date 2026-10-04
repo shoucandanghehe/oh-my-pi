@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed native renderer transitions so applications can assemble semantic components before the first frame, and native input bypasses app-viewport interception. ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2))
 - Reduced background work during app-viewport tool animations while preserving offscreen content growth and scrolling.
 - Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
 - Workspace panes can retain their layout while hidden on small terminals, and nested panes support independent text selection and drag capture.

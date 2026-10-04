@@ -467,18 +467,17 @@ export class InputController {
 			// Defers to fullscreen overlays, which own mouse handling on the
 			// alternate screen.
 			this.ctx.ui.addInputListener(data => this.#handleInlineMouse(data));
-			if (this.ctx.workspaceEnabled) {
-				this.ctx.ui.setAppViewportClickHandler(event => {
-					if (!cfgTuiMouse.get(this.ctx.settings) || this.ctx.ui.hasOverlay()) return false;
-					if (event.motion) {
-						this.#updateHoverHighlight(event.row, event.col);
-						return false;
-					}
-					if (!event.leftClick || this.#viewportCandidates(event.row, event.col).length === 0) return false;
-					this.#focusClickedAgent(event.row, event.col);
-					return true;
-				});
-			}
+			this.ctx.ui.setAppViewportClickHandler(event => {
+				if (!this.ctx.workspaceEnabled || !cfgTuiMouse.get(this.ctx.settings) || this.ctx.ui.hasOverlay())
+					return false;
+				if (event.motion) {
+					this.#updateHoverHighlight(event.row, event.col);
+					return false;
+				}
+				if (!event.leftClick || this.#viewportCandidates(event.row, event.col).length === 0) return false;
+				this.#focusClickedAgent(event.row, event.col);
+				return true;
+			});
 		}
 		this.ctx.editor.onEscape = () => {
 			// `/mcp test` advertises Esc until each owner's post-settlement grace expires.

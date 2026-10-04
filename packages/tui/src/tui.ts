@@ -3324,8 +3324,8 @@ export class TUI extends Container {
 		this.#clearNativeConfirm();
 		const nativeWasLive = this.#nativeLive;
 		if (nativeWasLive) {
-			this.#native!.stop();
 			this.#nativeLive = false;
+			this.#native!.stop();
 		}
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
@@ -3675,7 +3675,7 @@ export class TUI extends Container {
 	}
 
 	#handleAppViewportInput(data: string): boolean {
-		if (!this.#appViewportBackend || this.hasOverlay()) return false;
+		if (this.#nativeLive || !this.#appViewportBackend || this.hasOverlay()) return false;
 		const inputOwner = this.#findAppViewportInputOwner();
 		if (data.startsWith("\x1b[<")) {
 			return this.#handleAppViewportMouse(data, inputOwner);
