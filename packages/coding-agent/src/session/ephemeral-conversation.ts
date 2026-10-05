@@ -23,6 +23,8 @@ export interface EphemeralConversationSideOptions {
 	readOnlyTools?: boolean;
 	/** Install `shareSummaryWithMain` for a user-approved BTW knowledge summary. */
 	shareSummaryWithMain?: (summary: string) => void | Promise<void>;
+	/** Present the exact summary for approval in the conversation's own view. */
+	approveSummary?: (summary: string, signal?: AbortSignal) => Promise<boolean>;
 }
 
 export interface EphemeralTurnResult {

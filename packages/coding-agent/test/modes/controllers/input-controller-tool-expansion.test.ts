@@ -67,7 +67,7 @@ describe("InputController tool activity visibility", () => {
 			hideToolActivity: false,
 			toolOutputExpanded: true,
 			settings,
-			chatContainer: { children, clear, addChild, setToolActivityVisible },
+			chatContainer: { children, clear, addChild, setToolActivityVisible, setExpanded: vi.fn() },
 			rebuildChatFromMessages,
 			showStatus,
 			ui: { clearInlineImages, resetDisplay },

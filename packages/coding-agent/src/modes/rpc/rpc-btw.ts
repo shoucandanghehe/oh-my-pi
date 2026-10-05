@@ -38,7 +38,7 @@ function toRpcRecord({ title: _title, ...record }: BtwHistoryRecord): RpcBtwHist
 }
 
 export class RpcBtwController {
-	readonly #session: Pick<AgentSession, "model" | "runEphemeralTurn" | "sessionManager">;
+	readonly #session: Pick<AgentSession, "model" | "createEphemeralConversation" | "sessionManager">;
 	readonly #output: (frame: RpcBtwOutputFrame) => void;
 	#store: BtwHistoryStore | undefined;
 	/** `sessionId \0 artifactsDir` the store was opened for. */
@@ -54,7 +54,7 @@ export class RpcBtwController {
 	readonly #unsaved = new Map<string, RunningBtw>();
 
 	constructor(
-		session: Pick<AgentSession, "model" | "runEphemeralTurn" | "sessionManager">,
+		session: Pick<AgentSession, "model" | "createEphemeralConversation" | "sessionManager">,
 		output: (frame: RpcBtwOutputFrame) => void,
 	) {
 		this.#session = session;

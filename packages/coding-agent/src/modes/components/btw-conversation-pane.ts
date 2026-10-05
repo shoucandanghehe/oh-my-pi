@@ -8,6 +8,7 @@ import {
 	componentContains,
 	type Focusable,
 	type MouseRoutable,
+	type OverlayHandle,
 	matchesKey,
 	padding,
 	renderTargeted,
@@ -16,6 +17,8 @@ import {
 	sliceWithWidth,
 	type TargetedRender,
 	type TextSelectionRange,
+	type SelectItem,
+	SelectList,
 	type TUI,
 	type ViewportHeightAware,
 	type VirtualRowAnchor,
@@ -30,12 +33,17 @@ import type { EphemeralConversationStatus, EphemeralConversationTurn } from "../
 import { sanitizeAssistantForReparentedHistory } from "../../session/messages";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { renderWorkspacePaneHeader } from "@oh-my-pi/pi-tui/chrome/shared";
-import { theme } from "@oh-my-pi/pi-tui/theme/theme";
+import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
 import type { ExtensionPresentationSource } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
+import { BtwShareSummaryDialog } from "./btw-share-summary-dialog";
 
+import { node, span } from "@oh-my-pi/pi-tui/native/describe";
+import type { DescribeContext, NativeNode, NativeSurface, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
+import { actionBar, actionButton } from "@oh-my-pi/pi-tui/native/overlay";
+import { SelectListSheet } from "@oh-my-pi/pi-tui/native/picker";
 export interface BtwThreadView {
 	readonly key: string;
 	readonly title: string;
@@ -67,6 +75,8 @@ export interface BtwThreadView {
 
 export interface BtwConversationPaneOptions {
 	ui: TUI;
+	/** This view owns a separate native surface, rather than a sheet on Main. */
+	nativePane?: boolean;
 	cwd: string;
 	expandKeys: readonly KeyId[];
 	hideThinkingBlock: () => boolean;
@@ -142,6 +152,9 @@ export class BtwConversationPane
 	readonly #statusKeys = new Set<string>();
 	#presentation: ExtensionPresentationSource | undefined;
 	#detachPresentation: (() => void) | undefined;
+	#menu: { kind: "threads" | "actions"; list: SelectList; handle: OverlayHandle } | undefined;
+	readonly #approvalLifetime = new AbortController();
+	#approvalTail = Promise.resolve();
 	readonly #scrollOffsets = new Map<string, number>();
 	#threads: readonly BtwThreadView[] = [];
 	#selectedKey: string | undefined;
@@ -164,6 +177,7 @@ export class BtwConversationPane
 	#width = 80;
 	#height = 20;
 	#abandoned = false;
+	readonly wantsKeyRelease = true;
 
 	constructor(options: BtwConversationPaneOptions) {
 		this.#options = options;
@@ -184,7 +198,7 @@ export class BtwConversationPane
 			},
 			editor: {
 				label: "Ask BTW",
-				placeholder: "Continue the side conversation…",
+				placeholder: "Ask a side question…",
 				images: true,
 				onSubmit: (input, images, key) => options.onSubmit(input, images, key),
 				autocompleteProvider: new CombinedAutocompleteProvider(BTW_SLASH_COMMANDS, options.cwd),
@@ -194,7 +208,9 @@ export class BtwConversationPane
 			belowEditor: this.#widgets.below,
 			getEditorTopBorder: availableWidth => options.statusLine.getTopBorder(availableWidth),
 			getPlaceholder: () =>
-				"No threads yet — type a question to start a durable BTW thread, or use /btw <question> from Main.",
+				this.#threads.length === 0
+					? "Ask a side question without interrupting Main."
+					: "Start this conversation with a question.",
 			getNotice: () => this.#selected()?.error,
 			onEditorChange: (text, images, imageLinks, key) => {
 				if (key && !this.#abandoned) this.#options.onDraftChange(key, text, images, imageLinks);
@@ -202,6 +218,196 @@ export class BtwConversationPane
 			onInput: (data, editorEmpty) => this.#handleInput(data, editorEmpty),
 			onClose: options.onClose,
 		});
+	}
+
+	async approveSummary(threadTitle: string, summary: string, signal?: AbortSignal): Promise<boolean> {
+		const lifetime = this.#approvalLifetime.signal;
+		const approvalSignal = signal ? AbortSignal.any([signal, lifetime]) : lifetime;
+		const previous = this.#approvalTail;
+		const finished = Promise.withResolvers<void>();
+		this.#approvalTail = finished.promise;
+		try {
+			await previous;
+			if (approvalSignal.aborted) return false;
+			const result = Promise.withResolvers<boolean>();
+			const finish = (approved: boolean): void => {
+				approvalSignal.removeEventListener("abort", abort);
+				overlay.hide();
+				this.#options.requestRender();
+				result.resolve(approved);
+			};
+			const abort = (): void => finish(false);
+			const dialog = new BtwShareSummaryDialog(threadTitle, summary, finish);
+			const overlay = this.#options.ui.showOverlay(dialog, { width: "80%", maxHeight: "80%" });
+			approvalSignal.addEventListener("abort", abort, { once: true });
+			if (approvalSignal.aborted) abort();
+			return await result.promise;
+		} finally {
+			finished.resolve();
+		}
+	}
+
+	readonly nativeOverlay = {
+		role: "omp.overlay.btw",
+		size: "lg",
+		anchor: "center",
+		head: "BTW threads",
+	} as const;
+
+	describeSurface(cx: DescribeContext): NativeSurface {
+		const surface = this.#pane.describeSurface(cx);
+		return { ...surface, main: [this.#describeHeader(), ...surface.main], dock: [this] };
+	}
+
+	describe(cx: DescribeContext): NativeNode {
+		const controls = [
+			...(this.#threads.length > 0
+				? [
+						actionButton(
+							`${this.#threads.length} ${this.#threads.length === 1 ? "thread" : "threads"}`,
+							"threads",
+							{ keys: "alt+t" },
+						),
+					]
+				: []),
+			actionButton("+", "new", { title: "New thread" }),
+			...(this.#selected() ? [actionButton("···", "more", { title: "Thread actions" })] : []),
+			null,
+			actionButton("Close", "close"),
+		];
+		const composer = node(
+			"col",
+			{ gap: "xs", shrink: 0 },
+			[actionBar(controls), this.#pane.describeComposer()],
+			"composer",
+		);
+		return this.#options.nativePane
+			? composer
+			: node("col", { grow: 1, gap: "sm" }, [this.#describeHeader(), this.#pane.describeTranscript(cx), composer]);
+	}
+
+	#describeHeader(): NativeNode {
+		const selected = this.#selected();
+		return node(
+			"row",
+			{ gap: "sm", align: "center", shrink: 0 },
+			[
+				node(
+					"text",
+					{
+						spans: [span(replaceTabs(selected?.title ?? "BTW"), "strong")],
+						grow: 1,
+						min: { w: 0 },
+						truncate: "end",
+					},
+					undefined,
+					"title",
+				),
+				...(selected?.phase === "running"
+					? [node("spinner", { label: "Replying" }, undefined, "running")]
+					: selected?.error
+						? [node("badge", { text: "Error", tone: "error" }, undefined, "error")]
+						: []),
+			],
+			"header",
+		);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		if (event.act === "threads") this.#openMenu("threads");
+		else if (event.act === "more") this.#openMenu("actions");
+		else this.#runNativeAction(event.act);
+	}
+
+	#runNativeAction(act: string): void {
+		if (act === "new") this.#startNewThread();
+		else if (act === "close") this.#options.onClose();
+		else if (this.#selectedKey) {
+			if (act === "copy-thread" && this.#options.canCopy(this.#selectedKey)) {
+				void this.#options.onCopy(this.#selectedKey).catch(() => {});
+			} else if (act === "delete") void this.#options.onCloseThread(this.#selectedKey);
+			else if (act === "promote") void this.#options.onPromoteThread(this.#selectedKey).catch(() => {});
+		}
+		this.#options.requestRender();
+	}
+
+	#menuItems(kind: "threads" | "actions"): SelectItem[] {
+		if (kind === "threads") {
+			return this.#threads.map(thread => ({
+				value: thread.key,
+				label: replaceTabs(thread.title),
+				description: [
+					thread.phase === "running" ? "Replying" : thread.phase,
+					thread.unread ? `${thread.unread} unread` : undefined,
+					thread.draft ? "Draft" : undefined,
+				]
+					.filter(Boolean)
+					.join(" · "),
+			}));
+		}
+		const selected = this.#selected();
+		if (!selected) return [];
+		return [
+			...(this.#options.canCopy(selected.key) ? [{ value: "copy-thread", label: "Copy conversation" }] : []),
+			...(selected.phase !== "running" && selected.turns.length > 0
+				? [{ value: "promote", label: "Promote to a new session" }]
+				: []),
+			{ value: "delete", label: "Delete thread" },
+		];
+	}
+
+	#openMenu(kind: "threads" | "actions"): void {
+		this.#closeMenu();
+		const items = this.#menuItems(kind);
+		if (items.length === 0) return;
+		const list = new SelectList(items, items.length, getSelectListTheme());
+		if (kind === "threads") list.setSelectedIndex(items.findIndex(item => item.value === this.#selectedKey));
+		const sheet =
+			kind === "threads"
+				? new SelectListSheet(
+						list,
+						{
+							title: "BTW threads",
+							noun: "threads",
+							searchable: true,
+							current: this.#selectedKey ? [this.#selectedKey] : [],
+						},
+						{ docked: false },
+					)
+				: undefined;
+		list.onSelect = item => {
+			this.#closeMenu();
+			if (kind === "threads") {
+				this.#persistCurrentDraft();
+				this.#previewKey = undefined;
+				this.#options.onSelectThread(item.value);
+			} else this.#runNativeAction(item.value);
+			this.#options.requestRender();
+		};
+		list.onCancel = () => this.#closeMenu();
+		const component: Component = {
+			render: width => list.render(width),
+			describe: cx => (sheet && cx.supports("picker") ? sheet.describe() : node("col", {}, [list])),
+			nativeSheet: cx => sheet !== undefined && cx.supports("picker"),
+			nativeOverlay:
+				kind === "actions" ? { role: "omp.overlay.btw.actions", size: "sm", head: "Thread actions" } : undefined,
+			handleInput: data => {
+				list.handleInput(data);
+				this.#options.requestRender();
+			},
+			handleNativeEvent: event => {
+				if (sheet?.handle(event)) this.#options.requestRender();
+			},
+		};
+		this.#menu = { kind, list, handle: this.#options.ui.showOverlay(component, { width: "60%" }) };
+	}
+
+	#closeMenu(): void {
+		const menu = this.#menu;
+		this.#menu = undefined;
+		menu?.handle.hide();
+		this.#options.requestRender();
 	}
 
 	get focused(): boolean {
@@ -242,6 +448,8 @@ export class BtwConversationPane
 		this.#threads = threads;
 		const selected = threads.find(thread => thread.key === selectedKey) ?? threads.at(-1);
 		this.#selectedKey = selected?.key;
+		if (previousSelected !== this.#selectedKey) this.#closeMenu();
+		else if (this.#menu) this.#menu.list.setItems(this.#menuItems(this.#menu.kind));
 		if (!threads.some(thread => thread.key === this.#previewKey)) this.#previewKey = undefined;
 		if (threads.length === 0) {
 			this.#railPeek = false;
@@ -394,6 +602,14 @@ export class BtwConversationPane
 	}
 
 	handleInput(data: string): void {
+		if (
+			this.#options.ui.nativeRendering &&
+			matchesKey(data, "escape") &&
+			!this.#pane.getPasteTarget()?.hasAutocomplete()
+		) {
+			this.#options.onClose();
+			return;
+		}
 		this.#pane.handleInput(data);
 	}
 
@@ -464,6 +680,8 @@ export class BtwConversationPane
 	}
 
 	dispose(): void {
+		this.#approvalLifetime.abort();
+		this.#closeMenu();
 		if (this.#hoverClearTimer) {
 			clearTimeout(this.#hoverClearTimer);
 			this.#hoverClearTimer = undefined;
@@ -479,7 +697,8 @@ export class BtwConversationPane
 
 	#handleInput(data: string, editorEmpty: boolean): boolean {
 		if (matchesKey(data, "alt+t")) {
-			this.#toggleRail();
+			if (this.#options.ui.nativeRendering) this.#openMenu("threads");
+			else this.#toggleRail();
 			return true;
 		}
 		// Consume the submit while the selected thread is streaming: the editor
@@ -642,6 +861,8 @@ export class BtwConversationPane
 		this.#displayedKey = displayed?.key;
 		if (displayed && displayed.key !== previousKey) this.#options.onDisplayThread?.(displayed.key);
 		this.#options.statusLine.setRuntimeStatus(displayed?.status, displayed?.title);
+		const editor = this.#pane.getPasteTarget();
+		if (editor) editor.disableSubmit = displayed?.phase === "running";
 		const samePresentation = this.#presentation === displayed?.extensionRunner;
 		this.#syncPresentation(displayed?.extensionRunner);
 		const sameRenderedRequest =

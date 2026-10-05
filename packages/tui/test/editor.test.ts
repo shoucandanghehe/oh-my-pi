@@ -71,6 +71,22 @@ describe("Editor component", () => {
 		});
 	});
 
+	it("keeps shifted text and IME commits when all keys use Kitty reporting", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const submitted = vi.fn();
+		editor.onSubmit = submitted;
+		editor.handleInput("\x1b[97;1;97u");
+		editor.handleInput("\x1b[97;2;65u");
+		editor.handleInput("\x1b[49;2;33u");
+		editor.handleInput("\x1b[0;;20013:25991u");
+		editor.handleInput("\x1b[0;1:3;20013:25991u");
+		expect(editor.getText()).toBe("aA!中文");
+		expect(submitted).not.toHaveBeenCalled();
+		editor.handleInput("\x1b[13u");
+		expect(submitted.mock.calls).toEqual([["aA!中文"]]);
+		expect(editor.getText()).toBe("");
+	});
+
 	describe("Submit/newline keybindings", () => {
 		it("submits on Ctrl+Enter when tui.input.submit is remapped to it (#8906)", () => {
 			setKeybindings(

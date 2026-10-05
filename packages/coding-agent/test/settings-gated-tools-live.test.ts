@@ -67,25 +67,27 @@ describe("settings-gated tools in a live session", () => {
 		await session.runToolRegistryMutation(async () => {});
 	}
 
-	const GREP_POLICY = "NEVER shell `grep`/`rg`/`awk`";
+	// Advice to prefer the available grep tool must track its live availability,
+	// independently of the prompt's surrounding prose and optional find advice.
+	const GREP_POLICY = /`grep`[^\n]*not shell[^\n]*`rg`[^\n]*`awk`/;
 
 	it("removes and restores grep in the request tools and system prompt", async () => {
 		const settings = Settings.isolated({});
 		const session = await startSession(settings);
 		expect(session.getActiveToolNames()).toContain("grep");
-		expect(session.systemPrompt.join("\n")).toContain(GREP_POLICY);
+		expect(session.systemPrompt.join("\n")).toMatch(GREP_POLICY);
 
 		cfgGrepEnabled.set(settings, false);
 		await settle(session);
 		expect(session.getActiveToolNames()).not.toContain("grep");
 		expect(session.getToolByName("grep")).toBeUndefined();
-		expect(session.systemPrompt.join("\n")).not.toContain(GREP_POLICY);
+		expect(session.systemPrompt.join("\n")).not.toMatch(GREP_POLICY);
 		expect(session.getActiveToolNames()).toContain("read");
 
 		cfgGrepEnabled.set(settings, true);
 		await settle(session);
 		expect(session.getActiveToolNames()).toContain("grep");
-		expect(session.systemPrompt.join("\n")).toContain(GREP_POLICY);
+		expect(session.systemPrompt.join("\n")).toMatch(GREP_POLICY);
 	});
 
 	it("never widens an explicit tool list", async () => {

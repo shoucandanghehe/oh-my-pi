@@ -459,11 +459,11 @@ describe("native working row", () => {
 });
 
 describe("native queued messages", () => {
-	it("counts the queue in the first pill only and edits through the dequeue path", () => {
+	it("counts the queue in the first pill only and edits the selected message", () => {
 		const onEdit = vi.fn();
 		const band = new QueuedMessagesBand(
 			[
-				{ label: "Steering", messages: ["one", "two"] },
+				{ label: "Steering", messages: ["one", "two"], liveSteered: 1 },
 				{ label: "After yield", messages: ["three"] },
 			],
 			"alt+up",
@@ -477,8 +477,16 @@ describe("native queued messages", () => {
 			undefined,
 			undefined,
 		]);
-		band.handleNativeEvent({ type: "action", key: "x/edit", act: "queue.edit", mods: [] });
-		expect(onEdit).toHaveBeenCalledTimes(1);
+		band.handleNativeEvent({ type: "action", key: "Steering/0/edit", act: "queue.edit", mods: [] });
+		expect(onEdit).toHaveBeenLastCalledWith(0, 0);
+		band.handleNativeEvent({ type: "action", key: "After yield/0/edit", act: "queue.edit", mods: [] });
+		expect(onEdit).toHaveBeenLastCalledWith(1, 0);
+		expect(onEdit).toHaveBeenCalledTimes(2);
+		band.handleNativeEvent({ type: "action", key: "missing/edit", act: "queue.edit", mods: [] });
+		expect(onEdit).toHaveBeenCalledTimes(2);
+		expect(byRole(pills[0]!, "omp.queue.edit")?.p).toMatchObject({
+			title: expect.stringContaining("Stop current response"),
+		});
 
 		const single = new QueuedMessagesBand([{ label: "Steering", messages: ["only"] }], "alt+up", onEdit);
 		expect(byRole(single.describe(), "omp.queue.count")).toBeUndefined();

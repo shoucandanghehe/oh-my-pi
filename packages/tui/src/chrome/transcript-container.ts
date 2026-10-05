@@ -501,6 +501,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	#entriesUnverified = false;
 	/** Block list handed to the native frame provider, reused while the children are unchanged. */
 	#nativeBlocks: readonly Component[] = [];
+	#nativeExpansionDirty = true;
 	#nativeNode: NativeNode | undefined;
 	#virtualEntries: VirtualBlockExtent[] = [];
 	#virtualRowIndex = new VirtualRowIndex();
@@ -638,6 +639,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#replayPending = false;
 		this.#replayRequested = false;
 		this.#lastViewportSpans = [];
+		this.#nativeExpansionDirty = true;
 		this.#virtualEntries = [];
 		this.#virtualRowIndex = new VirtualRowIndex();
 		this.#virtualMeasurementConfig = "";
@@ -715,6 +717,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#offered = offered;
 		this.#toolActivityVisible = toolActivityVisible;
 		this.#expanded = expanded;
+		this.#nativeExpansionDirty = true;
 		this.#lastFrame = lastFrame;
 		this.#virtualEntries = virtualEntries;
 		this.#virtualRowIndex = virtualRowIndex;
@@ -758,6 +761,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	setExpanded(expanded: boolean): void {
 		if (this.#expanded === expanded) return;
 		this.#expanded = expanded;
+		this.#nativeExpansionDirty = true;
 		this.#cancelVirtualWarmup();
 		for (const entry of this.#visibleVirtualEntries) this.#applyPresentationState(entry.component);
 		this.#generation++;
@@ -1419,8 +1423,11 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 		this.#syncEntries();
 		const children = this.children;
 		for (const child of children) {
+			if (this.#nativeExpansionDirty) setBlockExpanded(child, this.#expanded);
 			if (!isNativeSettled(child) && isBlockFinalized(child)) settleNative(child);
 		}
+		// Only a transcript-wide toggle overrides the terminal's per-card folds.
+		this.#nativeExpansionDirty = false;
 		const previous = this.#nativeBlocks;
 		if (previous.length === children.length && previous.every((child, index) => child === children[index])) {
 			return previous;
