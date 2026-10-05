@@ -458,6 +458,7 @@
 
 ### Fixed
 
+- Tern now retains its native transcript, tool cards, and editor with app-viewport enabled, and restores the workspace if TSP negotiation fails ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2)).
 - Reworked agent, planning, delegation, and recovery guidance around evidence-driven execution, scoped autonomy, explicit approval boundaries, and proportionate verification.
 - Inline `/btw` questions are now durable threads from creation; Enter opens the same thread without an upgrade or repeated request, and dismissing a panel keeps its history.
 - BTW threads can now use web and structural search, memory lookups, and read-only LSP/GitHub operations, including `xd://` devices, while mutation and execution tools remain blocked.
@@ -567,6 +568,14 @@
 
 - Removed the durable BTW `/refresh` command and refresh journal event so a thread's frozen Main context and promotion anchor remain immutable for its lifetime.
 - Removed redundant hover/click guidance and the duplicate thread-count heading from the BTW thread rail.
+
+## [18.6.2] - 2026-10-04
+
+### Fixed
+
+- Fixed snapcompact's short final frames preventing vision-backed sessions from continuing on backends that reject 32px-or-smaller images ([#14355](https://github.com/can1357/oh-my-pi/issues/14355)).
+- Fixed the agent's `goal` calls asking for approval under `--approval-mode write`, which paused goal-mode loops at `complete`; `always-ask` still prompts for goal changes but not `get` ([#14368](https://github.com/can1357/oh-my-pi/issues/14368))
+- Fixed MCP server connection progress popping up a toast for every server that connects or fails in native terminals such as Tern; it now shows only in the classic terminal transcript
 
 ## [18.6.1] - 2026-10-04
 

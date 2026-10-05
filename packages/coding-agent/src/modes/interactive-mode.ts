@@ -49,6 +49,7 @@ import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { col, kbd, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
+import { onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
@@ -1216,7 +1217,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	readonly terminalActivity: TerminalActivityController;
-	readonly workspaceEnabled: boolean;
+	get workspaceEnabled(): boolean {
+		return this.#workspaceLayout !== undefined && !this.ui.nativeRendering;
+	}
 	#workspaceLayout: WorkspaceLayout | undefined;
 	#mainScrollRoot: Container | undefined;
 	#mainStickyRoot: Container | undefined;
@@ -1957,8 +1960,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
-		this.workspaceEnabled = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
-		if (this.workspaceEnabled) {
+		if (Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport") {
 			this.#mainScrollRoot = new Container();
 			this.#mainStickyRoot = new Container();
 			const mainPane = new MainSessionPane({
@@ -2002,6 +2004,76 @@ export class InteractiveMode implements InteractiveModeContext {
 				createViewer: (id, close) => this.#createAgentWorkspaceViewer(id, close),
 			});
 		}
+	}
+
+	#mountRuntimeSurface(): void {
+		this.composer.setPreferences({ quiet: this.workspaceEnabled || cfgStartupQuiet.get(settings) });
+		if (this.workspaceEnabled && this.#workspaceLayout) {
+			this.composer.setRuntimeChildren([this.#workspaceLayout], { chrome: "omit" });
+			if (this.#agentRegistrySubscriptionTarget) {
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				for (const ref of registry.list()) this.#autoAgentWorkspace?.handleEvent({ type: "registered", ref });
+			}
+			return;
+		}
+		const workspace = this.#workspaceLayout;
+		if (workspace) {
+			this.#autoAgentWorkspace?.reset();
+			const mainFocus = this.editorContainer.children[0] ?? this.editor;
+			for (const overlay of this.ui.overlayStack) {
+				if (overlay.preFocus && workspace.containsComponent(overlay.preFocus)) overlay.preFocus = mainFocus;
+			}
+			this.#workspacePanes?.focusMain();
+		}
+		this.composer.setRuntimeChildren(
+			[
+				this.chatContainer,
+				this.pendingMessagesContainer,
+				this.todoContainer,
+				this.subagentContainer,
+				this.btwContainer,
+				this.reportContainer,
+				this.omfgContainer,
+				this.cleanseContainer,
+				this.errorBannerContainer,
+				this.modelCycleContainer,
+				this.deferredCommandContainer,
+				// Judge batches and automatic downloads stay editor-anchored and update
+				// independently of transcript output, directly above the working/throughput/title row.
+				this.progressHudContainer,
+				// Working loader / transient status sits below the sticky todo + subagent
+				// HUDs, just above the editor's hook-widget top margin — so it reads next to
+				// the prompt while keeping the one-line gap above the editor (the band
+				// composer collapses that gap so its status band sits flush).
+				this.statusContainer,
+				this.attachmentChipsContainer,
+				this.hookWidgetContainerAbove,
+				this.editorContainer,
+				this.hookWidgetContainerBelow,
+			],
+			{
+				// Inline dialogs, tall drafts and reports clip the transcript instead of retiring it.
+				transient: [this.editorContainer, this.reportContainer],
+				// Natively the HUD pills lead the dock, queued messages sit between
+				// the working row and the composer, and the attachment chips live
+				// inside the composer.
+				nativeDock: [
+					new HudPillsRow(this),
+					this.btwContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
+					this.modelCycleContainer,
+					this.deferredCommandContainer,
+					this.progressHudContainer,
+					this.statusContainer,
+					this.pendingMessagesContainer,
+					this.hookWidgetContainerAbove,
+					this.editorContainer,
+					this.hookWidgetContainerBelow,
+				],
+			},
+		);
 	}
 
 	#createAgentWorkspaceViewer(
@@ -2053,7 +2125,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async openAgentWorkspacePane(id: string): Promise<void> {
-		if (!this.#autoAgentWorkspace) {
+		if (!this.workspaceEnabled || !this.#autoAgentWorkspace) {
 			throw new Error("Agent workspace panes require the app-viewport render backend");
 		}
 		if (!this.#autoAgentWorkspace.openManual(id)) {
@@ -2063,7 +2135,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	previewSubagentExitAnimation(): void {
 		const workspacePanes = this.#workspacePanes;
-		if (!workspacePanes) {
+		if (!this.workspaceEnabled || !workspacePanes) {
 			this.showWarning("Petrification preview requires the app-viewport render backend");
 			return;
 		}
@@ -2100,6 +2172,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	openBtwWorkspacePane(component: Component): boolean {
+		if (!this.workspaceEnabled) return false;
 		return (
 			this.#workspacePanes?.open({
 				key: "btw",
@@ -2117,7 +2190,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	focusMainWorkspacePane(): void {
-		if (!this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
+		if (!this.workspaceEnabled || !this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
 	}
 
 	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
@@ -2148,7 +2221,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	isMainWorkspacePaneFocused(): boolean {
-		return !this.#workspaceLayout || this.#workspaceLayout.focusedPaneId === "main";
+		return !this.workspaceEnabled || this.#workspaceLayout?.focusedPaneId === "main";
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -2210,7 +2283,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	playWelcomeIntro(): void {
-		const welcome = this.#workspaceWelcome;
+		const welcome = this.workspaceEnabled ? this.#workspaceWelcome : undefined;
 		if (welcome) {
 			welcome.playIntro(() => this.ui.requestComponentRender(welcome));
 			return;
@@ -2310,7 +2383,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		});
 
-		if (this.workspaceEnabled) {
+		if (this.#workspaceLayout) {
 			const scrollRoot = this.#mainScrollRoot;
 			const stickyRoot = this.#mainStickyRoot;
 			const workspaceLayout = this.#workspaceLayout;
@@ -2344,63 +2417,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			stickyRoot.addChild(this.hookWidgetContainerAbove);
 			stickyRoot.addChild(this.editorContainer);
 			stickyRoot.addChild(this.hookWidgetContainerBelow);
-			this.composer.setHeaderExtras([], []);
-			this.composer.setRuntimeChildren([workspaceLayout], { chrome: "omit" });
-			if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
-		} else {
-			this.#workspaceWelcome = undefined;
-			this.composer.setHeaderExtras(headerBefore, headerAfter);
-			this.composer.setStatusComponent(this.statusLine);
-			this.composer.setRuntimeChildren(
-				[
-					this.chatContainer,
-					this.pendingMessagesContainer,
-					this.todoContainer,
-					this.subagentContainer,
-					this.btwContainer,
-					this.reportContainer,
-					this.omfgContainer,
-					this.cleanseContainer,
-					this.errorBannerContainer,
-					this.modelCycleContainer,
-					this.deferredCommandContainer,
-					// Judge batches and automatic downloads stay editor-anchored and update
-					// independently of transcript output, directly above the working/throughput/title row.
-					this.progressHudContainer,
-					// Working loader / transient status sits below the sticky todo + subagent
-					// HUDs, just above the editor's hook-widget top margin — so it reads next to
-					// the prompt while keeping the one-line gap above the editor (the band
-					// composer collapses that gap so its status band sits flush).
-					this.statusContainer,
-					this.attachmentChipsContainer,
-					this.hookWidgetContainerAbove,
-					this.editorContainer,
-					this.hookWidgetContainerBelow,
-				],
-				{
-					// Inline dialogs, tall drafts and reports clip the transcript instead of retiring it.
-					transient: [this.editorContainer, this.reportContainer],
-					// Natively the HUD pills lead the dock, queued messages sit between
-					// the working row and the composer, and the attachment chips live
-					// inside the composer.
-					nativeDock: [
-						new HudPillsRow(this),
-						this.btwContainer,
-						this.omfgContainer,
-						this.cleanseContainer,
-						this.errorBannerContainer,
-						this.modelCycleContainer,
-						this.deferredCommandContainer,
-						this.progressHudContainer,
-						this.statusContainer,
-						this.pendingMessagesContainer,
-						this.hookWidgetContainerAbove,
-						this.editorContainer,
-						this.hookWidgetContainerBelow,
-					],
-				},
-			);
 		}
+		this.composer.setHeaderExtras(headerBefore, headerAfter);
+		this.composer.setStatusComponent(this.statusLine);
+		this.#mountRuntimeSurface();
+		this.#eventBusUnsubscribers.push(onNativeRenderingChange(() => this.#mountRuntimeSurface()));
+		if (this.workspaceEnabled && !options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 
@@ -3961,7 +3983,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				this.syncRunningSubagentBadge();
-				this.#autoAgentWorkspace?.handleEvent(event);
+				if (this.workspaceEnabled) this.#autoAgentWorkspace?.handleEvent(event);
 			});
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
