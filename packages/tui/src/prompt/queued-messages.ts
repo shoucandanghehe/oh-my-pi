@@ -12,22 +12,26 @@ import { theme } from "../theme/theme";
 export interface QueuedMessageGroup {
 	readonly label: string;
 	readonly messages: readonly string[];
+	/** Leading entries already sent into the current provider response. */
+	readonly liveSteered?: number;
 }
 
 /**
  * Messages queued while the agent works, above the editor. ANSI: a heading
  * per group, numbered dim rows and the dequeue hint. Natively (§8.1): a
  * stack of pills, each `corner-down-right` · the text · `⌥↑ Edit`, the total
- * (`N queued`, not a position) in the first pill when more than one waits; the edit control sends
- * `queue.edit`, answered like the dequeue key.
+ * (`N queued`, not a position) in the first pill when more than one waits;
+ * each edit control restores its own message, while the keyboard hint retains
+ * the last-message dequeue.
  */
 export class QueuedMessagesBand extends Container {
 	readonly #native: NativeNode;
+	readonly #editTargets = new Map<string, { group: number; index: number }>();
 
 	constructor(
 		groups: readonly QueuedMessageGroup[],
 		dequeueKey: KeyId,
-		private readonly onEdit: () => void,
+		private readonly onEdit: (group: number, index: number) => void,
 	) {
 		super();
 		this.addChild(new Spacer(1));
@@ -46,8 +50,10 @@ export class QueuedMessagesBand extends Container {
 
 		const count = groups.reduce((sum, group) => sum + group.messages.length, 0);
 		const pills: NativeNode[] = [];
-		for (const group of groups) {
+		groups.forEach((group, groupIndex) => {
 			group.messages.forEach((message, index) => {
+				this.#editTargets.set(`${group.label}/${index}/edit`, { group: groupIndex, index });
+				const live = index < (group.liveSteered ?? 0);
 				const children: NativeNode[] = [
 					node("icon", { name: "corner-down-right" }, undefined, "icon"),
 					node(
@@ -79,10 +85,10 @@ export class QueuedMessagesBand extends Container {
 							role: "omp.queue.edit",
 							gap: "xs",
 							align: "center",
-							title: editTitle,
+							title: live ? `Stop current response and edit  ${formatTooltipKey(dequeueKey)}` : editTitle,
 							actions: { click: "queue.edit" },
 						},
-						[kbd(dequeueKey), text("Edit")],
+						[kbd(dequeueKey), text(live ? "Stop & edit" : "Edit")],
 						"edit",
 					),
 				);
@@ -95,7 +101,7 @@ export class QueuedMessagesBand extends Container {
 					),
 				);
 			});
-		}
+		});
 		this.#native = node("col", { role: "omp.queue", gap: "xs" }, pills);
 	}
 
@@ -103,8 +109,10 @@ export class QueuedMessagesBand extends Container {
 		return this.#native;
 	}
 
-	/** The pills' Edit control: the dequeue key's path (queued messages back into the editor). */
+	/** Restore the message belonging to the clicked pill, not an unrelated last entry. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "queue.edit") this.onEdit();
+		if (event.type !== "action" || event.act !== "queue.edit") return;
+		const target = this.#editTargets.get(event.key);
+		if (target) this.onEdit(target.group, target.index);
 	}
 }

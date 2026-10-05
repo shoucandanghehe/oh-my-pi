@@ -484,18 +484,17 @@ export class InputController {
 			// Defers to fullscreen overlays, which own mouse handling on the
 			// alternate screen.
 			this.ctx.ui.addInputListener(data => this.#handleInlineMouse(data));
-			if (this.ctx.workspaceEnabled) {
-				this.ctx.ui.setAppViewportClickHandler(event => {
-					if (!cfgTuiMouse.get(this.ctx.settings) || this.ctx.ui.hasOverlay()) return false;
-					if (event.motion) {
-						this.#updateHoverHighlight(event.row, event.col);
-						return false;
-					}
-					if (!event.leftClick || this.#viewportCandidates(event.row, event.col).length === 0) return false;
-					this.#focusClickedAgent(event.row, event.col);
-					return true;
-				});
-			}
+			this.ctx.ui.setAppViewportClickHandler(event => {
+				if (!this.ctx.workspaceEnabled || !cfgTuiMouse.get(this.ctx.settings) || this.ctx.ui.hasOverlay())
+					return false;
+				if (event.motion) {
+					this.#updateHoverHighlight(event.row, event.col);
+					return false;
+				}
+				if (!event.leftClick || this.#viewportCandidates(event.row, event.col).length === 0) return false;
+				this.#focusClickedAgent(event.row, event.col);
+				return true;
+			});
 		}
 		this.ctx.editor.onEscape = () => {
 			// `/mcp test` advertises Esc until each owner's post-settlement grace expires.
@@ -735,7 +734,13 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showSessionSelector());
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.message.followUp")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleFollowUp());
+			this.ctx.editor.setCustomKeyHandler(key, () => {
+				if (this.ctx.ui.nativeRendering && key === "ctrl+enter") {
+					this.ctx.editor.insertNewLine();
+				} else {
+					void this.handleFollowUp();
+				}
+			});
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
@@ -1671,6 +1676,13 @@ export class InputController {
 	handleDequeue(): void {
 		const popped = this.#popLastQueuedMessage();
 		if (!popped) {
+			const liveSteered = this.ctx.viewSession.getQueuedMessages().liveSteered;
+			const edit =
+				liveSteered > 0 ? this.ctx.viewSession.getQueuedMessageEditAction("steering", liveSteered - 1) : undefined;
+			if (edit) {
+				void this.handleQueuedMessageEdit(edit);
+				return;
+			}
 			this.ctx.showStatus("No queued messages to restore");
 			return;
 		}
@@ -1680,6 +1692,29 @@ export class InputController {
 		this.ctx.locallySubmittedUserSignatures.delete(`${popped.text}\u0000${popped.images?.length ?? 0}`);
 		this.#restoreEntriesToEditor([popped]);
 		this.ctx.showStatus("Restored last queued message to editor");
+	}
+
+	async handleQueuedMessageEdit(
+		edit: (beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>,
+	): Promise<void> {
+		try {
+			const restored = await edit(() => {
+				if (this.ctx.focusedAgentId) return;
+				if (this.ctx.loopModeEnabled) this.ctx.pauseLoop();
+				this.ctx.cancelPendingSubmission();
+			});
+			if (!restored) {
+				this.ctx.updatePendingMessagesDisplay();
+				this.ctx.showStatus("Queued message is no longer available to edit");
+				return;
+			}
+			this.ctx.locallySubmittedUserSignatures.delete(`${restored.text}\u0000${restored.images?.length ?? 0}`);
+			this.#restoreEntriesToEditor([restored]);
+			this.ctx.showStatus("Restored queued message to editor");
+		} catch (error) {
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	/**
@@ -2812,6 +2847,7 @@ export class InputController {
 
 		if (!this.ctx.hideToolActivity) {
 			this.ctx.toolOutputExpanded = false;
+			this.ctx.chatContainer.setExpanded(false);
 		}
 
 		for (const child of this.ctx.chatContainer.children) {

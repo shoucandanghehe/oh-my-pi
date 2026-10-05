@@ -53,6 +53,8 @@ afterEach(() => {
 describe("write figures", () => {
 	it("draws an svg under its card as it streams, and holds retirement until the final raster lands", async () => {
 		const write = streamingWrite("logo.svg", SVG.slice(0, -"</svg>".length));
+		// A spinner tick must not be needed to reveal the raster.
+		write.component.stopAnimation();
 		const partial = write.changed();
 		expect(hasImage(write.component.render(80))).toBe(false);
 		await partial;

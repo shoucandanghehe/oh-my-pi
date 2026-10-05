@@ -193,6 +193,11 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
  */
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
+	/** Structured facts for tool approval; args are the input that will execute. */
+	toolApproval?: {
+		toolName: string;
+		args: unknown;
+	};
 	timeout?: number;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;

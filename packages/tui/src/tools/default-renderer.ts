@@ -204,7 +204,7 @@ export function describeDefaultToolExecution(input: DefaultToolRenderInput): Nat
 	if (!result) return { tool };
 	const output = result.output.trimEnd();
 	const tone = result.skipped ? "info" : result.isError ? "error" : undefined;
-	if (!output) return { tool, tone, body: [noteText("(no output)")] };
+	if (!output) return { tool, tone, body: result.hasAttachments ? [] : [noteText("(no output)")] };
 	if (isTreeSafeJson(output)) {
 		let parsed: unknown;
 		try {

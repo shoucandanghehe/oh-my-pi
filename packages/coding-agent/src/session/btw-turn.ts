@@ -2,11 +2,11 @@
  * Headless `/btw` turn lifecycle shared by the TUI controller and RPC mode:
  * record bookkeeping for a new topic or follow-up, and the ephemeral model turn.
  */
-import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
-import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
+import { Snowflake } from "@oh-my-pi/pi-utils";
+import btwConversationPrompt from "../prompts/system/btw-conversation.md" with { type: "text" };
 import type { AgentSession } from "./agent-session";
 import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwTurns } from "./btw-history";
+import type { EphemeralConversationTurn, EphemeralTurnResult } from "./ephemeral-conversation";
 
 export interface BtwTurnStart {
 	/** The record with the new turn appended, status `running`. */
@@ -45,7 +45,7 @@ export function patchLatestBtwTurn(record: BtwHistoryRecord, patch: Partial<BtwH
  * Not `async`: returns the session's own promise so callers settle on the same tick as the turn.
  */
 export function runBtwTurn(
-	session: Pick<AgentSession, "model" | "runEphemeralTurn">,
+	session: Pick<AgentSession, "model" | "createEphemeralConversation">,
 	args: {
 		question: string;
 		history?: readonly BtwHistoryTurn[];
@@ -53,42 +53,41 @@ export function runBtwTurn(
 		onTextDelta: (delta: string) => void;
 		signal: AbortSignal;
 	},
-): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
+): Promise<EphemeralTurnResult> {
 	const model = session.model;
 	if (!model) throw new Error("No active model available for /btw.");
-	const history: Message[] = [];
+	const history: EphemeralConversationTurn[] = [];
 	for (const turn of args.history ?? []) {
-		history.push({
-			role: "user",
-			content: [{ type: "text", text: prompt.render(btwUserPrompt, { question: turn.question }) }],
-			attribution: "agent",
-			timestamp: turn.createdAt,
-		});
 		if (!turn.answer) continue;
-		// Saved BTW history contains visible text, not provider-native reasoning
-		// or replay signatures. These are context messages, not new billed turns.
 		history.push({
-			role: "assistant",
-			content: [{ type: "text", text: turn.answer }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			input: turn.question,
+			replyText: turn.answer,
+			timestamp: turn.createdAt,
+			assistantMessage: {
+				role: "assistant",
+				content: [{ type: "text", text: turn.answer }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: turn.updatedAt,
 			},
-			stopReason: "stop",
-			timestamp: turn.updatedAt,
 		});
 	}
-	return session.runEphemeralTurn({
-		promptText: prompt.render(btwUserPrompt, { question: args.question }),
-		history,
-		conversationKey: args.conversationKey,
+	const conversation = session.createEphemeralConversation(
+		btwConversationPrompt,
+		{ turns: history, sideSessionId: args.conversationKey },
+		model,
+	);
+	return conversation.prompt(args.question, {
 		// /btw answers are read in full and saved to history: keep the
 		// repeated-line collapse, but not the 4 KiB cap meant for one-liners.
 		replyMaxBytes: Number.POSITIVE_INFINITY,

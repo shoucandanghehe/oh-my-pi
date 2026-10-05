@@ -174,14 +174,15 @@ export class BtwPanelComponent extends OverlayPanel {
 
 	#describeFooter(canFollowUp: boolean, canBranch: boolean): NativeNode {
 		const esc: NativeHint = { keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "to close" };
+		const open: NativeHint[] = this.#canOpenThread ? [{ keys: ["enter"], label: "open thread" }] : [];
 		switch (this.#state) {
 			case "running":
-				return hintsRow([{ ...esc, label: "to cancel" }]);
+				return hintsRow([...open, { ...esc, label: "to cancel" }]);
 			case "complete": {
-				const hints: NativeHint[] = [];
+				const hints: NativeHint[] = [...open];
 				if (this.isCopyable()) hints.push({ keys: ["c"], label: this.#copied ? "to copy again" : "to copy" });
 				if (canFollowUp) hints.push({ keys: ["f"], label: "to follow up" });
-				if (canBranch) hints.push({ keys: ["b"], label: "to branch" });
+				if (canBranch) hints.push({ keys: ["b"], label: this.#canOpenThread ? "promote to chat" : "to branch" });
 				hints.push(esc);
 				if (!this.#copied) return hintsRow(hints);
 				return statusHintsRow([span("✓ Copied to clipboard", "success")], hints);
@@ -189,9 +190,9 @@ export class BtwPanelComponent extends OverlayPanel {
 			case "branching":
 				return text([span(`${theme.status.pending} Branching to chat…`, "muted")]);
 			case "aborted":
-				return statusHintsRow([span(`${theme.status.warning} Cancelled`, "warning")], [esc]);
+				return statusHintsRow([span(`${theme.status.warning} Cancelled`, "warning")], [...open, esc]);
 			case "error":
-				return statusHintsRow([span(`${theme.status.error} Error`, "error")], [esc]);
+				return statusHintsRow([span(`${theme.status.error} Error`, "error")], [...open, esc]);
 		}
 	}
 

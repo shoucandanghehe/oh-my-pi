@@ -1592,6 +1592,14 @@ mod tests {
 		};
 		assert_eq!(dims(&stretched(&"x".repeat(20 * 12))), (120, 72));
 		assert_eq!(dims(&stretched("0123456789ab")), (120, 64));
+		let narrow = render("0123456789ab", SnapcompactRenderOptions {
+			size: 60,
+			font: Some("8x8".into()),
+			cell_width: Some(6),
+			cell_height: Some(6),
+			..Default::default()
+		});
+		assert_eq!(dims(&narrow), (60, 64));
 	}
 
 	#[test]

@@ -16,6 +16,17 @@ Example hooks (`HookAPI` factories) for intercepting tool calls, adding safety g
 ### [custom-tools/](custom-tools/)
 Example custom tools that extend the agent's capabilities.
 
+### [tern/omp-workspace/](tern/omp-workspace/)
+Tern window plugin that evenly splits native OMP agent and BTW panes when they open or close, without changing focus. It also resets custom split ratios in their tab.
+
+Install once (verified with Tern 0.7.3):
+
+```sh
+tern plugin install /path/to/oh-my-pi/packages/coding-agent/examples/tern/omp-workspace
+```
+
+On WSL, give the Windows Tern CLI a Windows path, such as `\\wsl.localhost\<distribution>\home\<user>\code\oh-my-pi\packages\coding-agent\examples\tern\omp-workspace`. Existing panes are discovered on the next window start; new panes are recognized after their first native frame.
+
 ## Documentation
 
 - [SDK Reference](sdk/README.md)

@@ -26,11 +26,18 @@ import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
-import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
+import { assumedTspHello, NativeBackend, type NativeBackendOptions, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
-import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
+import type {
+	DescribeContext,
+	NativeNode,
+	NativeScreen,
+	NativeSurface,
+	NativeSurfaceProvider,
+	NativeUiEvent,
+} from "./native/node";
 import { withAnimationOnlyRenderTargets } from "./render-targets";
 import { cropSixelTop } from "./sixel";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
@@ -240,6 +247,8 @@ export type PaintListener = (paint: TuiPaint) => void;
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
 	onPaint?: PaintListener;
+	debugServer?: boolean;
+	nativeSurfaceMode?: NativeBackendOptions["mode"];
 }
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
@@ -362,6 +371,9 @@ export interface Component {
 	 * changed; return null to fall back to `render()` rows.
 	 */
 	describe?(cx: DescribeContext): NativeNode | null;
+
+	/** A sole root component may own the native transcript and sticky bottom regions. */
+	describeSurface?(cx: DescribeContext): NativeSurface;
 
 	/**
 	 * Props for the native `overlay` wrapper when this component is shown as
@@ -1782,6 +1794,7 @@ export class TUI extends Container {
 	#appViewportRootLines = new Map<Component, readonly string[]>();
 	#appViewportRootWidth = -1;
 	#appViewportActive = false;
+	#appViewportKeyboardOnEntry = false;
 	#appViewportPixelMouseSupported = false;
 	#appViewportCellSizeKnown = false;
 	#appViewportPixelMouseActive = false;
@@ -1874,6 +1887,9 @@ export class TUI extends Container {
 	// stop/start so a restart adopts the surface.
 	#native: NativeBackend | undefined;
 	#nativeLive = false;
+	#nativeRenderingListeners = new Set<(active: boolean) => void>();
+	#debugServerEnabled: boolean;
+	readonly #nativeSurfaceMode: NativeBackendOptions["mode"];
 	// Holds the first paint while the `hello` probe is outstanding, so a TSP
 	// terminal never sees a row paint it would have to erase.
 	#nativeHoldTimer: RenderTimer | undefined;
@@ -1907,6 +1923,8 @@ export class TUI extends Container {
 		super();
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
+		this.#debugServerEnabled = options?.debugServer !== false;
+		this.#nativeSurfaceMode = options?.nativeSurfaceMode;
 		if (options?.onPaint) this.#paintListeners.add(options.onPaint);
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
@@ -2386,7 +2404,7 @@ export class TUI extends Container {
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
 		const debugPath = process.env.OMP_TUI_DEBUG;
-		if (debugPath !== undefined && debugPath.length > 0) {
+		if (this.#debugServerEnabled && debugPath !== undefined && debugPath.length > 0) {
 			this.#debugServer = new TuiDebugServer(this, debugPath);
 			this.#debugServer.start();
 		}
@@ -2546,6 +2564,12 @@ export class TUI extends Container {
 		return this.#nativeLive;
 	}
 
+	/** Observe this TUI's renderer, independently of other live native panes. */
+	onNativeRenderingChange(listener: (active: boolean) => void): () => void {
+		this.#nativeRenderingListeners.add(listener);
+		return () => this.#nativeRenderingListeners.delete(listener);
+	}
+
 	/**
 	 * Close the TSP surfaces ahead of {@link stop}, before the exit drains
 	 * input: the terminal answers nothing once they are closed, and whatever it
@@ -2609,8 +2633,12 @@ export class TUI extends Container {
 			return;
 		}
 		this.#native = new NativeBackend(this.#nativeHost(), hello, {
+			mode: this.#nativeSurfaceMode,
 			mirror: this.#debugServer !== undefined,
 			scheduler: this.#renderScheduler === DEFAULT_RENDER_SCHEDULER ? undefined : this.#renderScheduler,
+			onRenderingChange: active => {
+				for (const listener of this.#nativeRenderingListeners) listener(active);
+			},
 		});
 		this.#native.start();
 	}
@@ -2662,6 +2690,7 @@ export class TUI extends Container {
 		this.#cancelResizeProbe();
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
+		this.#leaveAppViewport();
 		if (this.#altActive || this.#resizeAltActive) {
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#altScreenExit()}`);
 			setAltScreenActive(false);
@@ -2690,6 +2719,8 @@ export class TUI extends Container {
 					| (TerminalFrameProvider & Partial<NativeSurfaceProvider>)
 					| undefined;
 				if (provider?.describeSurface) return provider.describeSurface(cx);
+				const root = this.children.length === 1 ? this.children[0] : undefined;
+				if (root?.describeSurface) return root.describeSurface(cx);
 				return { main: this.children, dock: [] };
 			},
 			overlays: () => {
@@ -3513,8 +3544,10 @@ export class TUI extends Container {
 	#enterAppViewport(hoverMouse: boolean): void {
 		if (this.#appViewportActive) return;
 		const pixelMouse = this.#appViewportPixelMouseSupported && this.#appViewportCellSizeKnown;
+		const keyboardEnter = this.#keyboardEnhancementEnter();
+		this.#appViewportKeyboardOnEntry = keyboardEnter !== "";
 		this.terminal.write(
-			`\x1b[?1049h${hoverMouse ? APP_VIEWPORT_HOVER_TRACKING_ON : APP_VIEWPORT_MOUSE_TRACKING_ON}${pixelMouse ? APP_VIEWPORT_PIXEL_MOUSE_ON : ""}`,
+			`\x1b[?1049h${keyboardEnter}${hoverMouse ? APP_VIEWPORT_HOVER_TRACKING_ON : APP_VIEWPORT_MOUSE_TRACKING_ON}${pixelMouse ? APP_VIEWPORT_PIXEL_MOUSE_ON : ""}`,
 		);
 		this.terminal.hideCursor();
 		this.#appViewportActive = true;
@@ -3537,6 +3570,36 @@ export class TUI extends Container {
 		this.#appViewportSelectionDrag = false;
 		this.#appViewportLastClick = null;
 	}
+	#leaveAppViewport(): void {
+		if (!this.#appViewportActive) return;
+		// Deferred startup can first enable the keyboard mode inside this alt
+		// screen. Move that frame to main instead of leaving it behind.
+		const keyboardTransfer = this.#appViewportKeyboardOnEntry ? "" : this.#keyboardEnhancementEnter();
+		this.terminal.write(
+			`${APP_VIEWPORT_MOUSE_TRACKING_OFF}${this.#keyboardEnhancementExit()}\x1b[?1049l${keyboardTransfer}`,
+		);
+		this.#appViewportActive = false;
+		this.#appViewportPixelMouseActive = false;
+		this.#appViewportHoverMouseActive = false;
+		this.#appViewportVisibleSourceRows = [];
+		this.#appViewportFrameLines = [];
+		this.#appViewportFramePreparedRows = [];
+		this.#appViewportComposeStale = true;
+		this.#appViewportFrameCursorPos = null;
+		this.#appViewportPreviousScrollRegionEnd = undefined;
+		this.#clearAppViewportSelection();
+		this.#appViewportSelectionDrag = false;
+		this.#stopAppViewportSelectionAutoScroll();
+		this.#appViewportLastClick = null;
+		this.#appViewportPreviousLines = [];
+		this.#appViewportPreparedRows = [];
+		this.#appViewportPreviousSixelRows = [];
+		this.#appViewportPreviousScrollbarGlyphs = [];
+		this.#appViewportPreviousWidth = 0;
+		this.#appViewportScrollbarMetrics = null;
+		this.#appViewportScrollbarDrag = null;
+	}
+
 	stop(): void {
 		this.#appearanceReportUnsubscribe?.();
 		this.#appearanceReportUnsubscribe = undefined;
@@ -3549,8 +3612,8 @@ export class TUI extends Container {
 		this.#clearNativeConfirm();
 		const nativeWasLive = this.#nativeLive;
 		if (nativeWasLive) {
-			this.#native!.stop();
 			this.#nativeLive = false;
+			this.#native!.stop();
 		}
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
@@ -3565,29 +3628,7 @@ export class TUI extends Container {
 		this.#resizeInPlaceActive = false;
 		this.#altToggleEchoPending = false;
 		this.#cancelResizeProbe();
-		if (this.#appViewportActive) {
-			this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}\x1b[?1049l`);
-			this.#appViewportActive = false;
-			this.#appViewportPixelMouseActive = false;
-			this.#appViewportHoverMouseActive = false;
-			this.#appViewportVisibleSourceRows = [];
-			this.#appViewportFrameLines = [];
-			this.#appViewportFramePreparedRows = [];
-			this.#appViewportComposeStale = true;
-			this.#appViewportFrameCursorPos = null;
-			this.#appViewportPreviousScrollRegionEnd = undefined;
-			this.#clearAppViewportSelection();
-			this.#appViewportSelectionDrag = false;
-			this.#stopAppViewportSelectionAutoScroll();
-			this.#appViewportLastClick = null;
-			this.#appViewportPreviousLines = [];
-			this.#appViewportPreparedRows = [];
-			this.#appViewportPreviousSixelRows = [];
-			this.#appViewportPreviousScrollbarGlyphs = [];
-			this.#appViewportPreviousWidth = 0;
-			this.#appViewportScrollbarMetrics = null;
-			this.#appViewportScrollbarDrag = null;
-		}
+		this.#leaveAppViewport();
 		if (this.#resizeAltActive) {
 			this.#resizeAltActive = false;
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#altScreenExit()}`);
@@ -3908,7 +3949,7 @@ export class TUI extends Container {
 	}
 
 	#handleAppViewportInput(data: string): boolean {
-		if (!this.#appViewportBackend || this.hasOverlay()) return false;
+		if (this.#nativeLive || !this.#appViewportBackend || this.hasOverlay()) return false;
 		const inputOwner = this.#findAppViewportInputOwner();
 		if (data.startsWith("\x1b[<")) {
 			return this.#handleAppViewportMouse(data, inputOwner);
@@ -6407,6 +6448,16 @@ export class TUI extends Container {
 				this.#appViewportPreparedRows = preparedRows;
 				if (kittyCleanup) this.terminal.write(this.#paintBeginSequence + kittyCleanup + this.#paintEndSequence);
 				this.#writeAppViewportCursor(fittedCursorPos, height);
+				if (this.#paintListeners.size > 0) {
+					this.#notifyPaint({
+						history: [],
+						viewport: appendBrailleScrollbar(fitted, scrollbarGlyphs, width),
+						reset: false,
+						alt: false,
+						columns: width,
+						rows: height,
+					});
+				}
 				return;
 			}
 		}
@@ -6456,6 +6507,16 @@ export class TUI extends Container {
 		this.#appViewportPreviousWidth = width;
 		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
 		else this.#recordHardwareCursorHidden();
+		if (this.#paintListeners.size > 0) {
+			this.#notifyPaint({
+				history: [],
+				viewport: appendBrailleScrollbar(fitted, scrollbarGlyphs, width),
+				reset: false,
+				alt: false,
+				columns: width,
+				rows: height,
+			});
+		}
 	}
 
 	#appViewportPaintRows(

@@ -15,6 +15,9 @@ import {
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
 	isUserTurnInitiator,
+	BTW_SUMMARY_MESSAGE_TYPE,
+	type BtwSummary,
+	type BtwSummaryMessageDetails,
 } from "@oh-my-pi/pi-tui/chat/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -24,6 +27,10 @@ export {
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 	DEFAULT_CUSTOM_MESSAGE_TYPE,
 	LIVE_DELEGATION_MESSAGE_TYPE,
+	BTW_SUMMARY_MESSAGE_TYPE,
+	type BtwSummarySource,
+	type BtwSummary,
+	type BtwSummaryMessageDetails,
 	type CustomMessageContent,
 	type CustomMessagePayload,
 	type NormalizedCustomMessagePayload,
@@ -70,18 +77,6 @@ export {
 
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { titleTextFromSkillPrompt } from "@oh-my-pi/pi-tui/chat/skill-title-input";
-
-export const BTW_SUMMARY_MESSAGE_TYPE = "btw:summary";
-export interface BtwSummarySource {
-	threadKey: string;
-	threadTitle: string;
-}
-export interface BtwSummary extends BtwSummarySource {
-	summary: string;
-}
-export interface BtwSummaryMessageDetails {
-	summaries: BtwSummary[];
-}
 
 export function createBtwSummaryMessage(summaries: BtwSummary[]): CustomMessage<BtwSummaryMessageDetails> {
 	return {

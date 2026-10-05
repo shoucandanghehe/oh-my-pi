@@ -32,8 +32,14 @@ function makeCtx(opts: QueueContextOptions = {}) {
 	const session = {
 		popLastQueuedMessage: () => queue.pop(),
 		clearQueue,
+		getQueuedMessages: () => ({ steering: [], followUp: queue.map(entry => entry.text), liveSteered: 0 }),
 	};
-	const viewSession = opts.focusedQueue ? { popLastQueuedMessage: () => focusedQueue.pop() } : session;
+	const viewSession = opts.focusedQueue
+		? {
+				popLastQueuedMessage: () => focusedQueue.pop(),
+				getQueuedMessages: () => ({ steering: [], followUp: [], liveSteered: 0 }),
+			}
+		: session;
 
 	const ctx = {
 		session,

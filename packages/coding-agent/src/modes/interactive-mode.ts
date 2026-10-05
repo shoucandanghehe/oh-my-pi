@@ -78,6 +78,7 @@ import {
 	prompt,
 	sanitizeText,
 	setProjectDir,
+	toError,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { pickTableChart } from "../auto-graph/planner";
@@ -138,7 +139,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
@@ -147,6 +148,7 @@ import {
 	type AgentSessionEvent,
 	type DroppedPrompt,
 	type ResolvedRoleModel,
+	type RestoredQueuedMessage,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
@@ -291,6 +293,7 @@ import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcrip
 import { MainSessionPane } from "./components/main-session-pane";
 import { AutoAgentWorkspaceController } from "./controllers/auto-agent-workspace-controller";
 import { BtwController } from "./controllers/btw-controller";
+import { NativeWorkspace } from "./native-workspace/workspace";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -351,6 +354,7 @@ import {
 } from "@oh-my-pi/pi-tui/theme";
 import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
+	AddMessageOptions,
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
 	InteractiveModeContext,
@@ -1308,7 +1312,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Canonical composer shared by cold prepaint and the session-aware runtime. */
 	readonly composer: Composer;
 	ui: TUI;
-	chatContainer: TranscriptContainer;
+	readonly chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -1333,7 +1337,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
 	readonly terminalActivity: TerminalActivityController;
-	readonly workspaceEnabled: boolean;
+	get workspaceEnabled(): boolean {
+		return this.#workspaceLayout !== undefined && !this.ui.nativeRendering;
+	}
+	nativeWorkspace: NativeWorkspace | undefined;
 	#workspaceLayout: WorkspaceLayout | undefined;
 	#mainScrollRoot: Container | undefined;
 	#mainStickyRoot: Container | undefined;
@@ -1341,6 +1348,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#autoAgentWorkspace: AutoAgentWorkspaceController | undefined;
 	#autoAgentWorkspaceSessionId: string | undefined;
 	#workspaceWelcome: WelcomeComponent | undefined;
+	#nativeAutomaticAgents = new Set<string>();
+	#nativeDismissedAgents = new Set<string>();
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -1896,6 +1905,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
 		this.#initialComposerModel = session.model;
+		this.nativeWorkspace = NativeWorkspace.fromEnvironment(this.sessionManager.getCwd());
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings),
@@ -2130,8 +2140,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
 		this.#observerRegistry = new SessionObserverRegistry();
-		this.workspaceEnabled = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
-		if (this.workspaceEnabled) {
+		if (Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport") {
 			this.#mainScrollRoot = new Container();
 			this.#mainStickyRoot = new Container();
 			const mainPane = new MainSessionPane({
@@ -2177,10 +2186,96 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	#mountRuntimeSurface(): void {
+		this.composer.setPreferences({ quiet: this.workspaceEnabled || cfgStartupQuiet.get(settings) });
+		if (this.workspaceEnabled && this.#workspaceLayout) {
+			this.composer.setRuntimeChildren([this.#workspaceLayout], { chrome: "omit" });
+			if (this.#agentRegistrySubscriptionTarget) {
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				for (const ref of registry.list()) this.#autoAgentWorkspace?.handleEvent({ type: "registered", ref });
+			}
+			return;
+		}
+		const workspace = this.#workspaceLayout;
+		if (workspace) {
+			this.#autoAgentWorkspace?.reset();
+			const mainFocus = this.editorContainer.children[0] ?? this.editor;
+			for (const overlay of this.ui.overlayStack) {
+				if (overlay.preFocus && workspace.containsComponent(overlay.preFocus)) overlay.preFocus = mainFocus;
+			}
+			this.#workspacePanes?.focusMain();
+		}
+		this.composer.setRuntimeChildren(
+			[
+				this.chatContainer,
+				this.pendingMessagesContainer,
+				this.todoContainer,
+				this.subagentContainer,
+				this.btwContainer,
+				this.reportContainer,
+				this.omfgContainer,
+				this.cleanseContainer,
+				this.errorBannerContainer,
+				this.modelCycleContainer,
+				this.deferredCommandContainer,
+				// Judge batches and automatic downloads stay editor-anchored and update
+				// independently of transcript output, directly above the working/throughput/title row.
+				this.progressHudContainer,
+				// Working loader / transient status sits below the sticky todo + subagent
+				// HUDs, just above the editor's hook-widget top margin — so it reads next to
+				// the prompt while keeping the one-line gap above the editor (the band
+				// composer collapses that gap so its status band sits flush).
+				this.statusContainer,
+				this.attachmentChipsContainer,
+				this.hookWidgetContainerAbove,
+				this.editorContainer,
+				this.hookWidgetContainerBelow,
+			],
+			{
+				// Roots that collapse without transcript output must not raise the post-run floor.
+				transientChrome: [
+					this.editorContainer,
+					this.attachmentChipsContainer,
+					this.reportContainer,
+					this.pendingMessagesContainer,
+					this.btwContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
+				],
+				selfClearingChrome: [
+					this.todoContainer,
+					this.subagentContainer,
+					this.modelCycleContainer,
+					this.progressHudContainer,
+				],
+				// Natively the HUD pills lead the dock, queued messages sit between
+				// the working row and the composer, and the attachment chips live
+				// inside the composer.
+				nativeDock: [
+					new HudPillsRow(this),
+					this.btwContainer,
+					this.omfgContainer,
+					this.cleanseContainer,
+					this.errorBannerContainer,
+					this.modelCycleContainer,
+					this.deferredCommandContainer,
+					this.progressHudContainer,
+					this.statusContainer,
+					this.pendingMessagesContainer,
+					this.hookWidgetContainerAbove,
+					this.editorContainer,
+					this.hookWidgetContainerBelow,
+				],
+			},
+		);
+	}
+
 	#createAgentWorkspaceViewer(
 		agentId: string,
 		close: () => void,
 		registryOverride?: AgentRegistry,
+		ui: TUI = this.ui,
 	): AgentTranscriptViewer {
 		const remote = registryOverride ? undefined : this.collabGuest?.hubRemote;
 		const lifecycle = registryOverride || remote ? undefined : () => AgentLifecycleManager.global();
@@ -2193,7 +2288,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			transcript: agentTranscriptSource,
 			remote,
 			lifecycle,
-			ui: this.ui,
+			ui,
 			getTool: name => this.session.getToolByName(name),
 			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
 			getAssistantThinkingRenderers: () => this.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
@@ -2216,8 +2311,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
 			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
 			requestRender: () => {
-				if (viewer) this.ui.requestComponentRender(viewer);
-				else this.ui.requestRender();
+				if (viewer) ui.requestComponentRender(viewer);
+				else ui.requestRender();
 			},
 			onClose: close,
 			onHubToggle: () => this.showAgentHub(),
@@ -2226,7 +2321,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async openAgentWorkspacePane(id: string): Promise<void> {
-		if (!this.#autoAgentWorkspace) {
+		if (this.ui.nativeRendering && this.nativeWorkspace) {
+			this.#nativeAutomaticAgents.delete(id);
+			await this.#openNativeAgentPane(id, false);
+			return;
+		}
+		if (!this.workspaceEnabled || !this.#autoAgentWorkspace) {
 			throw new Error("Agent workspace panes require the app-viewport render backend");
 		}
 		if (!this.#autoAgentWorkspace.openManual(id)) {
@@ -2234,9 +2334,52 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	async #openNativeAgentPane(id: string, automatic: boolean): Promise<void> {
+		const workspace = this.nativeWorkspace!;
+		await workspace.open(
+			`agent:${id}`,
+			id,
+			(ui, close) => this.#createAgentWorkspaceViewer(id, close, undefined, ui),
+			() => {
+				this.#nativeAutomaticAgents.delete(id);
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				if (registry.get(id)?.status === "running") this.#nativeDismissedAgents.add(id);
+			},
+			automatic,
+		);
+	}
+
+	async #handleNativeAgentEvent(event: RegistryEvent): Promise<void> {
+		const workspace = this.nativeWorkspace;
+		const { ref } = event;
+		if (!this.ui.nativeRendering || !workspace || ref.kind !== "sub" || event.type === "metadata_changed") return;
+		const key = `agent:${ref.id}`;
+		workspace.get(key)?.ui.requestRender();
+		if (event.type !== "removed" && ref.status === "running") {
+			const viewer = workspace.get(key)?.component;
+			if (viewer instanceof AgentTranscriptViewer) viewer.cancelAutoClose();
+			if (!workspace.has(key) && !this.#nativeDismissedAgents.has(ref.id)) {
+				this.#nativeAutomaticAgents.add(ref.id);
+				await this.#openNativeAgentPane(ref.id, true);
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				const current = registry.get(ref.id);
+				if (!current) workspace.close(key);
+				else if (current.status !== "running")
+					await this.#handleNativeAgentEvent({ type: "status_changed", ref: current });
+			}
+			return;
+		}
+		this.#nativeDismissedAgents.delete(ref.id);
+		if (!this.#nativeAutomaticAgents.has(ref.id)) return;
+		const viewer = workspace.get(key)?.component;
+		if (!(viewer instanceof AgentTranscriptViewer) || viewer.autoCloseProtected || (await workspace.isFocused(key)))
+			return;
+		viewer.startAutoClose(() => workspace.close(key));
+	}
+
 	previewSubagentExitAnimation(): void {
 		const workspacePanes = this.#workspacePanes;
-		if (!workspacePanes) {
+		if (!this.workspaceEnabled || !workspacePanes) {
 			this.showWarning("Petrification preview requires the app-viewport render backend");
 			return;
 		}
@@ -2273,6 +2416,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	openBtwWorkspacePane(component: Component): boolean {
+		if (!this.workspaceEnabled) return false;
 		return (
 			this.#workspacePanes?.open({
 				key: "btw",
@@ -2290,7 +2434,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	focusMainWorkspacePane(): void {
-		if (!this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
+		if (!this.workspaceEnabled || !this.#workspacePanes?.focusMain()) this.ui.setFocus(this.editor);
 	}
 
 	#handleJudgmentBatchProgress(progress: JudgmentBatchProgress): void {
@@ -2321,7 +2465,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	isMainWorkspacePaneFocused(): boolean {
-		return !this.#workspaceLayout || this.#workspaceLayout.focusedPaneId === "main";
+		return !this.workspaceEnabled || this.#workspaceLayout?.focusedPaneId === "main";
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -2383,7 +2527,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	playWelcomeIntro(): void {
-		const welcome = this.#workspaceWelcome;
+		const welcome = this.workspaceEnabled ? this.#workspaceWelcome : undefined;
 		if (welcome) {
 			welcome.playIntro(() => this.ui.requestComponentRender(welcome));
 			return;
@@ -2497,7 +2641,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		});
 
-		if (this.workspaceEnabled) {
+		if (this.#workspaceLayout) {
 			const scrollRoot = this.#mainScrollRoot;
 			const stickyRoot = this.#mainStickyRoot;
 			const workspaceLayout = this.#workspaceLayout;
@@ -2531,78 +2675,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			stickyRoot.addChild(this.hookWidgetContainerAbove);
 			stickyRoot.addChild(this.editorContainer);
 			stickyRoot.addChild(this.hookWidgetContainerBelow);
-			this.composer.setHeaderExtras([], []);
-			this.composer.setRuntimeChildren([workspaceLayout], { chrome: "omit" });
-			if (!options.suppressWelcomeIntro) this.playWelcomeIntro();
-		} else {
-			this.#workspaceWelcome = undefined;
-			this.composer.setHeaderExtras(headerBefore, headerAfter);
-			this.composer.setStatusComponent(this.statusLine);
-			this.composer.setRuntimeChildren(
-				[
-					this.chatContainer,
-					this.pendingMessagesContainer,
-					this.todoContainer,
-					this.subagentContainer,
-					this.btwContainer,
-					this.reportContainer,
-					this.omfgContainer,
-					this.cleanseContainer,
-					this.errorBannerContainer,
-					this.modelCycleContainer,
-					this.deferredCommandContainer,
-					// Judge batches and automatic downloads stay editor-anchored and update
-					// independently of transcript output, directly above the working/throughput/title row.
-					this.progressHudContainer,
-					// Working loader / transient status sits below the sticky todo + subagent
-					// HUDs, just above the editor's hook-widget top margin — so it reads next to
-					// the prompt while keeping the one-line gap above the editor (the band
-					// composer collapses that gap so its status band sits flush).
-					this.statusContainer,
-					this.attachmentChipsContainer,
-					this.hookWidgetContainerAbove,
-					this.editorContainer,
-					this.hookWidgetContainerBelow,
-				],
-				{
-					// Roots that collapse without transcript output must not raise the post-run floor.
-					transientChrome: [
-						this.editorContainer,
-						this.attachmentChipsContainer,
-						this.reportContainer,
-						this.pendingMessagesContainer,
-						this.btwContainer,
-						this.omfgContainer,
-						this.cleanseContainer,
-						this.errorBannerContainer,
-					],
-					selfClearingChrome: [
-						this.todoContainer,
-						this.subagentContainer,
-						this.modelCycleContainer,
-						this.progressHudContainer,
-					],
-					// Natively the HUD pills lead the dock, queued messages sit between
-					// the working row and the composer, and the attachment chips live
-					// inside the composer.
-					nativeDock: [
-						new HudPillsRow(this),
-						this.btwContainer,
-						this.omfgContainer,
-						this.cleanseContainer,
-						this.errorBannerContainer,
-						this.modelCycleContainer,
-						this.deferredCommandContainer,
-						this.progressHudContainer,
-						this.statusContainer,
-						this.pendingMessagesContainer,
-						this.hookWidgetContainerAbove,
-						this.editorContainer,
-						this.hookWidgetContainerBelow,
-					],
-				},
-			);
 		}
+		this.composer.setHeaderExtras(headerBefore, headerAfter);
+		this.composer.setStatusComponent(this.statusLine);
+		this.#mountRuntimeSurface();
+		this.#eventBusUnsubscribers.push(
+			this.ui.onNativeRenderingChange(() => {
+				this.#btwController.closeView();
+				if (!this.ui.nativeRendering) this.nativeWorkspace?.dispose();
+				this.#mountRuntimeSurface();
+			}),
+		);
+		if (this.workspaceEnabled && !options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 
@@ -3924,7 +4008,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
 		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {
 			this.hideToolActivity = hideToolActivity;
-			if (!hideToolActivity) this.toolOutputExpanded = false;
+			if (!hideToolActivity) {
+				this.toolOutputExpanded = false;
+				this.chatContainer.setExpanded(false);
+			}
 			for (const child of this.chatContainer.children) {
 				if (
 					!hideToolActivity &&
@@ -4176,12 +4263,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#agentRegistrySubscriptionTarget !== registry || this.#autoAgentWorkspaceSessionId !== sessionId) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#autoAgentWorkspace?.reset();
+			this.nativeWorkspace?.dispose();
+			this.#nativeAutomaticAgents.clear();
+			this.#nativeDismissedAgents.clear();
 			this.#autoAgentWorkspaceSessionId = sessionId;
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				this.syncRunningSubagentBadge();
-				this.#autoAgentWorkspace?.handleEvent(event);
+				if (this.workspaceEnabled) this.#autoAgentWorkspace?.handleEvent(event);
+				void this.#handleNativeAgentEvent(event).catch(error =>
+					this.showError(`Native agent pane failed: ${toError(error).message}`),
+				);
 			});
+			if (this.ui.nativeRendering && this.nativeWorkspace) {
+				for (const ref of registry.list()) {
+					void this.#handleNativeAgentEvent({ type: "registered", ref }).catch(error =>
+						this.showError(`Native agent pane failed: ${toError(error).message}`),
+					);
+				}
+			}
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
@@ -7408,6 +7508,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#hidePlanReview();
+		this.#btwController.closeView();
+		this.nativeWorkspace?.dispose();
+		this.#nativeAutomaticAgents.clear();
+		this.#nativeDismissedAgents.clear();
 		this.#appearanceRefreshRequest = undefined;
 		// Settle any pending approval prompt as dismissed (deny). The
 		// controller stays aborted: approvals still queued behind the approval
@@ -8246,13 +8350,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.isKnownSlashCommand(text);
 	}
 
-	addMessageToChat(
-		message: AgentMessage,
-		options?: {
-			imageLinks?: readonly (string | undefined)[];
-			reuseSettledComponent?: boolean;
-		},
-	): Component[] {
+	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
 		return this.#uiHelpers.addMessageToChat(message, options);
 	}
 
@@ -8803,6 +8901,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleDequeue(): void {
 		this.#inputController.handleDequeue();
+	}
+
+	handleQueuedMessageEdit(
+		edit: (beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>,
+	): Promise<void> {
+		return this.#inputController.handleQueuedMessageEdit(edit);
 	}
 
 	handleImagePaste(): Promise<boolean> {

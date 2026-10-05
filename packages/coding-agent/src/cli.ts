@@ -27,6 +27,8 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 
+import type * as NativePaneRelay from "./modes/native-workspace/relay";
+import type * as NativePaneSmoke from "./modes/native-workspace/smoke";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import {
@@ -36,6 +38,7 @@ import {
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
+	NATIVE_PANE_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
@@ -178,6 +181,8 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
+	const nativePaneSmoke: typeof NativePaneSmoke = require("./modes/native-workspace/smoke");
+	await nativePaneSmoke.smokeTestNativePaneRelay();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -190,7 +195,13 @@ const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
-async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
+async function runWorkerEntrypoint(arg: string | undefined, endpoint?: string): Promise<boolean> {
+	if (arg === NATIVE_PANE_WORKER_ARG) {
+		if (!endpoint) throw new Error("Native pane relay requires its Main endpoint");
+		const relay: typeof NativePaneRelay = require("./modes/native-workspace/relay");
+		await relay.runNativePaneRelay(endpoint);
+		return true;
+	}
 	if (arg === TINY_WORKER_ARG) {
 		await runTinyWorker();
 		return true;
@@ -504,7 +515,10 @@ export async function runCli(argv: string[]): Promise<void> {
 	if (isWorkerHostSelector(resolvedArgv[0])) {
 		// Invoke dispatch first so its inbox is installed before asynchronous
 		// process-name setup yields; neither dependency belongs in prepaint.
-		const [dispatched] = await Promise.all([runWorkerEntrypoint(resolvedArgv[0]), setFullProcessName()]);
+		const [dispatched] = await Promise.all([
+			runWorkerEntrypoint(resolvedArgv[0], resolvedArgv[1]),
+			setFullProcessName(),
+		]);
 		if (!dispatched) {
 			process.stderr.write(`Error: unknown worker selector: ${resolvedArgv[0]}\n`);
 			process.exitCode = 1;
