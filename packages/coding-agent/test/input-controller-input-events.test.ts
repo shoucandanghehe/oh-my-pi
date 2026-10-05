@@ -25,7 +25,7 @@ const originalImage: ImageContent = { type: "image", mimeType: "image/png", data
 const newerImage: ImageContent = { type: "image", mimeType: "image/jpeg", data: "bmV3ZXI=" };
 const transformedImage: ImageContent = { type: "image", mimeType: "image/jpeg", data: "cmVwbGFjZW1lbnQ=" };
 
-async function createHarness(factory: ExtensionFactory) {
+async function createHarness(factory: ExtensionFactory, nativeRendering = false) {
 	const runtime = new ExtensionRuntime();
 	const generatedMessages: Array<string | (TextContent | ImageContent)[]> = [];
 	runtime.sendUserMessage = (content?: string | (TextContent | ImageContent)[]) => {
@@ -71,9 +71,11 @@ async function createHarness(factory: ExtensionFactory) {
 		keybindings: KeybindingsManager.inMemory(),
 		dictationSpaceHold: vi.fn(),
 		ui: {
+			nativeRendering,
 			requestRender: vi.fn(),
 			addInputListener: vi.fn(),
 			addStartListener: vi.fn(),
+			setAppViewportClickHandler: vi.fn(),
 			getFocused: () => editor,
 			terminal: { write: vi.fn() },
 		},
@@ -137,6 +139,20 @@ async function createHarness(factory: ExtensionFactory) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("interactive native input ingress", () => {
+	it("inserts a native newline on Ctrl+Enter and submits the multiline draft on plain Enter", async () => {
+		const h = await createHarness(() => {}, true);
+		h.editor.setText("first");
+		h.editor.handleInput(FOLLOW_UP);
+		h.editor.handleInput("second");
+		expect(h.editor.getText()).toBe("first\nsecond");
+		expect(h.prompt).not.toHaveBeenCalled();
+		expect(h.session.followUp).not.toHaveBeenCalled();
+		await h.pressSubmit(ENTER);
+		expect(h.prompt).toHaveBeenCalledTimes(1);
+		expect(h.prompt.mock.calls[0]?.[0]).toBe("first\nsecond");
+		expect(h.editor.getText()).toBe("");
+	});
+
 	it("Ctrl+Enter chains partial text/image transforms and restores materialized images after rejection", async () => {
 		const seen: InputEvent[] = [];
 		const h = await createHarness(pi => {

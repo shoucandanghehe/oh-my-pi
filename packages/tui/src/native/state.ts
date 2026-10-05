@@ -3,22 +3,26 @@
  *
  * Components that animate by re-rendering on a timer (spinners, shimmer,
  * thinking frames, countdowns) check it and skip scheduling, because the
- * terminal clocks motion from the described nodes. Set only by the native
- * backend when a surface opens and cleared when it closes.
+ * terminal clocks motion from the described nodes. Each backend owns its
+ * registration, so closing one surface cannot disable another live backend.
  */
-let active = false;
+const owners = new Set<object>();
+const defaultOwner = {};
 const listeners = new Set<(on: boolean) => void>();
 
 /** Whether a TSP surface is live in this process. */
 export function isNativeRendering(): boolean {
-	return active;
+	return owners.size > 0;
 }
 
 /** Called by the native backend on surface open and close. */
-export function setNativeRendering(on: boolean): void {
-	if (active === on) return;
-	active = on;
-	for (const listener of listeners) listener(on);
+export function setNativeRendering(on: boolean, owner: object = defaultOwner): void {
+	const wasActive = isNativeRendering();
+	if (on) owners.add(owner);
+	else owners.delete(owner);
+	const active = isNativeRendering();
+	if (active === wasActive) return;
+	for (const listener of listeners) listener(active);
 }
 
 /** Call `listener` whenever native rendering starts or stops; returns the unsubscribe. */

@@ -22,41 +22,25 @@ describe("TUI start listeners", () => {
 		}
 	});
 
-	it("runs a hook added to an already started TUI at once, then on each restart", () => {
-		// The prepaint composer starts the TUI before the interactive mode wires its
-		// controllers, so their hooks are added after the start they would react to.
+	it("runs a late hook while started, but holds hooks added while stopped until restart", () => {
 		const tui = new TUI(new VirtualTerminal(80, 24));
 		let starts = 0;
-
 		try {
 			tui.start();
-			tui.addStartListener(() => {
-				starts++;
-			});
+			const unsubscribe = tui.addStartListener(() => starts++);
 			expect(starts).toBe(1);
-
+			tui.stop();
+			let lateStarts = 0;
+			tui.addStartListener(() => lateStarts++);
+			expect(lateStarts).toBe(0);
+			tui.start();
+			expect(starts).toBe(2);
+			expect(lateStarts).toBe(1);
+			unsubscribe();
 			tui.stop();
 			tui.start();
 			expect(starts).toBe(2);
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("holds a hook added to a stopped TUI until the next start", () => {
-		const tui = new TUI(new VirtualTerminal(80, 24));
-		let starts = 0;
-
-		try {
-			tui.start();
-			tui.stop();
-			tui.addStartListener(() => {
-				starts++;
-			});
-			expect(starts).toBe(0);
-
-			tui.start();
-			expect(starts).toBe(1);
+			expect(lateStarts).toBe(2);
 		} finally {
 			tui.stop();
 		}

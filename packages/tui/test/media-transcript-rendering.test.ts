@@ -8,8 +8,13 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import type { TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { buildFileMentionBlock, userMessageDisplayText } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { text } from "@oh-my-pi/pi-tui/native/describe";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import type { ToolRenderer } from "@oh-my-pi/pi-tui/tools/renderer";
+import { TSP_KINDS } from "@oh-my-pi/pi-wire";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { VirtualTerminal } from "./virtual-terminal";
+import { TspHarness } from "./native/tsp-harness";
 
 const audio: MediaContent = { type: "audio", data: "YXVkaW8=", mimeType: "audio/wav" };
 const video: MediaContent = { type: "video", data: "dmlkZW8=", mimeType: "video/mp4" };
@@ -42,7 +47,7 @@ function plain(component: Component): string {
 	return Bun.stripANSI(component.render(120).join("\n"));
 }
 
-function toolTurn(toolName: string, content: MediaContent[]): AgentMessage[] {
+function toolTurn(toolName: string, content: MediaContent[], details?: unknown): AgentMessage[] {
 	const assistant: AssistantMessage = {
 		role: "assistant",
 		content: [{ type: "toolCall", id: "media-call", name: toolName, arguments: { command: "decode media" } }],
@@ -62,7 +67,7 @@ function toolTurn(toolName: string, content: MediaContent[]): AgentMessage[] {
 	};
 	return [
 		assistant,
-		{ role: "toolResult", toolCallId: "media-call", toolName, content, isError: false, timestamp: 2 },
+		{ role: "toolResult", toolCallId: "media-call", toolName, content, details, isError: false, timestamp: 2 },
 	];
 }
 
@@ -199,6 +204,120 @@ describe("media transcript rendering", () => {
 			expect(rendered).toContain("image/png");
 		} finally {
 			component.dispose();
+		}
+	});
+});
+
+describe("native media transcript rendering", () => {
+	it.each([
+		{ route: "generic tool", toolName: "generic", kinds: TSP_KINDS },
+		{ route: "generic card fallback", toolName: "generic", kinds: TSP_KINDS.filter(kind => kind !== "tool") },
+		{ route: "built-in renderer", toolName: "bash", kinds: TSP_KINDS },
+		{ route: "custom native renderer", toolName: "custom", kinds: TSP_KINDS },
+		{ route: "mounted tool device", toolName: "write", kinds: TSP_KINDS },
+	])("keeps attachments visible through $route updates and history rebuilds", async ({ toolName, kinds }) => {
+		const tool: (AgentTool & Pick<ToolRenderer, "describeResult" | "mergeCallAndResult">) | undefined =
+			toolName === "custom"
+				? {
+						name: "custom",
+						label: "Custom",
+						description: "Decode media",
+						parameters: { type: "object", properties: {} },
+						execute: async () => ({ content: [] }),
+						mergeCallAndResult: true,
+						describeResult: () => ({ body: [text("decoded")] }),
+					}
+				: undefined;
+		const h = await TspHarness.start(undefined, { kinds });
+		const args = toolName === "write" ? { path: "xd://decode_media", content: "{}" } : { command: "decode media" };
+		const details = toolName === "write" ? { xdev: { tool: "decode_media", mode: "invoke", args: {} } } : undefined;
+		const component = new ToolExecutionComponent(toolName, args, { showImages: false }, tool, {
+			requestRender: () => h.tui.requestRender(),
+			requestComponentRender: () => h.tui.requestRender(),
+			resetDisplay() {},
+		});
+		const builder = new ChatTranscriptBuilder({
+			ui: h.tui,
+			cwd: process.cwd(),
+			requestRender: () => h.tui.requestRender(),
+			getTool: () => tool,
+		});
+		const rendered = () => JSON.stringify(h.doc());
+		const expectAttachments = () => {
+			expect(rendered().match(/\[audio attachment: audio\/wav\]/g)).toHaveLength(1);
+			expect(rendered().match(/\[video attachment: video\/mp4\]/g)).toHaveLength(1);
+			expect(rendered()).not.toContain("(no output)");
+			expect(h.findAll(node => node.k === "rows")).toEqual([]);
+			expect(h.errors).toEqual([]);
+		};
+		try {
+			h.tui.addChild(component);
+			component.updateResult({ content: [audio], details }, true);
+			await h.render();
+			expect(rendered()).toContain("[audio attachment: audio/wav]");
+			expect(rendered()).not.toContain("(no output)");
+
+			component.updateResult({ content: [{ type: "text", text: "decoded" }, audio, video], details });
+			await h.render();
+			expect(rendered()).toContain("decoded");
+			expectAttachments();
+			component.setShowImages(true);
+			await h.render();
+			expectAttachments();
+
+			h.tui.removeChild(component);
+			h.tui.addChild(builder.container);
+			builder.rebuild(entries(toolTurn(toolName, [audio, video], details)));
+			await h.render();
+			expectAttachments();
+
+			h.tui.removeChild(builder.container);
+			h.tui.addChild(component);
+			component.updateResult({ content: [{ type: "text", text: "replacement" }] });
+			await h.render();
+			expect(rendered()).not.toContain("attachment:");
+		} finally {
+			component.dispose();
+			builder.dispose();
+			h.stop();
+			setNativeRendering(false);
+		}
+	});
+
+	it("keeps sanitized media markers alongside native images and hidden-image fallbacks", async () => {
+		const h = await TspHarness.start();
+		const component = new ToolExecutionComponent("generic", {}, {}, undefined, {
+			requestRender: () => h.tui.requestRender(),
+			requestComponentRender: () => h.tui.requestRender(),
+			resetDisplay() {},
+		});
+		try {
+			h.tui.addChild(component);
+			component.updateResult({
+				content: [
+					image,
+					{ ...audio, mimeType: "audio/wav\x1b]52;c;PAYLOAD\x07\t\r\nextra\x00" },
+					{ type: "video" },
+				],
+			});
+			await h.render();
+			expect(h.find(node => node.k === "image")).toBeDefined();
+			for (const showImages of [true, false]) {
+				component.setShowImages(showImages);
+				await h.render();
+				const document = JSON.stringify(h.doc());
+				expect(document).not.toContain("PAYLOAD");
+				expect(document).toMatch(/\[audio attachment: audio\/wav +extra\]/);
+				expect(document).toContain("[video attachment]");
+				expect(document).not.toContain("(no output)");
+			}
+			expect(h.find(node => node.k === "image")).toBeUndefined();
+			expect(JSON.stringify(h.doc())).toContain("image/png");
+			expect(h.errors).toEqual([]);
+		} finally {
+			component.dispose();
+			h.stop();
+			setNativeRendering(false);
 		}
 	});
 });

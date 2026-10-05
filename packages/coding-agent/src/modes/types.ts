@@ -24,7 +24,7 @@ import type { CompactOptions, PlanReviewChoice, PlanReviewRequestedEvent } from 
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
-import type { AgentSession } from "../session/agent-session";
+import type { AgentSession, RestoredQueuedMessage } from "../session/agent-session";
 import type { PausedExitParticipant } from "../session/agent-session-types";
 import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
 import type { CompactMode } from "../session/compact-modes";
@@ -58,6 +58,7 @@ import type { TerminalActivityController } from "./controllers/terminal-activity
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { NativeWorkspace } from "./native-workspace/workspace";
 
 export type CompactionQueuedMessage = {
 	text: string;
@@ -101,7 +102,14 @@ export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
 
 export type SessionPickHandler = (session: SessionInfo) => void | Promise<void>;
 
+export interface AddMessageOptions {
+	imageLinks?: readonly (string | undefined)[];
+	reuseSettledComponent?: boolean;
+	container?: TranscriptContainer;
+}
+
 export interface RenderSessionContextOptions {
+	container?: TranscriptContainer;
 	updateFooter?: boolean;
 	reuseSettledComponents?: boolean;
 	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
@@ -133,7 +141,7 @@ export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
 	readonly composer: Pick<Composer, "setRunActive">;
-	chatContainer: TranscriptContainer;
+	readonly chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
@@ -183,6 +191,7 @@ export interface InteractiveModeContext {
 	setClickHoverId(id: string | undefined, col?: number): void;
 	/** Whether the main view is mounted in the app-viewport multi-pane workspace. */
 	readonly workspaceEnabled: boolean;
+	readonly nativeWorkspace?: NativeWorkspace;
 	/** Create or focus a persistent transcript pane for an agent. */
 	openAgentWorkspacePane(id: string): Promise<void>;
 	/** Open a local fake pane and play the real subagent petrification/close path. */
@@ -435,13 +444,7 @@ export interface InteractiveModeContext {
 	/** Drops the optimistic `/skill:` row when dispatch fails or bails before reaching the agent. */
 	clearOptimisticSkillMessage(): void;
 	isKnownSlashCommand(text: string): boolean;
-	addMessageToChat(
-		message: AgentMessage,
-		options?: {
-			imageLinks?: readonly (string | undefined)[];
-			reuseSettledComponent?: boolean;
-		},
-	): Component[];
+	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[];
 	renderSessionContext(sessionContext: SessionContext, options?: RenderSessionContextOptions): void;
 	/** Render a session context in bounded chunks so terminal input runs between transcript paints. */
 	renderSessionContextIncrementally(
@@ -567,6 +570,9 @@ export interface InteractiveModeContext {
 	/** Re-query terminal appearance for an explicit display reset, then immediately replay the display. */
 	resetDisplayAfterAppearanceRefresh(): void;
 	handleDequeue(): void;
+	handleQueuedMessageEdit(
+		edit: (beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>,
+	): Promise<void>;
 	handleImagePaste(): Promise<boolean>;
 	/** Attach a pasted image path to the main editor or an image-accepting prompt; other prompts refuse. */
 	handleImagePathPaste(path: string): Promise<void>;

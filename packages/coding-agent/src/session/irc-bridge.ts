@@ -221,6 +221,7 @@ export class IrcBridge {
 					role: "user",
 					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
 					attribution: "agent",
+					irc: msg,
 					timestamp: msg.ts,
 					steering: true,
 				});

@@ -26,6 +26,7 @@ import { createStartupStatusLine } from "@oh-my-pi/pi-tui/status-line/startup";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { type Component, WorkspaceLayout, WorkspaceModel } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
@@ -525,10 +526,10 @@ describe("Composer prepaint", () => {
 		}
 	});
 
-	it("turns kitty enhanced paste on when the interactive mode adopts an already started composer", async () => {
-		// The prepaint composer starts the TUI before InteractiveMode wires the input
-		// controller, so enhanced paste (ESC[?5522h) cannot wait for a start event.
-		const terminal = new WriteTrackingTerminal();
+	it("enables terminal-owned image paste when interactive mode adopts a running prepaint composer", async () => {
+		const terminal = new CountingTerminal();
+		const writes = vi.spyOn(terminal, "write");
+		const reads = vi.spyOn(clipboard, "readClipboardContent");
 		const composer = new Composer({ preferences: config, terminal });
 		composer.start();
 		const lease = new ComposerLease(composer);
@@ -545,12 +546,32 @@ describe("Composer prepaint", () => {
 		);
 		lease.adopt();
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-
 		try {
-			expect(terminal.written).not.toContain("\x1b[?5522h");
+			expect(writes.mock.calls.some(([data]) => data.includes("\x1b[?5522h"))).toBe(false);
 			await mode.init({ suppressWelcomeIntro: true });
-			expect(terminal.written.split("\x1b[?5522h")).toHaveLength(2);
+			expect(writes.mock.calls.filter(([data]) => data.includes("\x1b[?5522h"))).toHaveLength(1);
 			expect(terminal.starts).toBe(1);
+			terminal.sendInput("\x1b]5522;type=read:status=OK:pw=native-paste\x07");
+			terminal.sendInput("\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;\x07");
+			terminal.sendInput("\x1b]5522;type=read:status=DONE\x07");
+			expect(
+				writes.mock.calls.some(([data]) => data.includes("type=read") && data.includes("mime=aW1hZ2UvcG5n")),
+			).toBe(true);
+			const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+			const attached = Promise.withResolvers<void>();
+			const onChange = mode.editor.onChange;
+			mode.editor.onChange = text => {
+				onChange?.(text);
+				if (mode.editor.pendingImages.length > 0) attached.resolve();
+			};
+			terminal.sendInput(`\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;${png}\x07`);
+			terminal.sendInput("\x1b]5522;type=read:status=DONE\x07");
+			await attached.promise;
+			expect(mode.editor.pendingImages).toHaveLength(1);
+			const image = mode.editor.pendingImages[0]!;
+			const metadata = await new Bun.Image(Buffer.from(image.data, "base64")).metadata();
+			expect(image.mimeType).toBe(`image/${metadata.format}`);
+			expect(reads).not.toHaveBeenCalled();
 		} finally {
 			mode.stop();
 			lease.dispose();

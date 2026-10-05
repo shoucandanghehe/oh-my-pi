@@ -1092,7 +1092,7 @@ export class ToolExecutionComponent extends Container {
 		const status = this.#nativeStatus();
 		const head = view.tool;
 		const late = this.#lateDiagnosticsParts();
-		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages(view.body)];
+		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultAttachments(view.body)];
 		if (late.section) body.push(late.section);
 		const inline = view.inline === true;
 		const hasBody = body.length > 0;
@@ -1180,7 +1180,7 @@ export class ToolExecutionComponent extends Container {
 		const children: NativeChild[] = [
 			node("row", { gap: "sm", align: "baseline" }, headChildren, "head"),
 			...(view.body ?? []),
-			...this.#nativeResultImages(view.body),
+			...this.#nativeResultAttachments(view.body),
 			...(late.section ? [late.section] : []),
 		];
 		const role = `omp.tool.${this.#toolName}`;
@@ -1269,7 +1269,12 @@ export class ToolExecutionComponent extends Container {
 			label: this.#toolLabel,
 			args: this.#args,
 			result: result
-				? { output: this.#nativeTextOutput(), isError: result.isError, skipped: this.#isBenignSkip() }
+				? {
+						output: this.#nativeTextOutput(),
+						hasAttachments: Boolean(this.#mediaAttachmentText()),
+						isError: result.isError,
+						skipped: this.#isBenignSkip(),
+					}
 				: undefined,
 			options,
 		});
@@ -1294,19 +1299,31 @@ export class ToolExecutionComponent extends Container {
 		return indicators ? (output ? `${output}\n${indicators}` : indicators) : output;
 	}
 
-	/** Result images under the renderer's body, minus those the body already shows (as an `image` blob or a `media` file). */
-	#nativeResultImages(body: readonly NativeChild[] | undefined): NativeNode[] {
-		if (!this.#result || !this.#showImages) return [];
+	#nativeResultAttachments(body: readonly NativeChild[] | undefined): NativeNode[] {
+		const indicators = this.#mediaAttachmentText();
+		const attachments: NativeNode[] = indicators ? [text(indicators, { wrap: "word" })] : [];
+		if (!this.#result || !this.#showImages) return attachments;
 		const shown = shownMedia(body);
 		const mediaPath = readMediaPath(this.#result.details);
-		if (mediaPath && shown.paths.has(mediaPath)) return [];
-		const images: NativeNode[] = [];
+		if (mediaPath && shown.paths.has(mediaPath)) return attachments;
 		this.#getAllImageBlocks().forEach((image, index) => {
 			if (!image.data || !image.mimeType) return;
 			const described = this.#nativeImages.get(`img${index}`, image.data, image.mimeType, mediaPath);
-			if (!shown.blobs.has((described.p as { blob?: string } | undefined)?.blob ?? "")) images.push(described);
+			if (!shown.blobs.has((described.p as { blob?: string } | undefined)?.blob ?? "")) attachments.push(described);
 		});
-		return images;
+		return attachments;
+	}
+
+	#mediaAttachmentText(): string {
+		return (
+			this.#result?.content
+				.filter(block => block.type === "audio" || block.type === "video")
+				.map(block => {
+					const mimeType = block.mimeType ? sanitizeDisplayLine(block.mimeType) : "";
+					return `[${block.type} attachment${mimeType ? `: ${mimeType}` : ""}]`;
+				})
+				.join("\n") ?? ""
+		);
 	}
 
 	/** Apply the transcript allocator's current viewport reservation. */
@@ -1329,6 +1346,11 @@ export class ToolExecutionComponent extends Container {
 		super.invalidate();
 		this.#renderMemo = undefined;
 		this.#updateDisplay();
+	}
+
+	override releaseRenderCaches(): void {
+		this.#renderMemo = undefined;
+		super.releaseRenderCaches();
 	}
 
 	#updateDisplay(): void {
@@ -1394,7 +1416,7 @@ export class ToolExecutionComponent extends Container {
 			return [];
 		}
 		const key = `${this.#displayKey()}|${this.#allocation}`;
-		if (this.#renderedImageCount === 0) {
+		if (this.#renderedImageCount === 0 && this.#figure === undefined) {
 			const memo = this.#renderMemo;
 			if (memo !== undefined && memo.width === width && memo.key === key) {
 				this.#trackPaintedShapes();
@@ -1766,13 +1788,7 @@ export class ToolExecutionComponent extends Container {
 		// silently hide attachments, just as image children are handled below.
 		if (this.#mediaIndicators) this.removeChild(this.#mediaIndicators);
 		this.#mediaIndicators = undefined;
-		const mediaIndicators = this.#result?.content
-			.filter(block => block.type === "audio" || block.type === "video")
-			.map(block => {
-				const mimeType = block.mimeType ? sanitizeDisplayLine(block.mimeType) : "";
-				return `[${block.type} attachment${mimeType ? `: ${mimeType}` : ""}]`;
-			})
-			.join("\n");
+		const mediaIndicators = this.#mediaAttachmentText();
 		if (mediaIndicators) {
 			this.#mediaIndicators = new Text(theme.fg("toolOutput", mediaIndicators), 1, 0);
 			this.addChild(this.#mediaIndicators);

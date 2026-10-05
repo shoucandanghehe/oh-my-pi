@@ -11,7 +11,11 @@ import type {
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type {
+	AddMessageOptions,
+	InteractiveModeContext,
+	RenderSessionContextOptions,
+} from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { CustomMessageEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -155,7 +159,7 @@ function createHarness(): Harness {
 			options: RenderSessionContextOptions,
 			renderChunk?: () => void,
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
-		addMessageToChat: (m: AgentMessage) => helpers.addMessageToChat(m),
+		addMessageToChat: (m: AgentMessage, options?: AddMessageOptions) => helpers.addMessageToChat(m, options),
 		rebuildChatFromMessages: () => {
 			ctx.chatContainer.clear();
 			helpers.renderSessionContext(buildSessionContext(entries));

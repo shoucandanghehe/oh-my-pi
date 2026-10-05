@@ -9,6 +9,7 @@ import {
 	type SgrMouseEvent,
 	Text,
 	TUI,
+	type TuiPaint,
 	WorkspaceLayout,
 	WorkspaceModel,
 } from "@oh-my-pi/pi-tui";
@@ -225,6 +226,35 @@ describe("TUI app viewport backend", () => {
 				expect(nativeFrame).not.toHaveBeenCalled();
 				expect(nativeResize).not.toHaveBeenCalled();
 				expect(viewportContent(term)).toContain("app");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("publishes app viewport snapshots for recording startup and cached scrolling", async () => {
+		await withEnv("PI_TUI_RENDER_BACKEND", "app-viewport", async () => {
+			const scheduler = new StressRenderScheduler();
+			const term = new VirtualTerminal(20, 4);
+			const paints: TuiPaint[] = [];
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler, onPaint: paint => paints.push(paint) });
+			tui.addChild(new TranscriptComponent(["first", "second", "third", "fourth", "fifth", "sixth"]));
+			try {
+				tui.start();
+				await scheduler.drain(term);
+				expect(Bun.stripANSI(paints.at(-1)!.viewport.join("\n"))).toContain("sixth");
+				paints.length = 0;
+
+				tui.requestRender(true);
+				await scheduler.drain(term);
+				expect(Bun.stripANSI(paints.at(-1)!.viewport.join("\n"))).toContain("sixth");
+				expect(paints.at(-1)).toMatchObject({ history: [], reset: false, alt: false, columns: 20, rows: 4 });
+
+				term.sendInput("\x1b[<64;2;2M");
+				await scheduler.drain(term);
+				const scrolled = Bun.stripANSI(paints.at(-1)!.viewport.join("\n"));
+				expect(scrolled).toContain("first");
+				expect(scrolled).not.toContain("sixth");
 			} finally {
 				tui.stop();
 			}

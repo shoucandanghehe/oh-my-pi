@@ -9504,6 +9504,60 @@ export class AgentSession implements SettingsScope {
 		};
 	}
 
+	/**
+	 * Capture one displayed message's identity for an Edit control. A stale control
+	 * cannot take a different duplicate or a message already recorded in the transcript.
+	 * Pending edits leave the run alone; live steering requires stopping the response
+	 * that already received it, not pretending that provider input can be unsent.
+	 * `beforeInterrupt` pauses the composer's loop before the live response stops.
+	 */
+	getQueuedMessageEditAction(
+		queue: "steering" | "followUp",
+		index: number,
+	): ((beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>) | undefined {
+		const messages =
+			queue === "steering"
+				? [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
+				: this.agent.peekFollowUpQueue();
+		const message = messages.filter(isUserAuthoredQueuedMessage)[index];
+		if (!message) return undefined;
+		return beforeInterrupt => this.#editQueuedMessage(message, queue, beforeInterrupt);
+	}
+
+	async #editQueuedMessage(
+		message: AgentMessage,
+		queue: "steering" | "followUp",
+		beforeInterrupt?: () => void,
+	): Promise<RestoredQueuedMessage | undefined> {
+		const pending = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
+		const index = pending.indexOf(message);
+		const restored = toRestoredQueuedMessage(message);
+		restored.text = this.#queuedMessageRawText.get(message) ?? restored.text;
+		if (index >= 0) {
+			this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(pending, index));
+			this.#reconcileQueuedMessageDrain();
+			return restored;
+		}
+		if (queue !== "steering" || !this.agent.peekLiveSteeredMessages().includes(message)) return undefined;
+		beforeInterrupt?.();
+
+		// Withdraw before abort so neither the aborted transcript nor its requeue
+		// commits the selected message. Other undelivered input returns to its
+		// original queue, and remains pending until the user explicitly resumes.
+		this.#modeExitDrainSuppressionDepth++;
+		try {
+			const withdrawn = this.agent.withdrawUndeliveredQueuedMessages();
+			const steering = [...withdrawn.steering, ...this.agent.peekSteeringQueue()];
+			const followUp = [...withdrawn.followUp, ...this.agent.peekFollowUpQueue()];
+			this.agent.replaceQueues(this.#withoutQueuedUserMessage(steering, steering.indexOf(message)), followUp);
+			await this.abort({ reason: USER_INTERRUPT_LABEL });
+			return restored;
+		} finally {
+			this.#queuedMessageDrainBlocked = this.agent.hasQueuedMessages();
+			this.#modeExitDrainSuppressionDepth--;
+		}
+	}
+
 	/** Last {@link getQueuedMessages} snapshot emitted as a `queue_update` event.
 	 *  Coalesces the agent's internal `onQueueChange` notification down to the
 	 *  externally observable transitions RPC/ACP/TUI subscribers actually care
@@ -11984,6 +12038,7 @@ export class AgentSession implements SettingsScope {
 							toolInfos,
 							isReadOnlyToolCall: (tool, args) => this.#tools.isReadOnlySideToolCall(tool, args),
 							shareSummaryTool: shareSummaryWithMainTool,
+							approveSummary: options?.approveSummary,
 							approvalUI: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
 						});
 						child.setTools(runtime.tools);

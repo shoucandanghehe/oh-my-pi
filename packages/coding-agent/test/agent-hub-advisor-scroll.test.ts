@@ -694,10 +694,9 @@ describe("AgentTranscriptViewer", () => {
 			expect(body()).toContain("OLDMARKER");
 			fs.writeFileSync(file, `${buildJsonl()}${messageLine("same", "NEWMARKER")}\n`);
 			fs.utimesSync(file, original.atime, original.mtime);
-			const readFile = vi.spyOn(fs.promises, "readFile");
+			const visitEntries = vi.spyOn(agentTranscriptSource, "visitEntries");
 			vi.advanceTimersByTime(250 * 5);
-			expect(readFile).toHaveBeenCalledTimes(1);
-			await readFile.mock.results[0]!.value;
+			await visitEntries.mock.results[0]?.value;
 			await settleRemoteRefresh();
 			expect(body()).toContain("NEWMARKER");
 		} finally {

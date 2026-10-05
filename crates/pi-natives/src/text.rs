@@ -1384,8 +1384,9 @@ impl PreparedWrap {
 					} else {
 						self.tokens[index - 1].end
 					};
-					// Reuse the painter's grapheme/OSC-66 breaker for overlong words.
-					// Restored styles are zero-width and cannot change their row count.
+					// Reuse the painter's grapheme/OSC-66 breaker for overlong
+					// words. Restored styles are zero-width and
+					// cannot change their row count.
 					let broken = break_long_word(
 						&self.token_text[token_start..token.end],
 						width,

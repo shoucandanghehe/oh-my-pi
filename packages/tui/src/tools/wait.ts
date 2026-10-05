@@ -572,19 +572,11 @@ export function createIrcMessageCard(
 		{
 			role: `omp.irc.${card.kind}`,
 			tone: "info",
-			head: [
-				span(plainText(title), "toolTitle strong"),
-				...meta.filter(part => part !== age).map(part => span(` ${part}`, "muted")),
-			],
+			head: [span(plainText(title), "toolTitle strong"), ...meta.map(part => span(` ${part}`, "dim"))],
 			collapsible: body.trim().length > 0,
 			preview: { lines: 3 },
 		},
-		compact([
-			card.timestamp
-				? row([elapsed(Date.now() - card.timestamp), text([span("ago", "dim")])], { gap: "xs" })
-				: undefined,
-			body.trim() ? md(body) : undefined,
-		]),
+		body.trim() ? [md(body)] : [],
 	);
 	return Object.assign(component, { describe: () => described });
 }

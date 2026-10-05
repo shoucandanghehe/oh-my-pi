@@ -2104,7 +2104,7 @@ export class Editor implements Component, Focusable {
 			if (this.onAltEnter) {
 				this.onAltEnter(this.getText());
 			} else {
-				this.#addNewLine();
+				this.insertNewLine();
 			}
 		}
 		// New line. A key the user explicitly bound to `tui.input.submit` wins
@@ -2127,7 +2127,7 @@ export class Editor implements Component, Focusable {
 				this.#submitValue();
 				return;
 			}
-			this.#addNewLine();
+			this.insertNewLine();
 		}
 		// Plain Enter - submit (handles both legacy \r and Kitty protocol with lock bits)
 		else if (kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") {
@@ -3259,7 +3259,7 @@ export class Editor implements Component, Focusable {
 		let line = this.#state.lines[this.#state.cursorLine] || "";
 		// The space a Tab word accept added is provisional until the next keystroke:
 		// a typed space is swallowed, closing punctuation or a hyphen replaces it,
-		// anything else keeps it (a newline drops it too, see #addNewLine).
+		// anything else keeps it (a newline drops it too, see insertNewLine).
 		const provisionalSpace = this.#hasProvisionalSpace();
 		if (provisionalSpace && char === " ") {
 			this.#lastAction = null;
@@ -3493,7 +3493,7 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	#addNewLine(): void {
+	insertNewLine(): void {
 		// A provisional space from a Tab word accept would become trailing whitespace.
 		// Read before #resetKillSequence clears the accept marker.
 		const dropSpace = this.#hasProvisionalSpace();
