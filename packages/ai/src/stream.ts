@@ -926,7 +926,9 @@ export function stream<TApi extends Api>(
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
 		withThinkingLoopGuard(routedModel, wireOptions, opts =>
-			withProviderInFlightLimit(routedModel, opts, limited => streamDispatch(routedModel, codec.context, opts, limited)),
+			withProviderInFlightLimit(routedModel, opts, limited =>
+				streamDispatch(routedModel, codec.context, opts, limited),
+			),
 		),
 	);
 }

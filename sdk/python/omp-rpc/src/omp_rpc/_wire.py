@@ -230,6 +230,18 @@ class ImageContent(TypedDict):
     providerFile: NotRequired[JsonObject]
 
 
+class AudioContent(TypedDict):
+    type: Literal["audio"]
+    data: str
+    mimeType: str
+
+
+class VideoContent(TypedDict):
+    type: Literal["video"]
+    data: str
+    mimeType: str
+
+
 class ToolCall(TypedDict):
     type: Literal["toolCall"]
     id: str
@@ -752,6 +764,8 @@ class RestoredQueuedMessage:
     """Queued user content withdrawn from the queue, as the editor would restore it."""
     text: str
     images: tuple[ImageContent, ...] | None = None
+    audio: tuple[AudioContent, ...] | None = None
+    video: tuple[VideoContent, ...] | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1578,7 +1592,7 @@ class LogoutResult:
     remaining_source: str | None = None
 
 
-UserContent: TypeAlias = TextContent | ImageContent
+UserContent: TypeAlias = TextContent | ImageContent | AudioContent | VideoContent
 
 
 AssistantContent: TypeAlias = TextContent | ThinkingContent | RedactedThinkingContent | FallbackContent | AnthropicServerToolContent | ImageContent | ToolCall
@@ -1622,6 +1636,14 @@ parse_redacted_thinking_content = cast("Decoder[RedactedThinkingContent]", open_
 
 parse_image_content = cast("Decoder[ImageContent]", open_record("type", frozenset({"image"})))
 """Decodes a `ImageContent` open record: checks the discriminator and keeps every key."""
+
+
+parse_audio_content = cast("Decoder[AudioContent]", open_record("type", frozenset({"audio"})))
+"""Decodes a `AudioContent` open record: checks the discriminator and keeps every key."""
+
+
+parse_video_content = cast("Decoder[VideoContent]", open_record("type", frozenset({"video"})))
+"""Decodes a `VideoContent` open record: checks the discriminator and keeps every key."""
 
 
 parse_tool_call = cast("Decoder[ToolCall]", open_record("type", frozenset({"toolCall"})))
@@ -1748,7 +1770,7 @@ parse_select_option_detail = cast("Decoder[SelectOptionDetail]", open_record(Non
 """Decodes a `SelectOptionDetail` open record: checks the discriminator and keeps every key."""
 
 
-parse_user_content = cast("Decoder[UserContent]", open_record("type", frozenset({"text", "image"})))
+parse_user_content = cast("Decoder[UserContent]", open_record("type", frozenset({"text", "image", "audio", "video"})))
 """Decodes a `UserContent` open record: checks the discriminator and keeps every key."""
 
 
@@ -2037,6 +2059,8 @@ def parse_restored_queued_message(value: object, path: str = "RestoredQueuedMess
     return RestoredQueuedMessage(
         text=required(payload, "text", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
+        audio=optional(payload, "audio", array(parse_audio_content), path),
+        video=optional(payload, "video", array(parse_video_content), path),
     )
 
 
@@ -3732,6 +3756,7 @@ __all__ = [
     "AssistantToolCallEndEvent",
     "AssistantToolCallStartEvent",
     "Attribution",
+    "AudioContent",
     "AutoCompactionAction",
     "AutoCompactionEndEvent",
     "AutoCompactionReason",
@@ -3894,6 +3919,7 @@ __all__ = [
     "UsageLimitWrapUp",
     "UserContent",
     "UserMessage",
+    "VideoContent",
     "WidgetPlacement",
     "parse_abort_and_restore_queue_result",
     "parse_advisor_cost_changed_event",
@@ -3922,6 +3948,7 @@ __all__ = [
     "parse_assistant_tool_call_delta_event",
     "parse_assistant_tool_call_end_event",
     "parse_assistant_tool_call_start_event",
+    "parse_audio_content",
     "parse_auto_compaction_end_event",
     "parse_auto_compaction_start_event",
     "parse_auto_retry_end_event",
@@ -4054,4 +4081,5 @@ __all__ = [
     "parse_usage_limit_wrap_up",
     "parse_user_content",
     "parse_user_message",
+    "parse_video_content",
 ]

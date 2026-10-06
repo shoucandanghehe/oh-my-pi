@@ -410,5 +410,29 @@ describe("RPC queued-message editing", () => {
 			const maxBytes = Buffer.byteLength(JSON.stringify(expected));
 			expect(fitAbortAndRestoreQueueResponse("stop", restored, maxBytes)).toEqual(expected);
 		});
+
+		test("preserves audio and video on retained entries when an oversized queue drops images and later entries", () => {
+			const first = {
+				text: "first",
+				audio: [{ type: "audio" as const, mimeType: "audio/wav", data: "AAAA" }],
+				video: [{ type: "video" as const, mimeType: "video/mp4", data: "BBBB" }],
+			};
+			const restored = {
+				steering: [
+					{ ...first, images: [{ type: "image" as const, mimeType: "image/png", data: "C".repeat(1_000) }] },
+				],
+				followUp: [{ text: "second".repeat(1_000) }],
+			};
+			const expected: RpcResponse = {
+				id: "stop",
+				type: "response",
+				command: "abort_and_restore_queue",
+				success: true,
+				data: { steering: [first], followUp: [], imagesDropped: true, truncated: true },
+			};
+			expect(fitAbortAndRestoreQueueResponse("stop", restored, Buffer.byteLength(JSON.stringify(expected)))).toEqual(
+				expected,
+			);
+		});
 	});
 });

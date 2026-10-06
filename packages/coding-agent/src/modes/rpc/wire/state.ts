@@ -177,7 +177,7 @@ export const stateDefs = {
 	},
 	PromoteQueuedMessageResult: { promoted: "boolean" },
 	RestoredQueuedMessage: doc(
-		{ text: "string", "images?": "ImageContent[]" },
+		{ text: "string", "images?": "ImageContent[]", "audio?": "AudioContent[]", "video?": "VideoContent[]" },
 		"Queued user content withdrawn from the queue, as the editor would restore it.",
 	),
 	AbortAndRestoreQueueResult: doc(

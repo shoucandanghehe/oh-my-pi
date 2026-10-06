@@ -30,6 +30,9 @@
 
 - Added `PI_NATIVES_DIR` support to `getNativesDir()` for configuring the native addon directory.
 - Added `ZipPackage` for lazily reading ZIP-based document packages with a total decompressed-size limit, along with `DocxImage.readBytes()` for accessing raw DOCX image data.
+### Fixed
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.8.0] - 2026-10-07
 
@@ -52,9 +55,6 @@
 ### Breaking Changes
 
 - Replaced the `cursorPosition` option of `TerminalQueryResponder` with `hostCursorHandshake`, which leaves only the PTY host's own session-start cursor query unanswered instead of every cursor-position query
-### Fixed
-
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.5.1] - 2026-10-03
 

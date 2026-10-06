@@ -178,7 +178,9 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 			}, TICK_MS);
 		}
 		this.#unsubWaiters = agentPauseGate.onWaitersChange(() => {
-			if (!this.#disposed) this.host.ui.requestRender();
+			if (this.#disposed) return;
+			this.#native = undefined;
+			this.host.ui.requestRender();
 		});
 		this.host.ui.requestRender();
 		return this.#done.promise;
@@ -231,8 +233,15 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 		this.#native = undefined;
 	}
 
-	/** A glass sheet titled "Paused" (not the whole pane: the transcript stays visible, frozen). */
-	readonly nativeOverlay = { role: "omp.overlay.pause", size: "md", anchor: "center", head: "Paused" } as const;
+	/** A glass sheet over the frozen transcript. */
+	get nativeOverlay() {
+		return {
+			role: "omp.overlay.pause",
+			size: "md",
+			anchor: "center",
+			head: agentPauseGate.ready ? "Paused" : "Pausing",
+		} as const;
+	}
 
 	describe(): NativeNode {
 		if (this.#native) return this.#native;
@@ -251,8 +260,24 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 				],
 				{ gap: "xs", align: "baseline" },
 			),
+			text(
+				[
+					span(
+						agentPauseGate.ready ? "Ready to exit paused" : "Waiting for the model boundary",
+						agentPauseGate.ready ? "success" : "warning",
+					),
+					span(
+						` · ${agentPauseGate.modelWaiterCount}/${agentPauseGate.activeLoopCount} agent loops parked`,
+						"dim",
+					),
+				],
+				{ wrap: "word" },
+			),
 			actionBar([
 				null,
+				...(agentPauseGate.ready
+					? [actionButton("Exit paused", "exit", { keys: "q", title: "Exit paused; resume later with /continue" })]
+					: []),
 				actionButton("Resume", "resume", {
 					keys: resumeKey,
 					tone: "accent",
@@ -264,9 +289,11 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 		return this.#native;
 	}
 
-	/** Resume runs what Esc/Enter/Space run. */
+	/** Pointer actions follow the same barrier and outcome rules as keys. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "resume" && !this.#disposed) this.#done.resolve();
+		if (event.type !== "action") return;
+		if (event.act === "resume") this.handleInput("\r");
+		else if (event.act === "exit") this.handleInput("q");
 	}
 
 	render(width: number): readonly string[] {

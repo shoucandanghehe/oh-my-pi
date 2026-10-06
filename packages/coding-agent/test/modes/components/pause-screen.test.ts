@@ -182,6 +182,44 @@ describe("pause screen", () => {
 			expect(agentPauseGate.paused).toBe(true); // foreign pause not stolen
 		});
 
+		it("native resume returns the resumed outcome without invoking durable exit", async () => {
+			const { host, shown, pausedExitCount, statuses } = makeHost();
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected PauseScreenComponent");
+			component.handleNativeEvent({ type: "action", key: "resume", act: "resume", mods: [] });
+			expect(await run).toBe("resumed");
+			expect(agentPauseGate.paused).toBe(false);
+			expect(pausedExitCount()).toBe(0);
+			expect(statuses.some(message => message.includes("Resumed after"))).toBe(true);
+		});
+
+		it("native durable exit appears only after the last active loop parks and reaches the session owner", async () => {
+			const loop = agentPauseGate.registerLoop();
+			const { host, shown, pausedExitCount } = makeHost();
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected PauseScreenComponent");
+			try {
+				expect(JSON.stringify(component.describe())).not.toContain('"click":"exit"');
+				component.handleNativeEvent({ type: "action", key: "exit", act: "exit", mods: [] });
+				expect(pausedExitCount()).toBe(0);
+				expect(agentPauseGate.paused).toBe(true);
+
+				const waiter = agentPauseGate.waitUntilResumed(undefined, loop);
+				expect(JSON.stringify(component.describe())).toContain('"click":"exit"');
+				component.handleNativeEvent({ type: "action", key: "exit", act: "exit", mods: [] });
+				expect(await run).toBe("exited");
+				await waiter;
+				expect(pausedExitCount()).toBe(1);
+				expect(agentPauseGate.paused).toBe(false);
+			} finally {
+				agentPauseGate.resume();
+				agentPauseGate.unregisterLoop(loop);
+				component.dispose();
+			}
+		});
+
 		it("exits paused only when the barrier is ready", async () => {
 			const { host, shown, pausedExitCount, statuses } = makeHost();
 			const run = runPauseScreen(host);

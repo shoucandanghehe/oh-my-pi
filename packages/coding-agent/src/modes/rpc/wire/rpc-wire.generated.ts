@@ -34,6 +34,18 @@ export interface ImageContent {
 	providerFile?: Record<string, unknown>;
 }
 
+export interface AudioContent {
+	type: "audio";
+	data: string;
+	mimeType: string;
+}
+
+export interface VideoContent {
+	type: "video";
+	data: string;
+	mimeType: string;
+}
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
@@ -58,7 +70,7 @@ export interface AnthropicServerToolContent {
 	block: Record<string, unknown>;
 }
 
-export type UserContent = TextContent | ImageContent;
+export type UserContent = TextContent | ImageContent | AudioContent | VideoContent;
 
 /** Message content: plain text or content blocks. */
 export type MessageContent = string | UserContent[];
@@ -585,6 +597,8 @@ export interface PromoteQueuedMessageResult {
 export interface RestoredQueuedMessage {
 	text: string;
 	images?: ImageContent[];
+	audio?: AudioContent[];
+	video?: VideoContent[];
 }
 
 /** User-authored queued input withdrawn before the abort, oldest first. */

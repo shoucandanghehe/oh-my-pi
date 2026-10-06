@@ -10,7 +10,6 @@ import btwConversationPrompt from "../../prompts/system/btw-conversation.md" wit
 import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
 import { resolveSessionMarkdownLinkHrefs } from "../../internal-urls/hyperlink-targets";
 import type { ContinuePausedAgentsResult } from "../../session/agent-session-types";
-import type { EphemeralConversationTurn } from "../../session/ephemeral-conversation";
 import {
 	type BtwHistoryRecord,
 	type BtwHistoryTurn,
@@ -19,7 +18,7 @@ import {
 	getBtwCopyText,
 	getBtwLatestTurn,
 } from "../../session/btw-history";
-import { beginBtwTurn, patchLatestBtwTurn } from "../../session/btw-turn";
+import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
 import { BtwManager, type BtwThread } from "../../session/btw-manager";
 import { BTW_THREAD_CUSTOM_TYPE, type BtwPromotionLifecycle, type BtwPromotionRequest } from "../../session/btw-thread";
 import { copyToClipboard } from "../../utils/clipboard";
@@ -42,6 +41,7 @@ interface BtwHistoryRequest extends BtwRequest {
 	store: BtwHistoryStore;
 	record: BtwHistoryRecord;
 	history?: readonly BtwHistoryTurn[];
+	conversationKey: string;
 	/** At least one checkpoint belongs to this request; later failures must block lifecycle changes. */
 	persisted: boolean;
 	abortController: AbortController;
@@ -104,6 +104,7 @@ export class BtwController {
 	#openingManager: Promise<BtwManager> | undefined;
 	#disposing: Promise<void> | undefined;
 	#workspacePane: BtwConversationPane | undefined;
+	#workspaceOverlay: OverlayHandle | undefined;
 
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -135,7 +136,7 @@ export class BtwController {
 
 	canOpenThread(): boolean {
 		if (
-			!this.ctx.workspaceEnabled ||
+			(!this.ctx.workspaceEnabled && !this.ctx.ui.nativeRendering) ||
 			this.#branchInFlight ||
 			this.#managerSessionId !== this.ctx.sessionManager.getSessionId()
 		)
@@ -463,7 +464,11 @@ export class BtwController {
 			this.ctx.showStatus("Wait for the current BTW promotion to finish", { dim: true });
 			return;
 		}
-		if (!this.ctx.workspaceEnabled || this.ctx.focusedAgentId || question.trim() === "--history") {
+		if (
+			(!this.ctx.workspaceEnabled && !this.ctx.ui.nativeRendering) ||
+			this.ctx.focusedAgentId ||
+			question.trim() === "--history"
+		) {
 			await this.#startHistory(question.trim() === "--history" ? "" : question);
 			return;
 		}
@@ -477,7 +482,7 @@ export class BtwController {
 		const manager = await this.#managerForCurrentSession();
 		if (generation !== this.#generation) return;
 		if (!input) {
-			if (this.ctx.workspaceEnabled) {
+			if (this.ctx.workspaceEnabled || this.ctx.ui.nativeRendering) {
 				if (this.#openWorkspacePane(manager)) this.#detachActiveRequest();
 			} else if (manager.activeKey) {
 				this.#showInlineThread(manager, manager.activeKey);
@@ -488,6 +493,7 @@ export class BtwController {
 		}
 		if (input === "--clear" || input === "clear") {
 			this.#closeActiveRequest();
+			if (this.ctx.ui.nativeRendering) this.#closeWorkspacePane();
 			this.ctx.showStatus("Dismissed the inline BTW panel; the thread is kept", { dim: true });
 			return;
 		}
@@ -502,6 +508,11 @@ export class BtwController {
 		this.#closeActiveRequest();
 		const previousKey = manager.activeKey;
 		const threadKey = manager.createChild(input, leafId, { provider: model.provider, id: model.id });
+		if (this.ctx.ui.nativeRendering) {
+			this.#openWorkspacePane(manager);
+			this.#sendThreadInput(threadKey, input);
+			return;
+		}
 		if (this.#workspacePane && previousKey) manager.select(previousKey);
 		const request = this.#showInlineThread(manager, threadKey);
 		if (!request) return;
@@ -982,6 +993,15 @@ export class BtwController {
 			});
 		}
 		this.#updateWorkspacePane();
+		if (this.ctx.ui.nativeRendering) {
+			if (!this.#workspaceOverlay) {
+				this.#workspaceOverlay = this.ctx.ui.showOverlay(this.#workspacePane, {
+					width: "100%",
+					maxHeight: "100%",
+				});
+			}
+			return true;
+		}
 		if (this.ctx.openBtwWorkspacePane(this.#workspacePane)) return true;
 		this.#workspacePane.dispose();
 		this.#workspacePane = undefined;
@@ -990,9 +1010,19 @@ export class BtwController {
 	}
 
 	#closeWorkspacePane(): void {
-		if (!this.#workspacePane) return;
+		const pane = this.#workspacePane;
+		if (!pane) return;
 		this.#workspacePane = undefined;
-		this.ctx.closeBtwWorkspacePane();
+		if (this.#workspaceOverlay) {
+			this.#workspaceOverlay.hide();
+			this.#workspaceOverlay = undefined;
+			pane.dispose();
+		} else this.ctx.closeBtwWorkspacePane();
+	}
+
+	/** Release native or retiring ANSI views without cancelling durable background work. */
+	closeView(): void {
+		if (this.#workspaceOverlay || this.ctx.ui.nativeRendering) this.#closeWorkspacePane();
 	}
 
 	#submitPaneInput(manager: BtwManager, input: string, images?: ImageContent[], sourceKey?: string): boolean {
@@ -1131,6 +1161,11 @@ export class BtwController {
 				: undefined,
 		}));
 		pane.update(threads, manager.activeKey);
+		const editor = pane.getPasteTarget();
+		if (editor && this.ctx.dictationSpaceHold) {
+			editor.spaceHold.keys = this.ctx.keybindings.getKeys("app.stt.pushToTalk");
+			editor.spaceHold.handler ??= this.ctx.dictationSpaceHold(editor);
+		}
 	}
 
 	async #closeThread(manager: BtwManager, key: string): Promise<boolean> {
@@ -1270,45 +1305,10 @@ export class BtwController {
 
 	async #runHistoryRequest(request: BtwHistoryRequest): Promise<void> {
 		try {
-			const model = request.session.model;
-			if (!model) throw new Error("No active model available for /btw.");
-			const history: EphemeralConversationTurn[] = [];
-			for (const turn of request.history ?? []) {
-				if (!turn.answer) continue;
-				history.push({
-					input: turn.question,
-					replyText: turn.answer,
-					timestamp: turn.createdAt,
-					assistantMessage: {
-						role: "assistant",
-						content: [{ type: "text", text: turn.answer }],
-						api: model.api,
-						provider: model.provider,
-						model: model.id,
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "stop",
-						timestamp: turn.updatedAt,
-					},
-				});
-			}
-			const transportEpoch = (request.history?.findLastIndex(turn => turn.status !== "complete") ?? -1) + 1;
-			const conversation = request.session.createEphemeralConversation(
-				btwConversationPrompt,
-				{
-					turns: history,
-					sideSessionId: `btw:${request.record.id}:${transportEpoch}`,
-				},
-				model,
-			);
-			const { replyText, assistantMessage } = await conversation.prompt(request.question, {
-				replyMaxBytes: Number.POSITIVE_INFINITY,
+			const { replyText, assistantMessage } = await runBtwTurn(request.session, {
+				question: request.question,
+				history: request.history,
+				conversationKey: request.conversationKey,
 				onTextDelta: delta => {
 					const latest = getBtwLatestTurn(request.record);
 					if (latest.status !== "running") return;

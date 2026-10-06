@@ -145,51 +145,11 @@
 
 ### Changed
 
-- The status line now recognizes projects located in the user’s `repos` directory.
-- Model mentions, `/switch` completions, and model-picker search now update immediately while typing, including with large model catalogs.
-
-### Fixed
-
-- Fixed terminal resizing issues that could cause flicker or briefly display an empty frame.
-- Improved `/annotate` handling for long source lines and filenames, preserving indentation and typed note text.
-- Fixed fullscreen inputs that could hide the cursor when hardware-cursor support was enabled.
-- Fixed model picker and mention-list ordering for same-provider `-latest` models so results remain alphabetically stable.
-- Model browser performance metrics now show the correct measurements for each service tier and identify the tier.
-- Fixed plan review keyboard navigation so horizontal options use Left/Right and model-slider adjustments use Shift+Left/Right.
-- Improved the Ask dialog footer so question-switching keyboard shortcuts are clearly labeled.
-- Fixed creating a new agent when its generated system prompt contains a Markdown code fence.
-- Timed-out `glob` scans are now labeled as timed out rather than truncated.
-- Ctrl+Delete now deletes the word after the cursor, matching Ctrl+Backspace behavior.
-
-## [18.6.3] - 2026-10-06
-
-### Breaking Changes
-
-- `WorkingRowSpec` no longer takes `rate`: the native working row reads spinner, elapsed time, divider, then the intent, and the tok/s readout moved to the composer bar
-
-### Added
-
-- `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
-- `formatTooltipKey` formats a key for a native tooltip: unicode keycap glyphs whatever the symbol preset, `esc` for Escape
-- `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
-- `AssistantMessageComponent` can keep finished thinking sections expanded via `setExpandThinkingBlocks()`; sections folded by hand stay folded ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))
-
-### Changed
-
-- `/hotkeys` shows the effective `app.stt.pushToTalk` binding, including `Disabled` when unbound ([#6592](https://github.com/can1357/oh-my-pi/pull/6592) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- SIXEL images are encoded off the main thread, so showing an image no longer stalls the terminal ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed native tooltips (composer, working row, queue, pause screen, git and extension dashboards) naming keys with Nerd Font icons Tern's UI font lacks, or as raw key ids (`ctrl+g`); they use keycap glyphs (`⇧⇥`, `⌃G`)
-- Fixed Tern's per-turn usage row showing a 24-hour time on a 12-hour terminal clock; the row and its tooltip now follow the terminal's clock, keeping the tooltip's ISO date ([#14565](https://github.com/can1357/oh-my-pi/pull/14565) by [@wolfiesch](https://github.com/wolfiesch))
-- Fixed hold-Space push-to-talk stopping the instant recording began (showing "No speech detected.") when opening the microphone briefly froze the UI ([#14463](https://github.com/can1357/oh-my-pi/pull/14463) by [@pgkt04](https://github.com/pgkt04))
-### Changed
-
 - Made the app viewport scrollbar thumb denser while retaining its four subrow scroll-position slots.
 
 ### Fixed
 
+- Fixed app-viewport screen recording and live streaming missing viewport updates.
 - Fixed native renderer transitions so applications can assemble semantic components before the first frame, and native input bypasses app-viewport interception. ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2))
 - Reduced background work during app-viewport tool animations while preserving offscreen content growth and scrolling.
 - Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
@@ -234,6 +194,78 @@
 - Fixed `/resume` leaving the session picker scrollbar visible after selecting a session in the app viewport renderer.
 - Fixed emergency exits leaving app-viewport mouse reporting enabled, restoring native terminal drag selection.
 - Fixed app viewport treating near-origin pixel mouse reports as terminal-cell coordinates, preserving wide-character selections during repaint.
+- Fixed switching from the app viewport to a Tern inline surface while the alternate screen was still active.
+- Fixed native keyboard transcript scrolling in BTW and agent views.
+- Fixed native pause sheets not updating barrier readiness or offering durable exit.
+
+## [18.8.0] - 2026-10-07
+
+### Added
+
+- SVG and Mermaid files now render as images or diagrams beneath their file cards, with SVG previews updating while the file streams and Mermaid previews appearing when the file is complete.
+- Native tool cards can open expanded regardless of the transcript’s expansion state; the todo checklist uses this behavior.
+
+### Changed
+
+- TSP composer placeholders now appear as the composer title in italicized curly quotes, with “What are we cooking?” used when no title is provided.
+- TSP image transfers are more efficient across reconnects and multiple surfaces: images are sent once per connection, existing terminal blobs are detected before upload, and images in the Tern blob cache can be reused without crossing the terminal pty.
+- Improved performance and responsiveness across the TUI, including large TSP messages and Markdown documents, streaming output, tool-result cards, debug logs, raw SSE and Git diff views, path and model searches, session and settings lists, plan review, agent transcripts, status updates, assistant links, Kitty images, and large prompt or evaluation content.
+- Large debug logs and plan-review histories now retain bounded history to keep the interface responsive, while preserving the newest log entries.
+
+### Fixed
+
+- Fixed slow Markdown processing for certain LaTeX environments and incomplete delimiters.
+- Fixed excessive slowdown when formatting long semicolon-free JavaScript evaluations.
+- Fixed prompt-editor lag in large drafts containing magic keywords.
+
+## [18.7.0] - 2026-10-06
+
+### Added
+
+- Assistant SVG code blocks now render as inline, theme-colored images on terminals with graphics support, updating as responses stream and adapting to terminal width; SVG that cannot be rendered remains available as code.
+- Numeric tables in assistant responses can now include automatically selected, themed charts based on the table’s structure and units.
+
+### Changed
+
+- The status line now recognizes projects located in the user’s `repos` directory.
+- Model mentions, `/switch` completions, and model-picker search now update immediately while typing, including with large model catalogs.
+
+### Fixed
+
+- Fixed terminal resizing issues that could cause flicker or briefly display an empty frame.
+- Improved `/annotate` handling for long source lines and filenames, preserving indentation and typed note text.
+- Fixed fullscreen inputs that could hide the cursor when hardware-cursor support was enabled.
+- Fixed model picker and mention-list ordering for same-provider `-latest` models so results remain alphabetically stable.
+- Model browser performance metrics now show the correct measurements for each service tier and identify the tier.
+- Fixed plan review keyboard navigation so horizontal options use Left/Right and model-slider adjustments use Shift+Left/Right.
+- Improved the Ask dialog footer so question-switching keyboard shortcuts are clearly labeled.
+- Fixed creating a new agent when its generated system prompt contains a Markdown code fence.
+- Timed-out `glob` scans are now labeled as timed out rather than truncated.
+- Ctrl+Delete now deletes the word after the cursor, matching Ctrl+Backspace behavior.
+
+## [18.6.3] - 2026-10-06
+
+### Breaking Changes
+
+- `WorkingRowSpec` no longer takes `rate`: the native working row reads spinner, elapsed time, divider, then the intent, and the tok/s readout moved to the composer bar
+
+### Added
+
+- `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
+- `formatTooltipKey` formats a key for a native tooltip: unicode keycap glyphs whatever the symbol preset, `esc` for Escape
+- `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+- `AssistantMessageComponent` can keep finished thinking sections expanded via `setExpandThinkingBlocks()`; sections folded by hand stay folded ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- `/hotkeys` shows the effective `app.stt.pushToTalk` binding, including `Disabled` when unbound ([#6592](https://github.com/can1357/oh-my-pi/pull/6592) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- SIXEL images are encoded off the main thread, so showing an image no longer stalls the terminal ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed native tooltips (composer, working row, queue, pause screen, git and extension dashboards) naming keys with Nerd Font icons Tern's UI font lacks, or as raw key ids (`ctrl+g`); they use keycap glyphs (`⇧⇥`, `⌃G`)
+- Fixed Tern's per-turn usage row showing a 24-hour time on a 12-hour terminal clock; the row and its tooltip now follow the terminal's clock, keeping the tooltip's ISO date ([#14565](https://github.com/can1357/oh-my-pi/pull/14565) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed hold-Space push-to-talk stopping the instant recording began (showing "No speech detected.") when opening the microphone briefly froze the UI ([#14463](https://github.com/can1357/oh-my-pi/pull/14463) by [@pgkt04](https://github.com/pgkt04))
 
 ## [18.6.1] - 2026-10-04
 

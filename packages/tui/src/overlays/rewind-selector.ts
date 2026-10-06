@@ -150,7 +150,6 @@ const CHROME_ROWS = 5;
 const STRIP_GAP = 2;
 const SLIDE_MS = 160;
 
-
 export class RewindSelectorComponent implements Component {
 	#history: RewindHistory;
 	#scrollView = new ScrollView([], {

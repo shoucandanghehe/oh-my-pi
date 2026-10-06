@@ -36,6 +36,9 @@ import type { ExtensionPresentationSource } from "@oh-my-pi/pi-tui/chat/extensio
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
 
+import { node, span } from "@oh-my-pi/pi-tui/native/describe";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
+import { actionBar, actionButton, selectList } from "@oh-my-pi/pi-tui/native/overlay";
 export interface BtwThreadView {
 	readonly key: string;
 	readonly title: string;
@@ -164,6 +167,7 @@ export class BtwConversationPane
 	#width = 80;
 	#height = 20;
 	#abandoned = false;
+	readonly wantsKeyRelease = true;
 
 	constructor(options: BtwConversationPaneOptions) {
 		this.#options = options;
@@ -194,7 +198,9 @@ export class BtwConversationPane
 			belowEditor: this.#widgets.below,
 			getEditorTopBorder: availableWidth => options.statusLine.getTopBorder(availableWidth),
 			getPlaceholder: () =>
-				"No threads yet — type a question to start a durable BTW thread, or use /btw <question> from Main.",
+				this.#threads.length === 0
+					? "No threads yet — type a question to start a durable BTW thread, or use /btw <question> from Main."
+					: "This thread has no messages yet — type a question below.",
 			getNotice: () => this.#selected()?.error,
 			onEditorChange: (text, images, imageLinks, key) => {
 				if (key && !this.#abandoned) this.#options.onDraftChange(key, text, images, imageLinks);
@@ -202,6 +208,81 @@ export class BtwConversationPane
 			onInput: (data, editorEmpty) => this.#handleInput(data, editorEmpty),
 			onClose: options.onClose,
 		});
+	}
+
+	readonly nativeOverlay = {
+		role: "omp.overlay.btw",
+		size: "lg",
+		anchor: "center",
+		head: "BTW threads",
+	} as const;
+
+	describe(_cx: DescribeContext): NativeNode {
+		const selected = this.#selected();
+		const actions = [actionButton("New thread", "new")];
+		if (selected) {
+			if (this.#options.canCopy(selected.key)) actions.push(actionButton("Copy", "copy-thread"));
+			actions.push(actionButton("Delete", "delete", { tone: "error" }));
+			if (selected.phase !== "running" && selected.turns.length > 0) {
+				actions.push(actionButton("Promote", "promote"));
+			}
+		}
+		return node("col", { gap: "md" }, [
+			node(
+				"row",
+				{ gap: "lg", align: "start", grow: 1 },
+				[
+					node(
+						"col",
+						{ shrink: 0, basis: 0.3, max: { w: "40ch" } },
+						[
+							selectList(
+								"threads",
+								this.#threads.map(thread =>
+									node(
+										"item",
+										{
+											label: replaceTabs(thread.title),
+											detail: [span(thread.phase, thread.phase === "error" ? "error" : "dim")],
+											value: thread.unread ? [span(`${thread.unread} unread`, "accent")] : undefined,
+										},
+										undefined,
+										thread.key,
+									),
+								),
+								{
+									selected: this.#selectedKey ?? null,
+									empty: "No threads yet. Ask a question below or create a new thread.",
+								},
+							),
+						],
+						"rail",
+					),
+					node("col", { grow: 1, basis: 0, min: { w: 0 } }, [this.#pane], "conversation"),
+				],
+				"body",
+			),
+			actionBar([...actions, null, actionButton("Close", "close")]),
+		]);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "select" || event.type === "activate") {
+			if (!this.#threads.some(thread => thread.key === event.item)) return;
+			this.#persistCurrentDraft();
+			this.#previewKey = undefined;
+			this.#options.onSelectThread(event.item);
+		} else if (event.type === "action") {
+			if (event.act === "new") this.#startNewThread();
+			else if (event.act === "close") this.#options.onClose();
+			else if (this.#selectedKey) {
+				if (event.act === "copy-thread" && this.#options.canCopy(this.#selectedKey)) {
+					void this.#options.onCopy(this.#selectedKey).catch(() => {});
+				} else if (event.act === "delete") void this.#options.onCloseThread(this.#selectedKey);
+				else if (event.act === "promote") void this.#options.onPromoteThread(this.#selectedKey).catch(() => {});
+			}
+		}
+		this.#options.requestRender();
 	}
 
 	get focused(): boolean {
@@ -394,6 +475,14 @@ export class BtwConversationPane
 	}
 
 	handleInput(data: string): void {
+		if (
+			this.#options.ui.nativeRendering &&
+			matchesKey(data, "escape") &&
+			!this.#pane.getPasteTarget()?.hasAutocomplete()
+		) {
+			this.#options.onClose();
+			return;
+		}
 		this.#pane.handleInput(data);
 	}
 
@@ -479,7 +568,7 @@ export class BtwConversationPane
 
 	#handleInput(data: string, editorEmpty: boolean): boolean {
 		if (matchesKey(data, "alt+t")) {
-			this.#toggleRail();
+			if (!this.#options.ui.nativeRendering) this.#toggleRail();
 			return true;
 		}
 		// Consume the submit while the selected thread is streaming: the editor

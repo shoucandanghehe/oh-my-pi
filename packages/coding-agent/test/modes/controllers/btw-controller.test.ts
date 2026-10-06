@@ -26,7 +26,6 @@ import {
 	type EphemeralConversationStatus,
 	type EphemeralTurnOptions,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ExtensionPresentationObserver } from "@oh-my-pi/pi-tui/chat/extension-types";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
@@ -1144,7 +1143,7 @@ describe("BtwController", () => {
 		expect(controller.hasActiveRequest()).toBe(false);
 	});
 
-	it("in Tern answers in the BTW history sheet, which Esc puts away while the answer keeps streaming", async () => {
+	it("in Tern keeps focused-agent BTW history streaming when its sheet closes", async () => {
 		const pending = Promise.withResolvers<RunEphemeralTurnResult>();
 		let onTextDelta: ((delta: string) => void) | undefined;
 		const runEphemeralTurn = vi.fn((args: RunEphemeralTurnArgs) => {
@@ -1153,7 +1152,12 @@ describe("BtwController", () => {
 		});
 		const btwContainer = new Container();
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
-		Object.assign(ctx, { workspaceEnabled: false, sessionManager: SessionManager.inMemory() });
+		Object.assign(ctx, {
+			workspaceEnabled: false,
+			sessionManager: SessionManager.inMemory(),
+			focusedAgentId: "Worker",
+			viewSession: ctx.session,
+		});
 		const hide = vi.fn();
 		const showOverlay = vi.fn((_component: unknown) => ({ hide }));
 		Object.assign(ctx.ui, { nativeRendering: true, showOverlay, setFocus: vi.fn() });

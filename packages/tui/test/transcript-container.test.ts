@@ -509,6 +509,25 @@ describe("TranscriptContainer", () => {
 		expect(transcript.renderViewport(80, 10, frame)).toEqual(["replaced"]);
 	});
 
+	it("keeps finalized pending figures out of immutable history until their render completes", () => {
+		const transcript = new TranscriptContainer();
+		let pending = true;
+		const figure = new (class extends Block {
+			isTranscriptBlockPending(): boolean {
+				return pending;
+			}
+		})(["Drawing SVG…"], true);
+		transcript.addChild(figure);
+
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+		expect(transcript.peekFlushBatch(80)).toBeUndefined();
+
+		pending = false;
+		figure.finalize(["rendered figure"]);
+		transcript.invalidate();
+		expect(transcript.peekFinalizedBatch(80, 0)?.rows).toEqual(["rendered figure", ""]);
+	});
+
 	it("retires the settled prefix only under capacity pressure, in order", () => {
 		const transcript = new TranscriptContainer();
 		const first = new Block(["first final"], true);

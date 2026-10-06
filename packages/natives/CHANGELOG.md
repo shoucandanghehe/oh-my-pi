@@ -48,6 +48,17 @@
 ### Fixed
 
 - Fixed background shell builtins and other in-process commands so they terminate when their subshell exits and can be stopped with `kill %N`, matching the behavior of external commands.
+### Breaking Changes
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Fixed
+
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.7.0] - 2026-10-06
 
@@ -149,23 +160,6 @@
 - Fixed `echo -e -E` expanding escapes; the later option wins, as in bash ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
 - Fixed `mapfile -O` writing into a readonly array; it now fails before reading any input, as bash does ([#14522](https://github.com/can1357/oh-my-pi/pull/14522) by [@H4vC](https://github.com/H4vC))
 - Fixed `computer` element refs expiring after two `ax()` reads of a window while the element was still there: an element now keeps its `[ref=eN]` across `ax()` and `find()` reads, even after missing a single snapshot. An element whose role or label changes gets a new ref, and its old ref keeps working until it expires; on Windows, an element that reuses a gone element's `RuntimeId` gets a new ref, and one whose `RuntimeId` cannot be read gets a new ref on every read ([#14485](https://github.com/can1357/oh-my-pi/pull/14485) by [@will-bogusz](https://github.com/will-bogusz))
-
-## [18.6.2] - 2026-10-04
-
-### Fixed
-
-- Fixed short snapcompact PNGs being emitted below the minimum dimensions accepted by some vision backends ([#14355](https://github.com/can1357/oh-my-pi/issues/14355)).
-### Breaking Changes
-
-- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
-
-### Added
-
-- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
-
-### Fixed
-
-- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.6.2] - 2026-10-04
 

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,6 +28,10 @@ beforeAll(async () => {
 	await initTheme(false);
 	widgetAuth = await AuthStorage.create(":memory:");
 	widgetModels = new ModelRegistry(widgetAuth);
+});
+
+afterEach(() => {
+	vi.useRealTimers();
 });
 
 afterAll(() => {
@@ -325,7 +329,6 @@ describe("AgentTranscriptViewer", () => {
 			expect(close).toHaveBeenCalledTimes(1);
 		} finally {
 			viewer.dispose();
-			vi.useRealTimers();
 		}
 	});
 
@@ -345,7 +348,6 @@ describe("AgentTranscriptViewer", () => {
 			expect(graySteps.size).toBeGreaterThanOrEqual(4);
 		} finally {
 			viewer.dispose();
-			vi.useRealTimers();
 		}
 	});
 
@@ -366,7 +368,6 @@ describe("AgentTranscriptViewer", () => {
 			expect(petrifiedStatus).toContain(theme.getBgAnsi("statusLineBg"));
 		} finally {
 			viewer.dispose();
-			vi.useRealTimers();
 		}
 	});
 
@@ -386,7 +387,6 @@ describe("AgentTranscriptViewer", () => {
 			expect(close).not.toHaveBeenCalled();
 		} finally {
 			viewer.dispose();
-			vi.useRealTimers();
 		}
 	});
 
@@ -404,7 +404,6 @@ describe("AgentTranscriptViewer", () => {
 			expect(viewerPaints.length).toBeGreaterThanOrEqual(60);
 		} finally {
 			viewer.dispose();
-			vi.useRealTimers();
 		}
 	});
 
@@ -575,6 +574,7 @@ describe("AgentTranscriptViewer", () => {
 		});
 		const old = Promise.withResolvers<ReadonlyMap<string, string>>();
 		const current = Promise.withResolvers<ReadonlyMap<string, string>>();
+		const currentRequested = Promise.withResolvers<void>();
 		let requests = 0;
 		const originalHyperlinks = TERMINAL.hyperlinks;
 		setTerminalHyperlinks(true);
@@ -584,7 +584,11 @@ describe("AgentTranscriptViewer", () => {
 			registry,
 			ui: new TUI(new ProcessTerminal()),
 			cwd: root,
-			resolveLinks: () => (++requests === 1 ? old.promise : current.promise),
+			resolveLinks: () => {
+				if (++requests === 1) return old.promise;
+				currentRequested.resolve();
+				return current.promise;
+			},
 			expandKeys: [],
 			hubKeys: [],
 			createStatusLine: () => undefined,
@@ -598,6 +602,7 @@ describe("AgentTranscriptViewer", () => {
 			registry.attachSession("Worker", {} as unknown as AgentSession, file);
 			viewer.render(80);
 			vi.advanceTimersByTime(250);
+			await currentRequested.promise;
 			expect(requests).toBe(2);
 			current.resolve(new Map([["note.md", "file:///current/note.md"]]));
 			await current.promise;
@@ -610,7 +615,6 @@ describe("AgentTranscriptViewer", () => {
 		} finally {
 			viewer.dispose();
 			setTerminalHyperlinks(originalHyperlinks);
-			vi.useRealTimers();
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -737,7 +741,6 @@ describe("AgentTranscriptViewer", () => {
 		} finally {
 			viewer.dispose();
 			fs.rmSync(dir, { recursive: true, force: true });
-			vi.useRealTimers();
 		}
 	});
 

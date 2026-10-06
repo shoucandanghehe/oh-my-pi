@@ -206,6 +206,68 @@ func (v *ImageContentDetail) UnmarshalJSON(data []byte) error {
 	return unknownValue("ImageContentDetail", s)
 }
 
+type AudioContent struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
+	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
+	// Encoding writes them back, over a declared field with the same key.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (v *AudioContent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "AudioContent", v.decodeFrom)
+}
+
+func (v *AudioContent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out AudioContent
+	d := fieldDecoder{raw: raw, owner: "AudioContent", open: true}
+	d.constant("type", "audio")
+	d.required("data", &out.Data)
+	d.required("mimeType", &out.MimeType)
+	out.Extra = d.rest()
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v AudioContent) MarshalJSON() ([]byte, error) {
+	type plain AudioContent
+	return encodeObject(plain(v), `"type":"audio"`, v.Extra)
+}
+
+type VideoContent struct {
+	Data     string `json:"data"`
+	MimeType string `json:"mimeType"`
+	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
+	// Encoding writes them back, over a declared field with the same key.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+func (v *VideoContent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "VideoContent", v.decodeFrom)
+}
+
+func (v *VideoContent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out VideoContent
+	d := fieldDecoder{raw: raw, owner: "VideoContent", open: true}
+	d.constant("type", "video")
+	d.required("data", &out.Data)
+	d.required("mimeType", &out.MimeType)
+	out.Extra = d.rest()
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v VideoContent) MarshalJSON() ([]byte, error) {
+	type plain VideoContent
+	return encodeObject(plain(v), `"type":"video"`, v.Extra)
+}
+
 type ToolCall struct {
 	ID               string                     `json:"id"`
 	Name             string                     `json:"name"`
@@ -322,6 +384,8 @@ type UserContentVariant interface {
 
 func (TextContent) isUserContent()  {}
 func (ImageContent) isUserContent() {}
+func (AudioContent) isUserContent() {}
+func (VideoContent) isUserContent() {}
 
 func (v UserContent) MarshalJSON() ([]byte, error) {
 	return encodeVariant("UserContent", v.Value)
@@ -342,6 +406,10 @@ func (v *UserContent) decodeFrom(raw map[string]json.RawMessage) error {
 		value, err = decodeVariant[TextContent](raw)
 	case "image":
 		value, err = decodeVariant[ImageContent](raw)
+	case "audio":
+		value, err = decodeVariant[AudioContent](raw)
+	case "video":
+		value, err = decodeVariant[VideoContent](raw)
 	default:
 		return unknownValue("UserContent.type", tag)
 	}
@@ -2805,6 +2873,8 @@ func (v *PromoteQueuedMessageResult) decodeFrom(raw map[string]json.RawMessage) 
 type RestoredQueuedMessage struct {
 	Text   string         `json:"text"`
 	Images []ImageContent `json:"images,omitempty"`
+	Audio  []AudioContent `json:"audio,omitempty"`
+	Video  []VideoContent `json:"video,omitempty"`
 }
 
 func (v *RestoredQueuedMessage) UnmarshalJSON(data []byte) error {
@@ -2816,6 +2886,8 @@ func (v *RestoredQueuedMessage) decodeFrom(raw map[string]json.RawMessage) error
 	d := fieldDecoder{raw: raw, owner: "RestoredQueuedMessage"}
 	d.required("text", &out.Text)
 	d.optional("images", &out.Images)
+	d.optional("audio", &out.Audio)
+	d.optional("video", &out.Video)
 	if d.err != nil {
 		return d.err
 	}

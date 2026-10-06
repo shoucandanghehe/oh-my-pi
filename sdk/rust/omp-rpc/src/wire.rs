@@ -336,6 +336,104 @@ impl<'de> Deserialize<'de> for ImageContent {
 /// Open record: declared fields are decoded leniently (a value that does not fit stays
 /// in `extra`) and every other key is kept in `extra`.
 #[derive(Debug, Clone, PartialEq, Default)]
+pub struct AudioContent {
+	pub r#type: Option<LitAudio>,
+	pub data: Option<String>,
+	pub mime_type: Option<String>,
+	/// Every key not decoded into a declared field.
+	pub extra: Map<String, Value>,
+}
+
+impl Serialize for AudioContent {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		let mut map = serializer.serialize_map(None)?;
+		if let Some(value) = &self.r#type {
+			map.serialize_entry("type", value)?;
+		}
+		if let Some(value) = &self.data {
+			map.serialize_entry("data", value)?;
+		}
+		if let Some(value) = &self.mime_type {
+			map.serialize_entry("mimeType", value)?;
+		}
+		for (key, value) in &self.extra {
+			match key.as_str() {
+				"type" if self.r#type.is_some() => continue,
+				"data" if self.data.is_some() => continue,
+				"mimeType" if self.mime_type.is_some() => continue,
+				_ => {}
+			}
+			map.serialize_entry(key, value)?;
+		}
+		map.end()
+	}
+}
+
+impl<'de> Deserialize<'de> for AudioContent {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let mut extra = Map::<String, Value>::deserialize(deserializer)?;
+		Ok(Self {
+			r#type: take(&mut extra, "type"),
+			data: take(&mut extra, "data"),
+			mime_type: take(&mut extra, "mimeType"),
+			extra,
+		})
+	}
+}
+
+///
+/// Open record: declared fields are decoded leniently (a value that does not fit stays
+/// in `extra`) and every other key is kept in `extra`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct VideoContent {
+	pub r#type: Option<LitVideo>,
+	pub data: Option<String>,
+	pub mime_type: Option<String>,
+	/// Every key not decoded into a declared field.
+	pub extra: Map<String, Value>,
+}
+
+impl Serialize for VideoContent {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		let mut map = serializer.serialize_map(None)?;
+		if let Some(value) = &self.r#type {
+			map.serialize_entry("type", value)?;
+		}
+		if let Some(value) = &self.data {
+			map.serialize_entry("data", value)?;
+		}
+		if let Some(value) = &self.mime_type {
+			map.serialize_entry("mimeType", value)?;
+		}
+		for (key, value) in &self.extra {
+			match key.as_str() {
+				"type" if self.r#type.is_some() => continue,
+				"data" if self.data.is_some() => continue,
+				"mimeType" if self.mime_type.is_some() => continue,
+				_ => {}
+			}
+			map.serialize_entry(key, value)?;
+		}
+		map.end()
+	}
+}
+
+impl<'de> Deserialize<'de> for VideoContent {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let mut extra = Map::<String, Value>::deserialize(deserializer)?;
+		Ok(Self {
+			r#type: take(&mut extra, "type"),
+			data: take(&mut extra, "data"),
+			mime_type: take(&mut extra, "mimeType"),
+			extra,
+		})
+	}
+}
+
+///
+/// Open record: declared fields are decoded leniently (a value that does not fit stays
+/// in `extra`) and every other key is kept in `extra`.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolCall {
 	pub r#type: Option<LitToolCall>,
 	pub id: Option<String>,
@@ -503,6 +601,8 @@ pub enum UserContent {
 	Text(TextContent),
 	/// Inline image; also the shape hosts send with prompts.
 	Image(ImageContent),
+	Audio(AudioContent),
+	Video(VideoContent),
 }
 
 impl UserContent {
@@ -511,6 +611,8 @@ impl UserContent {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("text") => |value| serde_json::from_value(value).map(Self::Text),
 			Some("image") => |value| serde_json::from_value(value).map(Self::Image),
+			Some("audio") => |value| serde_json::from_value(value).map(Self::Audio),
+			Some("video") => |value| serde_json::from_value(value).map(Self::Video),
 			other => {
 				return Err(serde_json::Error::custom(format!("unknown UserContent type {other:?}")));
 			}
@@ -524,6 +626,8 @@ impl Serialize for UserContent {
 		match self {
 			Self::Text(member) => serialize_tagged(member, &[("type", "text")], serializer),
 			Self::Image(member) => serialize_tagged(member, &[("type", "image")], serializer),
+			Self::Audio(member) => serialize_tagged(member, &[("type", "audio")], serializer),
+			Self::Video(member) => serialize_tagged(member, &[("type", "video")], serializer),
 		}
 	}
 }
@@ -3204,6 +3308,10 @@ pub struct RestoredQueuedMessage {
 	pub text: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub audio: Option<Vec<AudioContent>>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub video: Option<Vec<VideoContent>>,
 }
 
 /// User-authored queued input withdrawn before the abort, oldest first.
@@ -5515,6 +5623,48 @@ impl ImageContentDetail {
 			Self::Low => "low",
 			Self::High => "high",
 			Self::Original => "original",
+		}
+	}
+}
+
+/// The constant `"audio"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LitAudio;
+
+impl Serialize for LitAudio {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str("audio")
+	}
+}
+
+impl<'de> Deserialize<'de> for LitAudio {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let value = Value::deserialize(deserializer)?;
+		if value.as_str() == Some("audio") {
+			Ok(Self)
+		} else {
+			Err(D::Error::custom(format!("expected \"audio\", got {value}")))
+		}
+	}
+}
+
+/// The constant `"video"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LitVideo;
+
+impl Serialize for LitVideo {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str("video")
+	}
+}
+
+impl<'de> Deserialize<'de> for LitVideo {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let value = Value::deserialize(deserializer)?;
+		if value.as_str() == Some("video") {
+			Ok(Self)
+		} else {
+			Err(D::Error::custom(format!("expected \"video\", got {value}")))
 		}
 	}
 }

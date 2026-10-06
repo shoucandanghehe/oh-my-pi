@@ -35,6 +35,24 @@
 - Improved performance when pruning tool output and capturing telemetry messages during long-running sessions.
 
 ## [18.7.0] - 2026-10-06
+### Added
+
+- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
+- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
+- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
+- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
+
+### Changed
+
+- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
+
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Improved performance when pruning tool output and capturing telemetry messages during long-running sessions.
+
+## [18.7.0] - 2026-10-06
 
 ### Fixed
 
@@ -62,16 +80,6 @@
 - Fixed OpenAI and Codex Remote Compaction V2 dropping your recent messages instead of keeping them next to the compaction summary ([#14247](https://github.com/can1357/oh-my-pi/pull/14247) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the failed V2 remote compaction warning claiming a V1 fallback on Codex, where V1 does not run ([#14245](https://github.com/can1357/oh-my-pi/pull/14245) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Anthropic native compaction being rejected with `Invalid signature in thinking block` (or silently dropping the summarized thinking) on models with preserved thinking ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
-### Added
-
-- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
-- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
-- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
-- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
-
-### Changed
-
-- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
 
 ## [18.6.1] - 2026-10-04
 

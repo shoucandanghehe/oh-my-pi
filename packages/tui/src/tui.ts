@@ -2573,6 +2573,7 @@ export class TUI extends Container {
 		this.#cancelResizeProbe();
 		this.#resizeSettleTimer?.cancel();
 		this.#resizeSettleTimer = undefined;
+		this.#leaveAppViewport();
 		if (this.#altActive || this.#resizeAltActive) {
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#keyboardEnhancementExit()}\x1b[?1049l`);
 			setAltScreenActive(false);
@@ -3427,6 +3428,31 @@ export class TUI extends Container {
 		this.#appViewportSelectionDrag = false;
 		this.#appViewportLastClick = null;
 	}
+	#leaveAppViewport(): void {
+		if (!this.#appViewportActive) return;
+		this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}\x1b[?1049l`);
+		this.#appViewportActive = false;
+		this.#appViewportPixelMouseActive = false;
+		this.#appViewportHoverMouseActive = false;
+		this.#appViewportVisibleSourceRows = [];
+		this.#appViewportFrameLines = [];
+		this.#appViewportFramePreparedRows = [];
+		this.#appViewportComposeStale = true;
+		this.#appViewportFrameCursorPos = null;
+		this.#appViewportPreviousScrollRegionEnd = undefined;
+		this.#clearAppViewportSelection();
+		this.#appViewportSelectionDrag = false;
+		this.#stopAppViewportSelectionAutoScroll();
+		this.#appViewportLastClick = null;
+		this.#appViewportPreviousLines = [];
+		this.#appViewportPreparedRows = [];
+		this.#appViewportPreviousSixelRows = [];
+		this.#appViewportPreviousScrollbarGlyphs = [];
+		this.#appViewportPreviousWidth = 0;
+		this.#appViewportScrollbarMetrics = null;
+		this.#appViewportScrollbarDrag = null;
+	}
+
 	stop(): void {
 		this.#cancelPostmortemRestore?.();
 		this.#cancelPostmortemRestore = undefined;
@@ -3453,29 +3479,7 @@ export class TUI extends Container {
 		this.#resizeInPlaceActive = false;
 		this.#altToggleEchoPending = false;
 		this.#cancelResizeProbe();
-		if (this.#appViewportActive) {
-			this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}\x1b[?1049l`);
-			this.#appViewportActive = false;
-			this.#appViewportPixelMouseActive = false;
-			this.#appViewportHoverMouseActive = false;
-			this.#appViewportVisibleSourceRows = [];
-			this.#appViewportFrameLines = [];
-			this.#appViewportFramePreparedRows = [];
-			this.#appViewportComposeStale = true;
-			this.#appViewportFrameCursorPos = null;
-			this.#appViewportPreviousScrollRegionEnd = undefined;
-			this.#clearAppViewportSelection();
-			this.#appViewportSelectionDrag = false;
-			this.#stopAppViewportSelectionAutoScroll();
-			this.#appViewportLastClick = null;
-			this.#appViewportPreviousLines = [];
-			this.#appViewportPreparedRows = [];
-			this.#appViewportPreviousSixelRows = [];
-			this.#appViewportPreviousScrollbarGlyphs = [];
-			this.#appViewportPreviousWidth = 0;
-			this.#appViewportScrollbarMetrics = null;
-			this.#appViewportScrollbarDrag = null;
-		}
+		this.#leaveAppViewport();
 		if (this.#resizeAltActive) {
 			this.#resizeAltActive = false;
 			this.terminal.write(`${this.#takePendingAltEnter()}${this.#keyboardEnhancementExit()}\x1b[?1049l`);
@@ -6212,6 +6216,16 @@ export class TUI extends Container {
 				this.#appViewportPreparedRows = preparedRows;
 				if (kittyCleanup) this.terminal.write(this.#paintBeginSequence + kittyCleanup + this.#paintEndSequence);
 				this.#writeAppViewportCursor(fittedCursorPos, height);
+				if (this.#paintListeners.size > 0) {
+					this.#notifyPaint({
+						history: [],
+						viewport: appendBrailleScrollbar(fitted, scrollbarGlyphs, width),
+						reset: false,
+						alt: false,
+						columns: width,
+						rows: height,
+					});
+				}
 				return;
 			}
 		}
@@ -6261,6 +6275,16 @@ export class TUI extends Container {
 		this.#appViewportPreviousWidth = width;
 		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
 		else this.#recordHardwareCursorHidden();
+		if (this.#paintListeners.size > 0) {
+			this.#notifyPaint({
+				history: [],
+				viewport: appendBrailleScrollbar(fitted, scrollbarGlyphs, width),
+				reset: false,
+				alt: false,
+				columns: width,
+				rows: height,
+			});
+		}
 	}
 
 	#appViewportPaintRows(

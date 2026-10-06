@@ -722,7 +722,7 @@ export function fitRemoveQueuedMessageResponse(
  * Build the `abort_and_restore_queue` response within `maxBytes`. The queue is already withdrawn,
  * so an oversized response must not become a transport-limit error that loses it: images go first
  * (`imagesDropped`, keeping every text), then the newest entries (`truncated`, keeping an
- * oldest-first prefix of steering then follow-ups).
+ * oldest-first prefix of steering then follow-ups, retaining audio/video on included entries).
  */
 export function fitAbortAndRestoreQueueResponse(
 	id: string | undefined,
@@ -740,19 +740,19 @@ export function fitAbortAndRestoreQueueResponse(
 	if (encodedBytes(full) <= maxBytes) return full;
 	const imagesDropped = [...restored.steering, ...restored.followUp].some(entry => entry.images?.length);
 	const flags = imagesDropped ? { imagesDropped: true as const } : {};
-	const textOnly = {
-		steering: restored.steering.map(({ text }) => ({ text })),
-		followUp: restored.followUp.map(({ text }) => ({ text })),
+	const imageFree = {
+		steering: restored.steering.map(({ images: _images, ...entry }) => entry),
+		followUp: restored.followUp.map(({ images: _images, ...entry }) => entry),
 	};
 	if (imagesDropped) {
-		const withoutImages = response({ ...textOnly, ...flags });
+		const withoutImages = response({ ...imageFree, ...flags });
 		if (encodedBytes(withoutImages) <= maxBytes) return withoutImages;
 	}
 	const fitted: RpcAbortAndRestoreQueueResult = { steering: [], followUp: [], ...flags, truncated: true };
 	// Exact: each entry adds its own JSON plus a comma after the first in its array.
 	let remaining = maxBytes - encodedBytes(response(fitted));
 	for (const queue of ["steering", "followUp"] as const) {
-		for (const entry of textOnly[queue]) {
+		for (const entry of imageFree[queue]) {
 			const cost = encodedBytes(entry) + (fitted[queue].length > 0 ? 1 : 0);
 			if (cost > remaining) return response(fitted);
 			fitted[queue].push(entry);

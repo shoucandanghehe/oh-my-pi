@@ -80,6 +80,48 @@ describe("actual native renderer transitions", () => {
 		expect(transitions).toEqual([true, false, true]);
 	});
 
+	it("leaves the app viewport's alternate screen before opening native surfaces after deferred WSL startup", async () => {
+		const script = `
+			import { TspHarness } from ${JSON.stringify(new URL("./tsp-harness.ts", import.meta.url).href)};
+			import { Text } from "@oh-my-pi/pi-tui/components/text";
+			const h = await TspHarness.start(tui => {
+				tui.addChild(new Text("preserved transcript"));
+			}, { manualProbe: true, deferInput: true });
+			const before = h.terminal.alternateScreenActive;
+			h.tui.enableInput();
+			h.terminal.answerProbe();
+			h.flush();
+			const result = {
+				before,
+				native: h.tui.nativeRendering,
+				after: h.terminal.alternateScreenActive,
+				transcript: h.find(node => node.k === "text")?.p?.spans.map(span => span.t).join(""),
+				errors: h.errors,
+			};
+			h.stop();
+			h.tui.start();
+			h.terminal.answerProbe();
+			h.flush();
+			result.restarted = h.tui.nativeRendering && !h.terminal.alternateScreenActive;
+			h.stop();
+			console.log(JSON.stringify(result));
+		`;
+		const result = await $`${process.execPath} --eval ${script}`
+			.cwd(import.meta.dir)
+			.env({ ...Bun.env, PI_TUI_RENDER_BACKEND: "app-viewport" })
+			.quiet()
+			.nothrow();
+		expect({ exitCode: result.exitCode, stderr: result.stderr.toString() }).toEqual({ exitCode: 0, stderr: "" });
+		expect(JSON.parse(result.text())).toEqual({
+			before: true,
+			native: true,
+			after: false,
+			transcript: "preserved transcript",
+			errors: [],
+			restarted: true,
+		});
+	});
+
 	it("delivers native PgUp and SGR input to focus even with the app-viewport environment enabled", async () => {
 		// Bun.env is a non-configurable data property, not a spyable getter. Keep the
 		// real backend flag in a child process rather than mutating shared test env.

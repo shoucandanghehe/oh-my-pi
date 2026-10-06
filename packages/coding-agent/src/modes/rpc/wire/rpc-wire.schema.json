@@ -865,6 +865,46 @@
 			"description": "Inline image; also the shape hosts send with prompts.",
 			"x-open": true
 		},
+		"AudioContent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "audio"
+				},
+				"data": {
+					"type": "string"
+				},
+				"mimeType": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"data",
+				"mimeType"
+			],
+			"x-open": true
+		},
+		"VideoContent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "video"
+				},
+				"data": {
+					"type": "string"
+				},
+				"mimeType": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"data",
+				"mimeType"
+			],
+			"x-open": true
+		},
 		"ToolCall": {
 			"type": "object",
 			"properties": {
@@ -958,6 +998,12 @@
 				},
 				{
 					"$ref": "#/$defs/ImageContent"
+				},
+				{
+					"$ref": "#/$defs/AudioContent"
+				},
+				{
+					"$ref": "#/$defs/VideoContent"
 				}
 			]
 		},
@@ -2877,6 +2923,18 @@
 					"type": "array",
 					"items": {
 						"$ref": "#/$defs/ImageContent"
+					}
+				},
+				"audio": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/AudioContent"
+					}
+				},
+				"video": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/VideoContent"
 					}
 				}
 			},

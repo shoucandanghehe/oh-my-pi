@@ -56,14 +56,7 @@ export type AgentTranscriptEntry =
 
 /** Local filesystem and session parsing capabilities supplied by the host. */
 export interface AgentTranscriptSource {
-	/**
-	 * Sync primitives drive the first paint and the incremental tail. When the
-	 * host also supplies `promises.readFile` (e.g. passes `node:fs` itself), full
-	 * reloads after rotation/rewrite read the file off the UI thread.
-	 */
-	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync"> & {
-		promises?: Pick<typeof fs.promises, "readFile">;
-	};
+	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync">;
 	parseEntries(text: string): AgentTranscriptEntry[];
 	/** Stream complete session headers, message entries, and model changes from a bounded snapshot. */
 	visitEntries(
@@ -598,11 +591,11 @@ export class AgentTranscriptViewer
 			this.#fetchRemote();
 			return;
 		}
-		this.#refreshLocalTranscript();
+		this.#refreshLocalTranscript(allowAsync);
 		this.#syncLiveAssistant();
 	}
 
-	#refreshLocalTranscript(): void {
+	#refreshLocalTranscript(allowAsync: boolean): void {
 		const sessionFile = this.#deps.registry.get(this.#deps.agentId)?.sessionFile;
 		if (!sessionFile) {
 			this.#clearLocal("none");

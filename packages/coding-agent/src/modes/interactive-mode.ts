@@ -2421,7 +2421,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setHeaderExtras(headerBefore, headerAfter);
 		this.composer.setStatusComponent(this.statusLine);
 		this.#mountRuntimeSurface();
-		this.#eventBusUnsubscribers.push(onNativeRenderingChange(() => this.#mountRuntimeSurface()));
+		this.#eventBusUnsubscribers.push(
+			onNativeRenderingChange(() => {
+				this.#btwController.closeView();
+				this.#mountRuntimeSurface();
+			}),
+		);
 		if (this.workspaceEnabled && !options.suppressWelcomeIntro) this.playWelcomeIntro();
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
@@ -6991,6 +6996,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#btwController.closeView();
 		this.#appearanceRefreshRequest = undefined;
 		this.#streamPublisher?.dispose();
 		this.#streamPublisher = undefined;

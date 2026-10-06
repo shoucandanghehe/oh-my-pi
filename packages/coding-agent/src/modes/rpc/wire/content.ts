@@ -36,6 +36,8 @@ export const messageDefs = {
 		},
 		"Inline image; also the shape hosts send with prompts.",
 	),
+	AudioContent: { type: "'audio'", data: "string", mimeType: "string" },
+	VideoContent: { type: "'video'", data: "string", mimeType: "string" },
 	ToolCall: {
 		type: "'toolCall'",
 		id: "string",
@@ -52,7 +54,7 @@ export const messageDefs = {
 		"Anthropic server-side fallback boundary marker; consumers other than Anthropic ignore it.",
 	),
 	AnthropicServerToolContent: { type: "'anthropicServerTool'", block: JSON_OBJECT },
-	UserContent: "TextContent | ImageContent",
+	UserContent: "TextContent | ImageContent | AudioContent | VideoContent",
 	MessageContent: doc("string | UserContent[]", "Message content: plain text or content blocks."),
 	AssistantContent:
 		"TextContent | ThinkingContent | RedactedThinkingContent | FallbackContent | AnthropicServerToolContent | ImageContent | ToolCall",

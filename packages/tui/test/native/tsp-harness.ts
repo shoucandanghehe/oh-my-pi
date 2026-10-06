@@ -16,7 +16,14 @@ import { type TspApplyError, TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import { splitTspMessage, type TspHello } from "@oh-my-pi/pi-tui/native/encode";
 import type { Terminal, TerminalAppearance, TerminalStartOptions, TspHelloHandler } from "@oh-my-pi/pi-tui/terminal";
 import { type RenderScheduler, type RenderTimer, TUI } from "@oh-my-pi/pi-tui/tui";
-import { TSP_KINDS, type TspEvent, type TspFrame, type TspNode, type TspPalette } from "@oh-my-pi/pi-wire";
+import {
+	TSP_KINDS,
+	type TspEvent,
+	type TspFrame,
+	type TspNode,
+	type TspOpen,
+	type TspPalette,
+} from "@oh-my-pi/pi-wire";
 
 export interface TspHarnessOptions {
 	cols?: number;
@@ -135,6 +142,7 @@ export class TspTestTerminal implements Terminal {
 	#inbox: string[] = [];
 	#chunks = new Map<string, string>();
 	#open: string[] = [];
+	#alternateScreenActive = false;
 
 	constructor(options: TspHarnessOptions) {
 		this.#options = options;
@@ -185,6 +193,10 @@ export class TspTestTerminal implements Terminal {
 
 	get tspExpected(): boolean {
 		return this.#options.expected === true;
+	}
+
+	get alternateScreenActive(): boolean {
+		return this.#alternateScreenActive;
 	}
 
 	/** Whether flushes answer the probe by themselves. */
@@ -276,11 +288,18 @@ export class TspTestTerminal implements Terminal {
 			if (start === -1) break;
 			const end = data.indexOf("\x1b\\", start);
 			if (end === -1) throw new Error("unterminated TSP message in one write");
-			this.rowBytes += data.slice(at, start);
+			this.#writeRows(data.slice(at, start));
 			this.#receive(data.slice(start, end + 2));
 			at = end + 2;
 		}
-		this.rowBytes += data.slice(at);
+		this.#writeRows(data.slice(at));
+	}
+
+	#writeRows(data: string): void {
+		this.rowBytes += data;
+		for (const match of data.matchAll(/\x1b\[\?1049([hl])/g)) {
+			this.#alternateScreenActive = match[1] === "h";
+		}
 	}
 
 	#receive(sequence: string): void {
@@ -310,7 +329,10 @@ export class TspTestTerminal implements Terminal {
 				return;
 			}
 			case "o": {
-				const open = JSON.parse(body) as { id: string; adopt?: boolean };
+				const open = JSON.parse(body) as TspOpen;
+				if (open.mode === "inline" && this.#alternateScreenActive) {
+					throw new Error("inline surfaces need the main screen");
+				}
 				if (open.adopt && !this.docs.has(open.id)) {
 					this.send(tspEvent({ ev: "gone", ids: [open.id] }));
 					return;
