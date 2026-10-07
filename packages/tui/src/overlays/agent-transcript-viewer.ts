@@ -22,6 +22,7 @@ import type { VirtualRowAnchor } from "../tui";
 import type { KeyId } from "../app-keybindings";
 import type { AssistantThinkingRenderer, ExtensionPresentationSource, MessageRenderer } from "../chat/extension-types";
 import type { SessionMessageEntryLike } from "../chat/transcript-entry";
+import { sameAssistantTurn } from "../chat/chat-transcript-builder";
 import { renderWorkspacePaneHeader } from "../chrome/shared";
 import type { EditorTopBorder } from "../components/composer";
 import { matchesKey } from "../keys";
@@ -38,7 +39,7 @@ import { fgAnsi } from "../theme/color";
 import type { AgentHubRemote } from "./agent-hub";
 import { formatContextUsage } from "../chrome/context-thresholds";
 import { node, span, text } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import type { DescribeContext, NativeChild, NativeNode, NativeSurface, NativeUiEvent } from "../native/node";
 import { actionHint, escCloseButton, hintsRow, overlayCard } from "../native/overlay";
 import { ChatTranscriptPane } from "../chat/chat-transcript-pane";
 import { StatusLineComponent } from "../status-line/component";
@@ -119,11 +120,6 @@ const AUTO_CLOSE_FRAMES = Math.ceil(AUTO_CLOSE_DURATION_MS / AUTO_CLOSE_FRAME_MS
 
 const SENTINEL_BYTES = 4096;
 const ASYNC_LOCAL_LOAD_THRESHOLD_BYTES = 2 * 1024 * 1024;
-function sameAssistantTurn(left: AssistantMessage, right: AssistantMessage): boolean {
-	if (left.timestamp !== right.timestamp || left.provider !== right.provider || left.model !== right.model)
-		return false;
-	return left.responseId === undefined || right.responseId === undefined || left.responseId === right.responseId;
-}
 
 interface LocalTranscriptSentinel {
 	offset: number;
@@ -362,6 +358,7 @@ export class AgentTranscriptViewer
 		AppViewportHoverProvider
 {
 	readonly #pane: ChatTranscriptPane;
+	readonly #nativeComposer: Component & Focusable & Pick<AgentTranscriptViewer, "getPasteTarget">;
 	readonly #deps: AgentTranscriptViewerDeps;
 	#model: string | undefined;
 	readonly #widgets: ExtensionWidgets;
@@ -370,6 +367,7 @@ export class AgentTranscriptViewer
 	#detachPresentation: (() => void) | undefined;
 	#localState: LocalTranscriptState | undefined;
 	#localUnavailable = "";
+	#localError = "";
 	#localLoadToken = 0;
 	#localLoading: { path: string; dev: number; ino: number } | undefined;
 	#liveAssistant: AssistantMessage | undefined;
@@ -444,7 +442,7 @@ export class AgentTranscriptViewer
 			renderWorkspaceHeader: (width, focused) => this.renderWorkspaceHeader(width, focused),
 			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
 			getPlaceholder: () => this.#placeholder(),
-			getNotice: () => (this.#remoteError && !this.#pane.isEmpty ? this.#remoteError : undefined),
+			getNotice: () => (!this.#pane.isEmpty ? this.#localError || this.#remoteError || undefined : undefined),
 			onInput: data => {
 				for (const key of deps.hubKeys) {
 					if (!matchesKey(data, key)) continue;
@@ -455,6 +453,23 @@ export class AgentTranscriptViewer
 			},
 			onClose: deps.onClose,
 		});
+		// Native pointer focus must keep input and auto-close protection on the viewer.
+		const viewer = this;
+		this.#nativeComposer = {
+			render: () => [],
+			describe: () => this.#pane.describeComposer(),
+			handleInput: data => this.handleInput(data),
+			get focused() {
+				return viewer.focused;
+			},
+			set focused(focused: boolean) {
+				viewer.focused = focused;
+			},
+			setUseTerminalCursor: useTerminalCursor => this.setUseTerminalCursor(useTerminalCursor),
+			getPasteTarget: () => this.getPasteTarget(),
+			containsComponent: component => componentContains(this.#pane, component),
+			invalidate: () => this.#pane.invalidate(),
+		};
 		// First paint loads synchronously so the initial entry can be revealed
 		// immediately; later full reloads from the poll may go async.
 		this.#refresh(false);
@@ -657,6 +672,7 @@ export class AgentTranscriptViewer
 		this.#localLoading = undefined;
 		this.#localState = undefined;
 		this.#localUnavailable = reason;
+		this.#localError = "";
 		this.#model = undefined;
 		this.#sourceCwd = undefined;
 		this.#rebuild([]);
@@ -694,10 +710,6 @@ export class AgentTranscriptViewer
 		}
 		const token = ++this.#localLoadToken;
 		this.#localLoading = { path: sessionFile, dev: stat.dev, ino: stat.ino };
-		this.#localState = undefined;
-		this.#localUnavailable = "";
-		this.#model = undefined;
-		this.#rebuild([]);
 		void this.#loadLocalFullAsync(sessionFile, stat, token);
 	}
 
@@ -706,6 +718,8 @@ export class AgentTranscriptViewer
 		try {
 			data = this.#deps.transcript.fs.readFileSync(sessionFile);
 		} catch (err) {
+			this.#localError = `Transcript load failed: ${err instanceof Error ? err.message : String(err)}`;
+			this.#deps.requestRender();
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
@@ -724,6 +738,7 @@ export class AgentTranscriptViewer
 		const complete = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
 		const pending = lastNewline >= 0 ? text.slice(lastNewline + 1) : text;
 		this.#localUnavailable = "";
+		this.#localError = "";
 		this.#localState = {
 			path: sessionFile,
 			dev: post.dev,
@@ -740,8 +755,8 @@ export class AgentTranscriptViewer
 	}
 
 	async #loadLocalFullAsync(sessionFile: string, stat: fs.Stats, token: number): Promise<void> {
-		this.#sourceCwd = undefined;
-		const batch: AgentTranscriptEntry[] = [];
+		const incremental = this.#pane.isEmpty;
+		const entries: AgentTranscriptEntry[] = [];
 		const decoder = new TextDecoder();
 		let pending = "";
 		let bytesConsumed = 0;
@@ -749,10 +764,11 @@ export class AgentTranscriptViewer
 			await this.#deps.transcript.visitEntries(
 				sessionFile,
 				entry => {
-					batch.push(entry);
-					if (batch.length < 128) return;
-					this.#append(this.#extractMessages(batch));
-					batch.length = 0;
+					entries.push(entry);
+					if (incremental && entries.length >= 128) {
+						this.#append(this.#extractMessages(entries));
+						entries.length = 0;
+					}
 				},
 				{
 					maxBytes: stat.size,
@@ -770,17 +786,20 @@ export class AgentTranscriptViewer
 		} catch (err) {
 			if (token === this.#localLoadToken) {
 				this.#localLoading = undefined;
+				this.#localError = `Transcript load failed: ${err instanceof Error ? err.message : String(err)}`;
+				this.#deps.requestRender();
 				logger.debug("transcript viewer: incremental load failed", { err: String(err) });
 			}
 			return;
 		}
 		if (token !== this.#localLoadToken || this.#disposed) return;
-		if (batch.length > 0) this.#append(this.#extractMessages(batch));
 		let sentinels: LocalTranscriptSentinel[];
 		try {
 			sentinels = sentinelsFromFile(this.#deps.transcript.fs, sessionFile, bytesConsumed);
 		} catch (err) {
 			this.#localLoading = undefined;
+			this.#localError = `Transcript load failed: ${err instanceof Error ? err.message : String(err)}`;
+			this.#deps.requestRender();
 			logger.debug("transcript viewer: sentinel load failed", { err: String(err) });
 			return;
 		}
@@ -795,6 +814,15 @@ export class AgentTranscriptViewer
 			sentinels,
 		};
 		this.#localLoading = undefined;
+		this.#localUnavailable = "";
+		this.#localError = "";
+		if (incremental) {
+			if (entries.length > 0) this.#append(this.#extractMessages(entries));
+		} else {
+			this.#sourceCwd = undefined;
+			this.#model = undefined;
+			this.#rebuild(this.#extractMessages(entries));
+		}
 		this.#deps.requestRender();
 	}
 
@@ -927,28 +955,12 @@ export class AgentTranscriptViewer
 	}
 
 	#rebuild(entries: SessionMessageEntryLike[]): void {
-		const live = this.#liveAssistant;
-		this.#liveAssistant = undefined;
 		this.#pane.rebuildEntries(entries);
-		this.#restoreLiveAssistant(live, entries);
+		this.#syncLiveAssistant();
 	}
 
 	#append(entries: SessionMessageEntryLike[]): void {
-		const live = this.#liveAssistant;
-		if (live) this.#pane.setLiveAssistant(undefined);
-		this.#liveAssistant = undefined;
 		this.#pane.appendEntries(entries);
-		this.#restoreLiveAssistant(live, entries);
-	}
-
-	#restoreLiveAssistant(live: AssistantMessage | undefined, entries: SessionMessageEntryLike[]): void {
-		if (
-			live &&
-			!entries.some(entry => entry.message.role === "assistant" && sameAssistantTurn(live, entry.message))
-		) {
-			this.#liveAssistant = live;
-			this.#pane.setLiveAssistant(live);
-		}
 		this.#syncLiveAssistant();
 	}
 
@@ -991,7 +1003,7 @@ export class AgentTranscriptViewer
 	// ========================================================================
 
 	containsComponent(component: Component): boolean {
-		return componentContains(this.#pane, component);
+		return component === this.#nativeComposer || componentContains(this.#pane, component);
 	}
 
 	renderTargeted(width: number, targets: readonly Component[]): readonly string[] {
@@ -1013,6 +1025,12 @@ export class AgentTranscriptViewer
 		return this.#autoClose
 			? renderPetrificationFrame(lines, this.#autoClose.frame, 1, this.#lastRenderedBodyRows + 1)
 			: lines;
+	}
+
+	/** Independent workspace roots use the same flowing/sticky regions as Main. */
+	describeSurface(cx: DescribeContext): NativeSurface {
+		this.#syncSessionPresentation();
+		return { ...this.#pane.describeSurface(cx), dock: [this.#nativeComposer] };
 	}
 
 	/** The top-right `esc` runs Esc. */
@@ -1196,6 +1214,7 @@ export class AgentTranscriptViewer
 			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
+		if (this.#localError) return this.#localError;
 		if (this.#localLoading) return "Loading transcript…";
 		if (!this.#deps.registry.get(this.#deps.agentId)?.sessionFile) return "No session file available yet.";
 		return "No messages yet.";

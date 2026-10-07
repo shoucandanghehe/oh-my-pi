@@ -119,6 +119,61 @@ describe("native transcript", () => {
 		expect(h.errors).toEqual([]);
 	});
 
+	it("keeps an unpersisted assistant at the tail and adopts it when its tool-call turn persists", async () => {
+		let builder: ChatTranscriptBuilder | undefined;
+		const live = assistant([{ type: "text", text: "Checking the file" }]);
+		const h = await startWith(h => {
+			builder = new ChatTranscriptBuilder({ ui: h.tui, cwd: "/tmp", requestRender: () => h.tui.requestRender() });
+			builder.setLiveAssistant(live);
+			h.tui.addChild(builder.container);
+		});
+		try {
+			const md = h.find(node => node.k === "md" && node.p?.text === "Checking the file")!;
+			builder!.append([
+				{
+					type: "message",
+					id: "prompt",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00Z",
+					message: { role: "user", content: "Read it", timestamp: 0 },
+				},
+			]);
+			await h.render();
+			expect(h.findAll(node => node.k === "md").map(node => (node.k === "md" ? node.p?.text : undefined))).toEqual([
+				"Read it",
+				"Checking the file",
+			]);
+			const frames = h.frames.length;
+			builder!.append([
+				{
+					type: "message",
+					id: "response",
+					parentId: "prompt",
+					timestamp: "2026-01-01T00:00:01Z",
+					message: assistant([
+						{ type: "text", text: "Checking the file" },
+						{ type: "toolCall", id: "call", name: "lookup", arguments: { file: "a.ts" } },
+					]),
+				},
+			]);
+			await h.render();
+			expect(h.byId(md.id)).toMatchObject({ k: "md", p: { text: "Checking the file" } });
+			expect(h.byId(md.id)?.p).not.toHaveProperty("stream");
+			expect(h.find(node => node.k === "tool" && node.p?.role === "omp.tool.lookup")?.p).toMatchObject({
+				status: "pending",
+			});
+			expect(
+				opsSince(h, frames).some(op => op[0] === "del" && (op[1] === md.id || md.id.startsWith(`${op[1]}.`))),
+			).toBe(false);
+			builder!.setLiveAssistant(live);
+			await h.render();
+			expect(h.findAll(node => node.k === "md" && node.p?.text === "Checking the file")).toHaveLength(1);
+			expect(h.errors).toEqual([]);
+		} finally {
+			builder!.dispose();
+		}
+	});
+
 	it("hands the terminal session-resolved targets for relative links once the segment closes", async () => {
 		const component = new AssistantMessageComponent();
 		const h = await startWith(h => h.tui.addChild(component));
@@ -219,6 +274,36 @@ describe("native transcript", () => {
 		expect(h.byId(cardNode!.id)?.p).toMatchObject({ collapsed: false });
 
 		builder!.setExpanded(false);
+		await h.render();
+		expect(h.byId(cardNode!.id)?.p).toMatchObject({ collapsed: true });
+		expect(h.errors).toEqual([]);
+	});
+
+	it("expands and collapses native tool cards through the transcript container without an ANSI viewport", async () => {
+		let builder: ChatTranscriptBuilder | undefined;
+		const h = await startWith(h => {
+			builder = new ChatTranscriptBuilder({ ui: h.tui, cwd: "/tmp", requestRender: () => h.tui.requestRender() });
+			builder.append(toolTranscript());
+			h.tui.addChild(builder.container);
+		});
+		const cardNode = h.find(node => node.k === "tool" && node.p?.role === "omp.tool.lookup_thing");
+		expect(cardNode?.p).toMatchObject({ collapsed: true });
+
+		builder!.container.setExpanded(true);
+		await h.render();
+		expect(h.byId(cardNode!.id)?.p).toMatchObject({ collapsed: false });
+
+		h.event({ ev: "toggle", sf: h.terminal.surface!, id: cardNode!.id, collapsed: true });
+		await h.render();
+		expect(h.byId(cardNode!.id)?.p).toMatchObject({ collapsed: true });
+
+		builder!.container.setExpanded(false);
+		await h.render();
+		builder!.container.setExpanded(true);
+		await h.render();
+		expect(h.byId(cardNode!.id)?.p).toMatchObject({ collapsed: false });
+
+		builder!.container.setExpanded(false);
 		await h.render();
 		expect(h.byId(cardNode!.id)?.p).toMatchObject({ collapsed: true });
 		expect(h.errors).toEqual([]);

@@ -147,4 +147,29 @@ describe("actual native renderer transitions", () => {
 		expect({ exitCode: result.exitCode, stderr: result.stderr.toString() }).toEqual({ exitCode: 0, stderr: "" });
 		expect(JSON.parse(result.text())).toEqual({ native: true, inputs: ["\x1b[5~", "\x1b[<64;1;1M"] });
 	});
+
+	it("notifies the primary TUI's native revocation while another native pane stays live", async () => {
+		const main = await TspHarness.start(ui => ui.addChild(new BackendNote("Main")), {
+			expected: true,
+			manualProbe: true,
+		});
+		harness = main;
+		const side = await TspHarness.start(ui => ui.addChild(new BackendNote("Side")));
+		try {
+			const transitions: boolean[] = [];
+			unsubscribeRendering = main.tui.onNativeRenderingChange(active => transitions.push(active));
+			main.flush(1000);
+			expect(main.tui.nativeRendering).toBe(false);
+			expect(side.tui.nativeRendering).toBe(true);
+			expect(transitions).toEqual([false]);
+			main.terminal.answerProbe();
+			main.flush();
+			expect(main.tui.nativeRendering).toBe(true);
+			expect(transitions).toEqual([false, true]);
+			const note = side.find(node => node.k === "md");
+			expect(note?.k === "md" ? note.p?.text : undefined).toBe("Side");
+		} finally {
+			side.stop();
+		}
+	});
 });

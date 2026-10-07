@@ -23,3 +23,5 @@ export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 export const TEXT_PREDICT_WORKER_ARG = "__omp_worker_text_predict";
 /** Terminal-output selector shared by the CLI dispatcher and worker launcher. */
 export const TERMINAL_OUTPUT_WORKER_ARG = "__omp_worker_terminal_output";
+/** Native-pane relay selector shared by the CLI dispatcher and Tern launcher. */
+export const NATIVE_PANE_WORKER_ARG = "__omp_worker_native_pane";

@@ -11,6 +11,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { hasFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { GlobTool } from "../src/tools/glob";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
 
 const model = buildModel({
 	id: "side-extension-test",
@@ -32,6 +35,58 @@ afterEach(async () => {
 });
 
 describe("durable BTW extension runtime", () => {
+	it("lets a durable BTW request use real builtin tools with private-backed metadata getters", async () => {
+		using directory = TempDir.createSync("@pi-btw-private-getter-");
+		await Bun.write(path.join(directory.path(), "found-by-btw.ts"), "export const answer = 42;\n");
+		const settings = Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" });
+		const glob = new GlobTool({
+			cwd: directory.path(),
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+		});
+		let request = 0;
+		const sideStreamFn: StreamFn = (_model, context) => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (request++ === 0) {
+					const message = createAssistantMessage("");
+					message.content = [{ type: "toolCall", id: "side-glob", name: "glob", arguments: { path: "*.ts" } }];
+					message.stopReason = "toolUse";
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const result = context.messages.find(
+						message => message.role === "toolResult" && message.toolCallId === "side-glob",
+					);
+					const text =
+						(result?.role === "toolResult" ? result.content : undefined)
+							?.filter(block => block.type === "text")
+							.map(block => block.text)
+							.join("\n") ?? "missing glob result";
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage(text) });
+				}
+			});
+			return stream;
+		};
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: [], messages: [], tools: [glob] } }),
+			sessionManager: SessionManager.inMemory(directory.path()),
+			settings,
+			modelRegistry: { resolver: () => async () => "key", getAvailable: () => [model] } as never,
+			toolRegistry: new Map<string, AgentTool>([["glob", glob as AgentTool]]),
+			builtInToolNames: new Set(["glob"]),
+			sideStreamFn,
+		});
+		sessions.push(session);
+		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, { readOnlyTools: true });
+		await conversation.initializeExtensionRuntime();
+		const result = await conversation.prompt("Find the TypeScript file");
+		expect(result.replyText).toContain("found-by-btw.ts");
+		expect(session.messages).toEqual([]);
+		await conversation.disposeExtensionRuntime();
+	});
+
 	it("rebinds renderer, widget and side events without delivering them to Main", async () => {
 		let factoryRuns = 0;
 		const sideEvents: string[] = [];

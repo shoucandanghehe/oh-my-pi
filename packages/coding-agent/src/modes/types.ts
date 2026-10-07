@@ -56,6 +56,7 @@ import type { TerminalActivityController } from "./controllers/terminal-activity
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { NativeWorkspace } from "./native-workspace/workspace";
 
 export type CompactionQueuedMessage = {
 	text: string;
@@ -169,6 +170,7 @@ export interface InteractiveModeContext {
 	setClickHoverId(id: string | undefined, col?: number): void;
 	/** Whether the main view is mounted in the app-viewport multi-pane workspace. */
 	readonly workspaceEnabled: boolean;
+	readonly nativeWorkspace?: NativeWorkspace;
 	/** Create or focus a persistent transcript pane for an agent. */
 	openAgentWorkspacePane(id: string): Promise<void>;
 	/** Open a local fake pane and play the real subagent petrification/close path. */

@@ -18,6 +18,11 @@
 
 - Added built-in CoralBricks support with `/login`, live model discovery, per-model reasoning levels and off controls, and bundled offline fallbacks. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
 - Added `gen:models --provider <id>` to update one provider without changing other providers' catalog snapshots. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
+### Added
+
+- Added a `video` input modality to `Model.input`, the `input-modalities` axis, build-time narrowing, the model-cache row validator, and the dynamic-model input guard ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
+- Added GPT Image 2.5, Flare, and Sunburst image-model selection for Codex proxies configured with the Images API.
 
 ### Fixed
 
@@ -68,11 +73,6 @@
 
 - Fixed Codex Fast (`priority`) pricing to use OpenAI’s 2.5× included-usage rate for supported models, excluding GPT-5.5 and GPT-6 Astra.
 - Fixed GitHub Copilot models with tier-specific prompt limits incorrectly defaulting to the long-context window.
-### Added
-
-- Added a `video` input modality to `Model.input`, the `input-modalities` axis, build-time narrowing, the model-cache row validator, and the dynamic-model input guard ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
-- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
-- Added GPT Image 2.5, Flare, and Sunburst image-model selection for Codex proxies configured with the Images API.
 
 ## [18.8.0] - 2026-10-07
 

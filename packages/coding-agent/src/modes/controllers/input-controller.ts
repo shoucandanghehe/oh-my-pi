@@ -2793,6 +2793,7 @@ export class InputController {
 
 		if (!this.ctx.hideToolActivity) {
 			this.ctx.toolOutputExpanded = false;
+			this.ctx.chatContainer.setExpanded(false);
 		}
 
 		for (const child of this.ctx.chatContainer.children) {

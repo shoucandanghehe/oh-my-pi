@@ -1287,6 +1287,11 @@ export class ToolExecutionComponent extends Container {
 		this.#updateDisplay();
 	}
 
+	override releaseRenderCaches(): void {
+		this.#renderMemo = undefined;
+		super.releaseRenderCaches();
+	}
+
 	#updateDisplay(): void {
 		// `TERMINAL.imageProtocol` is resolved by an async capability probe during
 		// TUI startup, so a result rendered before it lands must re-shape once it

@@ -23,6 +23,7 @@
 ### Fixed
 
 - Fixed the virtual terminal misreading private CSI sequences such as kitty keyboard `CSI < u` and modifyOtherKeys `CSI > 4;1 m` as cursor restores or text styling, which garbled replayed PTY output.
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.8.1] - 2026-10-07
 
@@ -30,9 +31,6 @@
 
 - Added `PI_NATIVES_DIR` support to `getNativesDir()` for configuring the native addon directory.
 - Added `ZipPackage` for lazily reading ZIP-based document packages with a total decompressed-size limit, along with `DocxImage.readBytes()` for accessing raw DOCX image data.
-### Fixed
-
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.8.0] - 2026-10-07
 

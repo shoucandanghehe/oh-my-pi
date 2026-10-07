@@ -59,6 +59,16 @@ import { TranscriptContainer } from "../chrome/transcript-container";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
+/** A stream and its persisted entry identify the same provider response. */
+export function sameAssistantTurn(
+	left: Extract<AgentMessage, { role: "assistant" }>,
+	right: Extract<AgentMessage, { role: "assistant" }>,
+): boolean {
+	if (left.timestamp !== right.timestamp || left.provider !== right.provider || left.model !== right.model)
+		return false;
+	return left.responseId === undefined || right.responseId === undefined || left.responseId === right.responseId;
+}
+
 export interface ChatTranscriptBuilderDeps {
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
@@ -102,7 +112,8 @@ export class ChatTranscriptBuilder {
 	#entryComponents = new Map<string, Component[]>();
 	#streamingAssistantComponent: AssistantMessageComponent | undefined;
 	#liveAssistantComponent: AssistantMessageComponent | undefined;
-	#liveAssistantTimestamp: number | undefined;
+	#liveAssistantMessage: Extract<AgentMessage, { role: "assistant" }> | undefined;
+	#lastPersistedAssistant: Extract<AgentMessage, { role: "assistant" }> | undefined;
 	#linkTargets: ReadonlyMap<string, string>;
 
 	readonly #deps: ChatTranscriptBuilderDeps;
@@ -147,15 +158,23 @@ export class ChatTranscriptBuilder {
 
 	/** Discard all components and rebuild the whole transcript from `entries`. */
 	rebuild(entries: readonly TranscriptEntry[]): void {
+		const live = this.#liveAssistantComponent;
+		const message = this.#liveAssistantMessage;
+		if (live) this.container.removeChild(live);
 		this.reset();
-		for (const entry of entries) this.#appendEntry(entry);
-		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
+		this.#liveAssistantComponent = live;
+		this.#liveAssistantMessage = message;
+		this.append(entries);
 	}
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
 	append(entries: readonly TranscriptEntry[]): void {
+		// The unpersisted tail follows any newly read entries. If one is its
+		// persisted response, #appendAssistantMessage adopts the same component.
+		if (this.#liveAssistantComponent) this.container.removeChild(this.#liveAssistantComponent);
 		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
+		if (this.#liveAssistantComponent) this.container.addChild(this.#liveAssistantComponent);
 	}
 
 	/** Update the mutable assistant block at the transcript tail without rebuilding prior messages. */
@@ -188,31 +207,43 @@ export class ChatTranscriptBuilder {
 				this.container.removeChild(component);
 				component.dispose();
 				this.#liveAssistantComponent = undefined;
-				this.#liveAssistantTimestamp = undefined;
+				this.#liveAssistantMessage = undefined;
 			}
 			return undefined;
 		}
-		if (this.#liveAssistantComponent && this.#liveAssistantTimestamp === message.timestamp) {
+		if (this.#lastPersistedAssistant && sameAssistantTurn(this.#lastPersistedAssistant, message)) {
+			this.setLiveAssistant(undefined);
+			return undefined;
+		}
+		if (
+			this.#liveAssistantComponent &&
+			this.#liveAssistantMessage &&
+			sameAssistantTurn(this.#liveAssistantMessage, message)
+		) {
 			this.#liveAssistantComponent.updateContent(message, { transient: true });
+			this.#liveAssistantMessage = message;
 			return this.#liveAssistantComponent;
 		}
 		this.setLiveAssistant(undefined);
 		const component = new AssistantMessageComponent(
-			message,
+			undefined,
 			this.#deps.hideThinkingBlock?.() ?? false,
 			() => this.#deps.requestRender(),
 			this.#deps.getAssistantThinkingRenderers?.(),
 			this.#deps.ui.imageBudget,
 			this.#deps.proseOnlyThinking?.() ?? true,
 			this.#linkTargets,
+			this.#deps.expandThinkingBlocks?.() ?? false,
 		);
 		component.setMidStreamPublication(false);
 		component.setImagesVisible(displayPreferences.showImages);
 		component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+		component.setTableChartsVisible(this.#deps.tableCharts !== false);
 		component.setExpanded(this.#expanded);
+		component.updateContent(message, { transient: true });
 		this.container.addChild(component);
 		this.#liveAssistantComponent = component;
-		this.#liveAssistantTimestamp = message.timestamp;
+		this.#liveAssistantMessage = message;
 		return component;
 	}
 
@@ -281,7 +312,8 @@ export class ChatTranscriptBuilder {
 		this.#todoSnapshot = null;
 		this.#streamingAssistantComponent = undefined;
 		this.#liveAssistantComponent = undefined;
-		this.#liveAssistantTimestamp = undefined;
+		this.#liveAssistantMessage = undefined;
+		this.#lastPersistedAssistant = undefined;
 		this.#linkTargets = this.#deps.linkTargets ?? new Map();
 		this.#expandables = [];
 		this.#entryComponents.clear();
@@ -515,16 +547,29 @@ export class ChatTranscriptBuilder {
 		const proseOnlyThinking = this.#deps.proseOnlyThinking ? this.#deps.proseOnlyThinking() : true;
 		const expandThinkingBlocks = this.#deps.expandThinkingBlocks?.() ?? false;
 		const timeline = splitAssistantMessageToolTimeline(message);
-		const assistantComponent = new AssistantMessageComponent(
-			timeline.beforeTools,
-			hideThinkingBlock,
-			() => this.#deps.requestRender(),
-			this.#deps.getAssistantThinkingRenderers?.(),
-			this.#deps.ui.imageBudget,
-			proseOnlyThinking,
-			this.#linkTargets,
-			expandThinkingBlocks,
-		);
+		const live =
+			this.#liveAssistantMessage && sameAssistantTurn(this.#liveAssistantMessage, message)
+				? this.#liveAssistantComponent
+				: undefined;
+		const assistantComponent =
+			live ??
+			new AssistantMessageComponent(
+				timeline.beforeTools,
+				hideThinkingBlock,
+				() => this.#deps.requestRender(),
+				this.#deps.getAssistantThinkingRenderers?.(),
+				this.#deps.ui.imageBudget,
+				proseOnlyThinking,
+				this.#linkTargets,
+				expandThinkingBlocks,
+			);
+		if (live) {
+			this.#streamingAssistantComponent = live;
+			this.finalizeStreamingAssistant(timeline.beforeTools);
+			this.#liveAssistantComponent = undefined;
+			this.#liveAssistantMessage = undefined;
+		}
+		this.#lastPersistedAssistant = message;
 		assistantComponent.setImagesVisible(displayPreferences.showImages);
 		assistantComponent.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
 		assistantComponent.setTableChartsVisible(this.#deps.tableCharts !== false);

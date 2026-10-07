@@ -11,13 +11,15 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import { AgentTranscriptViewer, type AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type Component, ProcessTerminal, setTerminalHyperlinks, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
 import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { TspHarness } from "../../tui/test/native/tsp-harness";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 
 let widgetAuth: AuthStorage;
 let widgetModels: ModelRegistry;
@@ -70,6 +72,29 @@ function createRunningViewer(ui: TUI = new TUI(new ProcessTerminal()), statusCon
 		onHubToggle: () => {},
 	});
 	viewer.setViewportHeight(8);
+	return viewer;
+}
+
+function createNativeViewer(
+	h: TspHarness,
+	registry: AgentRegistry,
+	cwd: string,
+	transcript: AgentTranscriptSource = agentTranscriptSource,
+): AgentTranscriptViewer {
+	const viewer = new AgentTranscriptViewer({
+		transcript,
+		agentId: "Worker",
+		registry,
+		ui: h.tui,
+		cwd,
+		expandKeys: ["ctrl+o"],
+		hubKeys: [],
+		createStatusLine: () => undefined,
+		requestRender: () => h.tui.requestRender(),
+		onClose: () => {},
+		onHubToggle: () => {},
+	});
+	h.tui.addChild(viewer);
 	return viewer;
 }
 
@@ -744,7 +769,162 @@ describe("AgentTranscriptViewer", () => {
 		}
 	});
 
-	it("loads a local transcript asynchronously before publishing incremental rows", async () => {
+	it("persists a live assistant without replacing its native markdown identity", async () => {
+		vi.useFakeTimers();
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-native-live-"));
+		const file = path.join(dir, "Worker.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		const header = { type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: dir };
+		fs.writeFileSync(file, `${JSON.stringify(header)}\n`);
+		const assistant = { ...createAssistantMessage("Stable answer"), timestamp: 42 };
+		const state: { messages: AgentMessage[]; streamMessage: AgentMessage | null } = {
+			messages: [],
+			streamMessage: assistant,
+		};
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "running",
+			session: { agent: { state } } as AgentSession,
+			sessionFile: file,
+		});
+		const h = await TspHarness.start();
+		const viewer = createNativeViewer(h, registry, dir);
+		try {
+			await h.render();
+			const md = h.find(node => node.k === "md" && node.p?.text === "Stable answer")!;
+			expect(md.p).toMatchObject({ stream: true });
+			const frames = h.frames.length;
+			state.messages.push(assistant);
+			state.streamMessage = null;
+			const entry = { type: "message", id: "m0", parentId: null, timestamp, message: assistant };
+			const line = JSON.stringify(entry);
+			const split = Math.floor(line.length / 2);
+			fs.appendFileSync(file, line.slice(0, split));
+			vi.advanceTimersByTime(250);
+			await h.render();
+			expect(h.byId(md.id)).toMatchObject({ k: "md", p: { text: "Stable answer" } });
+			fs.appendFileSync(file, `${line.slice(split)}\n`);
+			vi.advanceTimersByTime(250);
+			await h.render();
+			expect(h.byId(md.id)).toMatchObject({ k: "md", p: { text: "Stable answer" } });
+			expect(h.byId(md.id)?.p).not.toHaveProperty("stream");
+			expect(h.findAll(node => node.k === "md" && node.p?.text === "Stable answer")).toHaveLength(1);
+			const ops = h.frames.slice(frames).flatMap(frame => frame.ops);
+			expect(ops.some(op => op[0] === "del" && (op[1] === md.id || md.id.startsWith(`${op[1]}.`)))).toBe(false);
+			expect(ops.some(op => op[0] === "add" && JSON.stringify(op).includes(`"id":"${md.id}"`))).toBe(false);
+			// The old response remaining in agent.state must not appear as a new live tail.
+			vi.advanceTimersByTime(250);
+			await h.render();
+			expect(h.findAll(node => node.k === "md" && node.p?.text === "Stable answer")).toHaveLength(1);
+			expect(h.errors).toEqual([]);
+		} finally {
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps valid native content until a complete reload publishes and cancels a rotated late load", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-native-reload-"));
+		const file = path.join(dir, "Worker.jsonl");
+		const rotated = path.join(dir, "Rotated.jsonl");
+		const timestamp = "2026-08-23T00:00:00.000Z";
+		const write = (target: string, prefix: string, count = 1) => {
+			const entries = [
+				{ type: "session", version: CURRENT_SESSION_VERSION, id: "worker", timestamp, cwd: dir },
+				...Array.from({ length: count }, (_, index) => ({
+					type: "message",
+					id: `${prefix}-${index}`,
+					parentId: null,
+					timestamp,
+					message: { role: "user", content: `${prefix}-${index}`, timestamp: index },
+				})),
+			];
+			fs.writeFileSync(target, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+		};
+		write(file, "old");
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+			sessionFile: file,
+		});
+		const gates = Array.from({ length: 4 }, () => ({
+			read: Promise.withResolvers<void>(),
+			release: Promise.withResolvers<void>(),
+		}));
+		let nextRead = 0;
+		const source: AgentTranscriptSource = {
+			...agentTranscriptSource,
+			async visitEntries(target, visit, options) {
+				const gate = gates[nextRead++]!;
+				await agentTranscriptSource.visitEntries(target, visit, options);
+				gate.read.resolve();
+				await gate.release.promise;
+			},
+		};
+		const h = await TspHarness.start();
+		const viewer = createNativeViewer(h, registry, dir, source);
+		try {
+			await h.render();
+			const old = h.find(node => node.k === "md" && node.p?.text === "old-0")!;
+			write(file, "replacement", 140);
+			await gates[0]!.read.promise;
+			await h.render();
+			expect(h.byId(old.id)).toMatchObject({ k: "md", p: { text: "old-0" } });
+			expect(h.find(node => node.k === "md" && node.p?.text === "replacement-139")).toBeUndefined();
+			gates[0]!.release.resolve();
+			await h.until(() => h.find(node => node.k === "md" && node.p?.text === "replacement-139") !== undefined);
+			expect(h.byId(old.id)).toBeUndefined();
+
+			write(file, "cancelled", 140);
+			await gates[1]!.read.promise;
+			write(rotated, "current");
+			registry.get("Worker")!.sessionFile = rotated;
+			await gates[2]!.read.promise;
+			gates[2]!.release.resolve();
+			await h.until(() => h.find(node => node.k === "md" && node.p?.text === "current-0") !== undefined);
+			gates[1]!.release.resolve();
+			await gates[1]!.release.promise;
+			// Let the viewer's continuation consume the now-completed source read.
+			await Promise.resolve();
+			await h.render();
+			expect(h.findAll(node => node.k === "md").map(node => (node.k === "md" ? node.p?.text : undefined))).toEqual([
+				"current-0",
+			]);
+
+			write(rotated, "failed", 140);
+			await gates[3]!.read.promise;
+			gates[3]!.release.reject(new Error("snapshot read failed"));
+			await gates[3]!.release.promise.catch(() => {});
+			await h.until(() => h.find(node => node.k === "text" && node.p?.tone === "error") !== undefined);
+			expect(h.findAll(node => node.k === "md").map(node => (node.k === "md" ? node.p?.text : undefined))).toEqual([
+				"current-0",
+			]);
+			expect(h.find(node => node.k === "text" && node.p?.tone === "error")).toMatchObject({
+				k: "text",
+				p: { text: expect.stringContaining("snapshot read failed") },
+			});
+			expect(h.errors).toEqual([]);
+		} finally {
+			for (const gate of gates) gate.release.resolve();
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("publishes initial large-transcript batches before the source read completes", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-load-"));
 		const file = path.join(dir, "Worker.jsonl");
 		const timestamp = "2026-08-23T00:00:00.000Z";
@@ -773,8 +953,17 @@ describe("AgentTranscriptViewer", () => {
 		// oxlint-disable-next-line prefer-const -- requestRender may run during construction before assignment
 		let viewer: AgentTranscriptViewer | undefined;
 		const loaded = Promise.withResolvers<void>();
+		const read = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
 		viewer = new AgentTranscriptViewer({
-			transcript: agentTranscriptSource,
+			transcript: {
+				...agentTranscriptSource,
+				async visitEntries(target, visit, options) {
+					await agentTranscriptSource.visitEntries(target, visit, options);
+					read.resolve();
+					await release.promise;
+				},
+			},
 			agentId: "Worker",
 			registry,
 			ui: new TUI(new ProcessTerminal()),
@@ -797,9 +986,13 @@ describe("AgentTranscriptViewer", () => {
 			expect(immediate).toContain("Loading transcript");
 			expect(immediate).not.toContain("row-299");
 
+			await read.promise;
+			expect(Bun.stripANSI(viewer.render(60).join("\n"))).toMatch(/\brow-\d+\b/);
+			release.resolve();
 			await loaded.promise;
 			expect(Bun.stripANSI(viewer.render(60).join("\n"))).toContain("row-299");
 		} finally {
+			release.resolve();
 			viewer.dispose();
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

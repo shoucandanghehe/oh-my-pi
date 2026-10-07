@@ -15,7 +15,7 @@ import * as path from "node:path";
 import { type TspApplyError, TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import { splitTspMessage, type TspHello } from "@oh-my-pi/pi-tui/native/encode";
 import type { Terminal, TerminalAppearance, TerminalStartOptions, TspHelloHandler } from "@oh-my-pi/pi-tui/terminal";
-import { type RenderScheduler, type RenderTimer, TUI } from "@oh-my-pi/pi-tui/tui";
+import { type RenderScheduler, type RenderTimer, TUI, type TUIOptions } from "@oh-my-pi/pi-tui/tui";
 import {
 	TSP_KINDS,
 	type TspEvent,
@@ -28,6 +28,7 @@ import {
 export interface TspHarnessOptions {
 	cols?: number;
 	rows?: number;
+	nativeSurfaceMode?: TUIOptions["nativeSurfaceMode"];
 	/** Kinds the terminal advertises (default: the whole vocabulary). */
 	kinds?: readonly string[];
 	/** Features the terminal advertises (default: blobs, settle, adopt, dock). */
@@ -396,16 +397,20 @@ export class TspHarness {
 	/** `TERN_BLOB_DIR` before {@link start} set it, restored by {@link stop}. */
 	#blobDirBefore: { value: string | undefined } | undefined;
 
-	constructor(terminal: TspTestTerminal, scheduler: ManualScheduler) {
+	constructor(
+		terminal: TspTestTerminal,
+		scheduler: ManualScheduler,
+		nativeSurfaceMode?: TUIOptions["nativeSurfaceMode"],
+	) {
 		this.terminal = terminal;
 		this.#scheduler = scheduler;
-		this.tui = new TUI(terminal, false, { renderScheduler: scheduler });
+		this.tui = new TUI(terminal, false, { renderScheduler: scheduler, nativeSurfaceMode });
 	}
 
 	/** Build the TUI, let `setup` populate it, start it and settle the handshake and first frame. */
 	static async start(setup?: (tui: TUI) => void, options: TspHarnessOptions = {}): Promise<TspHarness> {
 		const scheduler = new ManualScheduler();
-		const harness = new TspHarness(new TspTestTerminal(options), scheduler);
+		const harness = new TspHarness(new TspTestTerminal(options), scheduler, options.nativeSurfaceMode);
 		// The terminal's blob cache is the fake one, never the cache of a Tern running the tests.
 		harness.#blobDirBefore = { value: Bun.env.TERN_BLOB_DIR };
 		if (options.blobDir) Bun.env.TERN_BLOB_DIR = options.blobDir;

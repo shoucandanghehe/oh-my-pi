@@ -63,92 +63,17 @@
 
 - Subagent "Submit Result" cards now show the submitted result (its fields as a tree, or the report text), the section it fills, and why a submission was rejected, instead of only "Result submitted.".
 - Reduced memory held by retired transcript history in long sessions ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
+- Made the app viewport scrollbar thumb denser while retaining its four subrow scroll-position slots.
 
 ### Fixed
 
 - Reduced memory retained by discarded TSP images and previews ([#14336](https://github.com/can1357/oh-my-pi/pull/14336) by [@iliaal](https://github.com/iliaal)).
 - Fixed startup capability probes printing as text in the prompt (e.g. `25a1;stsp;q;{…}pppppp`) on terminals that cannot parse them, such as macOS Terminal.app.
 - Fixed the `/resume` picker flashing while a search runs over a large session history: background fuzzy matches now land in one update instead of reordering the list dozens of times per keystroke.
-
-## [18.8.6] - 2026-10-08
-
-### Changed
-
-- Improved rendering performance for streaming long Markdown lists while preserving nested items, numbering, and reference links.
-
-### Fixed
-
-- Added package exports for the native Tern/TSP modules, allowing extensions in compiled `omp` binaries to import them.
-- Fixed the Tern `/model` picker's Roles tab so typing and Backspace consistently edit the search field without triggering role commands.
-- Fixed the session picker so sessions retain and display their directory when switching between the current folder and all-project views.
-
-## [18.8.5] - 2026-10-08
-
-### Added
-
-- Added a **Compacts at** fact to the model hub preview and a Roles-view **Compaction limit** action (`k`) that edits the selected row's model limit through the new `ModelBrowserSource.compactionPointFor` and `ModelHubCallbacks.onCompactionPointChange` hooks ([#14952](https://github.com/can1357/oh-my-pi/pull/14952) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed `/usage` dashboard cards reordering their limit rows by usage; rows now keep the provider's window order (e.g. 5 hour → weekly → monthly) ([#14953](https://github.com/can1357/oh-my-pi/pull/14953) by [@H4vC](https://github.com/H4vC))
-- Fixed Cmd+A, Cmd+C, Cmd+X and Shift+arrow selection doing nothing in the Tern prompt while Vim mode is in Insert mode ([#14954](https://github.com/can1357/oh-my-pi/pull/14954) by [@H4vC](https://github.com/H4vC))
-
-## [18.8.4] - 2026-10-08
-
-### Changed
-
-- Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
-
-### Fixed
-
-- Fixed relative file links in Tern assistant replies opening against the folder omp was started in; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
-- Fixed Tern modals with no clickable exit: BTW history, git shortcuts and autoresearch gain a Close button, plan review a Cancel button, the agent transcript viewer and `/annotate` review a top-right `esc` that runs Esc, and the `/move` dialog Accept, Cancel and Confirm buttons; new `escCloseButton()` builds the `esc` keycap button ([#14894](https://github.com/can1357/oh-my-pi/pull/14894) by [@H4vC](https://github.com/H4vC))
-
-## [18.8.2] - 2026-10-07
-
-### Removed
-
-- Removed per-call `model` fields from task parameter types.
-
-## [18.8.1] - 2026-10-07
-
-### Fixed
-
-- Fixed the native ask dialog on TSP surfaces so it replaces the composer instead of opening as a modal over the transcript, keeping the transcript readable and scrollable.
-
-## [18.8.0] - 2026-10-07
-
-### Added
-
-- SVG and Mermaid files now render as images or diagrams beneath their file cards, with SVG previews updating while the file streams and Mermaid previews appearing when the file is complete.
-- Native tool cards can open expanded regardless of the transcript’s expansion state; the todo checklist uses this behavior.
-
-### Changed
-
-- TSP composer placeholders now appear as the composer title in italicized curly quotes, with “What are we cooking?” used when no title is provided.
-- TSP image transfers are more efficient across reconnects and multiple surfaces: images are sent once per connection, existing terminal blobs are detected before upload, and images in the Tern blob cache can be reused without crossing the terminal pty.
-- Improved performance and responsiveness across the TUI, including large TSP messages and Markdown documents, streaming output, tool-result cards, debug logs, raw SSE and Git diff views, path and model searches, session and settings lists, plan review, agent transcripts, status updates, assistant links, Kitty images, and large prompt or evaluation content.
-- Large debug logs and plan-review histories now retain bounded history to keep the interface responsive, while preserving the newest log entries.
-
-### Fixed
-
-- Fixed slow Markdown processing for certain LaTeX environments and incomplete delimiters.
-- Fixed excessive slowdown when formatting long semicolon-free JavaScript evaluations.
-- Fixed prompt-editor lag in large drafts containing magic keywords.
-
-## [18.7.0] - 2026-10-06
-
-### Added
-
-- Assistant SVG code blocks now render as inline, theme-colored images on terminals with graphics support, updating as responses stream and adapting to terminal width; SVG that cannot be rendered remains available as code.
-- Numeric tables in assistant responses can now include automatically selected, themed charts based on the table’s structure and units.
-
-### Changed
-
-- Made the app viewport scrollbar thumb denser while retaining its four subrow scroll-position slots.
-
-### Fixed
-
+- Fixed long native transcript panes intermittently hiding their entire conversation while preserving keyboard scrolling.
+- Agent transcript panes now preserve streaming message nodes when replies are saved and retain visible content during asynchronous reloads.
+- Fixed Ctrl+O not expanding or collapsing tool output in Tern native transcripts.
+- Closing one native pane no longer disables native rendering or changes symbols in other live panes.
 - Fixed app-viewport screen recording and live streaming missing viewport updates.
 - Fixed native renderer transitions so applications can assemble semantic components before the first frame, and native input bypasses app-viewport interception. ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2))
 - Reduced background work during app-viewport tool animations while preserving offscreen content growth and scrolling.
@@ -197,6 +122,52 @@
 - Fixed switching from the app viewport to a Tern inline surface while the alternate screen was still active.
 - Fixed native keyboard transcript scrolling in BTW and agent views.
 - Fixed native pause sheets not updating barrier readiness or offering durable exit.
+
+## [18.8.6] - 2026-10-08
+
+### Changed
+
+- Improved rendering performance for streaming long Markdown lists while preserving nested items, numbering, and reference links.
+
+### Fixed
+
+- Added package exports for the native Tern/TSP modules, allowing extensions in compiled `omp` binaries to import them.
+- Fixed the Tern `/model` picker's Roles tab so typing and Backspace consistently edit the search field without triggering role commands.
+- Fixed the session picker so sessions retain and display their directory when switching between the current folder and all-project views.
+
+## [18.8.5] - 2026-10-08
+
+### Added
+
+- Added a **Compacts at** fact to the model hub preview and a Roles-view **Compaction limit** action (`k`) that edits the selected row's model limit through the new `ModelBrowserSource.compactionPointFor` and `ModelHubCallbacks.onCompactionPointChange` hooks ([#14952](https://github.com/can1357/oh-my-pi/pull/14952) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed `/usage` dashboard cards reordering their limit rows by usage; rows now keep the provider's window order (e.g. 5 hour → weekly → monthly) ([#14953](https://github.com/can1357/oh-my-pi/pull/14953) by [@H4vC](https://github.com/H4vC))
+- Fixed Cmd+A, Cmd+C, Cmd+X and Shift+arrow selection doing nothing in the Tern prompt while Vim mode is in Insert mode ([#14954](https://github.com/can1357/oh-my-pi/pull/14954) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.4] - 2026-10-08
+
+### Changed
+
+- Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
+
+### Fixed
+
+- Fixed relative file links in Tern assistant replies opening against the folder omp was started in; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
+- Fixed Tern modals with no clickable exit: BTW history, git shortcuts and autoresearch gain a Close button, plan review a Cancel button, the agent transcript viewer and `/annotate` review a top-right `esc` that runs Esc, and the `/move` dialog Accept, Cancel and Confirm buttons; new `escCloseButton()` builds the `esc` keycap button ([#14894](https://github.com/can1357/oh-my-pi/pull/14894) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.2] - 2026-10-07
+
+### Removed
+
+- Removed per-call `model` fields from task parameter types.
+
+## [18.8.1] - 2026-10-07
+
+### Fixed
+
+- Fixed the native ask dialog on TSP surfaces so it replaces the composer instead of opening as a modal over the transcript, keeping the transcript readable and scrollable.
 
 ## [18.8.0] - 2026-10-07
 

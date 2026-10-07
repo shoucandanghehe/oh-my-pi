@@ -2091,6 +2091,11 @@ export class Markdown implements Component {
 	releaseRenderCaches(): void {
 		this.invalidate();
 		this.#dropStreamPrefix();
+		this.#lexedText = undefined;
+		this.#lexedTokens = undefined;
+		this.#streamRewound = undefined;
+		this.#layoutPlans = undefined;
+		this.#layoutContext = undefined;
 		this.#streamingHighlightCache = undefined;
 		this.#fastTail = undefined;
 		this.#lastTailCapture = undefined;

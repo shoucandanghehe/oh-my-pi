@@ -2475,7 +2475,10 @@ export class SelectorController {
 			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.ctx.settings),
 			getExtensionPresentation: id => AgentRegistry.global().get(id)?.session?.extensionRunner,
 			focusAgent: id => this.ctx.focusAgentSession(id),
-			openAgent: this.ctx.workspaceEnabled ? id => this.ctx.openAgentWorkspacePane(id) : undefined,
+			openAgent:
+				this.ctx.workspaceEnabled || (this.ctx.ui.nativeRendering && this.ctx.nativeWorkspace)
+					? id => this.ctx.openAgentWorkspacePane(id)
+					: undefined,
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
 

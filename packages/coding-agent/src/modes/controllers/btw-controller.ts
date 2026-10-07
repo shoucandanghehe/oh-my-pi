@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { getMarkdownLinkUrls, type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
+import { getMarkdownLinkUrls, type OverlayHandle, replaceTabs, type TUI } from "@oh-my-pi/pi-tui";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
@@ -240,7 +240,7 @@ export class BtwController {
 		const request = this.#activeRequest;
 		const manager = this.#manager;
 		if (!request?.threadKey || !manager?.select(request.threadKey)) return false;
-		if (!this.#openWorkspacePane(manager)) return false;
+		if (!(await this.#openWorkspacePane(manager))) return false;
 		this.#detachActiveRequest();
 		return true;
 	}
@@ -483,7 +483,7 @@ export class BtwController {
 		if (generation !== this.#generation) return;
 		if (!input) {
 			if (this.ctx.workspaceEnabled || this.ctx.ui.nativeRendering) {
-				if (this.#openWorkspacePane(manager)) this.#detachActiveRequest();
+				if (await this.#openWorkspacePane(manager)) this.#detachActiveRequest();
 			} else if (manager.activeKey) {
 				this.#showInlineThread(manager, manager.activeKey);
 			} else {
@@ -509,7 +509,8 @@ export class BtwController {
 		const previousKey = manager.activeKey;
 		const threadKey = manager.createChild(input, leafId, { provider: model.provider, id: model.id });
 		if (this.ctx.ui.nativeRendering) {
-			this.#openWorkspacePane(manager);
+			await this.#openWorkspacePane(manager);
+			if (generation !== this.#generation || manager !== this.#manager) return;
 			this.#sendThreadInput(threadKey, input);
 			return;
 		}
@@ -943,55 +944,78 @@ export class BtwController {
 		};
 	}
 
-	#openWorkspacePane(manager: BtwManager): boolean {
-		if (!this.#workspacePane) {
-			const ownerSession = this.ctx.session;
-			this.#workspacePane = new BtwConversationPane({
-				ui: this.ctx.ui,
-				cwd: this.ctx.sessionManager.getCwd(),
-				expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
-				hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
-				proseOnlyThinking: () => this.ctx.proseOnlyThinking,
-				resolveLinks: texts => resolveSessionMarkdownLinkHrefs(texts.flatMap(getMarkdownLinkUrls), ownerSession),
-				requestRender: () => {
-					if (this.#workspacePane) this.ctx.ui.requestComponentRender(this.#workspacePane);
-					else this.ctx.ui.requestRender();
-				},
-				statusLine: this.ctx.statusLine.createPeer(this.ctx.session),
-				onSubmit: (input, images, key) => this.#submitPaneInput(manager, input, images, key),
-				onNewThread: () => this.#createChild(manager, "") !== undefined,
-				canCopy: key => this.#threadCopyText(key) !== undefined,
-				onCopy: key => this.handleCopy(key),
-				onClose: () => this.#closeWorkspacePane(),
-				onDraftChange: (key, text, images, imageLinks) => {
-					manager.setDraft(key, text, images, imageLinks);
-				},
-				onSelectThread: key => manager.select(key),
-				onDisplayThread: key => {
-					const thread = manager.thread(key);
-					if (!thread || thread.conversation.extensionRunner) return;
-					void thread.conversation.initializeExtensionRuntime().then(
-						() => {
-							if (this.#manager === manager) this.#updateWorkspacePane();
-						},
-						error =>
-							this.ctx.showError(
-								`BTW extension failed: ${error instanceof Error ? error.message : String(error)}`,
-							),
-					);
-				},
-				onMarkRead: key => {
-					manager.markRead(key);
-				},
-				onCloseThread: key => this.#closeThread(manager, key),
-				onPromoteThread: key => this.#promoteThread(key),
-				onRejectedSubmit: () =>
-					this.ctx.showStatus("A BTW reply is still streaming — wait for it to finish", { dim: true }),
-				onPersistDraft: key => {
-					manager.persistDraft(key);
-				},
-			});
+	#createWorkspacePane(manager: BtwManager, ui: TUI): BtwConversationPane {
+		const ownerSession = this.ctx.session;
+		return new BtwConversationPane({
+			ui,
+			nativePane: ui !== this.ctx.ui,
+			cwd: this.ctx.sessionManager.getCwd(),
+			expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
+			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
+			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+			resolveLinks: texts => resolveSessionMarkdownLinkHrefs(texts.flatMap(getMarkdownLinkUrls), ownerSession),
+			requestRender: () => {
+				if (this.#workspacePane) ui.requestComponentRender(this.#workspacePane);
+				else ui.requestRender();
+			},
+			statusLine: this.ctx.statusLine.createPeer(this.ctx.session),
+			onSubmit: (input, images, key) => this.#submitPaneInput(manager, input, images, key),
+			onNewThread: () => this.#createChild(manager, "") !== undefined,
+			canCopy: key => this.#threadCopyText(key) !== undefined,
+			onCopy: key => this.handleCopy(key),
+			onClose: () => this.#closeWorkspacePane(),
+			onDraftChange: (key, text, images, imageLinks) => {
+				manager.setDraft(key, text, images, imageLinks);
+			},
+			onSelectThread: key => manager.select(key),
+			onDisplayThread: key => {
+				const thread = manager.thread(key);
+				if (!thread || thread.conversation.extensionRunner) return;
+				void thread.conversation.initializeExtensionRuntime().then(
+					() => {
+						if (this.#manager === manager) this.#updateWorkspacePane();
+					},
+					error =>
+						this.ctx.showError(`BTW extension failed: ${error instanceof Error ? error.message : String(error)}`),
+				);
+			},
+			onMarkRead: key => {
+				manager.markRead(key);
+			},
+			onCloseThread: key => this.#closeThread(manager, key),
+			onPromoteThread: key => this.#promoteThread(key),
+			onRejectedSubmit: () =>
+				this.ctx.showStatus("A BTW reply is still streaming — wait for it to finish", { dim: true }),
+			onPersistDraft: key => {
+				manager.persistDraft(key);
+			},
+		});
+	}
+
+	async #openWorkspacePane(manager: BtwManager): Promise<boolean> {
+		const native = this.ctx.ui.nativeRendering && this.ctx.nativeWorkspace;
+		if (native) {
+			try {
+				await native.open(
+					"btw",
+					"BTW",
+					ui => {
+						this.#workspacePane = this.#createWorkspacePane(manager, ui);
+						this.#updateWorkspacePane();
+						return this.#workspacePane;
+					},
+					() => {
+						this.#workspacePane = undefined;
+					},
+				);
+				return true;
+			} catch (error) {
+				if (manager !== this.#manager) return false;
+				this.ctx.showError(`Could not open native BTW pane: ${toError(error).message}`);
+				return false;
+			}
 		}
+		this.#workspacePane ??= this.#createWorkspacePane(manager, this.ctx.ui);
 		this.#updateWorkspacePane();
 		if (this.ctx.ui.nativeRendering) {
 			if (!this.#workspaceOverlay) {
@@ -1010,6 +1034,10 @@ export class BtwController {
 	}
 
 	#closeWorkspacePane(): void {
+		if (this.ctx.nativeWorkspace?.has("btw")) {
+			this.ctx.nativeWorkspace.close("btw");
+			return;
+		}
 		const pane = this.#workspacePane;
 		if (!pane) return;
 		this.#workspacePane = undefined;
@@ -1022,7 +1050,9 @@ export class BtwController {
 
 	/** Release native or retiring ANSI views without cancelling durable background work. */
 	closeView(): void {
-		if (this.#workspaceOverlay || this.ctx.ui.nativeRendering) this.#closeWorkspacePane();
+		if (this.#workspaceOverlay || this.ctx.ui.nativeRendering || this.ctx.nativeWorkspace?.has("btw")) {
+			this.#closeWorkspacePane();
+		}
 	}
 
 	#submitPaneInput(manager: BtwManager, input: string, images?: ImageContent[], sourceKey?: string): boolean {

@@ -49,7 +49,6 @@ import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { col, kbd, node, row, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
-import { onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
@@ -68,6 +67,7 @@ import {
 	prompt,
 	sanitizeText,
 	setProjectDir,
+	toError,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { pickTableChart } from "../auto-graph/planner";
@@ -123,7 +123,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { AgentMetrics } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
@@ -276,6 +276,7 @@ import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcrip
 import { MainSessionPane } from "./components/main-session-pane";
 import { AutoAgentWorkspaceController } from "./controllers/auto-agent-workspace-controller";
 import { BtwController } from "./controllers/btw-controller";
+import { NativeWorkspace } from "./native-workspace/workspace";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
@@ -1220,6 +1221,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	get workspaceEnabled(): boolean {
 		return this.#workspaceLayout !== undefined && !this.ui.nativeRendering;
 	}
+	nativeWorkspace: NativeWorkspace | undefined;
 	#workspaceLayout: WorkspaceLayout | undefined;
 	#mainScrollRoot: Container | undefined;
 	#mainStickyRoot: Container | undefined;
@@ -1227,6 +1229,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#autoAgentWorkspace: AutoAgentWorkspaceController | undefined;
 	#autoAgentWorkspaceSessionId: string | undefined;
 	#workspaceWelcome: WelcomeComponent | undefined;
+	#nativeAutomaticAgents = new Set<string>();
+	#nativeDismissedAgents = new Set<string>();
 
 	isInitialized = false;
 	initialChatRendered = false;
@@ -1736,6 +1740,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
 		this.settings = session.settings;
+		this.nativeWorkspace = NativeWorkspace.fromEnvironment(this.sessionManager.getCwd());
 		const preferences = {
 			quiet: cfgStartupQuiet.get(settings),
 			composerShape: cfgComposerShape.get(settings),
@@ -2080,6 +2085,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		agentId: string,
 		close: () => void,
 		registryOverride?: AgentRegistry,
+		ui: TUI = this.ui,
 	): AgentTranscriptViewer {
 		const remote = registryOverride ? undefined : this.collabGuest?.hubRemote;
 		const lifecycle = registryOverride || remote ? undefined : () => AgentLifecycleManager.global();
@@ -2092,7 +2098,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			transcript: agentTranscriptSource,
 			remote,
 			lifecycle,
-			ui: this.ui,
+			ui,
 			getTool: name => this.session.getToolByName(name),
 			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
 			getAssistantThinkingRenderers: () => this.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
@@ -2115,8 +2121,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
 			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
 			requestRender: () => {
-				if (viewer) this.ui.requestComponentRender(viewer);
-				else this.ui.requestRender();
+				if (viewer) ui.requestComponentRender(viewer);
+				else ui.requestRender();
 			},
 			onClose: close,
 			onHubToggle: () => this.showAgentHub(),
@@ -2125,12 +2131,60 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async openAgentWorkspacePane(id: string): Promise<void> {
+		if (this.ui.nativeRendering && this.nativeWorkspace) {
+			this.#nativeAutomaticAgents.delete(id);
+			await this.#openNativeAgentPane(id, false);
+			return;
+		}
 		if (!this.workspaceEnabled || !this.#autoAgentWorkspace) {
 			throw new Error("Agent workspace panes require the app-viewport render backend");
 		}
 		if (!this.#autoAgentWorkspace.openManual(id)) {
 			throw new Error("The terminal is too small to open another agent pane");
 		}
+	}
+
+	async #openNativeAgentPane(id: string, automatic: boolean): Promise<void> {
+		const workspace = this.nativeWorkspace!;
+		await workspace.open(
+			`agent:${id}`,
+			id,
+			(ui, close) => this.#createAgentWorkspaceViewer(id, close, undefined, ui),
+			() => {
+				this.#nativeAutomaticAgents.delete(id);
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				if (registry.get(id)?.status === "running") this.#nativeDismissedAgents.add(id);
+			},
+			automatic,
+		);
+	}
+
+	async #handleNativeAgentEvent(event: RegistryEvent): Promise<void> {
+		const workspace = this.nativeWorkspace;
+		const { ref } = event;
+		if (!this.ui.nativeRendering || !workspace || ref.kind !== "sub" || event.type === "metadata_changed") return;
+		const key = `agent:${ref.id}`;
+		workspace.get(key)?.ui.requestRender();
+		if (event.type !== "removed" && ref.status === "running") {
+			const viewer = workspace.get(key)?.component;
+			if (viewer instanceof AgentTranscriptViewer) viewer.cancelAutoClose();
+			if (!workspace.has(key) && !this.#nativeDismissedAgents.has(ref.id)) {
+				this.#nativeAutomaticAgents.add(ref.id);
+				await this.#openNativeAgentPane(ref.id, true);
+				const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
+				const current = registry.get(ref.id);
+				if (!current) workspace.close(key);
+				else if (current.status !== "running")
+					await this.#handleNativeAgentEvent({ type: "status_changed", ref: current });
+			}
+			return;
+		}
+		this.#nativeDismissedAgents.delete(ref.id);
+		if (!this.#nativeAutomaticAgents.has(ref.id)) return;
+		const viewer = workspace.get(key)?.component;
+		if (!(viewer instanceof AgentTranscriptViewer) || viewer.autoCloseProtected || (await workspace.isFocused(key)))
+			return;
+		viewer.startAutoClose(() => workspace.close(key));
 	}
 
 	previewSubagentExitAnimation(): void {
@@ -2422,8 +2476,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setStatusComponent(this.statusLine);
 		this.#mountRuntimeSurface();
 		this.#eventBusUnsubscribers.push(
-			onNativeRenderingChange(() => {
+			this.ui.onNativeRenderingChange(() => {
 				this.#btwController.closeView();
+				if (!this.ui.nativeRendering) this.nativeWorkspace?.dispose();
 				this.#mountRuntimeSurface();
 			}),
 		);
@@ -3737,7 +3792,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
 		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {
 			this.hideToolActivity = hideToolActivity;
-			if (!hideToolActivity) this.toolOutputExpanded = false;
+			if (!hideToolActivity) {
+				this.toolOutputExpanded = false;
+				this.chatContainer.setExpanded(false);
+			}
 			for (const child of this.chatContainer.children) {
 				if (
 					!hideToolActivity &&
@@ -3984,12 +4042,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#agentRegistrySubscriptionTarget !== registry || this.#autoAgentWorkspaceSessionId !== sessionId) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#autoAgentWorkspace?.reset();
+			this.nativeWorkspace?.dispose();
+			this.#nativeAutomaticAgents.clear();
+			this.#nativeDismissedAgents.clear();
 			this.#autoAgentWorkspaceSessionId = sessionId;
 			this.#agentRegistrySubscriptionTarget = registry;
 			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				this.syncRunningSubagentBadge();
 				if (this.workspaceEnabled) this.#autoAgentWorkspace?.handleEvent(event);
+				void this.#handleNativeAgentEvent(event).catch(error =>
+					this.showError(`Native agent pane failed: ${toError(error).message}`),
+				);
 			});
+			if (this.ui.nativeRendering && this.nativeWorkspace) {
+				for (const ref of registry.list()) {
+					void this.#handleNativeAgentEvent({ type: "registered", ref }).catch(error =>
+						this.showError(`Native agent pane failed: ${toError(error).message}`),
+					);
+				}
+			}
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.#runningSubagentCount = agentIds.length;
@@ -6997,6 +7068,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#btwController.closeView();
+		this.nativeWorkspace?.dispose();
+		this.#nativeAutomaticAgents.clear();
+		this.#nativeDismissedAgents.clear();
 		this.#appearanceRefreshRequest = undefined;
 		this.#streamPublisher?.dispose();
 		this.#streamPublisher = undefined;

@@ -32,13 +32,11 @@ import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollB
 import { type Component, Container, CURSOR_MARKER } from "../tui";
 import { getNativeBlob } from "./blobs";
 import { normalizeIconProps } from "./icons";
-import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
+import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt, NativeScroll, NativeSurface } from "./node";
 import { isNativeSettled } from "./settle";
 
 /** The regions a frame fills. */
-export interface NativeRegions {
-	readonly main: readonly NativeChild[];
-	readonly dock: readonly NativeChild[];
+export interface NativeRegions extends NativeSurface {
 	readonly layer: readonly NativeChild[];
 }
 
@@ -231,6 +229,7 @@ export class Reconciler {
 	#framePortals: NodeEntry[] = [];
 	#prevPortals: NodeEntry[] = [];
 	#regions: Record<RegionId, readonly Entry[]> | null = null;
+	#mainScroll: NativeScroll | undefined;
 	#rows = 0;
 	#gone = new Set<string>();
 	/** Live-only regions to re-add after the surface was closed and adopted. */
@@ -262,6 +261,8 @@ export class Reconciler {
 		this.#selectedIds.clear();
 		this.#framePortals = [];
 		this.#rows = 0;
+		this.#noteScroll("main", regions.scroll, this.#mainScroll);
+		this.#mainScroll = regions.scroll;
 		let prev = this.#regions;
 		if (prev === null) {
 			for (const region of REGION_IDS) this.#ops.push(["add", region, this.surface, null, { id: region, k: "col" }]);
@@ -592,6 +593,14 @@ export class Reconciler {
 		return entry.hoist === walk.hoist ? walk : { ...walk, hoist: entry.hoist };
 	}
 
+	#noteScroll(id: string, scroll: NativeScroll | undefined, previous: NativeScroll | undefined): void {
+		if (!scroll || scroll.n === previous?.n) return;
+		// Coalesced key repeats keep their distance; absolute jumps only run once.
+		const jump = scroll.by === "start" || scroll.by === "end";
+		const presses = jump ? 1 : Math.min(Math.max(scroll.n - (previous?.n ?? 0), 1), MAX_SCROLL_REPEAT);
+		for (let i = 0; i < presses; i++) this.#scrolls.push([id, scroll.by]);
+	}
+
 	// ── Nodes ────────────────────────────────────────────────────────────
 
 	#diffNode(old: NodeEntry, next: NodeEntry, parent: string, before: string | null, walk: Walk): void {
@@ -612,14 +621,7 @@ export class Reconciler {
 			this.#flushMoves();
 			return;
 		}
-		const scroll = next.node.scroll;
-		if (scroll && scroll.n !== old.node.scroll?.n) {
-			// Presses described in one frame coalesce: repeat the latest step once per
-			// press (an end once), so key repeat keeps its distance.
-			const jump = scroll.by === "start" || scroll.by === "end";
-			const presses = jump ? 1 : Math.min(Math.max(scroll.n - (old.node.scroll?.n ?? 0), 1), MAX_SCROLL_REPEAT);
-			for (let i = 0; i < presses; i++) this.#scrolls.push([next.id, scroll.by]);
-		}
+		this.#noteScroll(next.id, next.node.scroll, old.node.scroll);
 		const oldEntries = this.#entries(old.node.c, old.keypath, old.owner, old.hoist, null);
 		const newEntries = this.#entries(next.node.c, next.keypath, next.owner, next.hoist, inner);
 		this.#diffProps(

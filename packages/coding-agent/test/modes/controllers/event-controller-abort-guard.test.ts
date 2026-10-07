@@ -19,11 +19,11 @@ import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
-import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 
 import { cfgCompletionNotify, cfgErrorNotify } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -361,12 +361,17 @@ async function nextMacrotask(): Promise<void> {
 
 describe("EventController — terminal title across a non-terminal agent_end", () => {
 	it("keeps the working title and skips loader teardown but still flushes a deferred model switch during a scheduled continuation (isTerminal:false, not yielded), then tears down if it is cancelled before starting", async () => {
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const stateSpy = vi.fn();
 		// The reminder/retry is scheduled post-prompt work the session still owes.
 		let continuationPending = true;
 		const continuation = Promise.withResolvers<void>();
 		const ctx = createInteractiveModeContext({
 			sessionManager: { getSessionName: () => "test-session" },
+			terminalActivity: new TerminalActivityController({
+				isProgressEnabled: () => false,
+				setProgress: vi.fn(),
+				setTitleState: stateSpy,
+			}),
 			session: {
 				get hasPostPromptWork() {
 					return continuationPending;
@@ -380,6 +385,9 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 		markActivityEnd.mockImplementation(() => tornDown.resolve());
 		const flushPendingModelSwitch = vi.spyOn(ctx, "flushPendingModelSwitch");
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		stateSpy.mockClear();
+		releaseActivity.mockClear();
 		await controller.handleEvent({
 			...makeAgentEndEvent([makeAssistantMessage("stop")]),
 			isTerminal: false,
@@ -403,32 +411,45 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 	it("keeps the working title on a queued steer/follow-up or IRC continuation (isTerminal:false, yielded:true, no awaitingAsyncWork)", async () => {
 		// `AgentSession#flushPendingAgentEnd` re-tags a built terminal end as
 		// non-terminal when queued input is about to drain; `yielded` stays true.
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const stateSpy = vi.fn();
 		const ctx = createInteractiveModeContext({
 			sessionManager: { getSessionName: () => "test-session" },
+			terminalActivity: new TerminalActivityController({
+				isProgressEnabled: () => false,
+				setProgress: vi.fn(),
+				setTitleState: stateSpy,
+			}),
 			session: { queuedMessageCount: 1 },
 		});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
 		await controller.handleEvent({
 			...makeAgentEndEvent([makeAssistantMessage("stop")]),
 			isTerminal: false,
 			yielded: true,
 		} as Extract<AgentSessionEvent, { type: "agent_end" }>);
 		await nextMacrotask();
-		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(stateSpy.mock.calls.map(call => call[0])).toEqual(["working"]);
 		expect(markActivityEnd).not.toHaveBeenCalled();
 	});
 
 	it("drops the title to idle at an async-wait settle and tears down once background work drains without a wake", async () => {
 		// A cancelled or acknowledged background job never delivers a wake, so no
 		// terminal agent_end follows; without this, title and loader spin forever.
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const stateSpy = vi.fn();
 		const { ctx, drain } = makeAsyncWaitContext();
+		ctx.terminalActivity = new TerminalActivityController({
+			isProgressEnabled: () => false,
+			setProgress: vi.fn(),
+			setTitleState: stateSpy,
+		});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const tornDown = Promise.withResolvers<void>();
 		markActivityEnd.mockImplementation(() => tornDown.resolve());
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		stateSpy.mockClear();
 		await controller.handleEvent(asyncWaitEnd());
 		expect(stateSpy).toHaveBeenCalledWith("idle");
 		// The job is still running: loader/progress teardown waits for it.
@@ -440,7 +461,6 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 	});
 
 	it("leaves teardown to the woken run when background work resumes the agent", async () => {
-		vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
 		const { ctx, drain } = makeAsyncWaitContext();
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);

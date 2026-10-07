@@ -18,6 +18,8 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TspNode } from "@oh-my-pi/pi-wire";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ManualScheduler, TspTestTerminal, tspEvent } from "../../tui/test/native/tsp-harness";
+import { NativePaneHarness } from "./helpers/native-pane-harness";
+import { AgentRegistry } from "../src/registry/agent-registry";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -26,7 +28,7 @@ afterEach(async () => {
 	resetSettingsForTest();
 });
 
-async function harness(scroll = true, manualProbe = false) {
+async function harness(scroll = true, manualProbe = false, native?: NativePaneHarness) {
 	await initTheme(false);
 	resetSettingsForTest();
 	const directory = TempDir.createSync("@pi-btw-native-");
@@ -69,15 +71,16 @@ async function harness(scroll = true, manualProbe = false) {
 	const terminal = new TspTestTerminal({ cols: 120, rows: 32, features: scroll ? ["scroll"] : [], manualProbe });
 	const scheduler = new ManualScheduler();
 	const previous = Bun.env.PI_TUI_RENDER_BACKEND;
-	let composer: Composer;
+	let mode: InteractiveMode;
 	try {
 		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
-		composer = new Composer({ terminal, tuiOptions: { renderScheduler: scheduler } });
+		const composer = new Composer({ terminal, tuiOptions: { renderScheduler: scheduler } });
+		mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, undefined, composer);
 	} finally {
 		if (previous === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
 		else Bun.env.PI_TUI_RENDER_BACKEND = previous;
 	}
-	const mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, undefined, composer);
+	mode.nativeWorkspace = native?.workspace;
 	vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 	await mode.init({ suppressWelcomeIntro: true });
 	mode.renderSessionContext({ messages: [mainMessage], models: {}, injectedTtsrRules: [], mode: "none" });
@@ -124,15 +127,26 @@ async function harness(scroll = true, manualProbe = false) {
 		terminal.send(tspEvent({ ev: "action", sf: terminal.surface!, id: button.id, act }));
 		flush();
 	}
+	function pick(item: string) {
+		const picker = nodes().find(node => node.k === "picker")!;
+		expect(picker.p?.items?.some(candidate => candidate.id === item)).toBe(true);
+		terminal.send(tspEvent({ ev: "activate", sf: terminal.surface!, id: picker.id, item }));
+		flush();
+	}
 	function select(key: string) {
+		action("threads");
+		pick(key);
+	}
+	function threadAction(act: string) {
+		action("more");
 		const list = nodes().find(node => node.k === "list")!;
-		const item = list.c!.find(node => node.id.endsWith(`/${key}`))!;
+		const item = list.c!.find(node => node.id.endsWith(`/${act}`))!;
 		expect(item).toBeDefined();
 		terminal.send(tspEvent({ ev: "select", sf: terminal.surface!, id: list.id, item: item.id }));
 		flush();
 	}
 	function pane(): BtwConversationPane {
-		const focused = mode.ui.getFocused();
+		const focused = mode.nativeWorkspace?.get("btw")?.component ?? mode.ui.getFocused();
 		expect(focused).toBeInstanceOf(BtwConversationPane);
 		return focused as BtwConversationPane;
 	}
@@ -155,11 +169,19 @@ async function harness(scroll = true, manualProbe = false) {
 			},
 		};
 		requests[index]!.stream.push({ type: "done", reason: "stop", message });
-		await until(
-			() =>
-				JSON.stringify(nodes()).includes(text) &&
-				!nodes().some(node => node.k === "item" && JSON.stringify(node.p?.detail).includes("running")),
-		);
+		if (native) {
+			await native.until(async () =>
+				(await records()).some(
+					record => record.phase !== "running" && record.turns.some(turn => turn.replyText === text),
+				),
+			);
+		} else {
+			await until(
+				() =>
+					JSON.stringify(nodes()).includes(text) &&
+					!nodes().some(node => node.k === "item" && JSON.stringify(node.p?.detail).includes("running")),
+			);
+		}
 		await mode.getPausedExitParticipants()[0]!.flush();
 	}
 	async function records() {
@@ -171,7 +193,21 @@ async function harness(scroll = true, manualProbe = false) {
 			await store.close();
 		}
 	}
-	return { mode, terminal, requests, requestStarted, nodes, flush, until, action, select, pane, complete, records };
+	return {
+		mode,
+		terminal,
+		requests,
+		requestStarted,
+		nodes,
+		flush,
+		until,
+		action,
+		select,
+		threadAction,
+		pane,
+		complete,
+		records,
+	};
 }
 
 describe("durable BTW through the native terminal and production controller", () => {
@@ -190,6 +226,11 @@ describe("durable BTW through the native terminal and production controller", ()
 		expect(h.requests[0]!.options.signal?.aborted).toBe(false);
 		await h.mode.handleBtwCommand("");
 		h.flush();
+		expect(h.pane().getPasteTarget()!.getText()).toBe("first draft");
+		h.action("threads");
+		h.terminal.send("\x1b");
+		h.flush();
+		expect(h.mode.ui.getFocused()).toBe(h.pane());
 		expect(h.pane().getPasteTarget()!.getText()).toBe("first draft");
 		h.action("new");
 		const secondKey = (await h.records()).find(record => record.id !== firstKey)!.id;
@@ -282,9 +323,7 @@ describe("durable BTW through the native terminal and production controller", ()
 		void h.mode.getUserInput();
 		await h.mode.handleBtwCommand("");
 		h.flush();
-		const emptyRail = h.nodes().find(node => node.k === "list")!;
-		expect(emptyRail.k).toBe("list");
-		expect(emptyRail.c ?? []).toEqual([]);
+		expect(h.nodes().some(node => node.k === "list" || node.k === "picker")).toBe(false);
 		await h.mode.handleBtwCommand("promote question");
 		await h.requestStarted(0);
 		await h.complete(0, "promote answer");
@@ -292,16 +331,16 @@ describe("durable BTW through the native terminal and production controller", ()
 		h.flush();
 		expect(h.nodes().filter(node => node.k === "overlay")).toHaveLength(1);
 		const copy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
-		h.action("copy-thread");
+		h.threadAction("copy-thread");
 		await h.until(() => copy.mock.calls.length === 1);
 		expect(copy.mock.calls[0]![0]).toContain("promote answer");
 		const firstKey = (await h.records())[0]!.id;
 		h.action("new");
-		h.action("delete");
-		await h.until(() => h.nodes().find(node => node.k === "list")?.c?.length === 1);
+		h.threadAction("delete");
+		await h.until(() => JSON.stringify(h.nodes()).includes("promote answer"));
 		expect((await h.records()).map(record => record.id)).toEqual([firstKey]);
 		const previousSessionId = h.mode.sessionManager.getSessionId();
-		h.action("promote");
+		h.threadAction("promote");
 		await h.until(() => h.mode.sessionManager.getSessionId() !== previousSessionId);
 		await h.until(() => !h.mode.ui.hasOverlay());
 		expect(JSON.stringify(h.mode.sessionManager.getBranch())).toContain("promote answer");
@@ -310,5 +349,139 @@ describe("durable BTW through the native terminal and production controller", ()
 		h.flush();
 		expect(h.nodes().find(node => node.k === "overlay")?.p?.role).toBe("omp.overlay.btwHistory");
 		expect(h.terminal.errors).toEqual([]);
+	});
+
+	it("starts an empty side pane from its dock editor and rejects native sends while its reply is running", async () => {
+		const native = new NativePaneHarness();
+		cleanups.push(() => native.dispose());
+		const h = await harness(true, false, native);
+		void h.mode.getUserInput();
+		h.mode.editor.setText("Main draft");
+		await h.mode.handleBtwCommand("");
+		const block = native.focused;
+		await native.until(() => native.nodes(block).some(node => node.k === "editor"));
+		const terminal = native.terminals.get(block)!;
+		const editor = native.nodes(block).find(node => node.k === "editor")!;
+		expect(native.nodes(block).some(node => node.k === "list" || node.k === "picker")).toBe(false);
+		terminal.send(tspEvent({ ev: "send", sf: terminal.surface!, id: editor.id, text: "first side question" }));
+		await h.requestStarted(0);
+		const runningEditor = h.pane().getPasteTarget()!;
+		terminal.send("keep this draft");
+		await native.until(() => runningEditor.getText() === "keep this draft");
+		const runningNode = native.nodes(block).find(node => node.k === "editor")!;
+		terminal.send(
+			tspEvent({ ev: "send", sf: terminal.surface!, id: runningNode.id, text: "must not replace the draft" }),
+		);
+		terminal.send("!");
+		await native.until(() => runningEditor.getText() === "keep this draft!");
+		expect(h.requests).toHaveLength(1);
+		expect(h.mode.editor.getText()).toBe("Main draft");
+		await h.complete(0, "first side answer");
+		expect((await h.records())[0]!.turns.map(turn => turn.input)).toEqual(["first side question"]);
+		expect(terminal.errors).toEqual([]);
+	});
+
+	it("opens a real side transport instead of an overlay, preserves drafts, and promotes its shared durable thread", async () => {
+		const native = new NativePaneHarness();
+		cleanups.push(() => native.dispose());
+		const h = await harness(true, false, native);
+		void h.mode.getUserInput();
+		const sessionId = h.mode.sessionManager.getSessionId();
+		h.mode.editor.setText("Main draft");
+		h.flush();
+		await h.mode.handleBtwCommand("native split question");
+		await h.requestStarted(0);
+		const firstBlock = native.focused;
+		await native.until(() => native.nodes(firstBlock).some(node => node.k === "editor"));
+		const regions = native.terminals
+			.get(firstBlock)!
+			.docs.get(native.terminals.get(firstBlock)!.surface!)!
+			.snapshot();
+		const dock = regions.c!.find(node => node.id === "dock")!;
+		const main = regions.c!.find(node => node.id === "main")!;
+		expect(JSON.stringify(dock)).toContain('"k":"editor"');
+		expect(JSON.stringify(main)).not.toContain('"k":"editor"');
+		expect(h.mode.ui.hasOverlay()).toBe(false);
+		expect(JSON.stringify(h.nodes())).toContain("Main stays native");
+		expect(JSON.stringify(native.nodes(firstBlock))).toContain("native split question");
+		native.terminals.get(firstBlock)!.send("Side draft");
+		await native.until(() => h.pane().getPasteTarget()?.getText() === "Side draft");
+		native.action(firstBlock, "close");
+		await native.until(() => !native.workspace.has("btw"));
+		expect(h.mode.editor.getText()).toBe("Main draft");
+		expect(h.requests[0]!.options.signal?.aborted).toBe(false);
+		await h.complete(0, "native split answer");
+		await h.mode.handleBtwCommand("");
+		const secondBlock = native.focused;
+		await native.until(() =>
+			native.nodes(secondBlock).some(node => node.k === "editor" && node.p?.text === "Side draft"),
+		);
+		h.pane().getPasteTarget()!.clearDraft();
+		native.workspace.get("btw")!.ui.requestRender();
+		await native.until(() => native.nodes(secondBlock).some(node => node.k === "editor" && node.p?.text === ""));
+		const editor = native.nodes(secondBlock).find(node => node.k === "editor")!;
+		const terminal = native.terminals.get(secondBlock)!;
+		terminal.send(tspEvent({ ev: "send", sf: terminal.surface!, id: editor.id, text: "native follow up" }));
+		await h.requestStarted(1);
+		expect(h.requests[1]!.options.sessionId).toBe(h.requests[0]!.options.sessionId);
+		expect(JSON.stringify(h.requests[1]!.context.messages)).toContain("native split answer");
+		await h.complete(1, "native follow-up answer");
+		native.action(secondBlock, "more");
+		await native.until(() => native.nodes(secondBlock).some(node => node.k === "list"));
+		const menu = native.nodes(secondBlock).find(node => node.k === "list")!;
+		const promote = menu.c!.find(item => item.id.endsWith("/promote"))!;
+		expect(promote).toBeDefined();
+		terminal.send(tspEvent({ ev: "select", sf: terminal.surface!, id: menu.id, item: promote.id }));
+		await h.until(() => h.mode.sessionManager.getSessionId() !== sessionId);
+		await native.until(() => !native.workspace.has("btw"));
+		expect(JSON.stringify(h.mode.sessionManager.getBranch())).toContain("native follow-up answer");
+		expect(h.mode.ui.nativeRendering).toBe(true);
+		expect(h.mode.ui.hasOverlay()).toBe(false);
+	});
+
+	it("opens automatic native agent panes without stealing focus and keeps a manually pinned pane after completion", async () => {
+		const native = new NativePaneHarness();
+		cleanups.push(() => native.dispose());
+		const h = await harness(true, false, native);
+		const registry = AgentRegistry.global();
+		const id = `Native-${crypto.randomUUID()}`;
+		cleanups.push(async () => {
+			registry.unregister(id);
+		});
+		registry.register({ id, displayName: id, kind: "sub", parentId: "Main", status: "running", session: null });
+		await native.until(() => native.workspace.get(`agent:${id}`)?.ui.nativeRendering === true);
+		expect(native.focused).toBe(1);
+		const block = [...native.terminals.keys()][0]!;
+		await native.until(() => JSON.stringify(native.nodes(block)).includes(id));
+		await h.mode.openAgentWorkspacePane(id);
+		expect(native.focused).toBe(block);
+		registry.setStatus(id, "parked");
+		native.terminals.get(block)!.send("pinned after completion");
+		await native.until(() =>
+			native.nodes(block).some(node => node.k === "editor" && node.p?.text === "pinned after completion"),
+		);
+		expect(native.workspace.has(`agent:${id}`)).toBe(true);
+		native.terminals.get(block)!.send("\x1b");
+		await native.until(() => native.nodes(block).some(node => node.k === "editor" && node.p?.text === ""));
+		native.terminals.get(block)!.send("\x1b");
+		await native.until(() => !native.workspace.has(`agent:${id}`));
+		expect(h.mode.ui.nativeRendering).toBe(true);
+	});
+
+	it("retires an unvisited completed native agent pane without stopping Main", async () => {
+		const native = new NativePaneHarness();
+		cleanups.push(() => native.dispose());
+		const h = await harness(true, false, native);
+		const registry = AgentRegistry.global();
+		const id = `Native-auto-${crypto.randomUUID()}`;
+		cleanups.push(async () => {
+			registry.unregister(id);
+		});
+		registry.register({ id, displayName: id, kind: "sub", parentId: "Main", status: "running", session: null });
+		await native.until(() => native.workspace.get(`agent:${id}`)?.ui.nativeRendering === true);
+		registry.setStatus(id, "parked");
+		await native.until(() => !native.workspace.has(`agent:${id}`));
+		expect(h.mode.ui.nativeRendering).toBe(true);
+		expect(native.focused).toBe(1);
 	});
 });

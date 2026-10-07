@@ -26,11 +26,18 @@ import { TuiDebugServer } from "./debug-server";
 import { isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
-import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
+import { assumedTspHello, NativeBackend, type NativeBackendOptions, type NativeHost } from "./native/backend";
 import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import { parseSgrMouse, type SgrMouseEvent } from "./mouse";
-import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
+import type {
+	DescribeContext,
+	NativeNode,
+	NativeScreen,
+	NativeSurface,
+	NativeSurfaceProvider,
+	NativeUiEvent,
+} from "./native/node";
 import { withAnimationOnlyRenderTargets } from "./render-targets";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "./terminal-multiplexer";
@@ -228,6 +235,8 @@ export type PaintListener = (paint: TuiPaint) => void;
 export interface TUIOptions {
 	renderScheduler?: RenderScheduler;
 	onPaint?: PaintListener;
+	debugServer?: boolean;
+	nativeSurfaceMode?: NativeBackendOptions["mode"];
 }
 /** Physical terminal dimensions supplied to a frame provider. */
 export interface ViewportSize {
@@ -354,6 +363,9 @@ export interface Component {
 	 * changed; return null to fall back to `render()` rows.
 	 */
 	describe?(cx: DescribeContext): NativeNode | null;
+
+	/** A sole root component may own the native transcript and sticky bottom regions. */
+	describeSurface?(cx: DescribeContext): NativeSurface;
 
 	/**
 	 * Props for the native `overlay` wrapper when this component is shown as
@@ -1848,6 +1860,9 @@ export class TUI extends Container {
 	// stop/start so a restart adopts the surface.
 	#native: NativeBackend | undefined;
 	#nativeLive = false;
+	#nativeRenderingListeners = new Set<(active: boolean) => void>();
+	#debugServerEnabled: boolean;
+	readonly #nativeSurfaceMode: NativeBackendOptions["mode"];
 	// Holds the first paint while the `hello` probe is outstanding, so a TSP
 	// terminal never sees a row paint it would have to erase.
 	#nativeHoldTimer: RenderTimer | undefined;
@@ -1880,6 +1895,8 @@ export class TUI extends Container {
 		super();
 		this.terminal = terminal;
 		this.#renderScheduler = options?.renderScheduler ?? DEFAULT_RENDER_SCHEDULER;
+		this.#debugServerEnabled = options?.debugServer !== false;
+		this.#nativeSurfaceMode = options?.nativeSurfaceMode;
 		if (options?.onPaint) this.#paintListeners.add(options.onPaint);
 		this.#showHardwareCursor = showHardwareCursor === undefined ? this.#showHardwareCursor : showHardwareCursor;
 		this.#watchdog = new LoopWatchdog();
@@ -2305,7 +2322,7 @@ export class TUI extends Container {
 		this.#debugServer?.stop();
 		this.#debugServer = undefined;
 		const debugPath = process.env.OMP_TUI_DEBUG;
-		if (debugPath !== undefined && debugPath.length > 0) {
+		if (this.#debugServerEnabled && debugPath !== undefined && debugPath.length > 0) {
 			this.#debugServer = new TuiDebugServer(this, debugPath);
 			this.#debugServer.start();
 		}
@@ -2457,6 +2474,12 @@ export class TUI extends Container {
 		return this.#nativeLive;
 	}
 
+	/** Observe this TUI's renderer, independently of other live native panes. */
+	onNativeRenderingChange(listener: (active: boolean) => void): () => void {
+		this.#nativeRenderingListeners.add(listener);
+		return () => this.#nativeRenderingListeners.delete(listener);
+	}
+
 	/**
 	 * Close the TSP surfaces ahead of {@link stop}, before the exit drains
 	 * input: the terminal answers nothing once they are closed, and whatever it
@@ -2520,8 +2543,12 @@ export class TUI extends Container {
 			return;
 		}
 		this.#native = new NativeBackend(this.#nativeHost(), hello, {
+			mode: this.#nativeSurfaceMode,
 			mirror: this.#debugServer !== undefined,
 			scheduler: this.#renderScheduler === DEFAULT_RENDER_SCHEDULER ? undefined : this.#renderScheduler,
+			onRenderingChange: active => {
+				for (const listener of this.#nativeRenderingListeners) listener(active);
+			},
 		});
 		this.#native.start();
 	}
@@ -2602,6 +2629,8 @@ export class TUI extends Container {
 					| (TerminalFrameProvider & Partial<NativeSurfaceProvider>)
 					| undefined;
 				if (provider?.describeSurface) return provider.describeSurface(cx);
+				const root = this.children.length === 1 ? this.children[0] : undefined;
+				if (root?.describeSurface) return root.describeSurface(cx);
 				return { main: this.children, dock: [] };
 			},
 			overlays: () => {

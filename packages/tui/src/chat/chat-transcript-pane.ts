@@ -10,7 +10,7 @@ import { ScrollView } from "../components/scroll-view";
 import { matchesKey } from "../keys";
 import { type MouseRoutable, routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { node, span } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode, NativeScroll } from "../native/node";
+import type { DescribeContext, NativeChild, NativeNode, NativeScroll, NativeSurface } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "../text-selection";
 import {
@@ -138,6 +138,8 @@ export class ChatTranscriptPane
 				})),
 		);
 		editor.setPlaceholder(options.editor.placeholder);
+		const placeholder = options.editor.placeholder;
+		editor.describePlaceholder = () => placeholder;
 		editor.setMaxHeight(4);
 		editor.onExit = options.onClose;
 		editor.disableSubmit = options.editor.readOnly === true;
@@ -516,13 +518,28 @@ export class ChatTranscriptPane
 			this.options.builder.requestRender();
 		}
 	}
+	describeSurface(cx: DescribeContext): NativeSurface {
+		return {
+			main: this.#nativeTranscriptChildren(cx),
+			dock: [this.describeComposer()],
+			scroll: this.#nativeScroll ?? { by: "end", n: 0 },
+		};
+	}
 
 	/** Describe the same transcript and draft owners without VT viewport slicing. */
 	describe(cx: DescribeContext): NativeNode {
+		return node("col", { grow: 1 }, [this.describeTranscript(cx), this.describeComposer()]);
+	}
+
+	describeTranscript(cx: DescribeContext): NativeNode {
+		return { ...node("col", { grow: 1 }, this.#nativeTranscriptChildren(cx), "body"), scroll: this.#nativeScroll };
+	}
+
+	#nativeTranscriptChildren(cx: DescribeContext): readonly NativeChild[] {
 		this.#nativeScrollSupported = cx.feature("scroll");
-		const children: NativeChild[] = [
-			this.#builder.isEmpty
-				? node(
+		const children: NativeChild[] = this.#builder.isEmpty
+			? [
+					node(
 						"text",
 						{
 							spans: [
@@ -535,9 +552,9 @@ export class ChatTranscriptPane
 						},
 						undefined,
 						"placeholder",
-					)
-				: { ...node("col", { grow: 1 }, [this.#builder.container], "transcript"), scroll: this.#nativeScroll },
-		];
+					),
+				]
+			: [...this.#builder.container.nativeBlocks()];
 		const notice = this.#notice ?? this.options.getNotice?.();
 		if (notice) {
 			children.push(
@@ -549,6 +566,11 @@ export class ChatTranscriptPane
 				),
 			);
 		}
+		return children;
+	}
+
+	describeComposer(): NativeNode {
+		const children: NativeChild[] = [];
 		if (this.options.aboveEditor) children.push(this.options.aboveEditor);
 		if (this.options.editor?.readOnly) {
 			children.push(node("text", { spans: [span(this.options.editor.label, "dim")] }, undefined, "read-only"));
@@ -556,7 +578,7 @@ export class ChatTranscriptPane
 			children.push(this.#editor);
 		}
 		if (this.options.belowEditor) children.push(this.options.belowEditor);
-		return node("col", { grow: 1 }, children);
+		return node("col", { shrink: 0 }, children, "composer");
 	}
 
 	render(width: number): readonly string[] {

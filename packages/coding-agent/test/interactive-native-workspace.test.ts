@@ -5,10 +5,12 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { WorkspaceLayout } from "@oh-my-pi/pi-tui";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
@@ -152,6 +154,49 @@ describe("interactive app-viewport with native TSP rendering", () => {
 		expect((await pending).text).toBe("native submitted prompt");
 		expect(terminal.errors).toEqual([]);
 	});
+
+	for (const route of ["shortcut", "setting"] as const) {
+		it(`resets native tool expansion after hiding and restoring activity through the ${route}`, async () => {
+			await start({ expected: true });
+			void mode.getUserInput();
+			const addTool = (name: string): void => {
+				const tool = new ToolExecutionComponent(name, {}, {}, undefined, mode.ui);
+				tool.updateResult({ content: [{ type: "text", text: "Result line\n".repeat(30) }] });
+				mode.chatContainer.addChild(tool);
+				mode.ui.requestRender();
+				flush();
+			};
+			const card = (name: string): TspNode | undefined =>
+				documentNodes().find(node => node.k === "tool" && node.p?.name === name);
+			const toggleVisibility = async (): Promise<void> => {
+				if (route === "shortcut") {
+					terminal.send("\x1b[111;6u");
+				} else {
+					cfgDisplayHideToolActivity.set(mode.settings, !mode.hideToolActivity);
+					await Promise.resolve();
+				}
+				flush();
+			};
+
+			addTool("existing-tool");
+			terminal.send("\x0f");
+			flush();
+			expect(card("existing-tool")?.p).toMatchObject({ collapsed: false });
+
+			await toggleVisibility();
+			expect(card("existing-tool")?.p).toMatchObject({ hidden: true });
+			await toggleVisibility();
+			expect(card("existing-tool")?.p).toMatchObject({ collapsed: true });
+
+			addTool("new-tool");
+			expect(card("new-tool")?.p).toMatchObject({ collapsed: true });
+			terminal.send("\x0f");
+			flush();
+			expect(card("existing-tool")?.p).toMatchObject({ collapsed: false });
+			expect(card("new-tool")?.p).toMatchObject({ collapsed: false });
+			expect(terminal.errors).toEqual([]);
+		});
+	}
 
 	it("adopts a prepaint native surface without wrapping its editor in workspace rows", async () => {
 		await start({ expected: true }, true);

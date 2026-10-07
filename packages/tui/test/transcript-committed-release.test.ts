@@ -278,7 +278,7 @@ describe("committed transcript blocks release render caches", () => {
 		expect(block.releases).toBe(2);
 	});
 
-	it("never re-runs extension renderers when a block commits or replays", () => {
+	it("keeps extension renderer components across committed frame replay and finalized thinking cache release", () => {
 		const frameCalls = { count: 0 };
 		const framed = () =>
 			new FramedMessageComponent({
@@ -304,19 +304,17 @@ describe("committed transcript blocks release render caches", () => {
 		const built = { frame: frameCalls.count, thinking: thinkingCalls.count };
 		const transcript = new TranscriptContainer();
 		transcript.addChild(committedFrame);
-		transcript.addChild(committedAssistant);
+		committedAssistant.markTranscriptBlockFinalized();
 
 		const retired = commitAll(transcript, 80);
 		expect(replay(transcript, 80)).toEqual(retired);
-		const narrow = replay(transcript, 52);
+		expect(replay(transcript, 52)).toEqual([...trimBlankEdges(twins[0]!.render(52)), ""]);
 
+		const assistantRows = committedAssistant.render(80);
+		committedAssistant.releaseRenderCaches();
+		expect(committedAssistant.render(80)).toEqual(assistantRows);
+		expect(committedAssistant.render(52)).toEqual(twins[1]!.render(52));
 		expect({ frame: frameCalls.count, thinking: thinkingCalls.count }).toEqual(built);
-		expect(narrow).toEqual([
-			...trimBlankEdges(twins[0]!.render(52)),
-			"",
-			...trimBlankEdges(twins[1]!.render(52)),
-			"",
-		]);
 	});
 
 	it("keeps the ledger consistent when a block's cache hooks throw", () => {
@@ -546,13 +544,14 @@ describe("committed transcript blocks release render caches", () => {
 		});
 		const transcript = new TranscriptContainer();
 		transcript.addChild(disclosure);
-		disclosure.render(80);
-		disclosure.setExpanded(false);
+		transcript.setExpanded(true);
+		transcript.renderViewport(80, 40, frame);
+		transcript.setExpanded(false);
 		const retired = commitAll(transcript, 80);
 		expect(await becomesCollectible(rendered[0]!)).toBe(true);
 		expect(disclosure.expanded).toBe(false);
 		expect(replay(transcript, 80)).toEqual(retired);
-		disclosure.setExpanded(true);
+		transcript.setExpanded(true);
 		const narrow = replay(transcript, 30);
 		expect(narrow.join("\n")).toContain("Retained detail text wraps");
 		expect(bodyBuilds).toBe(1);

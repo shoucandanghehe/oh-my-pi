@@ -157,6 +157,22 @@ describe("native backend", () => {
 		expect(h.region("dock")).toBeDefined();
 	});
 
+	it("reopens a dedicated screen after restarting without adopting a closed document", async () => {
+		const block = new Probe(md("Restored conversation"));
+		harness = await TspHarness.start(tui => tui.addChild(block), { nativeSurfaceMode: "screen" });
+		const h = harness;
+		const surface = h.terminal.surface;
+		h.tui.stop();
+		h.flush();
+		expect(h.terminal.log.findLast(message => message.verb === "x")?.body).toEqual({ id: surface, keep: false });
+		h.tui.start();
+		h.flush();
+		expect(h.terminal.surface).not.toBe(surface);
+		expect(h.terminal.log.findLast(message => message.verb === "o")?.body).toMatchObject({ mode: "screen" });
+		expect(h.byId(nativeComponentId(block))).toMatchObject({ k: "md", p: { text: "Restored conversation" } });
+		expect(h.errors).toEqual([]);
+	});
+
 	it("announces native rendering once its surface is open, on start and after a stop/start cycle", () => {
 		// Tern drops the shell's title when a command's first surface opens, so
 		// the tab title omp writes when rendering turns native must follow the `o`.
