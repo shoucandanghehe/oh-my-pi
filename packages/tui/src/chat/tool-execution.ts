@@ -1355,7 +1355,7 @@ export class ToolExecutionComponent extends Container {
 			return [];
 		}
 		const key = `${this.#displayKey()}|${this.#allocation}`;
-		if (this.#renderedImageCount === 0) {
+		if (this.#renderedImageCount === 0 && this.#figure === undefined) {
 			const memo = this.#renderMemo;
 			if (memo !== undefined && memo.width === width && memo.key === key) {
 				this.#trackPaintedShapes();

@@ -73,6 +73,7 @@ async function createHarness(factory: ExtensionFactory) {
 			requestRender: vi.fn(),
 			addInputListener: vi.fn(),
 			addStartListener: vi.fn(),
+			setAppViewportClickHandler: vi.fn(),
 			getFocused: () => editor,
 			terminal: { write: vi.fn() },
 		},

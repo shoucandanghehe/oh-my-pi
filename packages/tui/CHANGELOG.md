@@ -59,6 +59,7 @@
 
 ### Fixed
 
+- Fixed streamed SVG drawings staying hidden beneath write tool cards after their images finish rendering.
 - Fixed long native transcript panes intermittently hiding their entire conversation while preserving keyboard scrolling.
 - Agent transcript panes now preserve streaming message nodes when replies are saved and retain visible content during asynchronous reloads.
 - Fixed Ctrl+O not expanding or collapsing tool output in Tern native transcripts.

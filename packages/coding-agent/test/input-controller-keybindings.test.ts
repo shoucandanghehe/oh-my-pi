@@ -173,6 +173,7 @@ async function createContext() {
 			clearInlineImages,
 			addInputListener,
 			addStartListener,
+			setAppViewportClickHandler: vi.fn(),
 			getFocused: vi.fn(() => focused),
 			hasOverlay: vi.fn(() => overlayVisible),
 			terminal: { write: terminalWrite, refreshAppearance },

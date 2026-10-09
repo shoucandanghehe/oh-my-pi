@@ -146,6 +146,7 @@ function createContext(): {
 				return () => {};
 			}),
 			addStartListener: vi.fn(),
+			setAppViewportClickHandler: vi.fn(),
 		} as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
 		autoCompactionLoader: undefined,

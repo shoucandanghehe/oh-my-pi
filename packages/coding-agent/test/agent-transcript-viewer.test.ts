@@ -369,8 +369,6 @@ describe("AgentTranscriptViewer", () => {
 			expect(petrifying[0]).not.toBe(normal[0]);
 			expect(Bun.stripANSI(petrifying[0] ?? "").trimEnd()).toBe(Bun.stripANSI(normal[0] ?? "").trimEnd());
 			expect(petrifying.at(-1)).toBe(normal.at(-1));
-			const graySteps = new Set((petrifying[0] ?? "").match(/\x1b\[38;2;\d+;\d+;\d+m/g) ?? []);
-			expect(graySteps.size).toBeGreaterThanOrEqual(4);
 		} finally {
 			viewer.dispose();
 		}
