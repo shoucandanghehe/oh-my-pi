@@ -1,16 +1,18 @@
 name: "Compose bazel cache config"
 description: >
-   Emits a bazelrc fragment wiring the vmon node's Bazel HTTP cache. Every
-   Bazel job runs on a vmon `omp-ci` sandbox (VMON_CI=1), whose template bakes
-   the repository/xwin caches at /opt/bazel-repo-cache, and whose node serves
-   a per-repository Bazel cache at $VMON_CACHE_URL/bazel: written by branch
-   and tag jobs, read-only for pull requests. Elsewhere the fragment carries
-   only --config=ci and the build runs uncached.
+   Emits a bazelrc fragment using the vmon node's Bazel HTTP cache on vmon
+   runners, or restorable local disk and download caches on hosted runners.
 
 outputs:
    rc:
       description: Path to the generated bazelrc fragment
       value: ${{ steps.compose.outputs.rc }}
+   local-cache:
+      description: Whether the caller should restore and save local caches
+      value: ${{ steps.compose.outputs.local-cache }}
+   cache-dir:
+      description: Root containing disk action cache and separate download caches
+      value: ${{ steps.compose.outputs.cache-dir }}
 
 runs:
    using: composite
@@ -23,13 +25,21 @@ runs:
            rc="$RUNNER_TEMP/bazel-cache.rc"
            echo "rc=$rc" >> "$GITHUB_OUTPUT"
            if [ "${VMON_CI:-}" != 1 ]; then
-             echo "::notice title=Bazel cache::Not a vmon runner; building uncached."
-             echo "common --config=ci" > "$rc"
+             cache_dir="$RUNNER_TEMP/omp-bazel-cache"
+             {
+               echo "common --config=ci"
+               echo "common --disk_cache=$cache_dir/disk"
+               echo "common --repository_cache=$cache_dir/downloads/repository"
+               echo "common --repo_env=OMP_XWIN_CACHE_DIR=$cache_dir/downloads/xwin"
+             } > "$rc"
+             echo "cache-dir=$cache_dir" >> "$GITHUB_OUTPUT"
+             echo "local-cache=true" >> "$GITHUB_OUTPUT"
+             echo "::notice title=Bazel cache::Using a restorable local disk cache."
              exit 0
            fi
+           echo "local-cache=false" >> "$GITHUB_OUTPUT"
 
-           # Template-baked (infra/vmon/omp_ci_template.py warms both with
-           # these exact values, so repo-contents-cache keys match).
+           # Keep these paths aligned with infra/vmon/omp_ci_template.py.
            {
              echo "common --config=ci"
              echo "common --repository_cache=/opt/bazel-repo-cache"
@@ -40,9 +50,7 @@ runs:
              echo "::warning title=Bazel cache::The vmon node serves no Bazel cache; building without a remote cache."
              exit 0
            fi
-           # The node refuses writes from pull request jobs; PRs
-           # (pull_request_target included) skip uploads instead of
-           # collecting 403 warnings.
+           # The node refuses writes from pull request jobs.
            case "${GITHUB_EVENT_NAME:-}" in
              pull_request*) mode=cache-ro ;;
              *) mode=cache-rw ;;
