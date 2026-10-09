@@ -1,14 +1,19 @@
 name: "Compose bazel cache config"
 description: >
-   Emits a bazelrc fragment wiring the cluster remote cache. Every Bazel job
-   runs on omp-kata, where the pod env carries the bazel-remote credentials;
-   elsewhere (no credentials) the fragment carries only --config=ci and the
-   build runs uncached.
+   Emits a bazelrc fragment wiring the cluster remote cache when credentials
+   are present, or a local content-addressed disk cache on hosted runners.
+   The caller restores and saves the local cache directories.
 
 outputs:
    rc:
       description: Path to the generated bazelrc fragment
       value: ${{ steps.compose.outputs.rc }}
+   local-cache:
+      description: Whether the caller should restore and save local caches
+      value: ${{ steps.compose.outputs.local-cache }}
+   cache-dir:
+      description: Root containing disk action cache and separate download caches
+      value: ${{ steps.compose.outputs.cache-dir }}
 
 runs:
    using: composite
@@ -26,7 +31,7 @@ runs:
              remote=true
            else
              remote=false
-             echo "::notice title=Bazel cache::No cluster remote-cache credentials on this runner; building uncached."
+             echo "::notice title=Bazel cache::No cluster remote-cache credentials on this runner; using a restorable local disk cache."
            fi
 
            rc="$RUNNER_TEMP/bazel-cache.rc"
@@ -53,6 +58,14 @@ runs:
                echo "common --remote_download_toplevel"
              } > "$rc"
            else
-             echo "common --config=ci" > "$rc"
+             cache_dir="$RUNNER_TEMP/omp-bazel-cache"
+             {
+               echo "common --config=ci"
+               echo "common --disk_cache=$cache_dir/disk"
+               echo "common --repository_cache=$cache_dir/downloads/repository"
+               echo "common --repo_env=OMP_XWIN_CACHE_DIR=$cache_dir/downloads/xwin"
+             } > "$rc"
+             echo "cache-dir=$cache_dir" >> "$GITHUB_OUTPUT"
            fi
            echo "rc=$rc" >> "$GITHUB_OUTPUT"
+           echo "local-cache=$([ "$remote" = true ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
