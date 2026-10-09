@@ -3,7 +3,7 @@ name: App viewport backend preview
 on:
    push:
       branches:
-         - demo/app-viewport-backend
+         - main
    workflow_dispatch:
 
 concurrency:
@@ -199,14 +199,14 @@ jobs:
                   ]
                 ],
                 "notes": [
-                  "Branch build: demo/app-viewport-backend @ $short_sha.",
+                  "Branch build: main @ $short_sha.",
                   "OMP on Windows requires bash.exe. Install Git for Windows, WSL, Cygwin, or MSYS2."
                 ]
               }
               EOF
 
               cat > preview-release-notes.md <<EOF
-              Rolling preview release for \`demo/app-viewport-backend\`.
+              Rolling preview release for \`main\`.
 
               - Commit: \`${GITHUB_SHA}\`
               - Windows binary: \`omp-windows-x64.exe\`
