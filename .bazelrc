@@ -91,9 +91,9 @@ build:ci --reuse_sandbox_directories
 # --- Remote cache ------------------------------------------------------------
 # .github/actions/bazel-cache points vmon `omp-ci` runners at their node's
 # Bazel HTTP cache ($VMON_CACHE_URL/bazel) and picks one of these policies.
-# GitHub-hosted runners never use a remote cache and run no Bazel builds.
-# These configs carry only the policy bits; the endpoint comes from the
-# consumer.
+# Hosted previews reuse source-matched addons via .github/actions/native-build;
+# cache misses use restorable local disk and download caches.
+# These configs carry only policy bits; the endpoint comes from the consumer.
 #
 # cache-rw: branch and tag jobs on vmon runners.
 build:cache-rw --remote_upload_local_results=true
