@@ -1,0 +1,41 @@
+name: "Build native addons"
+description: >
+   Builds native addons on fixed self-hosted runners using persistent Bazel caches.
+   Targets build sequentially and land under ci-natives.
+
+inputs:
+   targets:
+      description: Space-separated natives-* Bazel target names
+      required: true
+
+runs:
+   using: composite
+   steps:
+      - id: bazel-cache
+        uses: ./.github/actions/bazel-cache
+
+      - name: Build native addons
+        shell: bash
+        env:
+           NATIVE_TARGETS: ${{ inputs.targets }}
+           OMP_BAZEL_RC: ${{ steps.bazel-cache.outputs.rc }}
+        run: |
+           set -eo pipefail
+           if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+           # Addon links peak at several GiB RSS; keep links sequential
+           # within each platform build.
+           read -r -a targets <<< "$NATIVE_TARGETS"
+           for target in "${targets[@]}"; do
+             bazelisk --bazelrc="$OMP_BAZEL_RC" build "//:$target" 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+             summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ process(es)?:' | tail -1 || true)
+             echo "::notice title=$target Bazel build summary::${summary:-no process summary found}"
+             mkdir -p "ci-natives/$target"
+             cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
+           done
+
+      - name: Report local Bazel cache sizes
+        continue-on-error: true
+        shell: bash
+        env:
+           CACHE_DIR: ${{ steps.bazel-cache.outputs.cache-dir }}
+        run: du -sh "$CACHE_DIR/disk" "$CACHE_DIR/downloads"
