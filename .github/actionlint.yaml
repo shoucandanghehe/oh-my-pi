@@ -1,6 +1,5 @@
-# actionlint only knows GitHub-hosted labels; register the vmon runner labels
-# (infra/docs/01-vmon-runners.md) so `runs-on: vmon-large/from=omp-ci` lints
-# clean.
+# Register custom self-hosted labels in addition to GitHub's built-in labels.
 self-hosted-runner:
    labels:
       - vmon-large/from=omp-ci
+      - omp-ci-preview

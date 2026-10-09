@@ -51,14 +51,14 @@ runs:
              echo "setup_bun=true" >> "$GITHUB_OUTPUT"
              echo "bun on runner: ${have:-none}; does not satisfy $want, installing $install"
            fi
-           # vmon runners export VMON_CI=1 (the `ci` template's runner .env).
-           # Their omp-ci template bakes the bun store, warmed from a pinned
-           # checkout, at the default cache path: a lockfile change since the
-           # template build downloads only the delta. Elsewhere actions/cache
-           # restores it.
+           # Fixed self-hosted runners retain their package store between jobs.
+           # Vmon images bake the same store into their template.
            if [ "${VMON_CI:-}" = 1 ]; then
              echo "cache=baked" >> "$GITHUB_OUTPUT"
              echo "bun cache backend: omp-ci template store (${HOME}/.bun/install/cache)"
+           elif [ "${RUNNER_ENVIRONMENT:-}" = self-hosted ]; then
+             echo "cache=persistent" >> "$GITHUB_OUTPUT"
+             echo "bun cache backend: persistent local store (${HOME}/.bun/install/cache)"
            else
              echo "cache=gha" >> "$GITHUB_OUTPUT"
              echo "bun cache backend: GitHub Actions cache"
