@@ -34,9 +34,6 @@
 - Fixed Claude Haiku 5.5 requests silently enabling adaptive thinking when reasoning is off, on native Bedrock (main and helper calls) and the Anthropic API; conversations whose earlier effort controls rule out disabled thinking fall back to lowest-effort adaptive thinking instead of failing ([#14996](https://github.com/can1357/oh-my-pi/pull/14996) by [@bse-ai](https://github.com/bse-ai)).
 - Fixed `/session pin` being ignored when every stored account is quota-blocked, which routed the next request to a different exhausted account instead of the pinned one ([#14997](https://github.com/can1357/oh-my-pi/issues/14997)).
 - Fixed `minimax-code-cn` sessions staying pinned to a key whose Token Plan quota is exhausted (`用量上限` 429) instead of rotating to a sibling credential ([#15053](https://github.com/can1357/oh-my-pi/issues/15053)).
-- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
-- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
-- Image edits can upload reference files to proxy endpoints that require multipart requests.
 
 ## [18.8.6] - 2026-10-08
 

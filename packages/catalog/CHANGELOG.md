@@ -11,6 +11,11 @@
 ### Fixed
 
 - Fixed Devin's discovered models not marking the account's default model, the one Devin's own CLI starts the account on (SWE-2 High on Pro, SWE-1.6 Slow on Free); when it is an effort lane of a family, the family starts at that effort. Cursor's discovered models no longer carry that marker, so Cursor keeps its existing startup selection ([#15115](https://github.com/can1357/oh-my-pi/pull/15115) by [@will-bogusz](https://github.com/will-bogusz))
+### Added
+
+- Added a `video` input modality to `Model.input`, the `input-modalities` axis, build-time narrowing, the model-cache row validator, and the dynamic-model input guard ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
+- Added GPT Image 2.5, Flare, and Sunburst image-model selection for Codex proxies configured with the Images API.
 
 ## [18.8.7] - 2026-10-09
 
@@ -18,11 +23,6 @@
 
 - Added built-in CoralBricks support with `/login`, live model discovery, per-model reasoning levels and off controls, and bundled offline fallbacks. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
 - Added `gen:models --provider <id>` to update one provider without changing other providers' catalog snapshots. ([#14146](https://github.com/can1357/oh-my-pi/pull/14146) by [@ryan-brosas](https://github.com/ryan-brosas))
-### Added
-
-- Added a `video` input modality to `Model.input`, the `input-modalities` axis, build-time narrowing, the model-cache row validator, and the dynamic-model input guard ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
-- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
-- Added GPT Image 2.5, Flare, and Sunburst image-model selection for Codex proxies configured with the Images API.
 
 ### Fixed
 

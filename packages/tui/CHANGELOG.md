@@ -53,23 +53,12 @@
 
 - Fixed the Agents hub Time column rewinding and freezing for running subagents between progress updates ([#15140](https://github.com/can1357/oh-my-pi/pull/15140) by [@H4vC](https://github.com/H4vC))
 
-## [18.8.7] - 2026-10-09
-
-### Added
-
-- Added cache-release hooks for TUI components and tool cards, allowing extensions to discard derived render data without rebuilding content ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
-
 ### Changed
 
-- Subagent "Submit Result" cards now show the submitted result (its fields as a tree, or the report text), the section it fills, and why a submission was rejected, instead of only "Result submitted.".
-- Reduced memory held by retired transcript history in long sessions ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
 - Made the app viewport scrollbar thumb denser while retaining its four subrow scroll-position slots.
 
 ### Fixed
 
-- Reduced memory retained by discarded TSP images and previews ([#14336](https://github.com/can1357/oh-my-pi/pull/14336) by [@iliaal](https://github.com/iliaal)).
-- Fixed startup capability probes printing as text in the prompt (e.g. `25a1;stsp;q;{…}pppppp`) on terminals that cannot parse them, such as macOS Terminal.app.
-- Fixed the `/resume` picker flashing while a search runs over a large session history: background fuzzy matches now land in one update instead of reordering the list dozens of times per keystroke.
 - Fixed long native transcript panes intermittently hiding their entire conversation while preserving keyboard scrolling.
 - Agent transcript panes now preserve streaming message nodes when replies are saved and retain visible content during asynchronous reloads.
 - Fixed Ctrl+O not expanding or collapsing tool output in Tern native transcripts.
@@ -122,6 +111,23 @@
 - Fixed switching from the app viewport to a Tern inline surface while the alternate screen was still active.
 - Fixed native keyboard transcript scrolling in BTW and agent views.
 - Fixed native pause sheets not updating barrier readiness or offering durable exit.
+
+## [18.8.7] - 2026-10-09
+
+### Added
+
+- Added cache-release hooks for TUI components and tool cards, allowing extensions to discard derived render data without rebuilding content ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
+
+### Changed
+
+- Subagent "Submit Result" cards now show the submitted result (its fields as a tree, or the report text), the section it fills, and why a submission was rejected, instead of only "Result submitted.".
+- Reduced memory held by retired transcript history in long sessions ([#13632](https://github.com/can1357/oh-my-pi/pull/13632) by [@iliaal](https://github.com/iliaal)).
+
+### Fixed
+
+- Reduced memory retained by discarded TSP images and previews ([#14336](https://github.com/can1357/oh-my-pi/pull/14336) by [@iliaal](https://github.com/iliaal)).
+- Fixed startup capability probes printing as text in the prompt (e.g. `25a1;stsp;q;{…}pppppp`) on terminals that cannot parse them, such as macOS Terminal.app.
+- Fixed the `/resume` picker flashing while a search runs over a large session history: background fuzzy matches now land in one update instead of reordering the list dozens of times per keystroke.
 
 ## [18.8.6] - 2026-10-08
 

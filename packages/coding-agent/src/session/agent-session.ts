@@ -209,7 +209,7 @@ import sideChannelToolDenied from "../prompts/system/side-channel-tool-denied.md
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import shareSummaryWithMainDescription from "../prompts/tools/share-summary-with-main.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import {
 	deobfuscateAssistantContent,
@@ -218,7 +218,6 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";

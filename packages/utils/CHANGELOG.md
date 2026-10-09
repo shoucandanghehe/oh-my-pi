@@ -13,6 +13,7 @@
 ### Fixed
 
 - Fixed `formatDuration` printing `60.0s` for durations just under a minute; they now read `1m` ([#15121](https://github.com/can1357/oh-my-pi/pull/15121) by [@H4vC](https://github.com/H4vC))
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.8.7] - 2026-10-09
 
@@ -23,7 +24,6 @@
 ### Fixed
 
 - Fixed the virtual terminal misreading private CSI sequences such as kitty keyboard `CSI < u` and modifyOtherKeys `CSI > 4;1 m` as cursor restores or text styling, which garbled replayed PTY output.
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.8.1] - 2026-10-07
 

@@ -1721,7 +1721,7 @@ function mapCoralbricksModel(
 			compat = { ...compat, reasoningDisableMode: "none-effort" };
 		}
 	}
-	const input: ("text" | "image")[] =
+	const input: InputModality[] =
 		entry.supports_image_input === true
 			? ["text", "image"]
 			: entry.supports_image_input === false
