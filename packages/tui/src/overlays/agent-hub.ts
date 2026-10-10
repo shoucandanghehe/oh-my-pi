@@ -40,6 +40,7 @@ import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
 import { USER_INTERRUPT_LABEL } from "../chat/messages";
 import { shortenPath, truncateToWidth } from "../render/render-utils";
+import { fileLinkSpan } from "../render/hyperlink";
 import { formatLocalDateTimeWithOffset } from "../chrome/local-date";
 import { getContextUsageLevel, getContextUsageTone } from "../chrome/context-thresholds";
 import type { ObservableSession, SessionObserverRegistry } from "./session-observer-registry";
@@ -1447,7 +1448,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (artifacts?.outputPath) {
 			facts.push({
 				k: "Output",
-				v: [span(shortenPath(artifacts.outputPath), "path", { href: `file://${artifacts.outputPath}` })],
+				v: [fileLinkSpan(artifacts.outputPath, shortenPath(artifacts.outputPath))],
 			});
 		}
 		if (artifacts?.patchPath) facts.push({ k: "Patch", v: [span(shortenPath(artifacts.patchPath), "path")] });

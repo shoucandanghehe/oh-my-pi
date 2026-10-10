@@ -5,8 +5,10 @@
  * sequences when the active terminal supports hyperlinks and the user setting
  * permits it. Falls back to plain text when disabled.
  */
+import * as path from "node:path";
 import * as url from "node:url";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { isWsl } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
 import { setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
 
@@ -54,8 +56,17 @@ export function fileUriForTerminal(
 	filePath: string,
 	opts: { line?: number; col?: number } | undefined,
 	terminalId: TerminalId,
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
 ): string {
-	if (terminalId !== "vscode") return url.pathToFileURL(filePath).href;
+	if (terminalId !== "vscode") {
+		// A Windows Tern pane exposes a named pipe even when its program runs in WSL.
+		if (isWsl(platform, env) && env.WSL_DISTRO_NAME && env.TERN_PANE_SOCKET?.startsWith("\\\\.\\pipe\\")) {
+			const windowsPath = `\\\\wsl.localhost\\${env.WSL_DISTRO_NAME}${path.posix.resolve(filePath).replaceAll("/", "\\")}`;
+			return url.pathToFileURL(windowsPath, { windows: true }).href;
+		}
+		return url.pathToFileURL(filePath).href;
+	}
 	// vscode:// takes a filesystem path with forward slashes. Encode each
 	// segment independently so separators and a Windows drive colon stay
 	// structural while reserved bytes in file names cannot become URI syntax.
@@ -203,7 +214,7 @@ export function urlLinkSpan(target: string, displayText: string, s = "link"): Ts
  */
 export function fileLinkSpan(filePath: string, displayText: string, s = "path"): TspSpan {
 	if (hyperlinkMode === "off") return span(displayText, s);
-	const href = safeHyperlinkUri(url.pathToFileURL(filePath).href);
+	const href = safeHyperlinkUri(fileUriForTerminal(filePath, undefined, "tern"));
 	return href ? span(displayText, s, { href }) : span(displayText, s);
 }
 
@@ -217,7 +228,7 @@ export function fileLinkSpan(filePath: string, displayText: string, s = "path"):
  *
  * @param filePath - Filesystem path
  * @param displayText - Text to render as the hyperlink anchor (may contain ANSI codes)
- * @param opts - Optional line/col position appended as `?line=N&col=M` query params
+ * @param opts - Optional line/col position for terminals supporting editor navigation
  */
 export function fileHyperlink(filePath: string, displayText: string, opts?: { line?: number; col?: number }): string {
 	return wrapHyperlink(buildFileUri(filePath, opts), displayText);

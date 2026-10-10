@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- File links from OMP running in WSL now open the corresponding files in Windows Tern, including native tool cards and file lists.
 - Parent IRC steering messages now retain their sender and message body in live and replayed transcript cards.
 - Audio and video attachments now remain visible in native tool cards, including custom tools and mounted tool devices.
 - Fixed streamed SVG drawings staying hidden beneath write tool cards after their images finish rendering.
