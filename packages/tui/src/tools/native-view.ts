@@ -9,6 +9,7 @@ import { ansi, code, compact, keyed, node, row, span, text } from "../native/des
 import type { NativeChild, NativeNode } from "../native/node";
 import { tryFileUri } from "../render/hyperlink";
 import { type ParsedDiagnostic, parseDiagnosticMessage, shortenPath } from "../render/render-utils";
+import { fileUriForTerminal } from "../render/hyperlink";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice, type OutputMeta } from "./output-meta";
@@ -25,7 +26,7 @@ export function displayPath(filePath: string): string {
 
 /** Configured file link for a head's path target, when the path is absolute. */
 export function fileHref(filePath: string | undefined): string | undefined {
-	return filePath && path.isAbsolute(filePath) ? tryFileUri(filePath) : undefined;
+	return filePath && path.isAbsolute(filePath) ? fileUriForTerminal(filePath, undefined, "tern") : undefined;
 }
 
 /** Diff stats as one head `meta` string, `+8 −1` (U+2212 minus), or undefined when nothing changed. */

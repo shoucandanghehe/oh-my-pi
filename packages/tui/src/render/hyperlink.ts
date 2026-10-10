@@ -6,9 +6,11 @@
  * permits it. Falls back to plain text when disabled.
  */
 import * as os from "node:os";
+import * as path from "node:path";
 import * as url from "node:url";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { isWsl } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
 import { setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
 
@@ -130,8 +132,18 @@ export function fileUriForTerminal(
 	filePath: string,
 	opts: { line?: number; col?: number } | undefined,
 	terminalId: TerminalId,
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-	if (fileLinkTarget || terminalId !== "vscode") return tryFileUri(filePath, opts);
+	if (fileLinkTarget) return tryFileUri(filePath, opts);
+	if (terminalId !== "vscode") {
+		// A Windows Tern pane exposes a named pipe even when its program runs in WSL.
+		if (isWsl(platform, env) && env.WSL_DISTRO_NAME && env.TERN_PANE_SOCKET?.startsWith("\\\\.\\pipe\\")) {
+			const windowsPath = `\\\\wsl.localhost\\${env.WSL_DISTRO_NAME}${path.posix.resolve(filePath).replaceAll("/", "\\")}`;
+			return url.pathToFileURL(windowsPath, { windows: true }).href;
+		}
+		return tryFileUri(filePath, opts);
+	}
 	// vscode:// takes a filesystem path with forward slashes. Encode each
 	// segment independently so separators and a Windows drive colon stay
 	// structural while reserved bytes in file names cannot become URI syntax.
@@ -284,7 +296,7 @@ export function isNativeLinkEnabled(): boolean {
  */
 export function fileLinkSpan(filePath: string, displayText: string, s = "path"): TspSpan {
 	if (hyperlinkMode === "off") return span(displayText, s);
-	const uri = tryFileUri(filePath);
+	const uri = fileUriForTerminal(filePath, undefined, "tern");
 	const href = uri === undefined ? undefined : safeHyperlinkUri(uri);
 	return href ? span(displayText, s, { href }) : span(displayText, s);
 }
