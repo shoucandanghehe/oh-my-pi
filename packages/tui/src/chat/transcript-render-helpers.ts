@@ -152,6 +152,29 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 	);
 }
 
+/** Present parent steering as IRC without changing the message consumed by the model. */
+export function buildParentIrcMessageCard(message: UserMessage, getExpanded: () => boolean): Component | undefined {
+	if (message.attribution !== "agent" || message.steering !== true) return undefined;
+	const source = message.irc;
+	let from = source?.from;
+	let body = source?.body;
+	if (!source) {
+		// Older journals retained only the parent steering envelope, not the original IRC source.
+		const legacy =
+			/^\[Wait interrupted by message\]\r?\n<irc from="parent" agent="([^"]+)">\r?\n([\s\S]*)\r?\n<\/irc>\s*$/.exec(
+				userMessageDisplayText(message),
+			);
+		if (!legacy) return undefined;
+		from = legacy[1];
+		body = legacy[2];
+	}
+	return createIrcMessageCard(
+		{ kind: "incoming", from, body, replyTo: source?.replyTo, timestamp: message.timestamp },
+		getExpanded,
+		theme,
+	);
+}
+
 /**
  * Render a `fileMention` message's files as a transcript block of "Read <path>"
  * rows. `indent` sets the left pad: the live chat renders within an outer gutter

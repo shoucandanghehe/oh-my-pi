@@ -3,6 +3,14 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import type { OutputMeta } from "../tools/output-meta";
 import type { BranchSummaryMessage, CompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
+import type { IrcMessage } from "../tools/irc";
+
+declare module "@oh-my-pi/pi-ai/types" {
+	interface UserMessage {
+		/** Original IRC source of a parent steer; presentation does not change its model content. */
+		irc?: IrcMessage;
+	}
+}
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface CustomAgentMessages {

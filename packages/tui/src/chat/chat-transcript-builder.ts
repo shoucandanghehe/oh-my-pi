@@ -27,6 +27,7 @@ import {
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildParentIrcMessageCard,
 	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
@@ -456,6 +457,12 @@ export class ChatTranscriptBuilder {
 				// A user prompt closes the poll-displacement window, same as the live path.
 				if (message.role === "user") this.#resolveWaitingPoll();
 				if (message.role === "user") this.#resolveTodoSnapshot();
+				const ircCard =
+					message.role === "user" ? buildParentIrcMessageCard(message, () => this.#expanded) : undefined;
+				if (ircCard) {
+					this.container.addChild(ircCard);
+					break;
+				}
 				const userText = message.role === "user" ? userMessageDisplayText(message) : "";
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);

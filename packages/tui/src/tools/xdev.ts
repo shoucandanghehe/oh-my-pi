@@ -220,7 +220,11 @@ export function describeXdevResult(
 	return describeDefaultToolExecution({
 		label: mounted?.label ?? dispatch.tool,
 		args: dispatch.args ?? {},
-		result: { output, isError: result.isError },
+		result: {
+			output,
+			hasAttachments: result.content.some(block => block.type === "audio" || block.type === "video"),
+			isError: result.isError,
+		},
 		options,
 	});
 }

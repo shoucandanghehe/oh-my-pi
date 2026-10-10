@@ -59,6 +59,8 @@
 
 ### Fixed
 
+- Parent IRC steering messages now retain their sender and message body in live and replayed transcript cards.
+- Audio and video attachments now remain visible in native tool cards, including custom tools and mounted tool devices.
 - Fixed streamed SVG drawings staying hidden beneath write tool cards after their images finish rendering.
 - Fixed long native transcript panes intermittently hiding their entire conversation while preserving keyboard scrolling.
 - Agent transcript panes now preserve streaming message nodes when replies are saved and retain visible content during asynchronous reloads.

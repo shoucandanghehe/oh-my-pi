@@ -80,6 +80,7 @@
 - Fixed hotkeys pressed in Tern while omp is still starting (such as Alt+P for the model selector) being ignored; like in other terminals, they now take effect once startup finishes ([#15120](https://github.com/can1357/oh-my-pi/pull/15120) by [@H4vC](https://github.com/H4vC))
 - Fixed a startup extension dialog (select, confirm, input) in Tern not receiving keys until it timed out ([#15122](https://github.com/can1357/oh-my-pi/pull/15122) by [@H4vC](https://github.com/H4vC))
 
+- Parent-agent IRC messages in agent panes now appear as IRC cards instead of user messages with raw steering markup.
 - Fixed native subagent and BTW panes not following new transcript output in Tern while preserving terminal-owned manual scrolling.
 - Fixed native agent and BTW panes flickering or temporarily showing an empty transcript in Tern.
 - Fixed concurrent native agent panes splitting from the same position in Tern.

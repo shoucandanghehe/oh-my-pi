@@ -178,7 +178,7 @@ export function describeDefaultToolExecution(input: DefaultToolRenderInput): Nat
 	if (!result) return { tool };
 	const output = result.output.trimEnd().slice(0, NATIVE_RESULT_MAX_CHARS);
 	const tone = result.skipped ? "info" : result.isError ? "error" : undefined;
-	if (!output) return { tool, tone, body: [noteText("(no output)")] };
+	if (!output) return { tool, tone, body: result.hasAttachments ? [] : [noteText("(no output)")] };
 	if (output.startsWith("{") || output.startsWith("[")) {
 		try {
 			return { tool, tone, body: [describeJsonTree(JSON.parse(output))] };

@@ -82,6 +82,7 @@ import {
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
+	buildParentIrcMessageCard,
 	buildLaunchCompletionBlock,
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
@@ -362,6 +363,14 @@ export class UiHelpers {
 			}
 			case "user":
 			case "developer": {
+				const ircCard =
+					message.role === "user"
+						? buildParentIrcMessageCard(message, () => this.ctx.toolOutputExpanded)
+						: undefined;
+				if (ircCard) {
+					this.ctx.chatContainer.addChild(ircCard);
+					return [ircCard];
+				}
 				const userText = message.role === "user" ? userMessageDisplayText(message) : "";
 				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
