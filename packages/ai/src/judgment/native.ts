@@ -19,6 +19,7 @@
  * (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL` overrides the API root,
  * `TYPESAFE_DEFAULT_MODEL` the model.
  */
+import { scheduler } from "node:timers/promises";
 import { resolveJudgmentQuestionsMax } from "@oh-my-pi/pi-catalog/compat/judgment-questions";
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -158,10 +159,8 @@ const BACKOFF_MAX_MS = 5_000;
 /** Chunks of one split judgment in flight at once, so a split never bursts the endpoint unboundedly. */
 const CHUNK_PARALLEL = 4;
 
-/** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */
-function backoffMs(attempt: number, headers: Headers | undefined): number {
-	const hinted = headers === undefined ? undefined : getRetryAfterMsFromHeaders(headers);
-	if (hinted !== undefined) return Math.min(hinted, BACKOFF_MAX_MS);
+/** Exponential backoff from {@link BACKOFF_BASE_MS}, capped at {@link BACKOFF_MAX_MS}. */
+function backoffMs(attempt: number): number {
 	return Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
 }
 
@@ -430,7 +429,7 @@ export class NativeJudge implements Judge {
 				});
 			} catch (error) {
 				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
-				await Bun.sleep(backoffMs(attempt, undefined));
+				await scheduler.wait(backoffMs(attempt), { signal });
 				continue;
 			}
 			if (response.ok) return await response.json();
@@ -439,8 +438,11 @@ export class NativeJudge implements Judge {
 				headers: response.headers,
 			});
 			const transient = response.status === 408 || response.status === 429 || response.status >= 500;
-			if (!transient || attempt + 1 >= MAX_ATTEMPTS) throw error;
-			await Bun.sleep(backoffMs(attempt, response.headers));
+			const hinted = getRetryAfterMsFromHeaders(response.headers);
+			if (!transient || attempt + 1 >= MAX_ATTEMPTS || (hinted !== undefined && hinted > BACKOFF_MAX_MS)) {
+				throw error;
+			}
+			await scheduler.wait(hinted ?? backoffMs(attempt), { signal });
 		}
 	}
 }

@@ -1,6 +1,6 @@
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { scheduler } from "node:timers/promises";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
-import { describe, expect, it, spyOn } from "bun:test";
+import { describe, expect, it, spyOn, vi } from "bun:test";
 import {
 	type ApiKeyResolveContext,
 	chatTextBackend,
@@ -967,6 +967,37 @@ describe("NativeJudge", () => {
 
 		expect(result.answers.urgent.noul).toBe(0.92);
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
+	});
+
+	it.each(["response", "network"] as const)("interrupts %s retry backoff when the caller cancels", async failure => {
+		const controller = new AbortController();
+		let calls = 0;
+		const judge = new NativeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				calls++;
+				if (failure === "network") throw new Error("connection reset");
+				return new Response("busy", { status: 503, headers: { "retry-after-ms": "4000" } });
+			},
+		});
+		const enteredBackoff = Promise.withResolvers<void>();
+		const originalWait = scheduler.wait.bind(scheduler);
+		const wait = vi.spyOn(scheduler, "wait").mockImplementation((delay, options) => {
+			const pending = originalWait(delay, options);
+			enteredBackoff.resolve();
+			return pending;
+		});
+		const startedAt = performance.now();
+		const pending = judge.judge(request, { signal: controller.signal });
+		try {
+			await enteredBackoff.promise;
+			controller.abort(new Error("caller stopped"));
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+			expect(performance.now() - startedAt).toBeLessThan(500);
+			expect(calls).toBe(1);
+		} finally {
+			wait.mockRestore();
+		}
 	});
 
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {
