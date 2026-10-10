@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type Answer,
+	type ApiKeyResolver,
 	type AssistantMessage,
 	type BoxEdges,
 	chatTextBackend,
@@ -50,6 +51,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import type { JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { normalizeModelContextImages } from "../utils/image-loading";
@@ -179,13 +181,17 @@ const CANDIDATE_TIMEOUT_COOLDOWN_MS = 30_000;
  * per-call consumers (auto-thinking, subagent starts) resolve a fresh judge.
  */
 const CANDIDATE_TTL_MS = 1_000;
-/** Skip-until timestamps and reasons keyed by routed model identity, carried by the registry that produced the rejection. */
+/** Skipped candidates keyed by routed model identity, carried by the registry that produced the failure. */
 const kRejections = Symbol("judgment.rejections");
 const kTimeouts = Symbol("judgment.timeouts");
 /** Last resolved judge role chain, carried by the registry it was drawn from. */
 const kRoleChain = Symbol("judgment.roleChain");
+interface Cooldown {
+	until: number;
+	reason: string;
+}
 interface RegistryWithRejections extends ModelRegistry {
-	[kRejections]?: Map<string, CandidateRejection>;
+	[kRejections]?: Map<string, Cooldown>;
 	[kTimeouts]?: Map<string, number>;
 	[kRoleChain]?: {
 		settings: Settings;
@@ -543,10 +549,10 @@ export class ChainJudge implements Judge {
 			if (timedOutBefore && !candidate.explicit) continue;
 			const configuredFallbackRemains = index < lastExplicitIndex;
 			const identity = formatModelStringWithRouting(candidate.model);
-			const rejection = rejections.get(identity);
-			if (rejection !== undefined) {
-				if (rejection.until > Date.now()) {
-					lastUnavailable = `${identity} ${rejection.reason} recently`;
+			const skipped = rejections.get(identity);
+			if (skipped !== undefined) {
+				if (skipped.until > Date.now()) {
+					lastUnavailable = `${identity} ${skipped.reason}`;
 					continue;
 				}
 				rejections.delete(identity);
@@ -560,13 +566,16 @@ export class ChainJudge implements Judge {
 			// Outside the candidate's failure handling: a refusal ends the judgment.
 			this.#deps.costGate?.admit();
 			const kind = kindOf(candidate);
+			const credentialResets = new Map<unknown, number | undefined>();
 			let timeout: AbortSignal | undefined;
 			try {
 				// Image fitting is local work, not evidence that a provider route has stalled.
 				const prepared = prepare ? await untilAborted(signal, () => prepare(candidate.model, kind)) : undefined;
 				timeout = kind === "native" && configuredFallbackRemains ? AbortSignal.timeout(timeoutMs) : undefined;
 				const candidateSignal = timeout ? (signal ? AbortSignal.any([signal, timeout]) : timeout) : signal;
-				const judge = await untilAborted(candidateSignal, () => this.#createJudge(candidate, candidateSignal));
+				const judge = await untilAborted(candidateSignal, () =>
+					this.#createJudge(candidate, credentialResets, candidateSignal),
+				);
 				if (!judge) {
 					lastUnavailable = `no API key for ${candidate.model.provider}/${candidate.model.id}`;
 					continue;
@@ -585,10 +594,8 @@ export class ChainJudge implements Judge {
 				const timedOut =
 					timeout !== undefined && (timeout.aborted || (error instanceof Error && error.name === "TimeoutError"));
 				if (!timedOut && isAbortOrTimeout(error)) throw error;
-				const rejected = rejectionReason(error);
-				if (rejected) {
-					rejections.set(identity, { until: Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS, reason: rejected });
-				}
+				const cooldown = cooldownOf(error, credentialResets);
+				if (cooldown) rejections.set(identity, cooldown);
 				if (timedOut) {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
@@ -598,8 +605,8 @@ export class ChainJudge implements Judge {
 					candidate: identity,
 					status: AIError.status(error),
 					error: lastFailure,
-					skippedForMs: rejected
-						? CANDIDATE_REJECTION_COOLDOWN_MS
+					skippedForMs: cooldown
+						? cooldown.until - Date.now()
 						: timedOut
 							? CANDIDATE_TIMEOUT_COOLDOWN_MS
 							: undefined,
@@ -641,7 +648,7 @@ export class ChainJudge implements Judge {
 		}).catch(error => logger.warn("judgment telemetry failed", { error: String(error) }));
 	}
 
-	#rejections(): Map<string, CandidateRejection> {
+	#rejections(): Map<string, Cooldown> {
 		const registry: RegistryWithRejections = this.#deps.registry;
 		return (registry[kRejections] ??= new Map());
 	}
@@ -697,11 +704,22 @@ export class ChainJudge implements Judge {
 		return list;
 	}
 
-	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
+	async #createJudge(
+		candidate: RoleChainCandidate,
+		credentialResets: Map<unknown, number | undefined>,
+		signal: AbortSignal | undefined,
+	): Promise<Judge | undefined> {
 		const model = candidate.model;
 		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
-		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
+		const resolver = this.#deps.registry.resolver(model, this.#deps.sessionId);
+		const apiKey: ApiKeyResolver = context => {
+			// Freeze relative hints before rotation or refresh consumes their remaining time.
+			if (context.error !== undefined && !credentialResets.has(context.error)) {
+				credentialResets.set(context.error, rateLimitResetOf(context.error));
+			}
+			return resolver(context);
+		};
 		if (isJudgmentApi(model.api)) {
 			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
 			const judge = createNativeJudge(model, { apiKey, headers });
@@ -886,27 +904,29 @@ function nativeJudge(
 	};
 }
 
-/** Why a candidate is skipped until {@link CandidateRejection.until}; rendered as `<identity> <reason> recently`. */
-interface CandidateRejection {
-	until: number;
-	reason: string;
+function rateLimitResetOf(error: unknown): number | undefined {
+	if (AIError.status(error) !== 429) return undefined;
+	const retryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(error));
+	return retryAfterMs === undefined ? undefined : Date.now() + retryAfterMs;
 }
 
-/**
- * Reason for a rejection the route keeps answering until something changes out of band — a credential or
- * billing rejection of the account, or a 404 for a model the route does not serve — else `undefined`.
- */
-function rejectionReason(error: unknown): string | undefined {
-	switch (AIError.status(error)) {
-		case 401:
-		case 402:
-		case 403:
-			return "rejected the account";
-		case 404:
-			return "did not serve the model";
-		default:
-			return undefined;
+/** Skip a rate-limited candidate only while every attempted credential is still blocked. */
+function cooldownOf(error: unknown, credentialResets: Map<unknown, number | undefined>): Cooldown | undefined {
+	const status = AIError.status(error);
+	if (status === 401 || status === 402 || status === 403) {
+		return { until: Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS, reason: "rejected the account recently" };
 	}
+	if (status === 404) {
+		return { until: Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS, reason: "did not serve the model recently" };
+	}
+	if (status !== 429) return undefined;
+	if (!credentialResets.has(error)) credentialResets.set(error, rateLimitResetOf(error));
+	let until = Number.POSITIVE_INFINITY;
+	for (const reset of credentialResets.values()) {
+		if (reset === undefined) return undefined;
+		until = Math.min(until, reset);
+	}
+	return until > Date.now() ? { until, reason: "is rate-limited" } : undefined;
 }
 
 function isAbortOrTimeout(error: unknown): boolean {
