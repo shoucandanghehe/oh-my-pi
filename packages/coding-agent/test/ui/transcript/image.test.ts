@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { TerminalCapabilities } from "@oh-my-pi/pi-tui/driver/contract";
 import { TerminalImages } from "@oh-my-pi/pi-tui/driver/images/store";
+import { getBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { driverImages } from "@oh-my-pi/pi-tui/term/backend";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { describeTree } from "@oh-my-pi/pi-tui/testing/corpus";
@@ -17,13 +18,16 @@ import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { bindEffects } from "../../../src/config/registry";
 import { Settings } from "../../../src/config/settings";
 import { cfgTuiMaxInlineImageColumns, cfgTuiMaxInlineImageRows } from "../../../src/modes/settings";
+import "../../../src/ui/styles/figures/figure";
 import "../../../src/ui/styles/tools/block";
 import "../../../src/ui/styles/tools/read";
 import "../../../src/ui/styles/transcript/exec-run";
 import { readPresenter } from "../../../src/ui/tools/read";
 import { ExecRun, ExecRunBlock } from "../../../src/ui/transcript/exec-run";
+import { EmbedFigure } from "../../../src/ui/transcript/figures/embed";
 import { followInlineImageLimits, ImageNode } from "../../../src/ui/transcript/messages/image";
 import { ToolBlock, ToolCall } from "../../../src/ui/transcript/tool-block";
+import { applyFileLinkSetting, fileUriForTerminal } from "../../../src/utils/file-links";
 
 const RED_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 const caps: TerminalCapabilities = {
@@ -212,6 +216,69 @@ test("a native file preview has a height limit but its fallback blob has no max 
 			dispose();
 		}
 	});
+});
+
+test.skipIf(process.platform !== "linux")("Windows Tern receives WSL links and previews with image bytes", () => {
+	const previousSocket = Bun.env.TERN_PANE_SOCKET;
+	const previousDistro = Bun.env.WSL_DISTRO_NAME;
+	Bun.env.TERN_PANE_SOCKET = "\\\\.\\pipe\\omp-test-tern";
+	Bun.env.WSL_DISTRO_NAME = "Ubuntu-24.04";
+	restoreNative = nativeRendering();
+	setNativeRenderingForTest(true);
+	applyFileLinkSetting({});
+	try {
+		createRoot(dispose => {
+			try {
+				const path = "/home/alice/a#b?c% 中文.png";
+				const call = new ToolCall({ id: "read", name: "read", args: { path }, presenter: readPresenter });
+				call.updateResult(
+					{
+						content: [{ type: "image", mimeType: "image/png", data: RED_PNG }],
+						details: { mediaPath: path, resolvedPath: path },
+					},
+					false,
+				);
+				const node = ToolBlock({ call });
+				if (!isUiNode(node)) throw new Error("expected a tool node");
+				const file = "file://wsl.localhost/Ubuntu-24.04/home/alice/a%23b%3Fc%25%20%E4%B8%AD%E6%96%87.png";
+				const id = new Bun.CryptoHasher("sha256").update(Buffer.from(RED_PNG, "base64")).digest("hex");
+				const env = staticEnvironment(currentTheme(), { hyperlinks: true });
+				expect(describeTree(node, env)).toMatchObject({ p: { href: file } });
+				expect(node.children().map(child => child.kind)).toEqual(["image", "text"]);
+				expect(describeTree(node.children()[0]!, env)).toMatchObject({ p: { blob: id } });
+				expect(getBlob(id)?.bytes).toEqual(new Uint8Array(Buffer.from(RED_PNG, "base64")));
+				expect(fileUriForTerminal(path, { line: 42 }, "base")).toBe(file);
+				expect(fileUriForTerminal("/home/alice/note.md", { line: 42, col: 7 }, "vscode")).toBe(
+					"vscode://file/home/alice/note.md:42:7",
+				);
+				const embed = EmbedFigure({
+					embed: { kind: "iframe", src: "./a #1.html", label: "Page" },
+					showImages: true,
+					host: { cwd: () => "/home/alice" },
+				});
+				const page = typeof embed === "function" ? embed() : embed;
+				if (!isUiNode(page)) throw new Error("expected a page node");
+				const pageHref = "file://wsl.localhost/Ubuntu-24.04/home/alice/a%20%231.html";
+				expect(describeTree(page, env)).toMatchObject({ k: "web", p: { url: pageHref } });
+				expect(paintNode(env, page, 80).rows.join("\n")).toContain(pageHref);
+			} finally {
+				dispose();
+			}
+		});
+		applyFileLinkSetting({ scheme: "omp-open", host: "linux.example" });
+		expect(fileUriForTerminal("/home/alice/note.md", { line: 42 }, "tern")).toBe(
+			"omp-open://linux.example/home/alice/note.md?line=42",
+		);
+		applyFileLinkSetting({});
+		Bun.env.TERN_PANE_SOCKET = "/run/user/1000/omp-test-tern.sock";
+		expect(fileUriForTerminal("/home/alice/note.md", undefined, "tern")).toBe("file:///home/alice/note.md");
+	} finally {
+		if (previousSocket === undefined) delete Bun.env.TERN_PANE_SOCKET;
+		else Bun.env.TERN_PANE_SOCKET = previousSocket;
+		if (previousDistro === undefined) delete Bun.env.WSL_DISTRO_NAME;
+		else Bun.env.WSL_DISTRO_NAME = previousDistro;
+		applyFileLinkSetting();
+	}
 });
 
 test("a native read puts the capped non-image file preview before its content and footer", () => {

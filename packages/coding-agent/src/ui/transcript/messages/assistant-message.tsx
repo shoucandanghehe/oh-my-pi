@@ -36,6 +36,7 @@ import {
 	signal,
 	untrack,
 } from "@oh-my-pi/pi-tui";
+import { isWslInWindowsTern } from "@oh-my-pi/pi-tui/driver/caps/env";
 import { holdPartialTableRow, speculativeStreamingSource } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
@@ -501,18 +502,28 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		if (toolMedia?.size && showImages && flag(model.showToolResultImages, true)) {
 			const showByPath = nativeSupports("media");
 			const shown = showByPath ? new Set<string>() : undefined;
+			// Windows Tern can open a WSL share link, but previews with available
+			// pixels should travel as blobs, including when another read only names it.
+			const blobPaths = shown && isWslInWindowsTern() ? new Set<string>() : undefined;
+			if (blobPaths) {
+				for (const { mediaPath, images } of toolMedia.values()) {
+					if (mediaPath && images.some(image => image.data && image.mimeType)) blobPaths.add(mediaPath);
+				}
+			}
 			if (shown) {
 				for (const [id, { mediaPath }] of toolMedia) {
-					if (!mediaPath || shown.has(mediaPath)) continue;
+					if (!mediaPath || shown.has(mediaPath) || blobPaths?.has(mediaPath)) continue;
 					shown.add(mediaPath);
 					out.set(`r${id}`, { kind: "media", path: mediaPath });
 				}
 			}
 			for (const [id, { images, mediaPath }] of toolMedia) {
-				if (mediaPath && showByPath) continue;
+				if (mediaPath && shown?.has(mediaPath)) continue;
 				images.forEach((image, n) => {
-					if (image.data && image.mimeType)
+					if (image.data && image.mimeType) {
 						out.set(`r${id}:${n}`, { kind: "image", image, tool: true, path: mediaPath });
+						if (mediaPath) shown?.add(mediaPath);
+					}
 				});
 			}
 		}

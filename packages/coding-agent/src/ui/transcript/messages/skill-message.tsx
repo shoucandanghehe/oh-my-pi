@@ -15,9 +15,9 @@
 import type { JSXNode, Reactive } from "@oh-my-pi/pi-tui";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { SkillPromptDetails } from "../../../session/transcript/messages";
+import { tryFileUri } from "../../../utils/file-links";
 import { cardExpansion } from "../expansion";
 import { chipText, skillChipLabel, termChips } from "./chips";
-import { openableImage } from "./image";
 
 /** What a skill row shows. */
 export interface SkillMessageProps {
@@ -45,7 +45,7 @@ export function SkillMessage(props: SkillMessageProps): JSXNode {
 	const display = prompt.replace(new RegExp(`${RegExp.escape(token)}(?![\\w./-])`, "g"), label);
 	const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
 	const draft = leading ? display.slice(label.length).trim() : display;
-	const href = details?.path ? openableImage(details.path).href : undefined;
+	const href = details?.path ? tryFileUri(details.path) : undefined;
 	const head: TspSpan[] = [
 		href ? { t: label, s: "customMessageLabel strong", href } : { t: label, s: "customMessageLabel strong" },
 	];

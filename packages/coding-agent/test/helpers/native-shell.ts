@@ -132,6 +132,11 @@ export async function nativeShell(shell = new Shell(), options?: { readonly kind
 		node,
 		surface,
 		page,
+		/** The bytes received over TSP for a referenced blob. */
+		blob(id: string) {
+			flush();
+			return tern.blobs.get(id);
+		},
 		/** Scroll operations received by the active native surface. */
 		scrolls() {
 			flush();

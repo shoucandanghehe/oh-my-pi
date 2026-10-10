@@ -28,6 +28,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { errorMessage } from "@oh-my-pi/pi-utils";
+import { tryFileUri } from "../../../utils/file-links";
 import { readImageHeaderDimensions } from "../../../utils/image-resize";
 import { holdSettle } from "../../shell/transcript";
 import { closePartialSvg, type FigureRaster, PX_PER_ROW, trackFigureWork } from "./svg";
@@ -233,7 +234,12 @@ export function EmbedFigure(
 		const state = loaded();
 		const label = embedLabel(embed);
 		const target = link();
-		const page = embed.kind === "iframe" ? url() : undefined;
+		let page = embed.kind === "iframe" ? target?.url : undefined;
+		if (page && target && "file" in target) {
+			const peer = tryFileUri(target.file, { local: true });
+			const suffix = page.match(/[?#].*$/)?.[0] ?? "";
+			page = peer && peer + suffix;
+		}
 		const web = page !== undefined && read(props.showImages) && nativeSupports("web");
 		const vector = state.status === "svg" ? svg.state() : undefined;
 		const raster = state.status === "image" ? state.raster : vector?.status === "ready" ? vector.raster : undefined;
@@ -255,7 +261,7 @@ export function EmbedFigure(
 					page: true,
 					...(error ? { error } : {}),
 					...(raster ? { still: raster } : {}),
-					...(target ? { link: target } : {}),
+					...(target && page ? { link: { ...target, url: page } } : {}),
 				};
 				return web ? (
 					<web

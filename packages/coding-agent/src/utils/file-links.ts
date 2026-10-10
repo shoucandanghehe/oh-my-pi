@@ -6,6 +6,7 @@
 import * as os from "node:os";
 import * as url from "node:url";
 import type { TerminalId } from "@oh-my-pi/pi-tui/driver/caps/identity";
+import { isWslInWindowsTern } from "@oh-my-pi/pi-tui/driver/caps/env";
 import { logger } from "@oh-my-pi/pi-utils";
 
 /** A remote file-link handler: links become `<scheme>://<host><path>?line=&col=`. */
@@ -75,7 +76,14 @@ export function tryFileUri(filePath: string, opts?: FileUriOptions): string | un
 	try {
 		const fileUrl = url.pathToFileURL(filePath);
 		const target = linkTarget();
-		if (!target || opts?.local) return fileUrl.href;
+		if (!target || opts?.local) {
+			const distro = Bun.env.WSL_DISTRO_NAME;
+			if (distro && isWslInWindowsTern()) {
+				// The Linux file URL already has the escaped, absolute path.
+				return `file://wsl.localhost/${encodeURIComponent(distro)}${fileUrl.pathname}`;
+			}
+			return fileUrl.href;
+		}
 		// Preserve UNC servers so the handler can reconstruct the network path.
 		const targetPath = fileUrl.host ? `//${fileUrl.host}${fileUrl.pathname}` : fileUrl.pathname;
 		const position = new URLSearchParams();

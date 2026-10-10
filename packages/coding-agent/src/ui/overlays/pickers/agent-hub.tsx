@@ -60,6 +60,7 @@ import {
 	MAIN_AGENT_ID,
 } from "../../../registry/agent-hub-types";
 import type { ObservableSession } from "../../../task/session-observer-registry";
+import { tryFileUri } from "../../../utils/file-links";
 import { fuzzyMatch } from "../../../utils/fuzzy";
 import { shortenPath } from "../../../utils/render-utils";
 import { clearHubHover, hubPaintedSplit } from "../../styles/pickers/agent-hub";
@@ -1034,7 +1035,7 @@ export function AgentHub<T extends AgentRecordLike>(
 		if (artifacts?.outputPath)
 			facts.push({
 				k: "Output",
-				v: [{ t: shortenPath(artifacts.outputPath), s: "path", href: `file://${artifacts.outputPath}` }],
+				v: [{ t: shortenPath(artifacts.outputPath), s: "path", href: tryFileUri(artifacts.outputPath) }],
 			});
 		if (artifacts?.patchPath) facts.push({ k: "Patch", v: [span(shortenPath(artifacts.patchPath), "path")] });
 		for (const nested of artifacts?.nestedPatchPaths ?? [])

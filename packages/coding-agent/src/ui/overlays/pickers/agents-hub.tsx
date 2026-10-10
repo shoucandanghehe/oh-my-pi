@@ -37,6 +37,7 @@ import {
 import type { AgentSource } from "../../../task/task-details";
 import { FuzzyQuery } from "../../../utils/fuzzy";
 import { shortenPath } from "../../../utils/render-utils";
+import { fileHref } from "../../tools/file-common";
 import "../../styles/pickers/agents-hub";
 import type {
 	AgentsHubBody,
@@ -989,7 +990,7 @@ export function AgentsHub(props: AgentsHubProps): JSXNode {
 		];
 		if (agent.filePath) {
 			// Bundled agents live in the binary (`embedded:…`): nothing to open.
-			const href = agent.filePath.startsWith("/") ? `file://${agent.filePath}` : undefined;
+			const href = fileHref(agent.filePath);
 			facts.push({ k: "File", v: [{ t: shortenPath(agent.filePath), s: "path", ...(href ? { href } : {}) }] });
 		}
 		return [

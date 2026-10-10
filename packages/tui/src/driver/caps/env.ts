@@ -175,6 +175,11 @@ export function isWsl(env: Env, platform: NodeJS.Platform): boolean {
 	return platform === "linux" && Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
 }
 
+/** A WSL program whose Tern pane is hosted on Windows, not in its Linux filesystem. */
+export function isWslInWindowsTern(env: Env = Bun.env, platform: NodeJS.Platform = process.platform): boolean {
+	return isWsl(env, platform) && env.TERN_PANE_SOCKET?.startsWith("\\\\.\\pipe\\") === true;
+}
+
 /**
  * Raw `0x08` means Ctrl+Backspace only in a genuine local Windows Terminal
  * session (multiplexers and SSH inherit `WT_SESSION` but send `0x08` for plain

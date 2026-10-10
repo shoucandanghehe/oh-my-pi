@@ -16,6 +16,7 @@
  */
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { tryFileUri } from "../../../utils/file-links";
 import { type ChipKind, chipColor, chipLabel } from "../../composer/attachments";
 
 const VISION_MARKER = /\[(Image|Video) #([1-9]\d*)(?:,[^\]\n]*)?\](?: attachment:\/\/\2)?/g;
@@ -92,14 +93,6 @@ export function chipText(
 	return { text: out, chips: [...chips.values()] };
 }
 
-function fileHref(path: string): string | undefined {
-	try {
-		return Bun.pathToFileURL(path).href;
-	} catch {
-		return undefined;
-	}
-}
-
 /** The native style of a chip: attachments accent, skills and mentions their pill colors. */
 function chipStyle(chip: Chip): string {
 	if (chip.kind === "skill") return "customMessageLabel strong";
@@ -110,7 +103,10 @@ function chipStyle(chip: Chip): string {
 /** The `md` marks of `chips` (attachment chips link to their file). */
 export function chipMarks(chips: readonly Chip[]): TspSpan[] {
 	return chips.map(chip => {
-		const href = chip.kind !== "skill" && chip.kind !== "mention" && chip.path ? fileHref(chip.path) : undefined;
+		const href =
+			chip.kind !== "skill" && chip.kind !== "mention" && chip.path
+				? tryFileUri(chip.path, { local: true })
+				: undefined;
 		return href ? { t: chip.label, s: chipStyle(chip), href } : { t: chip.label, s: chipStyle(chip) };
 	});
 }

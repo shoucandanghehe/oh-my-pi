@@ -262,7 +262,7 @@ describe("EventController read-group accretion", () => {
 		expect(isSettled(group!.block.node)).toBe(true);
 	});
 
-	it("sends the same deduplicated grouped media live and on replay, with blobs for hosts without media", async () => {
+	it("matches live and replayed grouped previews, uploading WSL pixels to a Windows Tern host", async () => {
 		const image: ImageContent = {
 			type: "image",
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -273,6 +273,7 @@ describe("EventController read-group accretion", () => {
 		const reads: readonly Pick<ToolResultMessage, "toolCallId" | "content" | "details">[] = [
 			{ toolCallId: "first", content: [image], details: { mediaPath: picture } },
 			{ toolCallId: "second", content: [image], details: { mediaPath: picture } },
+			{ toolCallId: "source", content: [{ type: "text", text: "Image source" }], details: { mediaPath: picture } },
 			{ toolCallId: "pdf", content: [{ type: "text", text: "Extracted page" }], details: { mediaPath: pdf } },
 			{ toolCallId: "blob", content: [image], details: {} },
 		];
@@ -298,10 +299,19 @@ describe("EventController read-group accretion", () => {
 
 		cfgTuiMaxInlineImageRows.override(settings, 10);
 		const stopSizing = followInlineImageLimits(() => 50);
+		const oldSocket = Bun.env.TERN_PANE_SOCKET;
+		const oldDistro = Bun.env.WSL_DISTRO_NAME;
 		try {
-			for (const drawsMedia of [true, false]) {
+			for (const mode of ["native", "blob", ...(process.platform === "linux" ? ["wsl"] : [])]) {
+				const drawsMedia = mode !== "blob";
+				if (mode === "wsl") {
+					Bun.env.TERN_PANE_SOCKET = "\\\\.\\pipe\\omp-test-tern";
+					Bun.env.WSL_DISTRO_NAME = "Ubuntu-24.04";
+				} else {
+					delete Bun.env.TERN_PANE_SOCKET;
+				}
 				const live = createFixture();
-				await using _host = await nativeShell(live.ctx.shell, {
+				await using host = await nativeShell(live.ctx.shell, {
 					kinds: drawsMedia ? TSP_KINDS : TSP_KINDS.filter(kind => kind !== "media"),
 				});
 				expect(nativeSupports("media")).toBe(drawsMedia);
@@ -329,7 +339,25 @@ describe("EventController read-group accretion", () => {
 					const liveTree = previews(live.ctx);
 					expect(previews(rebuilt.ctx)).toEqual(liveTree);
 					const blob = { alt: "image/png", blob: expect.any(String), w: 1, h: 1 };
-					if (drawsMedia) {
+					if (mode === "wsl") {
+						const bytes = Buffer.from(image.data, "base64");
+						const id = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+						expect(liveTree).toEqual([
+							{ k: "media", key: "rpdf", p: { path: pdf, max: { h: "10lines" } } },
+							{
+								k: "image",
+								key: "rfirst:0",
+								p: {
+									...blob,
+									blob: id,
+									href: "file://wsl.localhost/Ubuntu-24.04/tmp/grouped%20picture.png",
+									actions: { menu: ["open"] },
+								},
+							},
+							{ k: "image", key: "rblob:0", p: { ...blob, blob: id } },
+						]);
+						expect(host.blob(id)).toEqual(new Uint8Array(bytes));
+					} else if (drawsMedia) {
 						expect(liveTree).toEqual([
 							{ k: "media", key: "rfirst", p: { path: picture, max: { h: "10lines" } } },
 							{ k: "media", key: "rpdf", p: { path: pdf, max: { h: "10lines" } } },
@@ -349,6 +377,10 @@ describe("EventController read-group accretion", () => {
 				}
 			}
 		} finally {
+			if (oldSocket === undefined) delete Bun.env.TERN_PANE_SOCKET;
+			else Bun.env.TERN_PANE_SOCKET = oldSocket;
+			if (oldDistro === undefined) delete Bun.env.WSL_DISTRO_NAME;
+			else Bun.env.WSL_DISTRO_NAME = oldDistro;
 			stopSizing();
 		}
 	});

@@ -10,6 +10,7 @@ import { computed, createRoot, effect, type JSXNode, type Reactive, read, signal
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import type { TspImageProps } from "@oh-my-pi/pi-wire";
 import { readImageHeaderDimensions } from "../../../utils/image-resize";
+import { tryFileUri } from "../../../utils/file-links";
 
 /** An image content part (base64 bytes). */
 export interface ImagePart {
@@ -36,15 +37,8 @@ export function openableImage(filePath: string | undefined): {
 	href?: string;
 	actions?: { menu: string[] };
 } {
-	if (!filePath) return {};
-	try {
-		return {
-			href: Bun.pathToFileURL(filePath).href,
-			actions: { menu: ["open"] },
-		};
-	} catch {
-		return {};
-	}
+	const href = filePath ? tryFileUri(filePath, { local: true }) : undefined;
+	return href ? { href, actions: { menu: ["open"] } } : {};
 }
 
 /** Default maximum width of a transcript image, in terminal columns. */

@@ -13,7 +13,7 @@
  */
 import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type JSXNode, nativeSupports } from "@oh-my-pi/pi-tui";
-import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
+import { isWslInWindowsTern } from "@oh-my-pi/pi-tui/driver/caps/env";
 import { languageFromPath } from "@oh-my-pi/pi-tui/text/lang";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
 import { type ReadToolDetails, readSelectorRangeStart, splitPathAndSel } from "../../tools/details/read";
@@ -28,7 +28,7 @@ import type { ToolActivity, ToolHead, ToolPresenter, ToolResult, ToolView, ToolV
 import { resultText } from "./default";
 import { fileHref, pendingLinkPath } from "./file-common";
 import { READ_IMAGE_ROLE } from "../transcript/image-links";
-import { InlineMedia, inlineImageTerm } from "../transcript/messages/image";
+import { imageBlob, InlineMedia, inlineImageTerm } from "../transcript/messages/image";
 import { imageSize } from "../transcript/tool-block";
 import { isReadableUrlPath, readUrlPresenter } from "./read-url";
 import { registerToolPresenter } from "./registry";
@@ -340,11 +340,19 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 	const content = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
 	const split = splitTarget(rawPath);
 	const warnings = readWarnings(details);
-	const mediaPath = details?.mediaPath;
-	const media = mediaPath && nativeSupports("media") ? <InlineMedia nodeKey="media" path={mediaPath} /> : undefined;
 	const image = result.content.find(
-		block => block.type === "image" && typeof (block as { data?: unknown }).data === "string",
-	) as { data: string; mimeType: string } | undefined;
+		(block): block is { type: "image"; data: string; mimeType: string } =>
+			block.type === "image" &&
+			"data" in block &&
+			typeof block.data === "string" &&
+			"mimeType" in block &&
+			typeof block.mimeType === "string",
+	);
+	const mediaPath = details?.mediaPath;
+	const media =
+		mediaPath && nativeSupports("media") && !(image && isWslInWindowsTern()) ? (
+			<InlineMedia nodeKey="media" path={mediaPath} />
+		) : undefined;
 	if (image) {
 		const size = imageSize(image.data);
 		const detail = content.trim();
@@ -355,7 +363,7 @@ function readResult(result: ToolResult<ReadToolDetails>, state: ToolViewState, a
 			body: [
 				media ?? (
 					<image
-						blob={registerBlob(Buffer.from(image.data, "base64"), image.mimeType)}
+						blob={imageBlob(image)}
 						alt={shortenPath(suffix?.to ?? split.path) || "image"}
 						w={size?.w}
 						h={size?.h}

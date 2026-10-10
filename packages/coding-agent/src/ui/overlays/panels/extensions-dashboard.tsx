@@ -20,6 +20,7 @@ import { snapshotMcpRuntime } from "../../../extensibility/inventory/mcp-runtime
 import { type Extension, isShadowedExtension } from "../../../extensibility/inventory/types";
 import { shortenPath } from "../../../utils/render-utils";
 import "../../styles/panels/extensions";
+import { fileHref } from "../../tools/file-common";
 import { stableKey } from "../pickers/format";
 import type { ExtensionInspectorModel } from "./extension-inspector-model";
 import type { ExtensionListModel } from "./extension-list-model";
@@ -339,7 +340,7 @@ export function inspectorPreview(
 	const name = sanitizeDisplayLine(ext.displayName);
 	const subtitle = sanitizeDisplayLineField(title);
 	const level = ext.source.level === "user" ? "User" : ext.source.level === "project" ? "Project" : "Native";
-	const filePath = sanitizeDisplayText(ext.path);
+	const href = fileHref(ext.path);
 	const facts: Pair[] = [
 		...runtime,
 		["Status", health && ext.state === "active" ? undefined : status(ext, glyph)],
@@ -350,7 +351,7 @@ export function inspectorPreview(
 				{
 					s: "path dim",
 					t: sanitizeDisplayText(shortenPath(ext.path, os.homedir())),
-					...(filePath.startsWith("/") ? { href: `file://${filePath}` } : {}),
+					...(href ? { href } : {}),
 				},
 			],
 		],
