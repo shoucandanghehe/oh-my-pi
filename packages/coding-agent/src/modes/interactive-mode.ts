@@ -337,6 +337,7 @@ import {
 } from "@oh-my-pi/pi-tui/theme";
 import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
+	AddMessageOptions,
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
 	InteractiveModeContext,
@@ -1193,7 +1194,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Canonical composer shared by cold prepaint and the session-aware runtime. */
 	readonly composer: Composer;
 	ui: TUI;
-	chatContainer: TranscriptContainer;
+	readonly chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -7877,13 +7878,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.isKnownSlashCommand(text);
 	}
 
-	addMessageToChat(
-		message: AgentMessage,
-		options?: {
-			imageLinks?: readonly (string | undefined)[];
-			reuseSettledComponent?: boolean;
-		},
-	): Component[] {
+	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
 		return this.#uiHelpers.addMessageToChat(message, options);
 	}
 

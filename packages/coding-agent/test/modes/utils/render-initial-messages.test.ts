@@ -233,18 +233,20 @@ function makeRenderCtx(
 
 describe("UiHelpers.renderInitialMessages — transcript source", () => {
 	it("renders the collapsed live display transcript, never the LLM context", async () => {
-		await Settings.init({ inMemory: true });
-		const { ctx, transcriptSpy, llmContextSpy, renderSessionContextSpy } = makeCtx();
-		const transcript = makeEmptyContext();
-		transcriptSpy.mockReturnValue(transcript);
+		const transcript: SessionContext = {
+			...makeEmptyContext(),
+			messages: [{ role: "user", content: "display transcript body", timestamp: 1 }],
+		};
+		const { ctx, chatContainer } = makeRenderCtx(transcript);
+		const transcriptSpy = vi.spyOn(ctx.viewSession, "buildTranscriptSessionContext");
+		const llmContextSpy = vi.fn(() => makeEmptyContext());
+		ctx.viewSession.sessionManager.buildSessionContext = llmContextSpy;
 
 		await new UiHelpers(ctx).renderInitialMessages();
 
 		expect(transcriptSpy).toHaveBeenCalledWith({ collapseCompactedHistory: true });
 		expect(llmContextSpy).not.toHaveBeenCalled();
-		expect(renderSessionContextSpy).toHaveBeenCalledWith(transcript, {
-			updateFooter: true,
-		});
+		expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain("display transcript body");
 	});
 });
 

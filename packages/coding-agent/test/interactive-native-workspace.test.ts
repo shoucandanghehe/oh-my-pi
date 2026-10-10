@@ -198,6 +198,32 @@ describe("interactive app-viewport with native TSP rendering", () => {
 		});
 	}
 
+	it("keeps resumed history visible when TSP negotiation completes during transcript replay", async () => {
+		await start({ manualProbe: true });
+		void mode.getUserInput();
+		mode.editor.setText("draft while resuming");
+		session.sessionManager.appendMessage({ role: "user", content: "restored transcript body", timestamp: 1 });
+		const render = mode.renderSessionContextIncrementally.bind(mode);
+		vi.spyOn(mode, "renderSessionContextIncrementally").mockImplementationOnce(
+			async (context, options, renderChunk) => {
+				terminal.answerProbe();
+				flush();
+				await render(context, options, renderChunk);
+			},
+		);
+
+		await mode.renderInitialMessages();
+		flush();
+
+		const main = terminal.docs
+			.get(terminal.surface!)!
+			.snapshot()
+			.c?.find(node => node.id === "main");
+		expect(documentNodes(main).find(node => node.k === "md")?.p?.text).toBe("restored transcript body");
+		expect(documentNodes().find(node => node.k === "editor")?.p?.text).toBe("draft while resuming");
+		expect(terminal.errors).toEqual([]);
+	});
+
 	it("adopts a prepaint native surface without wrapping its editor in workspace rows", async () => {
 		await start({ expected: true }, true);
 		void mode.getUserInput();

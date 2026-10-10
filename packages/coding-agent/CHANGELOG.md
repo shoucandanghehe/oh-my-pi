@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Resumed sessions in Tern no longer lose their transcript when native rendering activates during history replay.
 - Fixed `find` exhausting its deadline on a rate-limited judge despite a healthy fallback; later batches skip it until the earliest credential reset ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
 - Parent-agent IRC messages in agent panes now appear as IRC cards instead of user messages with raw steering markup.
 - Fixed native subagent and BTW panes not following new transcript output in Tern while preserving terminal-owned manual scrolling.

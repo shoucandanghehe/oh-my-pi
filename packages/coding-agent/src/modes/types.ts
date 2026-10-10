@@ -98,7 +98,14 @@ export interface InteractiveModeInitOptions {
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions &
 	Pick<HookSelectorOptions, "disabledIndices" | "inline">;
 
+export interface AddMessageOptions {
+	imageLinks?: readonly (string | undefined)[];
+	reuseSettledComponent?: boolean;
+	container?: TranscriptContainer;
+}
+
 export interface RenderSessionContextOptions {
+	container?: TranscriptContainer;
 	updateFooter?: boolean;
 	reuseSettledComponents?: boolean;
 	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
@@ -122,7 +129,7 @@ export interface AgentHubOpenOptions {
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
-	chatContainer: TranscriptContainer;
+	readonly chatContainer: TranscriptContainer;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
@@ -422,13 +429,7 @@ export interface InteractiveModeContext {
 	/** Drops the optimistic `/skill:` row when dispatch fails or bails before reaching the agent. */
 	clearOptimisticSkillMessage(): void;
 	isKnownSlashCommand(text: string): boolean;
-	addMessageToChat(
-		message: AgentMessage,
-		options?: {
-			imageLinks?: readonly (string | undefined)[];
-			reuseSettledComponent?: boolean;
-		},
-	): Component[];
+	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[];
 	renderSessionContext(sessionContext: SessionContext, options?: RenderSessionContextOptions): void;
 	/** Render a session context in bounded chunks so terminal input runs between transcript paints. */
 	renderSessionContextIncrementally(

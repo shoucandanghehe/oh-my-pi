@@ -3,7 +3,11 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type {
+	AddMessageOptions,
+	InteractiveModeContext,
+	RenderSessionContextOptions,
+} from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { buildSessionContext, type SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
@@ -46,7 +50,8 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 			options: RenderSessionContextOptions,
 			renderChunk?: () => void,
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
-		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
+		addMessageToChat: (message: AgentMessage, options?: AddMessageOptions) =>
+			helpers.addMessageToChat(message, options),
 		settings: { get: () => false },
 		session: {
 			retryAttempt: 0,
