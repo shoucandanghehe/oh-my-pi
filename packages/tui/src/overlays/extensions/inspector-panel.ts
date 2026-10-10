@@ -17,6 +17,7 @@ import { renderTableRow } from "../../components/table";
 import { theme } from "../../theme";
 import { divider } from "../../chrome/overlay-box";
 import { expandKeyHint, PREVIEW_LIMITS, replaceTabs, shortenPath } from "../../render/render-utils";
+import { fileLinkSpan } from "../../render/hyperlink";
 import {
 	sanitizeDisplayField,
 	sanitizeDisplayLine,
@@ -165,20 +166,14 @@ export class InspectorPanel implements Component {
 		const name = sanitizeDisplayLine(ext.displayName);
 		const title = sanitizeDisplayLineField(view.title);
 		const levelLabel = ext.source.level === "user" ? "User" : ext.source.level === "project" ? "Project" : "Native";
-		const filePath = sanitizeDisplayText(ext.path);
+		const pathLabel = sanitizeDisplayText(shortenPath(ext.path, os.homedir()));
 		const facts = kv([
 			...view.runtime,
 			["Status", view.health && ext.state === "active" ? undefined : this.#nativeStatus(ext)],
 			["Origin", `via ${sanitizeDisplayLine(ext.source.providerName)} (${levelLabel})`],
 			[
 				"Path",
-				[
-					span(
-						sanitizeDisplayText(shortenPath(ext.path, os.homedir())),
-						"path dim",
-						filePath.startsWith("/") ? { href: `file://${filePath}` } : undefined,
-					),
-				],
+				[ext.path.startsWith("/") ? fileLinkSpan(ext.path, pathLabel, "path dim") : span(pathLabel, "path dim")],
 			],
 		]);
 		const out: NativeNode[] = compact<NativeNode>([
