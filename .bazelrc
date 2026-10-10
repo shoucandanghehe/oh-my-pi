@@ -91,8 +91,8 @@ build:ci --reuse_sandbox_directories
 # --- Remote cache ------------------------------------------------------------
 # The bazel-remote endpoint is cluster-internal only; .github/actions/bazel-cache
 # composes endpoint + credentials into an rc fragment on omp-kata pods.
-# GitHub-hosted runners never use a remote cache (actions/cache-backed
-# --disk_cache instead). These configs carry only the policy bits.
+# Hosted jobs reuse source-matched addons via .github/actions/native-build;
+# cache misses build without a remote cache. These configs carry only policy bits.
 #
 # cache-rw: trusted in-cluster writers (omp-kata pods).
 build:cache-rw --remote_upload_local_results=true

@@ -1,0 +1,91 @@
+name: "Restore or build native addons"
+description: >
+   Reuses source-matched shipping addons between snapshot builds.
+   Cache misses build each target sequentially and preserve target directories
+   under ci-natives. Only main writes caches, keeping two entries per scope.
+
+inputs:
+   targets:
+      description: Space-separated natives-* Bazel target names
+      required: true
+   cache-scope:
+      description: Cache prefix shared by jobs producing the same target set
+      required: true
+
+runs:
+   using: composite
+   steps:
+      - name: Compute native addon cache key
+        id: key
+        shell: bash
+        env:
+           CACHE_SCOPE: ${{ inputs.cache-scope }}
+           NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
+        run: |
+           echo "prefix=${CACHE_SCOPE}-v1-" >> "$GITHUB_OUTPUT"
+           echo "key=${CACHE_SCOPE}-v1-${NATIVE_INPUTS_HASH}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore native addons
+        id: restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+           path: ci-natives
+           key: ${{ steps.key.outputs.key }}
+
+      - name: Report native addon source
+        shell: bash
+        env:
+           EXACT: ${{ steps.restore.outputs.cache-hit }}
+           MATCHED: ${{ steps.restore.outputs.cache-matched-key }}
+        run: |
+           if [ "$EXACT" = true ]; then
+             echo "Using source-matched native addons ($MATCHED); no Bazel build needed."
+           else
+             echo "No source-matched native addon cache; building from this checkout."
+           fi
+
+      - id: bazel-cache
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: ./.github/actions/bazel-cache
+
+      - name: Build native addons
+        if: steps.restore.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+           NATIVE_TARGETS: ${{ inputs.targets }}
+           OMP_BAZEL_RC: ${{ steps.bazel-cache.outputs.rc }}
+        run: |
+           set -eo pipefail
+           if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+           # Addon links peak at several GiB RSS; keep links sequential
+           # within each platform build.
+           read -r -a targets <<< "$NATIVE_TARGETS"
+           for target in "${targets[@]}"; do
+             bazelisk --bazelrc="$OMP_BAZEL_RC" build "//:$target" 2>&1 | tee "$RUNNER_TEMP/bazel-build.log"
+             summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
+             echo "::notice title=$target Bazel build summary::${summary:-no process summary found}"
+             mkdir -p "ci-natives/$target"
+             cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
+           done
+
+      - name: Save native addon cache entry
+        if: github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+           path: ci-natives
+           key: ${{ steps.key.outputs.key }}
+
+      - name: Prune superseded native addon cache entries
+        if: github.ref == 'refs/heads/main' && steps.restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+           GH_TOKEN: ${{ github.token }}
+           PREFIX: ${{ steps.key.outputs.prefix }}
+        run: |
+           gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIX" \
+               --sort created_at --order desc --limit 100 --json id --jq '.[2:][].id' \
+             | while read -r id; do
+                 gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
+               done
