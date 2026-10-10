@@ -278,6 +278,151 @@ describe("ChainJudge", () => {
 		);
 	});
 
+	it("falls back promptly on a long Retry-After and skips the primary until its deadline", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		let limited = true;
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				const primary = String(url).endsWith("/v1/systemone");
+				if (primary && limited) {
+					return new Response("usage limit reached", { status: 429, headers: { "retry-after": "34003" } });
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: primary ? "high" : "low" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+		const startedAt = Date.now();
+
+		const first = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		const second = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+
+		expect(first.answers.level.choice).toBe("low");
+		expect(second.answers.level.choice).toBe("low");
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		expect(urls).toEqual([
+			"https://judge.example.test/v1/systemone",
+			"https://decisions.example.test/decisions",
+			"https://decisions.example.test/decisions",
+		]);
+
+		vi.spyOn(Date, "now").mockReturnValue(startedAt + 34_004_000);
+		limited = false;
+		const recovered = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		expect(recovered.answers.level.choice).toBe("high");
+		expect(urls[3]).toBe("https://judge.example.test/v1/systemone");
+	});
+
+	it.each([
+		{ header: "retry-after", first: "60", second: "32400" },
+		{ header: "retry-after-ms", first: "60000", second: "32400000" },
+	])(
+		"keeps the earliest credential's original $header deadline after slow rotation",
+		async ({ header, first, second }) => {
+			const startedAt = 1_800_000_000_000;
+			let now = startedAt;
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const settings = Settings.isolated({
+				modelRoles: { judge: "typesafe/jev-preview" },
+				"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+			});
+			const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+			vi.spyOn(registry, "resolver").mockImplementation(target => {
+				if (typeof target === "string" || target.provider !== "typesafe") return () => "or-key";
+				return context => {
+					if (context.error === undefined) return "account-a";
+					return context.previousKey === "account-a" ? "account-b" : undefined;
+				};
+			});
+			const keys: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async (url, init) => {
+					const primary = String(url).endsWith("/v1/systemone");
+					const key = new Headers(init?.headers).get("authorization") ?? "";
+					keys.push(key);
+					if (primary && now < startedAt + 60_000) {
+						if (key === "Bearer account-b") now += 40_000;
+						return new Response("usage limit reached", {
+							status: 429,
+							headers: { [header]: key === "Bearer account-a" ? first : second },
+						});
+					}
+					return Response.json({
+						model: "jev-1.13.0",
+						answers: { level: { type: "choice", choice: primary ? "high" : "low" } },
+						usage: { input_tokens: 8, output_tokens: 2 },
+					});
+				}),
+			);
+			const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+
+			const initial = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+			expect(initial.answers.level.choice).toBe("low");
+			now = startedAt + 59_999;
+			const cooling = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+			expect(cooling.answers.level.choice).toBe("low");
+			now = startedAt + 60_000;
+			const recovered = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+
+			expect(recovered.answers.level.choice).toBe("high");
+			expect(keys).toEqual([
+				"Bearer account-a",
+				"Bearer account-b",
+				"Bearer or-key",
+				"Bearer or-key",
+				"Bearer account-a",
+			]);
+		},
+	);
+
+	it("does not restart an expired Retry-After after a slow terminal credential resolution", async () => {
+		const startedAt = 1_800_000_000_000;
+		let now = startedAt;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+		vi.spyOn(registry, "resolver").mockImplementation(target => {
+			if (typeof target === "string" || target.provider !== "typesafe") return () => "or-key";
+			return context => {
+				if (context.error === undefined) return "account-a";
+				now += 70_000;
+				return undefined;
+			};
+		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				const primary = String(url).endsWith("/v1/systemone");
+				if (primary && now === startedAt) {
+					return new Response("usage limit reached", { status: 429, headers: { "retry-after": "60" } });
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: primary ? "high" : "low" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+
+		const initial = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		const recovered = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+
+		expect(initial.answers.level.choice).toBe("low");
+		expect(recovered.answers.level.choice).toBe("high");
+	});
+
 	it("propagates caller abort without attempting a fallback", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` },

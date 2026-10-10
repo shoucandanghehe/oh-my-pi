@@ -18,6 +18,7 @@
 - Fixed resumed OpenAI Responses sessions (xAI, Factory Droid, OpenAI and other hosts) dropping all earlier encrypted reasoning on their first request; GitHub Copilot still rebuilds history until its first response ([#15148](https://github.com/can1357/oh-my-pi/pull/15148) by [@will-bogusz](https://github.com/will-bogusz))
 ### Fixed
 
+- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
 - Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
 - Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
 - Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
