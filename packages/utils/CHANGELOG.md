@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
+
 ## [18.8.9] - 2026-10-10
 
 ### Added
@@ -13,7 +17,6 @@
 ### Fixed
 
 - Fixed `formatDuration` printing `60.0s` for durations just under a minute; they now read `1m` ([#15121](https://github.com/can1357/oh-my-pi/pull/15121) by [@H4vC](https://github.com/H4vC))
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.8.7] - 2026-10-09
 
