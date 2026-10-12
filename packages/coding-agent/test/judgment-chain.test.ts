@@ -704,9 +704,9 @@ describe("ChainJudge", () => {
 	it("falls back promptly on a long Retry-After and skips the primary until its deadline", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
-			"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+			"retry.fallbackChains": { judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`] },
 		});
-		const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
 		const urls: string[] = [];
 		let limited = true;
 		vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -756,9 +756,9 @@ describe("ChainJudge", () => {
 			vi.spyOn(Date, "now").mockImplementation(() => now);
 			const settings = Settings.isolated({
 				modelRoles: { judge: "typesafe/jev-preview" },
-				"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+				"retry.fallbackChains": { judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`] },
 			});
-			const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+			const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
 			vi.spyOn(registry, "resolver").mockImplementation(target => {
 				if (typeof target === "string" || target.provider !== "typesafe") return () => "or-key";
 				return context => {
@@ -813,9 +813,9 @@ describe("ChainJudge", () => {
 		vi.spyOn(Date, "now").mockImplementation(() => now);
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
-			"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+			"retry.fallbackChains": { judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`] },
 		});
-		const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
 		vi.spyOn(registry, "resolver").mockImplementation(target => {
 			if (typeof target === "string" || target.provider !== "typesafe") return () => "or-key";
 			return context => {

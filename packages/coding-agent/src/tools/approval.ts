@@ -8,7 +8,11 @@
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { Settings } from "../config/settings";
-import type { ExtensionApprovalAnswer, ExtensionUIContext } from "../extensibility/extensions/types";
+import type {
+	ExtensionApprovalAnswer,
+	ExtensionUIContext,
+	ExtensionUIDialogOptions,
+} from "../extensibility/extensions/types";
 
 import { cfgToolsApproval, cfgToolsApprovalMode } from "./settings";
 
@@ -437,6 +441,7 @@ export async function requestApproval(
 	tool: ApprovalSubject,
 	args: unknown,
 	options: { reason?: string; appendix?: readonly string[]; sessionSubject?: string } = {},
+	dialogOptions?: ExtensionUIDialogOptions,
 ): Promise<ExtensionApprovalAnswer> {
 	const { reason, appendix = [], sessionSubject } = options;
 	const header = approvalHeader(tool, reason);
@@ -446,9 +451,9 @@ export async function requestApproval(
 	if (ui.approve) {
 		const summary = approvalSummary(details);
 		const compact = [...header, ...(summary === undefined ? [] : [summary]), ...appendix].join("\n");
-		const answer = await ui.approve({ full, compact, ...(session ? { session } : {}) });
+		const answer = await ui.approve({ full, compact, ...(session ? { session } : {}) }, dialogOptions);
 		return answer === "once" || (answer === "session" && session) ? answer : "deny";
 	}
-	const choice = await ui.select(full, session ? ["Approve", session, "Deny"] : ["Approve", "Deny"]);
+	const choice = await ui.select(full, session ? ["Approve", session, "Deny"] : ["Approve", "Deny"], dialogOptions);
 	return choice === "Approve" ? "once" : session && choice === session ? "session" : "deny";
 }

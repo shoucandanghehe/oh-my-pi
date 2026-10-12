@@ -15,15 +15,7 @@
  */
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type {
-	Context,
-	ImageContent,
-	MediaContent,
-	Message,
-	Model,
-	TextContent,
-	UserMessage,
-} from "@oh-my-pi/pi-ai";
+import type { Context, ImageContent, MediaContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
 import contextFramesNote from "../prompts/system/snapcompact-context-frames-note.md" with { type: "text" };

@@ -213,7 +213,7 @@ import sideChannelToolDenied from "../prompts/system/side-channel-tool-denied.md
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import shareSummaryWithMainDescription from "../prompts/tools/share-summary-with-main.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import {
 	deobfuscateAssistantContent,
@@ -222,7 +222,6 @@ import {
 	obfuscateProviderContext,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -8072,7 +8071,13 @@ export class AgentSession implements SettingsScope {
 		const preparationAttachments = attachments.length > 0 ? attachments : undefined;
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
 		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
-			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal, preparationAttachments);
+			return this.#prepareQueuedAutoPrewalkTask(
+				first,
+				promptText,
+				preparationImages,
+				signal,
+				preparationAttachments,
+			);
 		}
 		return this.#prepareAgentStart(
 			first,
@@ -8099,7 +8104,15 @@ export class AgentSession implements SettingsScope {
 		const generation = this.#promptGeneration;
 		await this.#prewalk.beginAutoTask();
 		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
-		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued", attachments);
+		const preparation = await this.#prepareAgentStart(
+			message,
+			prompt,
+			images,
+			generation,
+			signal,
+			"queued",
+			attachments,
+		);
 		const decision = await autoPrewalk;
 		return {
 			commit: () => {

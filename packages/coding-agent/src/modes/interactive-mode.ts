@@ -4280,7 +4280,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-			keepDanglingToolCalls: this.viewSession.isStreaming,
+			keepInFlightToolCalls: this.viewSession.isStreaming,
 		});
 		const preservedLiveTools = new Map(livePendingTools);
 		// Terminal results belong to replay; a background task's initial running

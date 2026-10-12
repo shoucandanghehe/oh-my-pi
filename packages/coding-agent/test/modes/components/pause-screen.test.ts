@@ -154,8 +154,9 @@ describe("pause screen", () => {
 				})
 				.join("\n");
 
-		it("shows the live hold clock, the session it holds, what the hold means, and one Resume", () => {
+		it("keeps Resume available beside durable exit once the paused session is ready", () => {
 			const { host } = makeHost();
+			agentPauseGate.pause();
 			const sheet = new PauseScreenComponent({ ...host, sessionName: "Credit backpressure" });
 			const root = sheet.describe();
 			const all = nodes(root);
@@ -168,8 +169,8 @@ describe("pause screen", () => {
 			expect(shown).toContain("The repo is yours");
 
 			const buttons = all.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
-			expect(buttons.length).toBe(1);
-			const resume = buttons[0]!.p as { tone?: string; title?: string; actions?: { click?: string } };
+			expect(buttons.map(button => button.p?.actions?.click)).toEqual(["exit", "resume"]);
+			const resume = buttons[1]!.p as { tone?: string; title?: string; actions?: { click?: string } };
 			expect(resume.tone).toBe("accent");
 			expect(resume.actions?.click).toBe("resume");
 			// The keys live in the tooltip: `Label  key` clauses.

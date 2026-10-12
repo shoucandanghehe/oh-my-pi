@@ -240,7 +240,7 @@ describe("SnapcompactInlineTransformer", () => {
 			],
 		};
 		const context: Context = {
-			messages: [userMessage("first user prompt"), audioResult, videoResult, toolResult("latest", LARGE)],
+			messages: [userMessage("first user prompt"), audioResult, videoResult, toolResult("latest", "done")],
 		};
 		const transformer = new SnapcompactInlineTransformer(
 			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
