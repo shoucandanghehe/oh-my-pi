@@ -198,7 +198,7 @@ export class BtwExtensionRuntime {
 							args[0],
 							args[2],
 							args[3],
-							context && !sendsToMain ? { ...context, xdevApproved: true } : context,
+							context && !sendsToMain ? { ...context, xdevPolicyKey: native.name } : context,
 						);
 						return { ...result, details: { xdev: dispatch } };
 					},

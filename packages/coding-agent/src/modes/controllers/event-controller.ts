@@ -2696,8 +2696,6 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
 		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();

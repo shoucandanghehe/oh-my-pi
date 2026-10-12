@@ -1,4 +1,4 @@
-import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText } from "./helpers/draft";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
@@ -160,7 +160,7 @@ export async function executeBuiltinSlashCommand(
 		runtime.ctx.showStatus(`/${command.name} is host-only during a collab session`);
 		// A detached draft already left the editor: give it back, images included.
 		if (runtime.draftDetached) {
-			restoreDetachedDraft(runtime.ctx.editor, parsed.text, runtime.input?.images, runtime.input?.imageLinks);
+			runtime.ctx.editor.restoreDetachedDraft(parsed.text, runtime.input?.images, runtime.input?.imageLinks);
 		} else {
 			clearSubmittedText(runtime);
 		}

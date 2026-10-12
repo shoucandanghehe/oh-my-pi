@@ -148,15 +148,7 @@ function stubJudgeVerdict(verdict: "YES" | "NO"): string[] {
 }
 
 function reminderMessages(messages: AgentMessage[]): AgentMessage[] {
-	return messages.filter((message): message is Extract<AgentMessage, { role: "developer" }> => {
-		if (message.role !== "developer") return false;
-		const text =
-			(typeof message.content === "string"
-				? message.content
-				: message.content.find((content): content is { type: "text"; text: string } => content.type === "text")
-						?.text) ?? "";
-		return text.includes("You said you would continue");
-	});
+	return messages.filter(message => message.role === "developer" && message.attribution === "agent");
 }
 
 afterEach(async () => {

@@ -101,7 +101,7 @@ async function createContext() {
 		void listener;
 	});
 	const addStartListener = vi.fn();
-	const terminalWrite = vi.fn();
+	const terminalWrite = vi.fn<(data: string) => void>();
 	const refreshAppearance = vi.fn();
 	const resetDisplayAfterAppearanceRefresh = vi.fn(() => {
 		refreshAppearance();
@@ -294,6 +294,7 @@ async function createContext() {
 			handleBtwBranchKey,
 			addStartListener,
 			addInputListener,
+			terminalWrite,
 			canBranchBtw,
 			hasActiveBtw,
 			handlesBtwBranchKey,
@@ -309,7 +310,11 @@ async function createContext() {
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=";
 
 /** Replay a kitty OSC 5522 enhanced paste that offers text and PNG and delivers `png` bytes. */
-function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array): void {
+function dispatchEnhancedImagePaste(
+	listeners: InputListener[],
+	png: Uint8Array,
+	terminalWrite: Mock<(data: string) => void>,
+): void {
 	const packet = (metadata: string, payload?: string) =>
 		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 	const imageMime = Buffer.from("image/png").toString("base64");
@@ -319,9 +324,15 @@ function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array)
 		packet(`type=read:status=DATA:mime=${textMime}`),
 		packet(`type=read:status=DATA:mime=${imageMime}`),
 		packet("type=read:status=DONE"),
-		packet("type=read:status=OK"),
-		packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from(png).toString("base64")),
-		packet("type=read:status=DONE"),
+	]) {
+		dispatchInput(listeners, input);
+	}
+	const id = /id=([^:;\x1b\x07]+)/.exec(terminalWrite.mock.calls.at(-1)?.[0] ?? "")?.[1];
+	if (!id) throw new Error("Expected an identified clipboard read request");
+	for (const input of [
+		packet(`type=read:id=${id}:status=OK`),
+		packet(`type=read:id=${id}:status=DATA:mime=${imageMime}`, Buffer.from(png).toString("base64")),
+		packet(`type=read:id=${id}:status=DONE`),
 	]) {
 		dispatchInput(listeners, input);
 	}
@@ -1198,7 +1209,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const listeners = registeredInputListeners(context.spies.addInputListener);
 		context.spies.addStartListener.mock.calls[0]?.[0]();
 
-		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"), context.spies.terminalWrite);
 		prompt.handleInput("\r");
 		expect(onSubmit).not.toHaveBeenCalled();
 		await submittedOnce.promise;
@@ -1333,7 +1344,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const listeners = registeredInputListeners(context.spies.addInputListener);
 		context.spies.addStartListener.mock.calls[0]?.[0]();
 
-		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"), context.spies.terminalWrite);
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
 		expect(context.editor.pendingImages).toHaveLength(0);

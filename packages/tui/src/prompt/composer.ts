@@ -852,6 +852,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 	renderAppViewportFrame(viewport: ViewportSize, targets: readonly Component[]): AppViewportFramePlan {
 		if (!this.#started || this.#stopped) {
 			this.#lastClickSpans = [];
+			this.#lastViewportRows = [];
+			this.#syncLinkHints([], 0);
 			return {
 				viewport: [],
 				estimatedTotalRows: 0,
@@ -865,6 +867,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 		const rows = Math.max(0, viewport.rows);
 		if (!this.#runtimeMounted) {
 			this.#lastClickSpans = [];
+			this.#lastViewportRows = [];
+			this.#syncLinkHints([], 0);
 			const scroll = this.#header.render(width);
 			const sticky = this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
 			const stickyRows = Math.min(rows, sticky.length);
@@ -912,10 +916,16 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 				end: Math.min(visible.length, span.end - offset),
 				candidates: (row, col) => span.candidates(row + Math.max(0, offset - span.start), col),
 			}));
+		this.#lastViewportRows = visible;
+		this.#lastViewportWidth = width;
+		this.#syncLinkHints(visible, width);
 		return {
-			viewport: roots.some(root => "setHoveredClickId" in root)
-				? visible
-				: this.#paintHoverBand(visible, this.#lastClickSpans),
+			viewport: this.#paintLinkHints(
+				roots.some(root => "setHoveredClickId" in root)
+					? visible
+					: this.#paintHoverBand(visible, this.#lastClickSpans),
+				width,
+			),
 			estimatedTotalRows: rendered.length,
 			offset,
 			stickyRows: 0,

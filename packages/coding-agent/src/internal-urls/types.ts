@@ -13,7 +13,7 @@ import type {
 	ToolApprovalDecision,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";

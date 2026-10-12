@@ -57,6 +57,9 @@
 - `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
 - `setProcessName()` no longer assigns `process.title` on Windows, where it overwrites the shared console title ([#16842](https://github.com/can1357/oh-my-pi/issues/16842))
 - Fixed inline code spans rendering flush against the surrounding text when a backslash preceded the closing backtick ([#16972](https://github.com/can1357/oh-my-pi/pull/16972) by [@akainth015](https://github.com/akainth015))
+### Fixed
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
 
 ## [18.12.6] - 2026-10-21
 

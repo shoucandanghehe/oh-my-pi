@@ -111,7 +111,11 @@ import {
 	SPECULATIVE_STREAM_SESSION,
 } from "./types";
 
-async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal, loopId?: symbol): Promise<void> {
+async function waitForProcessPause(
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	loopId: symbol,
+): Promise<void> {
 	try {
 		while (agentPauseGate.paused && !signal?.aborted) {
 			config.onPauseChange?.(true);
@@ -2128,7 +2132,7 @@ async function streamAssistantResponse(
 	// Context shaping and credential resolution above may yield after the loop's
 	// initial gate check. Re-check immediately before the provider call; there is
 	// no async gap after this point where a newly engaged pause could slip through.
-	if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal, loopId);
+	if (agentPauseGate.paused) await waitForProcessPause(config, signal, loopId);
 	if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
 		throw PAUSE_SHUTDOWN_ABORT_REASON;
 	}
@@ -3418,7 +3422,6 @@ async function executeToolCalls(
 			transformError: prepared.transformError,
 		};
 	});
-
 
 	const isToolAborted = (record: (typeof records)[number]): boolean =>
 		signal?.aborted === true ||

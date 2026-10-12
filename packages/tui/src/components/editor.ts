@@ -2980,7 +2980,7 @@ export class Editor implements Component, Focusable {
 			if (n > 0 && command.newline) this.#openVimLine(true);
 			if (command.overwrite) {
 				for (const seg of segmenter.segment(command.record.text)) {
-					if (seg.segment === "\n" || seg.segment === "\r\n") this.#addNewLine();
+					if (seg.segment === "\n" || seg.segment === "\r\n") this.insertNewLine();
 					else this.#overwriteReplaceGrapheme(seg.segment);
 				}
 			} else {

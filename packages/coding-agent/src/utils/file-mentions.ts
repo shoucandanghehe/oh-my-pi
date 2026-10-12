@@ -8,7 +8,6 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { EditStore } from "@oh-my-pi/pi-natives";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MediaContent } from "@oh-my-pi/pi-ai";
 import { formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
 import {
@@ -331,7 +330,6 @@ export async function generateFileMentionMessages(
 				});
 				continue;
 			}
-			const ext = path.extname(absolutePath).toLowerCase();
 			if (CONVERTIBLE_EXTENSIONS.has(ext)) {
 				const result = await convertFileWithMarkit(absolutePath, options?.signal);
 				if (options?.signal?.aborted) {

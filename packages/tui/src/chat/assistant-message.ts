@@ -18,7 +18,12 @@ import { Text } from "../components/text";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer, AssistantThinkingRenderResult } from "./extension-types";
+import type {
+	AssistantTextRenderer,
+	AssistantTextRendering,
+	AssistantThinkingRenderer,
+	AssistantThinkingRenderResult,
+} from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { getTranscriptActions, type TranscriptActions } from "./transcript-actions";

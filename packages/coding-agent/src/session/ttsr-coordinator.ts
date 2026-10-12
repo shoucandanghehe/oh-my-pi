@@ -355,7 +355,9 @@ export class TtsrCoordinator {
 		return `TTSR matched ${label}: ${rules.map(rule => rule.name).join(", ")}`;
 	}
 
-	#getInjectionContent(template: string): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
+	#getInjectionContent(
+		template: string,
+	): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
 		if (this.#pendingInjections.length === 0) return undefined;
 		const rules = this.#pendingInjections;
 		const matched = this.#pendingExcerpts;

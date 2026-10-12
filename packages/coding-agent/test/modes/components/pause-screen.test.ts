@@ -62,7 +62,14 @@ function makeHost(rows = 24): FakeHost {
 			},
 		},
 	};
-	return { host, shown, statuses, requestCount: () => requests, hiddenCount: () => hidden, pausedExitCount: () => pausedExits };
+	return {
+		host,
+		shown,
+		statuses,
+		requestCount: () => requests,
+		hiddenCount: () => hidden,
+		pausedExitCount: () => pausedExits,
+	};
 }
 
 describe("pause screen", () => {
@@ -381,6 +388,7 @@ describe("pause screen", () => {
 
 		it("shows outstanding status and counts in semantic text nodes", () => {
 			const { host } = makeHost();
+			agentPauseGate.pause();
 			const sheet = new PauseScreenComponent(
 				{ ...host, sessionName: "Credit backpressure" },
 				{ getWorkStatus: () => ({ unsettledTurns: 0, unfinishedJobs: 2 }) },
@@ -396,8 +404,8 @@ describe("pause screen", () => {
 			expect(shown).toContain("Unfinished jobs: 2");
 
 			const buttons = all.filter(n => (n.p as { role?: string } | undefined)?.role === "omp.btn");
-			expect(buttons.length).toBe(1);
-			const resume = buttons[0]!.p as { tone?: string; title?: string; actions?: { click?: string } };
+			expect(buttons.map(button => button.p?.actions?.click)).toEqual(["exit", "resume"]);
+			const resume = buttons[1]!.p as { tone?: string; title?: string; actions?: { click?: string } };
 			expect(resume.tone).toBe("accent");
 			expect(resume.actions?.click).toBe("resume");
 			expect(resume.title).toStartWith("Resume  esc");
@@ -602,12 +610,18 @@ describe("pause screen", () => {
 			const component = shown[0];
 			if (!(component instanceof PauseScreenComponent)) throw new Error("expected PauseScreenComponent");
 			try {
+				expect(component.nativeOverlay.head).toBe("Pausing");
+				const pendingText = component.render(80).map(stripAnsi).join("\n");
+				expect(pendingText).toContain("Pausing");
+				expect(pendingText).not.toContain("Unsettled turns:");
+				expect(pendingText).not.toContain("Unfinished jobs:");
 				expect(JSON.stringify(component.describe())).not.toContain('"click":"exit"');
 				component.handleNativeEvent({ type: "action", key: "exit", act: "exit", mods: [] });
 				expect(pausedExitCount()).toBe(0);
 				expect(agentPauseGate.paused).toBe(true);
 
 				const waiter = agentPauseGate.waitUntilResumed(undefined, loop);
+				expect(component.nativeOverlay.head).toBe("Paused");
 				expect(JSON.stringify(component.describe())).toContain('"click":"exit"');
 				component.handleNativeEvent({ type: "action", key: "exit", act: "exit", mods: [] });
 				expect(await run).toBe("exited");

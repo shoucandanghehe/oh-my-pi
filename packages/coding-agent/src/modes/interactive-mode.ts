@@ -2860,29 +2860,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.setupEditorSubmitHandler();
 		// Native transcript controls (user-message toolbar, error-frame actions)
 		// run the same commands as their key bindings.
-		setTranscriptActionHandler(action => {
-			switch (action.act) {
-				case "retry":
-					void this.#inputController.handleRetry();
-					return;
-				case "switch-model":
-					this.showModelSelector({ temporaryOnly: true });
-					return;
-				case "rewind":
-					this.showUserMessageSelector();
-					return;
-				case "resume":
-					this.handleResumeSession(action.path, { followContinuation: true }).catch((error: unknown) =>
-						this.showError(error instanceof Error ? error.message : String(error)),
-					);
-					return;
-				case "copy":
-					copyToClipboard(action.text).then(
-						() => this.showStatus("Copied to clipboard"),
-						(error: unknown) =>
-							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
-					);
-			}
+		setTranscriptActions({
+			retry: () => void this.#inputController.handleRetry(),
+			switchModel: () => this.showModelSelector({ temporaryOnly: true }),
+			rewind: () => this.showUserMessageSelector(),
+			copy: text => {
+				copyToClipboard(text).then(
+					() => this.showStatus("Copied to clipboard"),
+					(error: unknown) =>
+						this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
+				);
+			},
 		});
 
 		// Wire observer registry to EventBus
@@ -4989,7 +4977,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-			keepDanglingToolCalls: this.viewSession.isStreaming,
+			keepInFlightToolCalls: this.viewSession.isStreaming,
 		});
 		const preservedLiveTools = new Map(livePendingTools);
 		// Terminal results belong to replay; a background task's initial running

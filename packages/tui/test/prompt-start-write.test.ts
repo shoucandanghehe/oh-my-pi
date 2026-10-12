@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
-import { TUI } from "@oh-my-pi/pi-tui";
+import { Text, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
@@ -30,44 +30,56 @@ class StatusTerminal extends VirtualTerminal {
 }
 
 describe("prompt-zone paints and program status lifetime", () => {
-	it("restores working and blocked after real redraws, not identical diff paints", async () => {
-		const terminal = new StatusTerminal(80, 8);
-		const scheduler = new VirtualRenderScheduler();
-		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
-		const message = new UserMessageComponent("Run sleep 15");
-		tui.setFrameProvider({
-			renderFrame: size => ({ viewport: [...message.render(size.columns), "status"] }),
-			acknowledgeHistory() {},
-		});
-		let currentStatus = "idle";
-		const unsubscribe = tui.addFrameWriteListener(frame => {
-			if (frame.includes(PROMPT_START)) terminal.report(currentStatus);
-		});
-		try {
-			tui.start();
-			await scheduler.settle(terminal);
-			for (const state of ["working", "blocked"]) {
-				currentStatus = state;
-				terminal.report(state);
-				const before = terminal.reports;
-				tui.requestRender(true);
-				await scheduler.settle(terminal);
-				expect(terminal.status).toBe(state);
-				expect(terminal.reports).toBe(before + 1);
-
-				tui.requestRender();
-				await scheduler.settle(terminal);
-				expect(terminal.reports).toBe(before + 1);
+	it.each(["native", "app-viewport"])(
+		"%s restores working and blocked after real redraws, not identical diff paints",
+		async backend => {
+			const previousBackend = process.env.PI_TUI_RENDER_BACKEND;
+			process.env.PI_TUI_RENDER_BACKEND = backend;
+			const terminal = new StatusTerminal(80, 8);
+			const scheduler = new VirtualRenderScheduler();
+			const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+			const message = new UserMessageComponent("Run sleep 15");
+			if (backend === "app-viewport") {
+				tui.addChild(message);
+				tui.addChild(new Text("status"));
+			} else {
+				tui.setFrameProvider({
+					renderFrame: size => ({ viewport: [...message.render(size.columns), "status"] }),
+					acknowledgeHistory() {},
+				});
 			}
-			currentStatus = "working";
-			terminal.report(currentStatus);
-			terminal.resize(70, 8);
-			await scheduler.advance(terminal, 180);
-			expect(terminal.status).toBe("working");
-			expect(terminal.promptStarts).toBeGreaterThanOrEqual(3);
-		} finally {
-			unsubscribe();
-			tui.stop();
-		}
-	});
+			let currentStatus = "idle";
+			const unsubscribe = tui.addFrameWriteListener(frame => {
+				if (frame.includes(PROMPT_START)) terminal.report(currentStatus);
+			});
+			try {
+				tui.start();
+				await scheduler.settle(terminal);
+				for (const state of ["working", "blocked"]) {
+					currentStatus = state;
+					terminal.report(state);
+					const before = terminal.reports;
+					tui.requestRender(true);
+					await scheduler.settle(terminal);
+					expect(terminal.status).toBe(state);
+					expect(terminal.reports).toBe(before + 1);
+
+					tui.requestRender();
+					await scheduler.settle(terminal);
+					expect(terminal.reports).toBe(before + 1);
+				}
+				currentStatus = "working";
+				terminal.report(currentStatus);
+				terminal.resize(70, 8);
+				await scheduler.advance(terminal, 180);
+				expect(terminal.status).toBe("working");
+				expect(terminal.promptStarts).toBeGreaterThanOrEqual(3);
+			} finally {
+				unsubscribe();
+				tui.stop();
+				if (previousBackend === undefined) delete process.env.PI_TUI_RENDER_BACKEND;
+				else process.env.PI_TUI_RENDER_BACKEND = previousBackend;
+			}
+		},
+	);
 });

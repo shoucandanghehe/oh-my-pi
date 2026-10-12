@@ -101,7 +101,6 @@ function formatClock(ms: number): string {
 	return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-
 /**
  * Paint the pause scene as exactly `height` rows, vertically centered.
  * Exported for tests.
@@ -117,7 +116,8 @@ export function renderPauseScreen(
 	const screenWidth = Math.max(1, Math.floor(width));
 	const screenHeight = Math.max(1, Math.floor(height));
 	const compact = screenWidth < MIN_FULL_WIDTH || screenHeight < MIN_FULL_HEIGHT;
-	const outstanding = !barrierReady || workStatus.unsettledTurns > 0 || workStatus.unfinishedJobs > 0;
+	const hasOutstandingWork = workStatus.unsettledTurns > 0 || workStatus.unfinishedJobs > 0;
+	const outstanding = !barrierReady || hasOutstandingWork;
 	const status = outstanding ? "Pausing — waiting for work to settle" : "Paused — ready to suspend";
 	const workCounts = [
 		`Unsettled turns: ${workStatus.unsettledTurns}`,
@@ -126,20 +126,23 @@ export function renderPauseScreen(
 	const content: string[] = [];
 	// Resume keys mirror PauseScreenComponent#handleInput: `app.interrupt` (raw Escape when unbound), Enter, Space.
 	const esc = interruptKey();
-	const TITLE = outstanding ? TITLE_PAUSING : TITLE_PAUSED;
+	const title = outstanding ? TITLE_PAUSING : TITLE_PAUSED;
 
 	if (compact) {
 		const sessionLine = sessionName
 			? centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd()
 			: undefined;
-		const titleLine = centerLine(theme.bold(theme.fg("accent", `▌▌ ${TITLE}`)), screenWidth).trimEnd();
+		const titleLine = centerLine(theme.bold(theme.fg("accent", `▌▌ ${title}`)), screenWidth).trimEnd();
 		const clockLine = centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd();
 		const statusLine = centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd();
-		const resumeLine = centerLine(theme.fg("dim", `${esc} to resume`), screenWidth).trimEnd();
+		const resumeLine = centerLine(
+			theme.fg("dim", `${esc} to resume${barrierReady ? " · q exit paused" : ""}`),
+			screenWidth,
+		).trimEnd();
 		const fullContent: string[] = [];
 		if (sessionLine) fullContent.push(sessionLine);
 		fullContent.push(titleLine, "", clockLine, statusLine);
-		if (outstanding)
+		if (hasOutstandingWork)
 			fullContent.push(...workCounts.map(line => centerLine(theme.fg("muted", line), screenWidth).trimEnd()));
 		fullContent.push(resumeLine);
 
@@ -149,27 +152,29 @@ export function renderPauseScreen(
 			// Keep the live state and a way out on screen before the decorative card details.
 			if (screenHeight === 1) {
 				const counts = `T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
-				const summary = outstanding ? `${counts} · ${esc} to resume` : `Paused · ${esc} to resume`;
-				const abbreviatedSummary = outstanding
+				const summary = hasOutstandingWork
+					? `${counts} · ${esc} to resume`
+					: `${outstanding ? "Pausing" : "Paused"} · ${esc} to resume`;
+				const abbreviatedSummary = hasOutstandingWork
 					? `T${workStatus.unsettledTurns} J${workStatus.unfinishedJobs} ${esc} resume`
 					: `${esc} resume`;
 				const visibleSummary = visibleWidth(summary) > screenWidth ? abbreviatedSummary : summary;
 				content.push(
 					centerLine(theme.fg(outstanding ? "warning" : "success", visibleSummary), screenWidth).trimEnd(),
 				);
-			} else if (screenHeight === 2 && outstanding) {
+			} else if (screenHeight === 2 && hasOutstandingWork) {
 				const counts = `Pausing · T:${workStatus.unsettledTurns} J:${workStatus.unfinishedJobs}`;
 				content.push(centerLine(theme.fg("warning", counts), screenWidth).trimEnd(), resumeLine);
 			} else {
 				content.push(statusLine);
-				if (outstanding && screenHeight === 3) {
+				if (hasOutstandingWork && screenHeight === 3) {
 					content.push(
 						centerLine(
 							theme.fg("muted", `Turns: ${workStatus.unsettledTurns} · Jobs: ${workStatus.unfinishedJobs}`),
 							screenWidth,
 						).trimEnd(),
 					);
-				} else if (outstanding) {
+				} else if (hasOutstandingWork) {
 					content.push(...workCounts.map(line => centerLine(theme.fg("muted", line), screenWidth).trimEnd()));
 				}
 				content.push(resumeLine);
@@ -179,7 +184,6 @@ export function renderPauseScreen(
 			if (content.length < screenHeight) content.push(titleLine);
 			if (content.length < screenHeight) content.push(clockLine);
 		}
-
 	} else {
 		if (sessionName) {
 			content.push(centerLine(theme.bold(sessionName.replace(/\s+/g, " ").trim()), screenWidth).trimEnd());
@@ -191,19 +195,19 @@ export function renderPauseScreen(
 			content.push(centerLine(theme.fg("accent", glyphRow), screenWidth).trimEnd());
 		}
 		content.push("");
-		content.push(centerLine(theme.bold(theme.fg("accent", TITLE)), screenWidth).trimEnd());
+		content.push(centerLine(theme.bold(theme.fg("accent", title)), screenWidth).trimEnd());
 		content.push("");
 		for (const line of BODY_LINES) {
 			content.push(centerLine(theme.fg("muted", line), screenWidth).trimEnd());
 		}
 		content.push(centerLine(theme.fg(outstanding ? "warning" : "success", status), screenWidth).trimEnd());
-		if (outstanding) {
+		if (hasOutstandingWork) {
 			content.push(centerLine(theme.fg("muted", workCounts[0]!), screenWidth).trimEnd());
 			content.push(centerLine(theme.fg("muted", workCounts[1]!), screenWidth).trimEnd());
 		}
 		content.push(centerLine(theme.fg("dim", `paused for ${formatClock(elapsedMs)}`), screenWidth).trimEnd());
 		content.push("");
-		const resumeHint = `${esc} · ${formatKeyHint("enter")} · ${formatKeyHint("space")} — resume`;
+		const resumeHint = `${esc} · ${formatKeyHint("enter")} · ${formatKeyHint("space")} — resume${barrierReady ? " · q — exit paused" : ""}`;
 		content.push(centerLine(theme.fg("dim", resumeHint), screenWidth).trimEnd());
 	}
 
@@ -318,8 +322,15 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 		return true;
 	}
 
-	/** A glass sheet titled "Paused" (not the whole pane: the transcript stays visible, frozen). */
-	readonly nativeOverlay = { role: "omp.overlay.pause", size: "md", anchor: "center", head: "Paused" } as const;
+	/** A glass sheet over the frozen transcript. */
+	get nativeOverlay() {
+		return {
+			role: "omp.overlay.pause",
+			size: "md",
+			anchor: "center",
+			head: agentPauseGate.activeLoopCount === agentPauseGate.modelWaiterCount ? "Paused" : "Pausing",
+		} as const;
+	}
 
 	/**
 	 * The sheet: a hero (the pause glyph beside the live hold clock and the
@@ -329,7 +340,8 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 	describe(): NativeNode {
 		if (this.#native) return this.#native;
 		const snapshot = this.#workSnapshot;
-		const outstanding = snapshot.unsettledTurns > 0 || snapshot.unfinishedJobs > 0;
+		const hasOutstandingWork = snapshot.unsettledTurns > 0 || snapshot.unfinishedJobs > 0;
+		const outstanding = agentPauseGate.activeLoopCount !== agentPauseGate.modelWaiterCount || hasOutstandingWork;
 		const status = col(
 			[
 				keyed(
@@ -344,7 +356,7 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 					),
 					"settlement",
 				),
-				...(outstanding
+				...(hasOutstandingWork
 					? [
 							keyed(
 								text([span(`Unsettled turns: ${snapshot.unsettledTurns}`, "muted")], {
@@ -434,7 +446,12 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 				actionBar([
 					null,
 					...(agentPauseGate.ready
-						? [actionButton("Exit paused", "exit", { keys: "q", title: "Exit paused; resume later with /continue" })]
+						? [
+								actionButton("Exit paused", "exit", {
+									keys: "q",
+									title: "Exit paused; resume later with /continue",
+								}),
+							]
 						: []),
 					actionButton("Resume", "resume", {
 						keys: resumeKey,

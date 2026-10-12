@@ -6,7 +6,6 @@ import {
 	type AutocompleteProvider,
 	BRACKETED_PASTE_END,
 	BRACKETED_PASTE_START,
-	type Component,
 	emergencyTerminalRestore,
 	isKeyRelease,
 	isKeyRepeat,
@@ -426,7 +425,7 @@ export class InputController {
 					this.#configurePasteEditor(target);
 					return undefined;
 				}
-				if (target === this.ctx.editor) return undefined;
+				if (!target || target === this.ctx.editor) return undefined;
 				if (!this.ctx.keybindings.matches(data, "app.clipboard.pasteImage")) return undefined;
 				void this.handleImagePaste(target);
 				return { consume: true };
@@ -544,7 +543,9 @@ export class InputController {
 					this.#updateHoverHighlight(event.row, event.col);
 					return false;
 				}
-				if (!event.leftClick || this.#viewportCandidates(event.row, event.col).length === 0) return false;
+				if (!event.leftClick) return false;
+				if (this.#activateClickedLink(event.row, event.col)) return true;
+				if (this.#viewportCandidates(event.row, event.col).length === 0) return false;
 				this.#focusClickedAgent(event.row, event.col);
 				return true;
 			});
@@ -2234,7 +2235,7 @@ export class InputController {
 	): Promise<void> {
 		// Ctrl+Enter detached the draft before the first await, so a side command
 		// has no editor state left to release; a render failure hands it back.
-		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
+		const restoreSideDraft = { restore: () => this.ctx.editor.restoreDetachedDraft(text, images, imageLinks) };
 
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a

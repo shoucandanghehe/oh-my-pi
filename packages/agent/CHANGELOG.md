@@ -63,6 +63,19 @@
 - Fixed native compaction token estimates counting opaque encrypted-state bytes as conversation text ([#16904](https://github.com/can1357/oh-my-pi/pull/16904) by [@eggpeat](https://github.com/eggpeat))
 - Fixed split-turn compaction leaving `session.compacting` context out of the turn-prefix summary ([#16707](https://github.com/can1357/oh-my-pi/pull/16707) by [@integrITsolutions](https://github.com/integrITsolutions))
 - Fixed compaction failing as a whole, and discarding the completed summary, when the optional short summary fails or returns no answer; the compaction now completes without a short summary, and cancellation still cancels it ([#16942](https://github.com/can1357/oh-my-pi/pull/16942) by [@Mouriya-Emma](https://github.com/Mouriya-Emma))
+### Added
+
+- Agents, child conversations, and Codex streamed compaction now accept `preferWebsockets: "only"` to prevent SSE fallback after WebSocket failures.
+- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
+- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
+- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
+- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
+- Added `advertisedTools` (and `advertiseParentTools` for `createChild()`) to declare a different tool catalog to the provider than the tools a loop may execute, so a restricted child can share its parent's cached prompt prefix.
+
+### Changed
+
+- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
+- Incremental compaction summaries now drop goals, steps, and constraints the user cancelled or replaced instead of carrying every earlier item forward.
 
 ## [18.12.4] - 2026-10-20
 
@@ -95,19 +108,6 @@
 ### Fixed
 
 - Fixed Cursor turns failing with `PROVIDER_ERROR` when a follow-up (a finished background job, a late diagnostic, a reminder) arrived while the previous turn was still streaming ([#15821](https://github.com/can1357/oh-my-pi/pull/15821) by [@robfeldmann](https://github.com/robfeldmann))
-### Added
-
-- Agents, child conversations, and Codex streamed compaction now accept `preferWebsockets: "only"` to prevent SSE fallback after WebSocket failures.
-- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
-- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
-- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
-- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
-- Added `advertisedTools` (and `advertiseParentTools` for `createChild()`) to declare a different tool catalog to the provider than the tools a loop may execute, so a restricted child can share its parent's cached prompt prefix.
-
-### Changed
-
-- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
-- Incremental compaction summaries now drop goals, steps, and constraints the user cancelled or replaced instead of carrying every earlier item forward.
 
 ## [18.11.3] - 2026-10-16
 

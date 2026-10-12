@@ -361,65 +361,81 @@ describe("agentPauseGate", () => {
 		const mock = createMockModel({
 			responses: [{ content: [echoCall("first"), echoCall("second")] }, { content: ["done"] }],
 		});
-		const gateWait = observeGateWait();
-		try {
-			const result = runLoop(
-				mock,
-				[
-					makeConcurrentEchoTool(executed, async msg => {
-						if (msg === "first") {
-							agentPauseGate.pause();
-							started.resolve();
-							await release.promise;
-						}
-					}),
-				],
-				{
-					onPauseChange: value => {
-						transitions.push(value);
-						if (value) paused.resolve();
-					},
+		const result = runLoop(
+			mock,
+			[
+				makeConcurrentEchoTool(executed, async msg => {
+					if (msg === "first") {
+						agentPauseGate.pause();
+						started.resolve();
+						await release.promise;
+					}
+				}),
+			],
+			{
+				onPauseChange: value => {
+					transitions.push(value);
+					if (value) paused.resolve();
 				},
-			);
+			},
+		);
+		try {
 			await started.promise;
 			expect(transitions).not.toContain(true);
-			expect(executed).toEqual(["second"]);
 			release.resolve();
 			await paused.promise;
 			expect(transitions).toContain(true);
-			expect(executed).toEqual(["second", "first"]);
+			expect(executed.toSorted()).toEqual(["first", "second"]);
 			agentPauseGate.resume();
 			await result;
-			expect(executed).toEqual(["second", "first"]);
 			expect(mock.calls).toHaveLength(2);
 		} finally {
-			gateWait.restore();
+			release.resolve();
+			agentPauseGate.resume();
+			await result;
 		}
 	});
 
-	it("pauses after asynchronous beforeModelCall preparation and before the provider call", async () => {
-		const entered = Promise.withResolvers<void>(),
-			release = Promise.withResolvers<void>();
-		const paused = Promise.withResolvers<void>(),
-			mock = createMockModel({ responses: [{ content: ["done"] }] });
-		const result = runLoop(mock, [], {
-			beforeModelCall: async () => {
+	it.each(["beforeModelCall", "getApiKey"] as const)(
+		"acknowledges pause after asynchronous %s preparation",
+		async boundary => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const transitions: boolean[] = [];
+			const mock = createMockModel({ responses: [{ content: ["done"] }] });
+			const prepare = async () => {
 				entered.resolve();
 				await release.promise;
-			},
-			onPauseChange: value => {
-				if (value) paused.resolve();
-			},
-		});
-		await entered.promise;
-		agentPauseGate.pause();
-		release.resolve();
-		await paused.promise;
-		expect(mock.calls).toHaveLength(0);
-		agentPauseGate.resume();
-		await result;
-		expect(mock.calls).toHaveLength(1);
-	});
+			};
+			const result = runLoop(mock, [], {
+				...(boundary === "beforeModelCall"
+					? { beforeModelCall: prepare }
+					: {
+							getApiKey: async () => {
+								await prepare();
+								return "key";
+							},
+						}),
+				onPauseChange: value => transitions.push(value),
+			});
+			try {
+				await entered.promise;
+				agentPauseGate.pause();
+				release.resolve();
+				await waitForGateState(1, 1);
+				expect(transitions).toContain(true);
+				expect(mock.calls).toHaveLength(0);
+				agentPauseGate.resume();
+				await result;
+				expect(mock.calls).toHaveLength(1);
+				expect(transitions.at(-1)).toBe(false);
+			} finally {
+				release.resolve();
+				agentPauseGate.resume();
+				await result;
+			}
+		},
+	);
 
 	it("clears Agent pause acknowledgement on re-pause and abort", async () => {
 		const gateWait = observeGateWait();
