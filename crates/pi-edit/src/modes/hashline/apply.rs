@@ -1304,7 +1304,7 @@ pub fn apply_edits(
 		// and closers.
 		let untrimmed = materialize(&lines, &landed);
 		if parses_cleanly(options.path, &untrimmed.0) {
-			normalized = landed.clone();
+			normalized.clone_from(&landed);
 			authored = untrimmed;
 			authored_parses = true;
 			echo_warnings.clear();

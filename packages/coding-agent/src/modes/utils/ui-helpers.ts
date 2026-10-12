@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
@@ -1316,31 +1316,38 @@ export class UiHelpers {
 			{
 				label: "Steering",
 				messages: [...queuedMessages.steering],
-				edits: queuedMessages.steering.map((_, index) => session.getQueuedMessageEditAction("steering", index)),
+				edits: queuedMessages.steering.map((_, index) => {
+					const edit = session.getQueuedMessageEditAction("steering", index);
+					return edit ? () => void this.ctx.handleQueuedMessageEdit(edit) : undefined;
+				}),
 				liveSteered: queuedMessages.liveSteered,
 			},
 			{
 				label: "After yield",
 				messages: [...queuedMessages.followUp],
-				edits: queuedMessages.followUp.map((_, index) => session.getQueuedMessageEditAction("followUp", index)),
+				edits: queuedMessages.followUp.map((_, index) => {
+					const edit = session.getQueuedMessageEditAction("followUp", index);
+					return edit ? () => void this.ctx.handleQueuedMessageEdit(edit) : undefined;
+				}),
 			},
 		];
 		if (!this.ctx.focusedAgentId) {
 			if (this.ctx.yieldCompaction) {
 				groups[1].messages.push(this.ctx.yieldCompaction.text);
-				groups[1].edits.push(async () => {
-					this.ctx.restoreCompactionQueueToEditor();
-					return undefined;
+				groups[1].edits.push(() => {
+					this.ctx.restoreCompactionQueueToEditor("Restored queued compaction and held input to editor");
 				});
 			}
 			for (const entry of this.ctx.compactionQueuedMessages) {
 				const group = groups[entry.mode === "steer" ? 0 : 1];
 				group.messages.push(entry.text);
-				group.edits.push(async () => {
-					const index = this.ctx.compactionQueuedMessages.indexOf(entry);
-					if (index < 0) return undefined;
-					this.ctx.compactionQueuedMessages.splice(index, 1);
-					return { text: entry.text, images: entry.images };
+				group.edits.push(() => {
+					void this.ctx.handleQueuedMessageEdit(async () => {
+						const index = this.ctx.compactionQueuedMessages.indexOf(entry);
+						if (index < 0) return undefined;
+						this.ctx.compactionQueuedMessages.splice(index, 1);
+						return { text: entry.text, images: entry.images };
+					});
 				});
 			}
 		}
@@ -1349,8 +1356,7 @@ export class UiHelpers {
 			const dequeueKey = this.ctx.keybindings.getKeys("app.message.dequeue")[0] ?? "alt+up";
 			this.ctx.pendingMessagesContainer.addChild(
 				new QueuedMessagesBand(visibleGroups, dequeueKey, (group, index) => {
-					const edit = visibleGroups[group]?.edits[index];
-					if (edit) void this.ctx.handleQueuedMessageEdit(edit);
+					visibleGroups[group]?.edits[index]?.();
 				}),
 			);
 		}
@@ -1389,6 +1395,7 @@ export class UiHelpers {
 	): Promise<void> {
 		const builtin = await executeBuiltinSlashCommand(message.text, {
 			ctx: this.ctx,
+			draftDetached: true,
 			input: message.images ? { images: message.images } : undefined,
 		});
 		if (builtin === true) {

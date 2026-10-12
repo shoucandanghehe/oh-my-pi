@@ -6,9 +6,14 @@ import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import type { ExtensionFactory, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionFactory,
+	PreparedExtension,
+	ToolInfo,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { BtwExtensionRuntime } from "@oh-my-pi/pi-coding-agent/session/btw-extension-runtime";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { hasFileDeleteFallback, hasFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -471,5 +476,59 @@ describe("durable BTW extension runtime", () => {
 		expect(toolContext?.localProtocolOptions).toBeUndefined();
 		expect(toolContext?.toolApprovalPreview).toBe("never");
 		await conversation.disposeExtensionRuntime();
+	});
+	it("keeps a mounted device's explicit approval separate from the outer write approval", async () => {
+		const write = createMainWriteTool();
+		const github: AgentTool = {
+			name: "github",
+			label: "GitHub",
+			description: "Read repository files",
+			parameters: type({ op: "string" }),
+			approval: "read",
+			execute: vi.fn(async () => ({ content: [{ type: "text" as const, text: "unapproved data" }] })),
+		};
+		const side = await BtwExtensionRuntime.create({
+			agent: new Agent({ initialState: { model, systemPrompt: [], messages: [], tools: [write] } }),
+			mainTools: [write],
+			availableTools: [write, github],
+			mountedNames: ["github"],
+			preparedExtensions: [],
+			modelRegistry: { getAvailable: () => [model] } as never,
+			settings: Settings.isolated({ "tools.approvalMode": "yolo", "tools.approval": { github: "prompt" } }),
+			cwd: process.cwd(),
+			toolInfos: [write, github].map(
+				tool =>
+					({
+						name: tool.name,
+						description: tool.description,
+						parameters: tool.parameters,
+						sourceInfo: {
+							path: `<builtin:${tool.name}>`,
+							source: "builtin",
+							scope: "temporary",
+							origin: "top-level",
+						},
+					}) satisfies ToolInfo,
+			),
+			isReadOnlyToolCall: (_tool, args) => args.op === "file_read",
+		});
+		try {
+			const deviceWrite = side.tools.find(tool => tool.name === "write");
+			if (!deviceWrite) throw new Error("Expected the BTW device transport");
+			const result = await deviceWrite.execute(
+				"read-device",
+				{ path: "xd://github", content: '{"op":"file_read"}' },
+				undefined,
+				undefined,
+				side.createToolContext(),
+			);
+			expect(result.isError).toBe(true);
+			expect(result.content).toContainEqual(
+				expect.objectContaining({ type: "text", text: expect.stringContaining('Tool "github" requires approval') }),
+			);
+			expect(github.execute).not.toHaveBeenCalled();
+		} finally {
+			await side.dispose();
+		}
 	});
 });

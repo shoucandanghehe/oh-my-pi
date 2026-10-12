@@ -56,6 +56,7 @@ function setup(readText: () => Promise<string> = async () => ""): { editor: Cust
 		keybindings: new KeybindingsManager(),
 		session: { extensionRunner: undefined },
 		viewSession: { prewarmModelConnection: () => {} },
+		syncIdleMaintenanceView: () => {},
 		isBashMode: false,
 		isPythonMode: false,
 		dictationSpaceHold: () => undefined,

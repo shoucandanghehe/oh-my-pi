@@ -56,6 +56,11 @@ async function createHarness(factory: ExtensionFactory, nativeRendering = false)
 		isStreaming: true,
 		isCompacting: false,
 		queuedMessageCount: 0,
+		customCommands: [],
+		promptTemplates: [],
+		hasPendingAsyncWork: () => false,
+		waitForIdle: async () => {},
+		waitForAdmittedSubmissions: async () => {},
 		prompt,
 		followUp: vi.fn(async (_text: string, _images?: ImageContent[]) => {}),
 		buildUserSkillPrompt: buildSkillPromptMessage,
@@ -99,18 +104,26 @@ async function createHarness(factory: ExtensionFactory, nativeRendering = false)
 		flushPendingBashComponents: vi.fn(),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
+		showWarning: vi.fn(),
+		runYieldCompaction: vi.fn(),
+		handleCompactCommand: vi.fn(async () => "ok" as const),
+		hasPendingSubmission: () => false,
 		handleClearCommand: vi.fn(),
 		resetDisplayAfterAppearanceRefresh: vi.fn(),
 		shutdown: vi.fn(async () => {}),
 		clearEditor: () => editor.clearDraft(),
 		withLocalSubmission: async <T>(_text: string, submit: () => Promise<T>) => submit(),
+		recordLocalSubmission: () => () => {},
 		isGuidedGoalInterviewActive: () => false,
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
+	ctx.flushCompactionQueue = options => helpers.flushCompactionQueue(options);
+	ctx.isKnownSlashCommand = text => helpers.isKnownSlashCommand(text);
 	ctx.queueCompactionMessage = (text, mode, images, options) =>
 		helpers.queueCompactionMessage(text, mode, images, options);
 	const controller = new InputController(ctx);
-	ctx.handleQueueCommand = (message, detached) => controller.handleQueueCommand(message, detached);
+	ctx.handleQueueCommand = (message, detached, origin) => controller.handleQueueCommand(message, detached, origin);
+	ctx.waitForSubmissionDispatches = () => controller.waitForSubmissionDispatches();
 	controller.setupKeyHandlers();
 	controller.setupEditorSubmitHandler();
 	const onSubmit = editor.onSubmit;
@@ -292,6 +305,165 @@ describe("interactive native input ingress", () => {
 		h.draftWithImage("/queue inspect [Image #1]");
 		await h.pressSubmit(FOLLOW_UP);
 		expect(h.session.followUp.mock.calls).toEqual([["inspect [Image #1]", [originalImage]]]);
+	});
+
+	it.each(["/queue", "->", "=>"])(
+		"%s /compact stays local, preserves mode/focus, and holds subsequent explicit input",
+		async prefix => {
+			const h = await createHarness(() => {});
+			h.editor.setText(`${prefix} /compact soft retain the open task`);
+			await h.pressSubmit(ENTER);
+			h.editor.setText("/queue continue after compression");
+			await h.pressSubmit(ENTER);
+
+			expect(h.ctx.yieldCompaction).toEqual({
+				sessionId: h.ctx.sessionManager.getSessionId(),
+				leafId: null,
+				text: "/compact soft retain the open task",
+				mode: "soft",
+				instructions: "retain the open task",
+			});
+			expect(h.ctx.compactionQueuedMessages).toEqual([
+				{ text: "continue after compression", mode: "followUp", images: undefined },
+			]);
+			expect(h.ctx.runYieldCompaction).toHaveBeenCalledTimes(1);
+			expect(h.session.abort).not.toHaveBeenCalled();
+			expect(h.session.followUp).not.toHaveBeenCalled();
+			expect(h.prompt).not.toHaveBeenCalled();
+			expect(h.editor.getText()).toBe("");
+		},
+	);
+
+	it("places a queued list's prefix before compaction and its suffix after it without replacing the current draft", async () => {
+		const h = await createHarness(() => {});
+		h.editor.setText("/queue older session input");
+		await h.pressSubmit(ENTER);
+		h.editor.setText("=>\n1. before compact\n2. /compact soft retain the open task\n3. after compact");
+		await h.pressSubmit(ENTER);
+		expect(h.session.followUp.mock.calls).toEqual([
+			["older session input", undefined],
+			["before compact", undefined],
+		]);
+		expect(h.ctx.compactionQueuedMessages).toEqual([{ text: "after compact", mode: "followUp", images: undefined }]);
+		expect(h.prompt).not.toHaveBeenCalled();
+		expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+
+		// The session has finished its older follow-ups. Drive the existing watcher rather than
+		// manufacturing its origin/flush state in the input adapter test.
+		h.session.isStreaming = false;
+		h.editor.setText("newer unsent draft");
+		const commands = new CommandController(h.ctx);
+		const compact = vi.spyOn(commands, "handleCompactCommand").mockResolvedValue("ok");
+		await commands.runYieldCompaction();
+		expect(compact).toHaveBeenCalledWith("retain the open task", "soft", expect.any(Function));
+		expect(h.prompt.mock.calls).toEqual([
+			["after compact", expect.objectContaining({ streamingBehavior: "followUp" })],
+		]);
+		expect(h.ctx.yieldCompaction).toBeUndefined();
+		expect(h.ctx.compactionQueuedMessages).toEqual([]);
+		expect(h.editor.getText()).toBe("newer unsent draft");
+		expect(h.session.abort).not.toHaveBeenCalled();
+	});
+
+	it("keeps /queue /compact behind an active compaction and leaves newer typing untouched when it flushes", async () => {
+		const h = await createHarness(() => {});
+		h.session.isCompacting = true;
+		h.editor.setText("/queue /compact soft keep decisions");
+		await h.pressSubmit(ENTER);
+		expect(h.ctx.compactionQueuedMessages).toEqual([
+			{ text: "/compact soft keep decisions", mode: "followUp", images: undefined },
+		]);
+		expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+		expect(h.ctx.runYieldCompaction).not.toHaveBeenCalled();
+		expect(h.prompt).not.toHaveBeenCalled();
+
+		h.session.isCompacting = false;
+		h.session.isStreaming = false;
+		h.editor.setText("newer unsent draft");
+		await h.ctx.flushCompactionQueue();
+		expect(h.ctx.handleCompactCommand).toHaveBeenCalledWith("keep decisions", "soft");
+		expect(h.editor.getText()).toBe("newer unsent draft");
+		expect(h.session.abort).not.toHaveBeenCalled();
+	});
+
+	it.each(["session follow-up", "pending submission"])(
+		"waits for an earlier %s even before its next turn starts",
+		async pending => {
+			const h = await createHarness(() => {});
+			h.session.isStreaming = false;
+			h.session.queuedMessageCount = pending === "session follow-up" ? 1 : 0;
+			h.ctx.hasPendingSubmission = () => pending === "pending submission";
+			h.editor.setText("/queue /compact");
+			await h.pressSubmit(ENTER);
+			expect(h.ctx.yieldCompaction?.text).toBe("/compact");
+			expect(h.ctx.runYieldCompaction).toHaveBeenCalledTimes(1);
+			expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+			expect(h.session.abort).not.toHaveBeenCalled();
+			expect(h.prompt).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each([
+		{ text: "/queue /compact remote keep decisions", streaming: false },
+		{ text: "/compact remote keep decisions", streaming: true },
+	])("runs $text immediately when streaming=$streaming", async ({ text, streaming }) => {
+		const h = await createHarness(() => {});
+		h.session.isStreaming = streaming;
+		h.editor.setText(text);
+		await h.pressSubmit(ENTER);
+		expect(h.ctx.handleCompactCommand).toHaveBeenCalledWith("keep decisions", "remote");
+		expect(h.ctx.yieldCompaction).toBeUndefined();
+		expect(h.ctx.runYieldCompaction).not.toHaveBeenCalled();
+		expect(h.session.followUp).not.toHaveBeenCalled();
+		expect(h.prompt).not.toHaveBeenCalled();
+	});
+
+	it("does not treat a leading dot as queue shorthand", async () => {
+		const h = await createHarness(() => {});
+		h.editor.setText(".-> /compact");
+		await h.pressSubmit(ENTER);
+		expect(h.prompt).toHaveBeenCalledWith(".-> /compact", expect.objectContaining({ streamingBehavior: "steer" }));
+		expect(h.ctx.yieldCompaction).toBeUndefined();
+		expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+	});
+
+	it("rejects invalid queued compaction arguments without sending slash text to the model", async () => {
+		const h = await createHarness(() => {});
+		h.editor.setText("/queue /compact snapcompact invalid focus");
+		await h.pressSubmit(ENTER);
+		expect(h.ctx.showWarning).toHaveBeenCalledTimes(1);
+		expect(h.ctx.yieldCompaction).toBeUndefined();
+		expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+		expect(h.prompt).not.toHaveBeenCalled();
+		expect(h.session.followUp).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{ text: "/queue /compact", key: ENTER },
+		{ text: "-> /compact", key: ENTER },
+		{ text: "/queue /compact", key: FOLLOW_UP },
+	])("restores $text submitted by $key if an input hook changes the conversation", async ({ text, key }) => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.editor.setText(text);
+		const submitting = h.pressSubmit(key);
+		await entered.promise;
+		await h.ctx.sessionManager.newSession();
+		h.editor.setText("newer draft");
+		release.resolve();
+		await submitting;
+		expect(h.editor.getText()).toBe("/compact\n\nnewer draft");
+		expect(h.ctx.showWarning).toHaveBeenCalledTimes(1);
+		expect(h.ctx.yieldCompaction).toBeUndefined();
+		expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+		expect(h.prompt).not.toHaveBeenCalled();
+		expect(h.session.followUp).not.toHaveBeenCalled();
 	});
 
 	it("Ctrl+Enter /queue that rejects restores its text and image beside a newer draft", async () => {

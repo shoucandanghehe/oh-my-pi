@@ -1,4 +1,5 @@
 import { scheduler } from "node:timers/promises";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import type { Api, Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";

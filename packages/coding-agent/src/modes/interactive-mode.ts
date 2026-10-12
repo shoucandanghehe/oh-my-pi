@@ -5285,7 +5285,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-			keepDanglingToolCalls: this.viewSession.isStreaming,
+			keepInFlightToolCalls: this.viewSession.isStreaming,
 		});
 		const preservedLiveTools = new Map(livePendingTools);
 		// Terminal results belong to replay; a background task's initial running
@@ -10008,8 +10008,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleQueueCommand(
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void> {
-		return this.#inputController.handleQueueCommand(message, detached);
+		return this.#inputController.handleQueueCommand(message, detached, origin);
 	}
 
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean> {

@@ -1842,7 +1842,7 @@ function mapCoralbricksModel(
 			compat = { ...compat, reasoningDisableMode: "none-effort" };
 		}
 	}
-	const input: ("text" | "image")[] =
+	const input: InputModality[] =
 		entry.supports_image_input === true
 			? ["text", "image"]
 			: entry.supports_image_input === false
@@ -4318,7 +4318,6 @@ function getLmStudioCapabilityNames(value: unknown): string[] {
 	}
 	return value.flatMap(item => (typeof item === "string" ? [item.toLowerCase()] : []));
 }
-
 
 function getLmStudioModelType(entry: Record<string, unknown>): string {
 	return typeof entry.type === "string" ? entry.type.toLowerCase() : "";

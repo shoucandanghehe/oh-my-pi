@@ -62,6 +62,8 @@ describe("SDK session dialogs and the computer display hold", () => {
 			return answered.promise;
 		},
 		notify: () => {},
+		setWidget: () => {},
+		setStatus: () => {},
 	} as unknown as ExtensionUIContext;
 	let owner = "";
 

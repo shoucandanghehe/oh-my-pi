@@ -32,6 +32,7 @@ const config = {
 	retainTimeoutMs: 30_000,
 	mentalModelsEnabled: false,
 	mentalModelAutoSeed: false,
+	mentalModelMaxTokens: undefined,
 	mentalModelMaxRenderChars: 16_000,
 } satisfies HindsightConfig;
 

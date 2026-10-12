@@ -842,8 +842,11 @@ describe("AgentTranscriptViewer", () => {
 			await resolved.promise;
 			await Promise.resolve();
 			const displayed = viewer.render(80).join("\n");
-			expect(displayed).toContain(fileUriForTerminal(path.join(childCwd, "note.md"), undefined, TERMINAL.id));
-			expect(displayed).not.toContain(fileUriForTerminal(path.join(mainCwd, "note.md"), undefined, TERMINAL.id));
+			const childHref = fileUriForTerminal(path.join(childCwd, "note.md"), undefined, TERMINAL.id);
+			const mainHref = fileUriForTerminal(path.join(mainCwd, "note.md"), undefined, TERMINAL.id);
+			if (childHref === undefined || mainHref === undefined) throw new Error("Expected valid fixture file URLs");
+			expect(displayed).toContain(childHref);
+			expect(displayed).not.toContain(mainHref);
 		} finally {
 			viewer.dispose();
 			setTerminalHyperlinks(originalHyperlinks);

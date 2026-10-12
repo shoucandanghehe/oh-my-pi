@@ -1,5 +1,5 @@
 import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { AnthropicServerToolContent, AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { AnthropicServerToolContent, AssistantMessage, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import {
 	CONTEXT_CATEGORIES,
@@ -22,13 +22,13 @@ function opaqueSize(name: string, value: string): string {
 	return `${name} · ${value.length.toLocaleString("en-US")} chars`;
 }
 
-/** One text or image block as readable text, without retaining binary data. */
-function summarizeBlockForView(block: TextContent | ImageContent): string {
+/** Text and media metadata, without retaining binary data. */
+function summarizeBlockForView(block: TextContent | MediaContent): string {
 	if (block.type === "text") return block.text;
-	return `[image · ${block.mimeType} · ~${Math.floor((block.data.length * 3) / 4)} bytes]`;
+	return `[${block.type} · ${block.mimeType} · ~${Math.floor((block.data.length * 3) / 4)} bytes]`;
 }
 
-function summarizeContentForView(content: string | readonly (TextContent | ImageContent)[]): string {
+function summarizeContentForView(content: string | readonly (TextContent | MediaContent)[]): string {
 	return typeof content === "string" ? content : content.map(summarizeBlockForView).join("\n");
 }
 

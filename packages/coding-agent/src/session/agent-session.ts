@@ -233,7 +233,7 @@ import sleepModeEndedPrompt from "../prompts/system/sleep-mode-ended.md" with { 
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import sendToMainSessionDescription from "../prompts/tools/send-to-main-session.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import {
 	deobfuscateAssistantContent,
@@ -243,7 +243,7 @@ import {
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -9218,7 +9218,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const generation = this.#promptGeneration;
 		await this.#prewalk.beginAutoTask();
 		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
-		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued", attachments);
+		const preparation = await this.#prepareAgentStart(
+			message,
+			prompt,
+			images,
+			generation,
+			signal,
+			"queued",
+			attachments,
+		);
 		const decision = await autoPrewalk;
 		return {
 			commit: () => {

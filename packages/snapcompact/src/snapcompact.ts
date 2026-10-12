@@ -54,7 +54,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, ImageContent, MediaContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
@@ -2024,9 +2024,9 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
  * Returns `blocks` itself when every frame fits.
  */
 export function capFrameDataBytes(
-	blocks: (TextContent | ImageContent)[],
+	blocks: (TextContent | MediaContent)[],
 	maxFrameDataBytes: number,
-): (TextContent | ImageContent)[] {
+): (TextContent | MediaContent)[] {
 	const kept = new Set<number>();
 	let usedBytes = 0;
 	let dropped = false;
@@ -2042,7 +2042,7 @@ export function capFrameDataBytes(
 	}
 	if (!dropped) return blocks;
 
-	const capped: (TextContent | ImageContent)[] = [];
+	const capped: (TextContent | MediaContent)[] = [];
 	let omittedFrames = 0;
 	let omittedBytes = 0;
 	const flushOmitted = (): void => {
