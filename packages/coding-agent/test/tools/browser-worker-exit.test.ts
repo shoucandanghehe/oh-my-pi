@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -79,7 +79,7 @@ async function crashAndHoldRecovery(name: string): Promise<{ crash: string; rele
 	return { crash, release: () => gate.resolve() };
 }
 
-function textOf(parts: ReadonlyArray<TextContent | ImageContent>): string {
+function textOf(parts: ReadonlyArray<TextContent | MediaContent>): string {
 	return parts.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
 }
 

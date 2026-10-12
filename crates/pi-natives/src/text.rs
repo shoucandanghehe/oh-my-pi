@@ -1461,7 +1461,7 @@ impl PreparedWrap {
 			line_with_prefix.extend_from_slice(line);
 			let line_width = visible_width_u16(&line_with_prefix, self.tab_width);
 			let mut token_state = WrapState::new();
-			for token in split_into_tokens_with_ansi(&line_with_prefix) {
+			for token in split_into_tokens_with_ansi(&line_with_prefix, self.tab_width) {
 				self.token_text.extend_from_slice(&token);
 				self.tokens.push(WrapMeasureToken {
 					end:            self.token_text.len(),

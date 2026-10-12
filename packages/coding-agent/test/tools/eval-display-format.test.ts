@@ -66,20 +66,28 @@ describe("eval renderer: display-only streaming formatting", () => {
 	});
 
 	it("keeps a workspace sash fixed beside multiline display strings containing tabs", () => {
+		const value = {
+			text: [
+				"total_bytes=4136960 files=2",
+				"4136960\t2102149\tsystemd-journal\t/var/log/journal",
+				"0\t3510063\tpmlogger\t/var/tmp/check",
+			].join("\n"),
+		};
+		const output = JSON.stringify(value);
 		const result = evalToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "" }],
 				details: {
 					language: "python",
 					languages: ["python"],
-					cells: [{ index: 0, code: "display(result)", language: "python", output: "", status: "complete" }],
-					jsonOutputs: [
+					cells: [
 						{
-							text: [
-								"total_bytes=4136960 files=2",
-								"4136960\t2102149\tsystemd-journal\t/var/log/journal",
-								"0\t3510063\tpmlogger\t/var/tmp/check",
-							].join("\n"),
+							index: 0,
+							code: "print(result)",
+							language: "python",
+							output,
+							status: "complete",
+							views: [{ text: output, view: { kind: "json", value } }],
 						},
 					],
 				} satisfies EvalToolDetails,

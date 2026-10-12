@@ -3575,9 +3575,7 @@ export class TUI extends Container {
 		// Deferred startup can first enable the keyboard mode inside this alt
 		// screen. Move that frame to main instead of leaving it behind.
 		const keyboardTransfer = this.#appViewportKeyboardOnEntry ? "" : this.#keyboardEnhancementEnter();
-		this.terminal.write(
-			`${APP_VIEWPORT_MOUSE_TRACKING_OFF}${this.#keyboardEnhancementExit()}\x1b[?1049l${keyboardTransfer}`,
-		);
+		this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}${this.#altScreenExit()}${keyboardTransfer}`);
 		this.#appViewportActive = false;
 		this.#appViewportPixelMouseActive = false;
 		this.#appViewportHoverMouseActive = false;
@@ -5113,16 +5111,18 @@ export class TUI extends Container {
 			}
 			const placementId = previous?.images[images.length]?.placementId ?? this.#nextImagePlacementId++;
 			images.push({ imageId: parsed.imageId, placementId });
-			rewritten += parsed.prefix + encodeKittyPlacementLine({
-				imageId: parsed.imageId,
-				placementId,
-				columns: parsed.columns,
-				rows: parsed.rows,
-				screenRow,
-				imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
-				tmuxPassthrough: parsed.tmuxPassthrough,
-				maxRowsAbove: parsed.maxRowsAbove,
-			});
+			rewritten +=
+				parsed.prefix +
+				encodeKittyPlacementLine({
+					imageId: parsed.imageId,
+					placementId,
+					columns: parsed.columns,
+					rows: parsed.rows,
+					screenRow,
+					imageHeightPx: this.#imageBudget.getPlacementGeometry(parsed.imageId)?.heightPx ?? 0,
+					tmuxPassthrough: parsed.tmuxPassthrough,
+					maxRowsAbove: parsed.maxRowsAbove,
+				});
 			remaining = parsed.suffix;
 		}
 	}
@@ -6415,7 +6415,7 @@ export class TUI extends Container {
 		if (this.#clearScrollbackOnNextRender && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			kittyCleanup += encodeKittyDeleteAllImages();
 			for (const id of this.#imageBudget.takeResetPurgeIds()) kittyCleanup += encodeKittyDeleteImage(id);
-			this.#imageBudget.resetPlacementEpochs();
+			this.#screenImagePlacements.clear();
 			this.#imageBudget.takePurgeIds();
 			this.#imageBudget.takeRetiredIds();
 		} else {
@@ -6485,6 +6485,7 @@ export class TUI extends Container {
 		this.#fullRedrawCount += 1;
 		const cursorControl = this.#appViewportCursorControlSequence(fittedCursorPos, height);
 		let buffer = this.#paintBeginSequence + kittyCleanup;
+		buffer += this.#retireImagePlacements(this.#screenImagePlacements, fitted, 0, forceFullRepaint);
 		// Windows Terminal's ED2 clears the page's SIXEL ImageSlice cells;
 		// DECSED covers terminals that expose selective image erasure. Use both
 		// before replay so pixels outside a narrowed footprint cannot survive.
@@ -6550,7 +6551,6 @@ export class TUI extends Container {
 						current,
 						contentWidth,
 						row,
-						this.#appViewportVisibleSourceRows[row] ?? -1,
 						spacerGlyphWidth,
 					)}`;
 				}
@@ -6597,7 +6597,6 @@ export class TUI extends Container {
 		line: PreparedLine,
 		width: number,
 		screenRow: number,
-		frameRow: number,
 		spacerGlyphWidth: number,
 	): string {
 		let rewrite: string;
@@ -6607,7 +6606,7 @@ export class TUI extends Container {
 					? ""
 					: `${SEGMENT_RESET}\x1b[${spacerGlyphWidth}C\x1b[${width - spacerGlyphWidth}X`;
 		} else if (line.isImage) {
-			rewrite = ERASE_LINE + this.#imageLineSequence(line.line, screenRow, frameRow, -1);
+			rewrite = ERASE_LINE + this.#imageLineSequence(line.line, screenRow, this.#screenImagePlacements, screenRow);
 		} else {
 			const terminalLine = this.#terminalLine(line);
 			if (line.asciiWidth === undefined) {

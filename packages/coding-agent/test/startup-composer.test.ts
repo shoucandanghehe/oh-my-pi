@@ -66,14 +66,6 @@ class CountingTerminal extends VirtualTerminal {
 	}
 }
 
-class WriteTrackingTerminal extends CountingTerminal {
-	written = "";
-	override write(data: string): void {
-		this.written += data;
-		super.write(data);
-	}
-}
-
 class ThrowingStartTerminal extends CountingTerminal {
 	override start(): void {
 		this.starts += 1;

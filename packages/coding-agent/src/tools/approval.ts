@@ -19,6 +19,7 @@ import type {
 	ExtensionApprovalGrant,
 	ExtensionApprovalPrompt,
 	ExtensionUIContext,
+	ExtensionUIDialogOptions,
 } from "../extensibility/extensions/types";
 
 import {
@@ -701,6 +702,7 @@ export async function requestApproval(
 	tool: ApprovalSubject,
 	args: unknown,
 	options: { reason?: string; appendix?: readonly string[]; sessionSubject?: string; grants?: boolean } = {},
+	dialogOptions?: ExtensionUIDialogOptions,
 ): Promise<ExtensionApprovalAnswer> {
 	const { reason, appendix = [], sessionSubject } = options;
 	const header = approvalHeader(tool, reason);
@@ -721,12 +723,15 @@ export async function requestApproval(
 			...(compactBlock ? [compactBlock] : []),
 			...appendix,
 		].join("\n");
-		const answer = await ui.approve({
-			full,
-			compact,
-			...(session ? { session } : {}),
-			...(grants.length > 0 ? { grants } : {}),
-		});
+		const answer = await ui.approve(
+			{
+				full,
+				compact,
+				...(session ? { session } : {}),
+				...(grants.length > 0 ? { grants } : {}),
+			},
+			dialogOptions,
+		);
 		if (answer === "once" || (answer === "session" && session)) return answer;
 		if (typeof answer === "object" && answer !== null && grants.some(grant => grant.scope === answer.grant)) {
 			return { grant: answer.grant, always: answer.always === true };
@@ -734,7 +739,7 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices)));
+	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices), dialogOptions));
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

@@ -5634,7 +5634,7 @@ interface CursorTurnBinding {
 
 /** Chains `Bun.hash` over message parts from `seed`, without copying them. */
 function hashCursorParts(
-	parts: string | readonly (TextContent | ImageContent)[],
+	parts: string | readonly (TextContent | MediaContent)[],
 	seed: number | bigint,
 ): number | bigint {
 	if (typeof parts === "string") return Bun.hash(parts, seed);

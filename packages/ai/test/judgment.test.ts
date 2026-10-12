@@ -1,4 +1,5 @@
 import { scheduler } from "node:timers/promises";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
 import { describe, expect, it, spyOn, vi } from "bun:test";
 import {

@@ -12,6 +12,7 @@ import { ExtensionUiController } from "../../../src/modes/controllers/extension-
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
+import { requestApproval } from "../../../src/tools/approval";
 
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
@@ -120,6 +121,28 @@ function makeHarness() {
 		},
 	};
 }
+
+describe("tool approval cancellation", () => {
+	for (const mode of ["approval", "select"] as const) {
+		it(`restores the composer when an aborted tool dismisses its ${mode} dialog`, async () => {
+			const harness = makeHarness();
+			const ui = await harness.init();
+			const controller = new AbortController();
+			const pending = requestApproval(
+				mode === "approval" ? ui : { select: ui.select },
+				{ name: "bash" },
+				{ command: "echo approval" },
+				undefined,
+				{ signal: controller.signal },
+			);
+			expect(harness.getFocused()).not.toBe(harness.editor);
+			controller.abort();
+			expect(await pending).toBe("deny");
+			expect(harness.getFocused()).toBe(harness.editor);
+			expect(harness.editorContainer.children).toEqual([harness.editor]);
+		});
+	}
+});
 
 describe("ExtensionUiController Ask dialog input", () => {
 	const questions: ExtensionAskDialogQuestion[] = [

@@ -331,7 +331,12 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 					),
 					null,
 					...(agentPauseGate.ready
-						? [actionButton("Exit paused", "exit", { keys: "q", title: "Exit paused; resume later with /continue" })]
+						? [
+								actionButton("Exit paused", "exit", {
+									keys: "q",
+									title: "Exit paused; resume later with /continue",
+								}),
+							]
 						: []),
 					actionButton("Resume", "resume", {
 						keys: resumeKey,

@@ -48,7 +48,6 @@ import type {
 	Context,
 	DeveloperMessage,
 	FetchImpl,
-	ImageContent,
 	MediaContent,
 	Message,
 	Model,
