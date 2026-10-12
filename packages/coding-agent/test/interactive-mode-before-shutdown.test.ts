@@ -196,6 +196,26 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 	});
 
+	it("finishes a paused exit that supersedes a pending operator gate without disposing twice", async () => {
+		const entered = Promise.withResolvers<AbortSignal>();
+		const late = Promise.withResolvers<SessionBeforeShutdownResult>();
+		beforeShutdown = event => {
+			entered.resolve(event.signal);
+			return late.promise;
+		};
+		const quitting = mode.shutdown();
+		const signal = await entered.promise;
+		await session.dispose({ pausedExit: true });
+		const dispose = vi.spyOn(session, "dispose");
+		await mode.shutdownAfterPausedExit();
+		await quitting;
+		late.resolve({ cancel: true });
+		expect(signal.aborted).toBe(true);
+		expect(dispose).not.toHaveBeenCalled();
+		expect(shutdownEvents).toBe(1);
+		expect(postmortem.quit).toHaveBeenCalledTimes(1);
+	});
+
 	it("never asks before a forced close", async () => {
 		await mode.shutdown({ cancellable: false });
 		expect(attempts).toBe(0);

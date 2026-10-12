@@ -166,7 +166,7 @@ describe("worktree clear task-isolation ownership", () => {
 		expect(await Bun.file(path.join(child, "work.txt")).text()).toBe("recoverable child work\n");
 	});
 
-	it("keeps an ovnfs record and checkout when nested worktrees prevent removal or slot reuse", async () => {
+	it("retains an ovnfs checkout with nested worktrees while reusing its recovery slot", async () => {
 		setWorktreesDir(".worktrees");
 		const cwd = path.join(base, "owner");
 		const checkout = path.join(base, "daemon", "parent");
@@ -177,17 +177,23 @@ describe("worktree clear task-isolation ownership", () => {
 		});
 		const call = vi
 			.spyOn(ovnfsClient, "callSocket")
-			.mockResolvedValue({ checkout: { name: "parent", path: checkout } });
+			.mockResolvedValueOnce({ checkout: { name: "parent", path: checkout } })
+			.mockResolvedValue({ checkout: { name: "replacement", path: path.join(base, "daemon", "replacement") } });
 		const open = ovnfsWorkspace("fixture-ovnfs");
 		await open(path.join(base, "source"), "parent", cwd);
 		const storage = path.join(cwd, ".worktrees");
 		const [entry] = await fs.readdir(storage);
-		const record = path.join(storage, entry!, OVNFS_CHECKOUT_FILE);
+		const slot = path.join(storage, entry!);
 		await Bun.write(path.join(checkout, ".worktrees", "child", "m", "work.txt"), "recoverable ovnfs child\n");
 		expect(await clearWorktrees({ cwd, all: true, dryRun: false, json: true })).toEqual({ removed: 0, failed: 1 });
-		await expect(open(path.join(base, "source"), "parent", cwd)).rejects.toThrow("still contains nested worktrees");
-		expect(call.mock.calls.map(args => args[1])).toEqual(["new"]);
-		expect(await Bun.file(record).exists()).toBe(true);
+		await open(path.join(base, "source"), "parent", cwd);
+		expect(call.mock.calls.map(args => args[1])).toEqual(["new", "new"]);
+		const [retained] = (await fs.readdir(storage)).filter(name => name.startsWith(`${entry}.retained-`));
+		const record = await Bun.file(path.join(storage, retained!, OVNFS_CHECKOUT_FILE)).json();
+		expect(record.dir).toBe(checkout);
+		expect((await Bun.file(path.join(slot, OVNFS_CHECKOUT_FILE)).json()).dir).toBe(
+			path.join(base, "daemon", "replacement"),
+		);
 		expect(await Bun.file(path.join(checkout, ".worktrees", "child", "m", "work.txt")).text()).toBe(
 			"recoverable ovnfs child\n",
 		);

@@ -2719,8 +2719,6 @@ export class Markdown implements Component {
 			// outlives the content it indexed.
 			this.#dropStreamPrefix();
 			this.#listItemRowsCache = undefined;
-			this.#lexedText = undefined;
-			this.#lexedTokens = undefined;
 			this.#layoutProbe = undefined;
 			// B+: the captured fast-path rows index the replaced content — drop
 			// the recipe so a fresh stream cannot splice onto stale rows.
@@ -2740,8 +2738,6 @@ export class Markdown implements Component {
 	releaseRenderCaches(): void {
 		this.invalidate();
 		this.#dropStreamPrefix();
-		this.#lexedText = undefined;
-		this.#lexedTokens = undefined;
 		this.#streamRewound = undefined;
 		this.#layoutPlans = undefined;
 		this.#layoutContext = undefined;
@@ -2827,6 +2823,10 @@ export class Markdown implements Component {
 		const key = this.#openTableKey;
 		if (key === undefined || this.tableLocks === undefined || this.tableLocks.has(key)) return false;
 		this.tableLocks.set(key, new Map());
+		// The same source must run its table checkpoint again to publish the
+		// finished rows now that their column widths can no longer change.
+		this.#lexedText = undefined;
+		this.#lexedTokens = undefined;
 		this.invalidate();
 		return true;
 	}
@@ -2860,6 +2860,8 @@ export class Markdown implements Component {
 		// so a memo computed on the other mode's buffer must not be reused —
 		// re-derive on the next frame instead.
 		this.#appendOnlySinceLastScan = false;
+		this.#lexedText = undefined;
+		this.#lexedTokens = undefined;
 		// B+ reset site: a transient flip (finalize, or a fresh stream on
 		// rewound text) means the next render re-lexes from the current
 		// source — drop the fast-path recipe so stale rows cannot be served
@@ -3157,6 +3159,9 @@ export class Markdown implements Component {
 	 * later text, so it stays until a non-append edit.
 	 */
 	#dropStreamPrefix(): void {
+		// Even unchanged normalized text must rebuild the discarded checkpoints.
+		this.#lexedText = undefined;
+		this.#lexedTokens = undefined;
 		this.#streamPrefixText = undefined;
 		this.#streamPrefixTokens = undefined;
 		this.#streamPrefixOpeners = NO_OPENERS;
@@ -3350,6 +3355,8 @@ export class Markdown implements Component {
 			);
 			probe.#ignoreTight = this.#ignoreTight;
 			probe.transientRenderCache = this.transientRenderCache;
+			probe.tableLocks = this.tableLocks;
+			probe.openTableTail = this.#openTableTail;
 			this.#layoutProbe = probe;
 		}
 		return probe.#measureLayoutRows(width);
@@ -3401,6 +3408,9 @@ export class Markdown implements Component {
 		const contentWidth = Math.max(1, width - paddingX * 2);
 		const plans = this.#layoutPlans!;
 		const tokens = this.#lexedTokens!;
+		let last = tokens.length - 1;
+		while (tokens[last]?.type === "space") last--;
+		this.#openTailToken = this.#openTableTail && tokens[last]?.type === "table" ? tokens[last] : undefined;
 		const stableCount = this.transientRenderCache ? (this.#streamPrefixTokens?.length ?? 0) : 0;
 		let rowCount = 0;
 		try {

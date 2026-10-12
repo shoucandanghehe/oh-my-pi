@@ -11,6 +11,7 @@ describe("Windows Tern file links from WSL", () => {
 	it("addresses the WSL share even when pwsh did not forward TERM_PROGRAM", () => {
 		const href = fileUriForTerminal("/home/alice/a#b?c% 中文.ts", { line: 42 }, "base", "linux", windowsTernEnv);
 		expect(href).toBe("file://wsl.localhost/Ubuntu-24.04/home/alice/a%23b%3Fc%25%20%E4%B8%AD%E6%96%87.ts");
+		if (href === undefined) throw new Error("Expected a Windows-readable WSL file URL");
 		expect(url.fileURLToPath(href, { windows: true })).toBe(
 			"\\\\wsl.localhost\\Ubuntu-24.04\\home\\alice\\a#b?c% 中文.ts",
 		);

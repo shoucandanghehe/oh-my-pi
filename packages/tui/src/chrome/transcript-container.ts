@@ -418,7 +418,6 @@ function isVoidNode(described: NativeNode, cx: DescribeContext, depth: number): 
 	}
 	return true;
 }
-
 function canRetire(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
 	return (

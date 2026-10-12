@@ -11,6 +11,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { getEditorTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type Component, type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
@@ -102,7 +103,7 @@ async function createContext() {
 		void listener;
 	});
 	const addStartListener = vi.fn();
-	const terminalWrite = vi.fn();
+	const terminalWrite = vi.fn<(data: string) => void>();
 	const refreshAppearance = vi.fn();
 	const resetDisplayAfterAppearanceRefresh = vi.fn(() => {
 		refreshAppearance();
@@ -118,6 +119,7 @@ async function createContext() {
 		isBashRunning: false,
 		isEvalRunning: false,
 		extensionRunner: undefined,
+		emitInteractiveInput: AgentSession.prototype.emitInteractiveInput,
 		prompt,
 		queuedMessageCount: 0,
 		abort,
@@ -296,6 +298,7 @@ async function createContext() {
 			handleBtwBranchKey,
 			addStartListener,
 			addInputListener,
+			terminalWrite,
 			canBranchBtw,
 			hasActiveBtw,
 			handlesBtwBranchKey,
@@ -311,7 +314,11 @@ async function createContext() {
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=";
 
 /** Replay a kitty OSC 5522 enhanced paste that offers text and PNG and delivers `png` bytes. */
-function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array): void {
+function dispatchEnhancedImagePaste(
+	listeners: InputListener[],
+	png: Uint8Array,
+	terminalWrite: Mock<(data: string) => void>,
+): void {
 	const packet = (metadata: string, payload?: string) =>
 		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 	const imageMime = Buffer.from("image/png").toString("base64");
@@ -321,9 +328,15 @@ function dispatchEnhancedImagePaste(listeners: InputListener[], png: Uint8Array)
 		packet(`type=read:status=DATA:mime=${textMime}`),
 		packet(`type=read:status=DATA:mime=${imageMime}`),
 		packet("type=read:status=DONE"),
-		packet("type=read:status=OK"),
-		packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from(png).toString("base64")),
-		packet("type=read:status=DONE"),
+	]) {
+		dispatchInput(listeners, input);
+	}
+	const id = /id=([^:;\x1b\x07]+)/.exec(terminalWrite.mock.calls.at(-1)?.[0] ?? "")?.[1];
+	if (!id) throw new Error("Expected an identified clipboard read request");
+	for (const input of [
+		packet(`type=read:id=${id}:status=OK`),
+		packet(`type=read:id=${id}:status=DATA:mime=${imageMime}`, Buffer.from(png).toString("base64")),
+		packet(`type=read:id=${id}:status=DONE`),
 	]) {
 		dispatchInput(listeners, input);
 	}
@@ -1216,7 +1229,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const listeners = registeredInputListeners(context.spies.addInputListener);
 		context.spies.addStartListener.mock.calls[0]?.[0]();
 
-		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"), context.spies.terminalWrite);
 		prompt.handleInput("\r");
 		expect(onSubmit).not.toHaveBeenCalled();
 		await submittedOnce.promise;
@@ -1260,6 +1273,33 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(readImage).toHaveBeenCalledTimes(1);
 		expect(submittedImage(onSubmit).source).toMatch(/^local:\/\/pasted-image-[0-9a-f]+\.png$/);
 		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Clipboard paste has no supported text or image data");
+	});
+
+	it("keeps Enter queued while a text-only prompt waits for native clipboard fallback", async () => {
+		const context = await createPromptContext();
+		const submitted = Promise.withResolvers<string>();
+		const clipboard = Promise.withResolvers<string>();
+		const prompt = new HookEditorComponent(
+			context.ctx.ui,
+			"Answer",
+			undefined,
+			text => submitted.resolve(text),
+			vi.fn(),
+			{
+				promptStyle: true,
+			},
+		);
+		context.setFocused(prompt);
+		new InputController(context.ctx, {
+			readImage: async () => null,
+			readText: () => clipboard.promise,
+		}).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		dispatchInput(listeners, "\x1b]5522;type=read:status=OK\x1b\\");
+		dispatchInput(listeners, "\x1b]5522;type=read:status=DONE\x1b\\");
+		prompt.handleInput("\r");
+		clipboard.resolve("answer");
+		expect(await submitted.promise).toBe("answer");
 	});
 
 	it("prefers a Finder file URL over the co-advertised icon bitmap (#8769)", async () => {
@@ -1386,7 +1426,7 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		const listeners = registeredInputListeners(context.spies.addInputListener);
 		context.spies.addStartListener.mock.calls[0]?.[0]();
 
-		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"), context.spies.terminalWrite);
 
 		expect(context.ctx.showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
 		expect(context.editor.pendingImages).toHaveLength(0);

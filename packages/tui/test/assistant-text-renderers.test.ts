@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { AssistantTextRenderContext, AssistantTextRenderer } from "@oh-my-pi/pi-tui/chat/extension-types";
-import { setTranscriptActionHandler, type TranscriptAction } from "@oh-my-pi/pi-tui/chat/transcript-actions";
+import { setTranscriptActions } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { splitAssistantMessageToolTimeline } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -15,7 +15,7 @@ beforeAll(async () => {
 
 let harness: TspHarness | undefined;
 afterEach(() => {
-	setTranscriptActionHandler(undefined);
+	setTranscriptActions(undefined);
 	harness?.stop();
 	harness = undefined;
 	setNativeRendering(false);
@@ -213,8 +213,12 @@ describe("assistant text renderers", () => {
 	});
 
 	it("keeps the native Copy action, copying the reply as written, when a renderer hides all of it", async () => {
-		const actions: TranscriptAction[] = [];
-		setTranscriptActionHandler(action => actions.push(action));
+		const actions: string[] = [];
+		setTranscriptActions({
+			copy: text => {
+				actions.push(text);
+			},
+		});
 		const target = component([() => ""], 0, assistant([{ type: "text", text: "Hidden answer." }]));
 		target.setTurnUsage({ elapsedMs: 1_000, input: 10, output: 5, cost: 0 });
 		harness = await TspHarness.start();
@@ -224,7 +228,7 @@ describe("assistant text renderers", () => {
 		const copy = harness.find(node => node.p?.role === "omp.turn.copy");
 		expect(copy).toBeDefined();
 		harness.event({ ev: "action", sf: harness.terminal.surface!, id: copy!.id, act: "copy-answer" });
-		expect(actions).toEqual([{ act: "copy", text: "Hidden answer." }]);
+		expect(actions).toEqual(["Hidden answer."]);
 		expect(harness.errors).toEqual([]);
 	});
 

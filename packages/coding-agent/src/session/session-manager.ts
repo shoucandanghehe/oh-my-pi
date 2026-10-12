@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
+	ImageContent,
 	MediaContent,
 	Message,
 	MessageAttribution,

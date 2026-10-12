@@ -90,7 +90,14 @@ describe("rewind page", () => {
 		setNativeRendering(false);
 	});
 
-	function rewind(deps: { selected?: string[]; cancelled?: { count: number }; siblings?: BranchVariantPath[]; startAt?: string } = {}) {
+	function rewind(
+		deps: {
+			selected?: string[];
+			cancelled?: { count: number };
+			siblings?: BranchVariantPath[];
+			startAt?: string;
+		} = {},
+	) {
 		const selector = new RewindSelectorComponent(transcript(), {
 			ui,
 			cwd: "/tmp",
@@ -279,6 +286,35 @@ describe("rewind page", () => {
 		expect(selected).toEqual(["a2"]);
 	});
 
+	test.each(["a1", "t1"])("opening on folded entry %s rewinds through its tool result", startAt => {
+		const selected: string[] = [];
+		const selector = rewind({ selected, startAt });
+		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:a1", "pick", "drop"]);
+		selector.handleInput("\r");
+		expect(selected).toEqual(["t1"]);
+	});
+
+	test("a missing start entry keeps the latest rewind target", () => {
+		const selected: string[] = [];
+		const selector = rewind({ selected, startAt: "missing" });
+		selector.describeScreen(pickerCx);
+		selector.handleInput("\r");
+		expect(selected).toEqual(["u2"]);
+	});
+
+	test("clicking a filtered turn selects its history point rather than its filtered index", () => {
+		const selected: string[] = [];
+		const selector = rewind({ selected, startAt: "u1" });
+		selector.handleInput("f");
+		typeText(selector, "ack");
+		const last = selector.describeScreen(pickerCx).main.findLast(child => !("k" in child));
+		if (!last || "k" in last) throw new Error("expected the last matching turn's block");
+		last.handleNativeEvent?.({ type: "action", key: "", act: "rewind-pick", mods: [] });
+		selector.describeScreen(pickerCx);
+		selector.handleInput("\r");
+		expect(selected).toEqual(["a2"]);
+	});
+
 	test("filtering shows only matching turns; Cancel leaves the filter before closing", () => {
 		const cancelled = { count: 0 };
 		const selector = rewind({ cancelled });
@@ -334,6 +370,35 @@ describe("rewind page", () => {
 		selector.handleInput("\r");
 		expect(selected).toEqual(["u3", "a3", "u2"]);
 		selector.dispose();
+	});
+
+	test("clicks in sibling and sliced current columns select the correct history", () => {
+		const selected: string[] = [];
+		const selector = rewind({
+			selected,
+			siblings: [
+				{
+					rootId: "u3",
+					entries: [
+						entry("u3", "a2", user("another branch")),
+						entry("a3", "u3", assistant([{ type: "text", text: "branch answer" }])),
+					],
+				},
+			],
+		});
+		const strip = selector.describeScreen(pickerCx).main.at(-1) as NativeNode;
+		const [current, other] = strip.c as NativeNode[];
+		const siblingBlock = other!.c!.findLast(child => !("k" in child));
+		const currentBlock = current!.c!.find(child => !("k" in child));
+		if (!siblingBlock || "k" in siblingBlock || !currentBlock || "k" in currentBlock)
+			throw new Error("expected replayed branch blocks");
+		siblingBlock.handleNativeEvent?.({ type: "action", key: "", act: "rewind-pick", mods: [] });
+		selector.describeScreen(pickerCx);
+		selector.handleInput("\r");
+		currentBlock.handleNativeEvent?.({ type: "action", key: "", act: "rewind-pick", mods: [] });
+		selector.describeScreen(pickerCx);
+		selector.handleNativeEvent({ type: "action", key: "rewind", act: "rewind", mods: [] });
+		expect(selected).toEqual(["a3", "u2"]);
 	});
 
 	test("describing and invalidating the page never changes the folded rewind point", () => {
@@ -428,11 +493,12 @@ describe("rewind page", () => {
 			} as AgentMessage),
 		]).flat();
 		const selected: string[] = [];
-		const create = () =>
+		const create = (startAt?: string) =>
 			new RewindSelectorComponent(entries, {
 				ui,
 				cwd: "/tmp",
 				requestRender() {},
+				startAt,
 				getMessageRenderer: () => () => {
 					constructed++;
 					return {
@@ -486,6 +552,18 @@ describe("rewind page", () => {
 			expect([rendered, measured]).toEqual([0, 0]);
 		} finally {
 			searched.dispose();
+		}
+		const before = constructed;
+		const opened = create("c0");
+		try {
+			// Resolve the old entry without constructing every intervening turn.
+			expect(constructed - before).toBe(1);
+			expect(marks(opened.describeScreen(pickerCx).main)).toEqual(["-", "here:main:c0", "pick", "drop"]);
+			opened.handleInput("\r");
+			expect(selected).toEqual(["u799", "c0", "u1", "c0"]);
+			expect([rendered, measured]).toEqual([0, 0]);
+		} finally {
+			opened.dispose();
 		}
 	});
 });

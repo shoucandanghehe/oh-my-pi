@@ -239,6 +239,22 @@ export class RewindHistory {
 		return true;
 	}
 
+	/** Resolve an entry, including folded results, by replaying only its user-turn chunk. */
+	selectEntry(id: string): boolean {
+		const entry = this.entries.findIndex(entry => entry.id === id);
+		if (entry < 0) return false;
+		const chunk = this.#chunks.findIndex(chunk => entry >= chunk.from && entry < chunk.to);
+		if (chunk < 0) return false;
+		const target = this.#chunks[chunk]!.targets.findIndex(target => target.entries.some(entry => entry.id === id));
+		if (target < 0) return false;
+		this.select({ chunk, target });
+		if (chunk < this.#nativeStart) {
+			this.#nativeStart = chunk;
+			this.#targets = undefined;
+		}
+		return true;
+	}
+
 	get position(): number {
 		const point = this.point;
 		const target = this.target;

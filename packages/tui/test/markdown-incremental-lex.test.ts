@@ -1183,6 +1183,55 @@ describe("Locked streaming tables", () => {
 		return live;
 	}
 
+	it("publishes finished rows on the same-text frame requested by a new table lock", () => {
+		const finished = `${header}| a | b |\n| c | d |\n`;
+		const live = new Markdown(`${finished}| e`, 0, 0, THEME);
+		live.tableLocks = new Map();
+		live.transientRenderCache = true;
+		live.render(60);
+		expect(live.getLastRenderStableText()).toBe("");
+
+		expect(live.lockOpenTable()).toBe(true);
+		live.render(60);
+		expect(live.getLastRenderStableText()).toBe(finished);
+		expect(live.lastRenderStableTextEndsInOpenTable()).toBe(true);
+		expect(live.lockOpenTable()).toBe(false);
+	});
+
+	it("rebuilds table settlement when unchanged text starts or resumes streaming", () => {
+		const finished = `${header}| a | b |\n`;
+		const live = new Markdown(`${finished}| c`, 0, 0, THEME);
+		live.tableLocks = new Map();
+		live.render(60);
+
+		live.transientRenderCache = true;
+		live.render(60);
+		expect(live.lockOpenTable()).toBe(true);
+		live.render(60);
+		expect(live.getLastRenderStableText()).toBe(finished);
+
+		live.transientRenderCache = false;
+		live.render(60);
+		live.transientRenderCache = true;
+		live.render(60);
+		expect(live.getLastRenderStableText()).toBe(finished);
+		expect(live.lastRenderStableTextEndsInOpenTable()).toBe(true);
+	});
+
+	it("keeps a table lockable after a tab-to-spaces source replacement", () => {
+		const live = new Markdown(`${header}| a\t| b |\n| c`, 0, 0, THEME);
+		live.tableLocks = new Map();
+		live.transientRenderCache = true;
+		live.render(60);
+
+		const finished = `${header}| a   | b |\n`;
+		live.setText(`${finished}| c`);
+		live.render(60);
+		expect(live.lockOpenTable()).toBe(true);
+		live.render(60);
+		expect(live.getLastRenderStableText()).toBe(finished);
+	});
+
 	it("keeps the locks of two tables with the same header apart", () => {
 		const locks: TableLocks = new Map();
 		const first = `${header}| a | b |\n\nBetween.\n\n`;

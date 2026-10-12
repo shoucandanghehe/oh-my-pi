@@ -19,7 +19,12 @@ import { Text } from "../components/text";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer, AssistantThinkingRenderResult } from "./extension-types";
+import type {
+	AssistantTextRenderer,
+	AssistantTextRendering,
+	AssistantThinkingRenderer,
+	AssistantThinkingRenderResult,
+} from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { getTranscriptActions, runTurnAction, turnHoldEntries, type TranscriptActions } from "./transcript-actions";
@@ -1173,7 +1178,11 @@ export class AssistantMessageComponent extends Container {
 		// A phone's long press on a turn's answer lists its actions (a desktop keeps the usage line's Copy).
 		const at = this.#answerMessage?.timestamp;
 		const hold =
-			this.#turnUsage && answered && at !== undefined && !this.#rewound && (this.#transcriptActions ?? getTranscriptActions())?.turn
+			this.#turnUsage &&
+			answered &&
+			at !== undefined &&
+			!this.#rewound &&
+			(this.#transcriptActions ?? getTranscriptActions())?.turn
 				? {
 						actions: {
 							hold: turnHoldEntries("assistant", { id: "copy-answer", label: "Copy reply", icon: "copy" }),
@@ -1278,7 +1287,8 @@ export class AssistantMessageComponent extends Container {
 		else if (act === "copy-answer") {
 			const text = this.#answerText();
 			if (text) void actions?.copy?.(text);
-		} else if (this.#answerMessage) runTurnAction(act, { role: "assistant", at: this.#answerMessage.timestamp }, actions);
+		} else if (this.#answerMessage)
+			runTurnAction(act, { role: "assistant", at: this.#answerMessage.timestamp }, actions);
 	}
 
 	/** The answer as the transcript shows it: its text blocks' markdown, a blank line apart, without thinking or tool calls. */

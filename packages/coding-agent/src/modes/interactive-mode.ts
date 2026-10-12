@@ -2496,6 +2496,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// composer collapses that gap so its status band sits flush).
 				this.statusContainer,
 				this.attachmentChipsContainer,
+				this.editorTopGapContainer,
 				this.hookWidgetContainerAbove,
 				this.editorContainer,
 				this.hookWidgetContainerBelow,
@@ -2519,6 +2520,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.modelCycleContainer,
 					this.progressHudContainer,
 				],
+				billedChrome: [this.statusContainer, this.editorTopGapContainer],
 				// Natively the HUD pills lead the dock, queued messages sit between
 				// the working row and the composer, and the attachment chips live
 				// inside the composer.
@@ -2533,6 +2535,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.progressHudContainer,
 					this.statusContainer,
 					this.pendingMessagesContainer,
+					this.editorTopGapContainer,
 					this.hookWidgetContainerAbove,
 					this.editorContainer,
 					this.hookWidgetContainerBelow,
@@ -3015,9 +3018,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			switchModel: () => this.showModelSelector({ temporaryOnly: true }),
 			rewind: () => this.showUserMessageSelector(),
 			turn: (turn, message) => this.#selectorController.runTurnAction(turn, message),
-			resume: sessionPath => this.handleResumeSession(sessionPath, { followContinuation: true }).catch((error: unknown) =>
-				this.showError(error instanceof Error ? error.message : String(error)),
-			),
+			resume: sessionPath =>
+				this.handleResumeSession(sessionPath, { followContinuation: true }).catch((error: unknown) =>
+					this.showError(error instanceof Error ? error.message : String(error)),
+				),
 			copy: text =>
 				copyToClipboard(text).then(
 					() => this.showStatus("Copied to clipboard"),
@@ -3073,6 +3077,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus({ startupRun: options.startupRun });
+		if (options.startupRun) this.terminalActivity.set(this, "working");
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
 		// Only a frame that actually writes the mark needs a replacement; diff
@@ -5360,7 +5365,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-			keepDanglingToolCalls: this.viewSession.isStreaming,
+			keepInFlightToolCalls: this.viewSession.isStreaming,
 		});
 		const preservedLiveTools = new Map(livePendingTools);
 		// Terminal results belong to replay; a background task's initial running
@@ -7935,6 +7940,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** End the `working` hold of `init({ startupRun })` once the command-line prompts are dispatched. */
 	settleStartupRun(): void {
 		settleStartupRun();
+		this.terminalActivity.release(this);
 	}
 
 	async #startGoalFromObjective(
@@ -8590,7 +8596,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}): Promise<void> {
 		if (this.#isShuttingDown) {
 			this.#closeAttempt?.abort();
-			return;
+			if (options.disposeSession || !this.#closeAttempt) return;
 		}
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
@@ -8605,7 +8611,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const signal = this.#beginClose(options.status);
 		// Reversible decisions first: nothing has been stopped yet, so a refusal
 		// leaves the session exactly as it was.
-		if (options?.cancellable !== false && !(await this.session.confirmClose(signal))) {
+		const confirmed = options.cancellable === false || (await this.session.confirmClose(signal));
+		if (this.#closeAttempt?.signal !== signal) return;
+		if (!confirmed) {
 			this.#abandonClose();
 			this.showStatus("Session close cancelled");
 			// The refusal covers only this quit, not a pending `ctx.shutdown()`.
@@ -8615,6 +8623,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A signal teardown or stop() took over while extensions were asked.
 		if ((options.disposeSession && this.session.isDisposed) || this.#dialogLifetime.signal.aborted) return;
 		const worktreePlan = await this.#planOwnedWorktreeExit(signal);
+		if (this.#closeAttempt?.signal !== signal) return;
 		try {
 			await this.#teardown(options.disposeSession);
 		} catch (error) {
@@ -8764,6 +8773,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Shared shutdown/restart teardown: optionally dispose the session, then hand the terminal back. */
 	async #teardown(disposeSession: boolean): Promise<void> {
+		this.#closeAttempt = undefined;
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -10068,8 +10078,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleQueueCommand(
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void> {
-		return this.#inputController.handleQueueCommand(message, detached);
+		return this.#inputController.handleQueueCommand(message, detached, origin);
 	}
 
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean> {

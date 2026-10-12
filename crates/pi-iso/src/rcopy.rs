@@ -148,7 +148,8 @@ fn seed_dirty_state(lower: &Path, merged: &Path, excluded: &[std::path::PathBuf]
 		git_apply(merged, &staged, &[])?;
 	}
 
-	let unstaged = Arc::new(git_capture_excluding(lower, &["diff", "--binary", "--no-color"], excluded)?);
+	let unstaged =
+		Arc::new(git_capture_excluding(lower, &["diff", "--binary", "--no-color"], excluded)?);
 	if !unstaged.is_empty() {
 		git_apply(merged, &unstaged, &[])?;
 	}

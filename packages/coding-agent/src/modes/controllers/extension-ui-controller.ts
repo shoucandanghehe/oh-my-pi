@@ -71,7 +71,6 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
 
-
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
  * the keys, so the host can't know its bindings: advertise the defaults.
@@ -437,7 +436,9 @@ export class ExtensionUiController {
 		// widget never moves that row out of the retirement baseline.
 		this.ctx.editorTopGapContainer.clear();
 		this.ctx.editorTopGapContainer.addChild(
-			this.#hookWidgets.above.children.length === 0 ? new EditorTopGap(() => this.ctx.statusRowOccupied) : new Spacer(1),
+			this.#hookWidgets.above.children.length === 0
+				? new EditorTopGap(() => this.ctx.statusRowOccupied)
+				: new Spacer(1),
 		);
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgets.above);
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgets.below);

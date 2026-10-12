@@ -21,6 +21,7 @@ test("keeps sleep prevention released through a paused setting change, then hold
 		expect(JSON.parse(stdout)).toEqual([
 			["acquire", "idle"],
 			["request-pause", "idle"],
+			["tool", "idle"],
 			["release", "idle"],
 			["parked", null],
 			["changed-setting", null],

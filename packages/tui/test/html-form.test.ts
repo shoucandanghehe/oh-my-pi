@@ -881,7 +881,9 @@ describe("html form", () => {
 				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
 				const items = (tabs.p && "items" in tabs.p ? tabs.p.items : undefined) ?? [];
 				return items.flatMap(tab =>
-					"id" in tab && typeof tab.label !== "string" && tab.label[0]?.t === "✓ " ? [tab.id] : [],
+					typeof tab === "object" && "id" in tab && Array.isArray(tab.label) && tab.label[0]?.t === "✓ "
+						? [tab.id]
+						: [],
 				);
 			};
 			// Both questions start with valid preselected answers, yet neither has been visited.

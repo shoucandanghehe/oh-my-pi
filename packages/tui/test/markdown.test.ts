@@ -2278,6 +2278,31 @@ describe("Layout-only row measurement", () => {
 			}
 		}
 	});
+
+	it("measures appended table cells inside the same locked widths used for painting", () => {
+		const layoutTheme = {
+			...defaultMarkdownTheme,
+			highlightCodeForLayout: (code: string): string[] => code.split("\n"),
+		};
+		const header = "| Key | Value |\n|---|---|\n";
+		const markdown = new Markdown(`${header}| a | b |\n| c`, 0, 0, layoutTheme);
+		markdown.tableLocks = new Map();
+		markdown.transientRenderCache = true;
+		markdown.render(60);
+		expect(markdown.lockOpenTable()).toBe(true);
+		markdown.render(60);
+
+		markdown.setText(`${header}| a | b |\n| abcdefghijk | b |\n`);
+		markdown.transientRenderCache = false;
+		markdown.openTableTail = true;
+		// The key column stays three cells wide: the new key needs four rows.
+		expect(markdown.measureRows(60)).toBe(10);
+		expect(markdown.render(60)).toHaveLength(10);
+		for (const width of [24, 60]) {
+			const measured = markdown.measureRows(width);
+			expect(markdown.render(width)).toHaveLength(measured);
+		}
+	});
 });
 
 describe("Module-level LRU render cache", () => {

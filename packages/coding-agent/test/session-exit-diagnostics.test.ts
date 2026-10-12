@@ -398,6 +398,21 @@ describe("session exit diagnostics", () => {
 		expect(hasRestorableTurn(sessionManager.getBranch())).toBe(false);
 	});
 
+	it("keeps a durable pause idle instead of reconstructing a crash under --restore", () => {
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });
+		sessionManager.appendMessage(pendingAssistant);
+		sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "paused exit",
+			kind: "paused",
+			recordedAt: "2026-07-11T02:20:08.800Z",
+			pendingToolCalls: [{ toolCallId: "toolu_repro", toolName: "bash" }],
+		});
+		const branch = sessionManager.getBranch();
+		expect(createInterruptedTurnAbortMessage(branch, undefined, { assumeExit: true })).toBeUndefined();
+		expect(hasRestorableTurn(branch)).toBe(false);
+	});
+
 	it("reconstructs a normal exit that reports pending tool calls", () => {
 		const sessionManager = SessionManager.inMemory();
 		sessionManager.appendMessage({ role: "user", content: "inspect the file", timestamp: Date.now() });

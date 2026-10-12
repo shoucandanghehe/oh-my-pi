@@ -6,7 +6,6 @@ import {
 	type AutocompleteProvider,
 	BRACKETED_PASTE_END,
 	BRACKETED_PASTE_START,
-	type Component,
 	emergencyTerminalRestore,
 	isKeyRelease,
 	isKeyRepeat,
@@ -465,7 +464,7 @@ export class InputController {
 					this.#configurePasteEditor(target);
 					return undefined;
 				}
-				if (target === this.ctx.editor) return undefined;
+				if (!target || target === this.ctx.editor) return undefined;
 				if (!this.ctx.keybindings.matches(data, "app.clipboard.pasteImage")) return undefined;
 				void this.handleImagePaste(target);
 				return { consume: true };
@@ -584,7 +583,9 @@ export class InputController {
 					this.#updateHoverHighlight(event.row, event.col);
 					return false;
 				}
-				if (!event.leftClick || this.#viewportCandidates(event.row, event.col).length === 0) return false;
+				if (!event.leftClick) return false;
+				if (this.#activateClickedLink(event.row, event.col)) return true;
+				if (this.#viewportCandidates(event.row, event.col).length === 0) return false;
 				this.#focusClickedAgent(event.row, event.col);
 				return true;
 			});
@@ -1113,18 +1114,27 @@ export class InputController {
 			write: data => ui.terminal.write(data),
 			beginPaste: () => {
 				const target = this.#resolvePasteTarget(ui);
+				const focused = ui.getFocused();
 				const editor = target instanceof CustomEditor ? target : undefined;
 				const context = editor ? this.#captureEditorPasteContext(editor) : undefined;
-				const finish = target?.beginPaste?.();
 				const imageEditor = this.#imagePasteEditor(target);
+				const promptPaste = target && !imageEditor ? this.#beginPromptImagePaste(target) : undefined;
+				const finish = promptPaste ? undefined : target?.beginPaste?.();
 				return {
 					finish: text => {
 						if (context && !context.isCurrent()) text = undefined;
 						let accepted = false;
-						if (finish) accepted = finish(text);
-						else if (text !== undefined && this.#resolvePasteTarget(ui) === target) {
-							target?.pasteText(text);
-							accepted = target !== undefined;
+						if (promptPaste) {
+							if (text) promptPaste.sink.pasteText(text);
+							promptPaste.finish();
+							accepted = text !== undefined;
+						} else if (finish) accepted = finish(text);
+						else if (text !== undefined && target && this.#resolvePasteTarget(ui) === target) {
+							target.pasteText(text);
+							accepted = true;
+						} else if (text !== undefined && !target && ui.getFocused() === focused && focused?.handleInput) {
+							focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
+							accepted = true;
 						}
 						ui.requestRender();
 						return accepted;
@@ -1135,8 +1145,13 @@ export class InputController {
 							this.ctx.showStatus("Paste is not supported in this pane");
 							return;
 						}
-						if (imageEditor) await this.#editorImageSink(imageEditor, context).attach(image, message);
+						if (promptPaste && target.acceptsImages) await promptPaste.sink.attach(image, message);
+						else if (imageEditor) await this.#editorImageSink(imageEditor, context).attach(image, message);
 						else await this.#pasteImageIntoFocus(sink => sink.attach(image, message), target);
+					},
+					pasteNative: async () => {
+						if (!target || (context && !context.isCurrent())) return false;
+						return this.handleImagePaste(target, promptPaste);
 					},
 				};
 			},
@@ -1268,6 +1283,11 @@ export class InputController {
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
 
+			// Explicit queue submissions bind to the conversation before input hooks can switch it.
+			const queueOrigin =
+				parseQueueShorthand(text) !== undefined || parseSlashCommand(text)?.name === "queue"
+					? conversationPosition(this.ctx.sessionManager)
+					: undefined;
 			// Input hooks pass in submission order with the follow-up key's (see `#submissionHookOrder`):
 			// `/queue` placement behind a queued `/compact` must follow the order the user sent them.
 			const earlier = this.#submissionHookOrder;
@@ -1298,17 +1318,22 @@ export class InputController {
 				hooksDone.resolve();
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
-			const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
+			const draftDetached =
+				submittedMode !== undefined &&
+				(DETACHED_DRAFT_COMMANDS.has(submittedMode) || (submittedMode === "queue" && !this.ctx.collabGuest));
 			if (draftDetached) this.#dropSubmittedPending(submittedImages);
 
 			if (!text && !hasInputImages) return;
 
 			const queueBody = parseQueueShorthand(text);
 			if (queueBody !== undefined) {
+				if (!this.ctx.collabGuest) this.#dropSubmittedPending(submittedImages);
 				await this.#queueForYield(queueBody, {
 					historyText: text,
+					detachedText: text,
 					images: inputImages,
 					imageLinks: inputImageLinks,
+					origin: queueOrigin,
 				});
 				return;
 			}
@@ -1333,7 +1358,12 @@ export class InputController {
 						: undefined;
 				let slashResult: string | boolean;
 				try {
-					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+					slashResult = await executeBuiltinSlashCommand(text, {
+						ctx: this.ctx,
+						input,
+						draftDetached,
+						followUp: submittedMode === "queue" ? queueOrigin : undefined,
+					});
 				} catch (error) {
 					// Detached mode commands (plan/vibe/goal/guided-goal) rethrow so
 					// this caller — the one that took the draft's images out of the
@@ -2111,6 +2141,7 @@ export class InputController {
 	async handleQueueCommand(
 		text: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void> {
 		const source = detached ?? {
 			images: this.ctx.editor.pendingImages,
@@ -2118,7 +2149,7 @@ export class InputController {
 		};
 		const images = source.images?.length ? [...source.images] : undefined;
 		const imageLinks = images && source.imageLinks?.length ? [...source.imageLinks] : undefined;
-		await this.#queueForYield(text, { images, imageLinks, detachedText: detached?.text });
+		await this.#queueForYield(text, { images, imageLinks, detachedText: detached?.text, origin });
 	}
 
 	async #queueForYield(
@@ -2127,6 +2158,7 @@ export class InputController {
 			historyText?: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
+			origin?: ConversationPosition;
 			/** The submitted draft already left the editor; anything there now is newer. Restored on failure. */
 			detachedText?: string;
 		},
@@ -2135,7 +2167,7 @@ export class InputController {
 		// Like /queue, it must not submit to the guest's local session.
 		if (this.ctx.collabGuest) {
 			this.ctx.showStatus("/queue is host-only during a collab session");
-			this.ctx.editor.setText(options.detachedText ?? options.historyText ?? text);
+			this.ctx.editor.setText(options.detachedText ?? text);
 			return;
 		}
 
@@ -2154,31 +2186,21 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
-		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText);
+		if (options.detachedText === undefined) this.ctx.editor.clearDraft();
+		if (options.historyText !== undefined) this.ctx.editor.addToHistory(options.historyText);
 
 		this.releaseStaleYieldCompaction();
-		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
-			for (let index = 0; index < messages.length; index++) {
-				this.ctx.compactionQueuedMessages.push({
-					text: messages[index] ?? "",
-					mode: "followUp",
-					images: index === 0 ? images : undefined,
-				});
-			}
-			this.ctx.updatePendingMessagesDisplay();
-			this.ctx.showStatus(
-				messages.length === 1
-					? "Queued message for after compaction"
-					: `Queued ${messages.length} messages for after compaction`,
-			);
-			this.ctx.ui.requestRender();
-			return;
-		}
-
+		const origin = options.origin ?? conversationPosition(this.ctx.sessionManager);
 		const startImmediately = !this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount === 0;
 		let queuedCount = 0;
+		let handledCompact = false;
 		try {
-			if (startImmediately) {
+			if (
+				startImmediately &&
+				!this.ctx.session.isCompacting &&
+				!this.ctx.yieldCompaction &&
+				!messages.some(message => parseSlashCommand(message)?.name === "compact")
+			) {
 				// The session queues the rest when it admits the first, so nothing can run ahead of it,
 				// and hands the whole list back if the first never reaches the agent.
 				const [first = "", ...rest] = messages;
@@ -2215,9 +2237,42 @@ export class InputController {
 			while (queuedCount < messages.length) {
 				const message = messages[queuedCount] ?? "";
 				const queuedImages = queuedCount === 0 ? images : undefined;
-				await this.ctx.withLocalSubmission(message, () => this.ctx.session.followUp(message, queuedImages), {
-					imageCount: queuedImages?.length ?? 0,
-				});
+				if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
+					this.ctx.compactionQueuedMessages.push({ text: message, mode: "followUp", images: queuedImages });
+				} else if (parseSlashCommand(message)?.name === "compact") {
+					// Reuse the follow-up slash lifecycle: validate and bind the request, then let its
+					// single watcher wait for older session input. Later queue entries stay held above.
+					await executeBuiltinSlashCommand(message, {
+						ctx: this.ctx,
+						input: { images: queuedImages, imageLinks: queuedCount === 0 ? imageLinks : undefined },
+						draftDetached: true,
+						followUp: origin,
+					});
+					handledCompact = true;
+				} else if (startImmediately && queuedCount === 0 && this.ctx.onInputCallback) {
+					const submission = this.ctx.startPendingSubmission({
+						text: message,
+						images: queuedImages,
+						imageLinks,
+						streamingBehavior: "followUp",
+					});
+					this.ctx.onInputCallback(submission);
+				} else {
+					await this.ctx.withLocalSubmission(
+						message,
+						async () => {
+							if (startImmediately && queuedCount === 0) {
+								await this.ctx.session.prompt(message, {
+									images: queuedImages,
+									streamingBehavior: "followUp",
+								});
+							} else {
+								await this.ctx.session.followUp(message, queuedImages);
+							}
+						},
+						{ imageCount: queuedImages?.length ?? 0 },
+					);
+				}
 				queuedCount++;
 			}
 		} catch (error) {
@@ -2241,15 +2296,19 @@ export class InputController {
 		}
 
 		this.ctx.updatePendingMessagesDisplay();
-		if (queuedCount === messages.length) {
+		if (queuedCount === messages.length && !handledCompact) {
 			this.ctx.showStatus(
-				startImmediately
+				this.ctx.session.isCompacting || this.ctx.yieldCompaction
 					? queuedCount === 1
-						? "Sent queued message"
-						: `Sent first message; queued ${queuedCount - 1} for later yields`
-					: queuedCount === 1
-						? "Queued message for when the agent yields"
-						: `Queued ${queuedCount} messages for when the agent yields`,
+						? "Queued message for after compaction"
+						: `Queued ${queuedCount} messages for after compaction`
+					: startImmediately
+						? queuedCount === 1
+							? "Sent queued message"
+							: `Sent first message; queued ${queuedCount - 1} for later yields`
+						: queuedCount === 1
+							? "Queued message for when the agent yields"
+							: `Queued ${queuedCount} messages for when the agent yields`,
 			);
 		}
 		this.ctx.ui.requestRender();
@@ -2321,7 +2380,7 @@ export class InputController {
 	): Promise<void> {
 		// Ctrl+Enter detached the draft before the first await, so a side command
 		// has no editor state left to release; a render failure hands it back.
-		const restoreSideDraft = { restore: () => restoreDetachedDraft(this.ctx.editor, text, images, imageLinks) };
+		const restoreSideDraft = { restore: () => this.ctx.editor.restoreDetachedDraft(text, images, imageLinks) };
 
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
@@ -2985,7 +3044,10 @@ export class InputController {
 		}
 	}
 
-	async handleImagePaste(target: PasteTarget | undefined = this.#resolvePasteTarget()): Promise<boolean> {
+	async handleImagePaste(
+		target: PasteTarget | undefined = this.#resolvePasteTarget(),
+		promptPaste?: PromptImagePaste,
+	): Promise<boolean> {
 		if (!this.#clipboardIsTerminalLocal()) {
 			this.ctx.showStatus(REMOTE_CLIPBOARD_STATUS);
 			return false;
@@ -2998,11 +3060,14 @@ export class InputController {
 		const editorContext = target instanceof CustomEditor ? this.#captureEditorPasteContext(target) : undefined;
 		const promptTarget = target instanceof CustomEditor ? null : target;
 		let finishPaste: ((text: string | undefined) => boolean) | undefined;
-		let promptPaste: PromptImagePaste | undefined;
+		const ownsPaste = promptPaste === undefined;
 		try {
-			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
-			else finishPaste = promptTarget?.beginPaste?.();
-			const sink = promptPaste?.sink ?? (editor ? this.#editorImageSink(editor) : undefined);
+			if (!promptPaste && promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
+			else if (!promptPaste) finishPaste = promptTarget?.beginPaste?.();
+			const sink =
+				promptTarget && !promptTarget.acceptsImages
+					? undefined
+					: (promptPaste?.sink ?? (editor ? this.#editorImageSink(editor) : undefined));
 			const content = await this.clipboard.readContent?.();
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
@@ -3099,7 +3164,7 @@ export class InputController {
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
 		} finally {
-			promptPaste?.finish();
+			if (ownsPaste) promptPaste?.finish();
 			finishPaste?.(undefined);
 		}
 	}

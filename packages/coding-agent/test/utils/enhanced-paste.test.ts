@@ -244,19 +244,23 @@ describe("EnhancedPasteController", () => {
 			beginPaste: () => {
 				const completion = delivered[started++]!;
 				const finish = editor.beginPaste();
-				return text => {
-					const accepted = finish(text);
-					completion.resolve();
-					return accepted;
+				return {
+					finish: text => {
+						const accepted = finish(text);
+						completion.resolve();
+						return accepted;
+					},
+					pasteImage: async image => {
+						const label = Buffer.from(image.data, "base64").toString();
+						if (label === "first") await firstImageReady.promise;
+						editor.pasteText(`${label} `);
+					},
 				};
 			},
 			pasteText: text => editor.pasteText(text),
-			pasteImage: async image => {
-				const label = Buffer.from(image.data, "base64").toString();
-				if (label === "first") await firstImageReady.promise;
-				editor.pasteText(`${label} `);
-			},
+			pasteImage: () => {},
 			showStatus: message => statuses.push(message),
+			pasteNative: unexpectedNativePaste,
 		});
 		const dot = Buffer.from(".").toString("base64");
 		const imageMime = Buffer.from("image/png").toString("base64");
@@ -310,18 +314,22 @@ describe("EnhancedPasteController", () => {
 			write: () => {},
 			beginPaste: () => {
 				const finish = editor.beginPaste();
-				return text => {
-					const accepted = finish(text);
-					delivered.resolve();
-					return accepted;
+				return {
+					finish: text => {
+						const accepted = finish(text);
+						delivered.resolve();
+						return accepted;
+					},
+					pasteImage: async () => {
+						await imageReady.promise;
+						editor.pasteText("image ");
+					},
 				};
 			},
 			pasteText: text => editor.pasteText(text),
-			pasteImage: async () => {
-				await imageReady.promise;
-				editor.pasteText("image ");
-			},
+			pasteImage: () => {},
 			showStatus: () => {},
+			pasteNative: unexpectedNativePaste,
 		});
 		const imageMime = Buffer.from("image/png").toString("base64");
 		controller.handleInput(packet("type=read:status=OK"));
@@ -364,6 +372,7 @@ describe("EnhancedPasteController", () => {
 			pasteText: text => focused.pasteText(text),
 			pasteImage: image => focused.pasteText(Buffer.from(image.data, "base64").toString()),
 			showStatus: () => {},
+			pasteNative: unexpectedNativePaste,
 		});
 		const mime = Buffer.from("image/png").toString("base64");
 		for (const target of [first, second]) {
@@ -390,10 +399,11 @@ describe("EnhancedPasteController", () => {
 		const editor = new CustomEditor(defaultEditorTheme);
 		const controller = new EnhancedPasteController({
 			write: () => {},
-			beginPaste: () => editor.beginPaste(),
+			beginPaste: () => ({ finish: editor.beginPaste(), pasteImage: () => {} }),
 			pasteText: text => editor.pasteText(text),
 			pasteImage: () => {},
 			showStatus: () => {},
+			pasteNative: unexpectedNativePaste,
 		});
 		controller.handleInput(packet("type=read:status=OK"));
 		const textMime = Buffer.from("text/plain").toString("base64");

@@ -25,6 +25,7 @@ interface CheckoutRecord {
 	command: string;
 	checkout: string;
 	start?: string;
+	dir?: string;
 }
 
 interface DaemonOp {
@@ -69,7 +70,7 @@ describe("ovnfs checkout recovery", () => {
 	}
 
 	async function plant(repo: string, agentId: string, checkout: string, pid: number): Promise<string> {
-		const baseDir = taskIsolationBaseDir(repo, agentId);
+		const baseDir = taskIsolationBaseDir(repo, agentId, repo);
 		await fs.mkdir(baseDir, { recursive: true });
 		await Bun.write(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify({ command: COMMAND, checkout }));
 		await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), JSON.stringify({ pid, id: agentId }));
@@ -110,10 +111,14 @@ describe("ovnfs checkout recovery", () => {
 		const baseDir = await plant(repo, agentId, STALE, await deadPid());
 		const owner = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).text();
 
-		const workspace = await ovnfsWorkspace(COMMAND)(repo, agentId);
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, agentId, repo);
 
 		const current = await readRecord(baseDir);
-		expect(current).toEqual({ command: COMMAND, checkout: expect.stringMatching(/^omp-authrefactor-[0-9a-f]{6}$/) });
+		expect(current).toEqual({
+			command: COMMAND,
+			checkout: expect.stringMatching(/^omp-authrefactor-[0-9a-f]{6}$/),
+			dir: workspace.dir,
+		});
 		expect(workspace.dir).toBe(`/mnt/ovnfs/${current.checkout}`);
 		const [sibling] = await retainedDirs(baseDir);
 		expect(sibling).toBeString();
@@ -123,7 +128,7 @@ describe("ovnfs checkout recovery", () => {
 		failRemoval = false;
 		const beforeClear = removed.length;
 		vi.spyOn(console, "log").mockImplementation(() => {});
-		const cleared = await clearWorktrees({ all: false, dryRun: false, json: true });
+		const cleared = await clearWorktrees({ all: false, dryRun: false, json: true, cwd: repo });
 		expect(cleared).toEqual({ removed: 1, failed: 0 });
 		expect(removed.slice(beforeClear)).toEqual([STALE]);
 		await expect(fs.stat(sibling)).rejects.toMatchObject({ code: "ENOENT" });
@@ -144,7 +149,7 @@ describe("ovnfs checkout recovery", () => {
 		await fs.mkdir(repo);
 		const baseDir = await plant(repo, "Removed", STALE, await deadPid());
 
-		const workspace = await ovnfsWorkspace(COMMAND)(repo, "Removed");
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, "Removed", repo);
 
 		expect(removed).toEqual([STALE]);
 		expect(await retainedDirs(baseDir)).toEqual([]);
@@ -168,7 +173,7 @@ describe("ovnfs checkout recovery", () => {
 		const baseDir = await plant(repo, "Stuck", STALE, await deadPid());
 		const owner = await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).text();
 
-		await expect(ovnfsWorkspace(COMMAND)(repo, "Stuck")).rejects.toThrow(/previous checkout/);
+		await expect(ovnfsWorkspace(COMMAND)(repo, "Stuck", repo)).rejects.toThrow(/previous checkout/);
 
 		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout: STALE });
 		expect(await Bun.file(path.join(baseDir, ISOLATION_OWNER_FILE)).text()).toBe(owner);
@@ -194,9 +199,9 @@ describe("ovnfs checkout recovery", () => {
 		await fs.mkdir(repo);
 		const agentId = "LostReply";
 
-		await expect(ovnfsWorkspace(COMMAND)(repo, agentId)).rejects.toThrow(/socket hang up/);
+		await expect(ovnfsWorkspace(COMMAND)(repo, agentId, repo)).rejects.toThrow(/socket hang up/);
 
-		const baseDir = taskIsolationBaseDir(repo, agentId);
+		const baseDir = taskIsolationBaseDir(repo, agentId, repo);
 		const record = await readRecord(baseDir);
 		expect(requested).toMatch(/^omp-lostreply-[0-9a-f]{6}$/);
 		expect(record).toEqual({ command: COMMAND, checkout: requested });
@@ -222,9 +227,9 @@ describe("ovnfs checkout recovery", () => {
 		});
 		const repo = path.join(root, "confirmed");
 		await fs.mkdir(repo);
-		const baseDir = taskIsolationBaseDir(repo, "Confirmed");
+		const baseDir = taskIsolationBaseDir(repo, "Confirmed", repo);
 
-		await expect(ovnfsWorkspace(COMMAND)(repo, "Confirmed")).rejects.toThrow(/ovnfs: invalid: rejected/);
+		await expect(ovnfsWorkspace(COMMAND)(repo, "Confirmed", repo)).rejects.toThrow(/ovnfs: invalid: rejected/);
 
 		expect(requested).toMatch(/^omp-confirmed-[0-9a-f]{6}$/);
 		expect(removed).toEqual([requested]);
@@ -247,9 +252,9 @@ describe("ovnfs checkout recovery", () => {
 		});
 		const repo = path.join(root, "collision");
 		await fs.mkdir(repo);
-		const baseDir = taskIsolationBaseDir(repo, "Collision");
+		const baseDir = taskIsolationBaseDir(repo, "Collision", repo);
 
-		await expect(ovnfsWorkspace(COMMAND)(repo, "Collision")).rejects.toThrow(/ovnfs: exists: already exists/);
+		await expect(ovnfsWorkspace(COMMAND)(repo, "Collision", repo)).rejects.toThrow(/ovnfs: exists: already exists/);
 
 		expect(requested).toMatch(/^omp-collision-[0-9a-f]{6}$/);
 		expect(removed).toEqual([]);
@@ -260,9 +265,9 @@ describe("ovnfs checkout recovery", () => {
 		vi.spyOn(daemon, "startDaemon").mockRejectedValue(new Error("cannot run /opt/ovnfs/ovnfs"));
 		const repo = path.join(root, "no-daemon");
 		await fs.mkdir(repo);
-		const baseDir = taskIsolationBaseDir(repo, "NoDaemon");
+		const baseDir = taskIsolationBaseDir(repo, "NoDaemon", repo);
 
-		await expect(ovnfsWorkspace(COMMAND)(repo, "NoDaemon")).rejects.toThrow(/cannot run \/opt\/ovnfs\/ovnfs/);
+		await expect(ovnfsWorkspace(COMMAND)(repo, "NoDaemon", repo)).rejects.toThrow(/cannot run \/opt\/ovnfs\/ovnfs/);
 
 		await expect(fs.stat(baseDir)).rejects.toMatchObject({ code: "ENOENT" });
 	});
@@ -282,8 +287,8 @@ describe("ovnfs checkout recovery", () => {
 		const repo = path.join(root, "cleanup");
 		await fs.mkdir(repo);
 		const agentId = "Cleanup";
-		const workspace = await ovnfsWorkspace(COMMAND)(repo, agentId);
-		const baseDir = taskIsolationBaseDir(repo, agentId);
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, agentId, repo);
+		const baseDir = taskIsolationBaseDir(repo, agentId, repo);
 		const record = await readRecord(baseDir);
 
 		failRemoval = true;
@@ -316,17 +321,35 @@ describe("ovnfs checkout recovery", () => {
 		const repo = path.join(root, "features");
 		await fs.mkdir(repo);
 		captureDaemon(repo, ["diff.binary"], () => ({}));
-		expect((await ovnfsWorkspace(COMMAND)(repo, "Old")).start).toBeUndefined();
+		expect((await ovnfsWorkspace(COMMAND)(repo, "Old", repo)).start).toBeUndefined();
 
 		vi.restoreAllMocks();
 		captureDaemon(repo, ["new.base", "diff.binary"], op => {
 			if (op.op === "diff") throw new client.OvnfsError("unsupported", "a.big goes through a filter");
 			return {};
 		});
-		const workspace = await ovnfsWorkspace(COMMAND)(repo, "New");
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, "New", repo);
 		expect(workspace.start).toBeDefined();
 		// ovnfs leaves a filtered path to git: the runner then diffs against the baseline.
 		expect(await workspace.start?.rootPatch()).toBeUndefined();
+	});
+
+	it("leaves in-repo worktree storage to the filtered baseline path instead of returning the daemon's full patch", async () => {
+		const repo = path.join(root, "nested-storage");
+		await fs.mkdir(repo);
+		setWorktreesDir(".worktrees");
+		captureDaemon(repo, ["new.base", "diff.binary"], op => {
+			if (op.op === "diff") {
+				return {
+					binary: true,
+					patch: "diff --git a/.worktrees/child/.omp-ovnfs-checkout.json b/.worktrees/child/.omp-ovnfs-checkout.json\n",
+				};
+			}
+			return {};
+		});
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, "NestedStorage", repo);
+		expect(workspace.start).toBeDefined();
+		expect(await workspace.start!.rootPatch()).toBeUndefined();
 	});
 
 	it("records the start checkout a branch baseline opens until it is removed", async () => {
@@ -349,8 +372,8 @@ describe("ovnfs checkout recovery", () => {
 			throw new Error(op.op);
 		});
 		const agentId = "Branch";
-		const workspace = await ovnfsWorkspace(COMMAND)(repo, agentId);
-		const baseDir = taskIsolationBaseDir(repo, agentId);
+		const workspace = await ovnfsWorkspace(COMMAND)(repo, agentId, repo);
+		const baseDir = taskIsolationBaseDir(repo, agentId, repo);
 		const { checkout } = await readRecord(baseDir);
 		const start = `${checkout}-start`;
 
@@ -358,13 +381,13 @@ describe("ovnfs checkout recovery", () => {
 		// The start checkout's path is no repository, so the baseline read fails.
 		await expect(workspace.start?.baseline()).rejects.toThrow();
 		expect(opened).toEqual([{ op: "new", base: "b_1", name: start, checkout: undefined }]);
-		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout, start });
+		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout, start, dir: workspace.dir });
 
 		// Closing the workspace removes the start checkout too, and keeps the record while it cannot.
 		removed.length = 0;
 		await workspace.cleanup();
 		expect(removed).toEqual([start]);
-		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout, start });
+		expect(await readRecord(baseDir)).toEqual({ command: COMMAND, checkout, start, dir: workspace.dir });
 
 		failRemoval = false;
 		removed.length = 0;
@@ -460,7 +483,7 @@ describe("ovnfs checkout recovery", () => {
 		expect(result.branchName).toBe("omp/task/BranchRun");
 		const start = opened.find(op => op.base);
 		expect(start?.base).toBe("b_1");
-		expect(captured.mock.calls).toEqual([[`/mnt/ovnfs/${start?.name}`, repo]]);
+		expect(captured.mock.calls).toEqual([[`/mnt/ovnfs/${start?.name}`, repo, undefined, repo]]);
 		expect(committed).toHaveBeenCalledTimes(1);
 		expect(committed.mock.calls[0]?.[1]).toBe(baseline);
 		expect(committed.mock.calls[0]?.[5]).toEqual({ rootPatch: binaryPatch, nestedPatches: [] });

@@ -30,7 +30,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { callSocket, OvnfsError, socketFeatures } from "../ovnfs/client";
 import { forgetDaemon, startDaemon } from "../ovnfs/daemon";
 import { writeFileAtomically } from "../utils/atomic-file";
@@ -165,17 +165,21 @@ class OvnfsWorkspace implements IsolationWorkspace {
 	) {
 		if (capture) {
 			this.start = {
-				rootPatch: () => this.#rootPatch(),
+				rootPatch: () => this.#rootPatch(capture.repoRoot, cwd),
 				baseline: () => this.#baseline(capture.base, capture.repoRoot, cwd),
 			};
 		}
 	}
 
 	/**
-	 * The checkout's changes since its capture, as `git diff --binary` writes them;
-	 * `undefined` when ovnfs leaves storing them to git (a filter, ident or encoding).
+	 * The checkout's changes since its capture, as `git diff --binary` writes them.
+	 * Managed storage inside either repo needs the baseline path's exclusions;
+	 * ovnfs also leaves filtered, ident or encoded files to git.
 	 */
-	async #rootPatch(): Promise<string | undefined> {
+	async #rootPatch(repoRoot: string, cwd: string): Promise<string | undefined> {
+		if (pathIsWithin(this.dir, getWorktreesDir(this.dir)) || pathIsWithin(repoRoot, getWorktreesDir(cwd))) {
+			return undefined;
+		}
 		let reply: DiffReply;
 		try {
 			reply = await call<DiffReply>(this.command, "diff", { checkout: this.checkout, binary: true });

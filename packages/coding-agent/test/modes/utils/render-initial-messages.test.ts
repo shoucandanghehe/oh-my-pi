@@ -194,6 +194,7 @@ function makeRenderCtx(
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
 			getQueuedMessages: () => ({ steering: [], followUp: [] }),
+			getQueuedMessageEditAction: () => undefined,
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
 			hasBuiltInTool: () => true,

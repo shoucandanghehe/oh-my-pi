@@ -347,7 +347,7 @@ describe("issue #6516 — tool output appears twice", () => {
 			created.push(live);
 			mode.chatContainer.addChild(live);
 			mode.pendingTools.set("call-1", live);
-			mode.eventController.markBackgroundTaskCalls(new Set(["call-1"]));
+			mode.eventController.markBackgroundCalls(new Set(["call-1"]));
 
 			for (let rebuild = 0; rebuild < 2; rebuild++) {
 				mode.rebuildChatFromMessages();

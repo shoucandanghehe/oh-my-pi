@@ -52,7 +52,7 @@ import { expandKeyHint } from "../render/render-utils";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { ScrollView } from "../components/scroll-view";
-import { RewindHistory, type RewindHistoryItem, type RewindHistoryTarget } from "./rewind-history";
+import { RewindHistory, type RewindHistoryItem, type RewindHistoryTarget, type RewindPoint } from "./rewind-history";
 import {
 	composeOutlineColumn,
 	type OutlineTarget,
@@ -151,20 +151,6 @@ class MarkedBlock implements Component {
 /** The click action that picks a block's target on the page. */
 const PICK = "rewind-pick";
 
-/** Index of the target in `targets` (sorted, disjoint) whose blocks include child `child`; -1 for none. */
-function targetAt(targets: readonly OutlineTarget[], child: number): number {
-	let lo = 0;
-	let hi = targets.length - 1;
-	while (lo <= hi) {
-		const mid = (lo + hi) >> 1;
-		const target = targets[mid]!;
-		if (child < target.start) hi = mid - 1;
-		else if (child >= target.end) lo = mid + 1;
-		else return mid;
-	}
-	return -1;
-}
-
 const kMarked = Symbol("rewind.marked");
 
 /** A replayed block tagged with its page wrapper, so stepping reuses one wrapper per block. */
@@ -229,6 +215,7 @@ export class RewindSelectorComponent implements Component {
 		private readonly deps: RewindSelectorDeps,
 	) {
 		this.#history = new RewindHistory(entries, deps);
+		if (deps.startAt !== undefined) this.#history.selectEntry(deps.startAt);
 	}
 
 	get hasTargets(): boolean {
@@ -629,7 +616,7 @@ export class RewindSelectorComponent implements Component {
 				const picked = item.target === selected;
 				if (picked) page.push(this.#caption(targets, targets.indexOf(item), "main"));
 				for (const block of this.#history.preview(item.point))
-					page.push(this.#marked(block, picked ? "pick" : undefined, "main", targets.indexOf(item)));
+					page.push(this.#marked(block, picked ? "pick" : undefined, "main", item.point));
 			}
 			if (matches.length === 0)
 				page.push(text([span(`No turns match "${filter}"`, "muted")], { role: "omp.rewind.empty" }));
@@ -687,7 +674,7 @@ export class RewindSelectorComponent implements Component {
 			const item = targets[index]!;
 			if (index === picked) out.push(this.#caption(targets, picked, column));
 			const mark = picked < 0 || index < picked ? undefined : index === picked ? "pick" : "drop";
-			for (const block of history.preview(item.point)) out.push(this.#marked(block, mark, column, index));
+			for (const block of history.preview(item.point)) out.push(this.#marked(block, mark, column, item.point));
 		}
 	}
 
@@ -745,29 +732,28 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	/** `block` wrapped to carry `mark`; one wrapper per block, so ids and view state persist while stepping. */
-	#marked(block: Component & MarkTagged, mark: TspMark | undefined, column: string, target: number): MarkedBlock {
+	#marked(block: Component & MarkTagged, mark: TspMark | undefined, column: string, point: RewindPoint): MarkedBlock {
 		const marked = (block[kMarked] ??= new MarkedBlock(block));
 		marked.mark = mark;
-		marked.pick = target < 0 ? undefined : () => this.#pick(column, target);
+		marked.pick = () => this.#pick(column, point);
 		return marked;
 	}
 
 	/**
-	 * A click or tap on a turn: the outline moves to `targets[index]` of `column` (`main`, or a strip
-	 * column's root id), as stepping there would; Enter or Rewind here then rewinds to it.
+	 * A click or tap on a turn moves the correct history to its stable point;
+	 * Enter or Rewind here then rewinds to it.
 	 */
-	#pick(column: string, index: number): void {
+	#pick(column: string, point: RewindPoint): void {
 		if (column === "main") {
-			if (this.#activeVariant === 0 && this.#selected === index) return;
-			this.#selected = index;
+			this.#history.select(point);
 			this.#activeVariant = 0;
-			this.#siblingSelected = 0;
 			this.#stopSlide();
 		} else {
-			const variant = this.#stripColumns().findIndex(c => c.rootId === column) + 1;
-			if (variant === 0 || (this.#activeVariant === variant && this.#siblingSelected === index)) return;
-			this.#activeVariant = variant;
-			this.#siblingSelected = index;
+			const columns = this.#stripColumns();
+			const index = columns.findIndex(c => c.rootId === column);
+			if (index < 0) return;
+			columns[index]!.history.select(point);
+			this.#activeVariant = index + 1;
 		}
 		this.deps.requestRender();
 	}

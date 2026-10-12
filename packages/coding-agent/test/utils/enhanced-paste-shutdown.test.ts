@@ -74,6 +74,9 @@ describe("Enhanced paste shutdown", () => {
 				throw new Error("unexpected image paste");
 			},
 			showStatus: message => pastedText.push(`status:${message}`),
+			pasteNative: () => {
+				throw new Error("unexpected native clipboard paste");
+			},
 		});
 		terminal.start(
 			data => controller.handleInput(data),

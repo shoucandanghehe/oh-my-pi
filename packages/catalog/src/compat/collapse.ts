@@ -36,7 +36,15 @@
  */
 import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
-import type { AntigravityModelWireProfile, Api, InputModality, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type {
+	AntigravityModelWireProfile,
+	Api,
+	InputModality,
+	Model,
+	ModelSpec,
+	Provider,
+	ThinkingConfig,
+} from "../types";
 import { resolveModelPolicy } from "./resolve";
 import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
 import { collapseVariantId, collapseVocabulary, stripThinkingVariantSuffix } from "./taxonomy";
