@@ -372,6 +372,9 @@
 - App-viewport subagents now share a stable auxiliary area with up to two visible transcripts and overflow tabs (Alt+Left/Right); completed panes still close automatically, while focused and manually opened panes stay available.
 - Very large sessions now resume faster, while large agent transcript panes load incrementally and reflow only visible rows during split-pane resizing.
 - Changed BTW knowledge sharing: the BTW-only `xd://send_to_main_session` device publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
+- App-viewport subagents now share a stable auxiliary area with up to two visible transcripts and overflow tabs (Alt+Left/Right); completed panes still close automatically, while focused and manually opened panes stay available.
+- Very large sessions now resume faster, while large agent transcript panes load incrementally and reflow only visible rows during split-pane resizing.
+- Changed durable BTW knowledge sharing: `shareSummaryWithMain` now publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
 - Changed durable BTW panes to open with the thread rail collapsed by default, provide a `+ New BTW` action that immediately creates a blank thread, and let `/new` omit its first question.
 - BTW thread-rail hover previews and pinned expand/collapse actions now use a short interruptible slide animation.
 - Agent Hub now opens selected agents in persistent app-viewport workspace panes beside the sticky main-session editor, with pane-local transcript scrolling and the existing native-scrollback behavior preserved on other backends.

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { EnhancedPasteController } from "@oh-my-pi/pi-coding-agent/utils/enhanced-paste";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { defaultEditorTheme } from "../../../tui/test/test-themes";
 
 const ST = "\x1b\\";
 const BEL = "\x07";
@@ -7,6 +9,10 @@ const OSC = "\x1b]5522;";
 
 function packet(metadata: string, payload?: string): string {
 	return `${OSC}${metadata}${payload === undefined ? "" : `;${payload}`}${ST}`;
+}
+
+function readReply(metadata: string, payload?: string, read = 1): string {
+	return packet(`${metadata}:id=paste-${read}`, payload);
 }
 
 describe("EnhancedPasteController", () => {
@@ -35,16 +41,18 @@ describe("EnhancedPasteController", () => {
 		controller.handleInput(packet("type=read:status=DONE"));
 
 		const pasteEventName = Buffer.from("Paste event", "utf8").toString("base64");
-		expect(writes.at(-1)).toBe(`${OSC}type=read:pw=${password}:name=${pasteEventName}:mime=${imageMime}${BEL}`);
+		expect(writes.at(-1)).toBe(
+			`${OSC}type=read:id=paste-1:pw=${password}:name=${pasteEventName}:mime=${imageMime}${BEL}`,
+		);
 
-		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(readReply("type=read:status=OK"));
 		controller.handleInput(
-			packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image-", "utf8").toString("base64")),
+			readReply(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image-", "utf8").toString("base64")),
 		);
 		controller.handleInput(
-			packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("bytes", "utf8").toString("base64")),
+			readReply(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("bytes", "utf8").toString("base64")),
 		);
-		controller.handleInput(packet("type=read:status=DONE"));
+		controller.handleInput(readReply("type=read:status=DONE"));
 
 		expect(pastedImages).toEqual([
 			{
@@ -76,17 +84,17 @@ describe("EnhancedPasteController", () => {
 		controller.handleInput(packet("type=read:status=DONE"));
 
 		expect(writes).toEqual([
-			`${OSC}type=read:loc=primary:pw=${password}:name=${pasteEventName}:mime=${textMime}${BEL}`,
+			`${OSC}type=read:id=paste-1:loc=primary:pw=${password}:name=${pasteEventName}:mime=${textMime}${BEL}`,
 		]);
 
-		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(readReply("type=read:status=OK"));
 		controller.handleInput(
-			packet(`type=read:status=DATA:mime=${textMime}`, Buffer.from("hello ", "utf8").toString("base64")),
+			readReply(`type=read:status=DATA:mime=${textMime}`, Buffer.from("hello ", "utf8").toString("base64")),
 		);
 		controller.handleInput(
-			packet(`type=read:status=DATA:mime=${textMime}`, Buffer.from("world", "utf8").toString("base64")),
+			readReply(`type=read:status=DATA:mime=${textMime}`, Buffer.from("world", "utf8").toString("base64")),
 		);
-		controller.handleInput(packet("type=read:status=DONE"));
+		controller.handleInput(readReply("type=read:status=DONE"));
 
 		expect(pastedText).toEqual(["hello world"]);
 	});
@@ -137,16 +145,16 @@ describe("EnhancedPasteController", () => {
 		);
 		controller.handleInput(packet(`type=read:status=DONE:pw=${password}`));
 
-		expect(writes.at(-1)).toBe(`${OSC}type=read:pw=${password}:name=${pasteEventName};${textMime}${BEL}`);
+		expect(writes.at(-1)).toBe(`${OSC}type=read:id=paste-1:pw=${password}:name=${pasteEventName};${textMime}${BEL}`);
 
-		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(readReply("type=read:status=OK"));
 		controller.handleInput(
-			packet(`type=read:status=DATA:mime=${textMime}`, Buffer.from("hello", "utf8").toString("base64")),
+			readReply(`type=read:status=DATA:mime=${textMime}`, Buffer.from("hello", "utf8").toString("base64")),
 		);
 		controller.handleInput(
-			packet(`type=read:status=DATA:mime=${textMime}`, Buffer.from(" world", "utf8").toString("base64")),
+			readReply(`type=read:status=DATA:mime=${textMime}`, Buffer.from(" world", "utf8").toString("base64")),
 		);
-		controller.handleInput(packet("type=read:status=DONE"));
+		controller.handleInput(readReply("type=read:status=DONE"));
 
 		expect(pastedText).toEqual(["hello world"]);
 	});
@@ -174,6 +182,142 @@ describe("EnhancedPasteController", () => {
 		);
 		controller.handleInput(packet("type=read:status=DONE"));
 
-		expect(writes.at(-1)).toBe(`${OSC}type=read;${imageMime}${BEL}`);
+		expect(writes.at(-1)).toBe(`${OSC}type=read:id=paste-1;${imageMime}${BEL}`);
+	});
+
+	it("queues consecutive paste notifications without ending the active image read or reordering attachments", async () => {
+		const editor = new CustomEditor(defaultEditorTheme);
+		const writes: string[] = [];
+		const statuses: string[] = [];
+		const firstImageReady = Promise.withResolvers<void>();
+		const delivered = Array.from({ length: 3 }, () => Promise.withResolvers<void>());
+		let started = 0;
+		const controller = new EnhancedPasteController({
+			write: data => writes.push(data),
+			beginPaste: () => {
+				const completion = delivered[started++]!;
+				const finish = editor.beginPaste();
+				return text => {
+					const accepted = finish(text);
+					completion.resolve();
+					return accepted;
+				};
+			},
+			pasteText: text => editor.pasteText(text),
+			pasteImage: async image => {
+				const label = Buffer.from(image.data, "base64").toString();
+				if (label === "first") await firstImageReady.promise;
+				editor.pasteText(`${label} `);
+			},
+			showStatus: message => statuses.push(message),
+		});
+		const dot = Buffer.from(".").toString("base64");
+		const imageMime = Buffer.from("image/png").toString("base64");
+		const mimeList = Buffer.from("image/png\n").toString("base64");
+		for (const password of ["first", "second", undefined]) {
+			const token = password ? `:pw=${Buffer.from(password).toString("base64")}` : "";
+			controller.handleInput(packet(`type=read:status=OK${token}`));
+			controller.handleInput(packet(`type=read:status=DATA:mime=${dot}`, mimeList));
+			controller.handleInput(packet("type=read:status=DONE"));
+		}
+		editor.handleInput("tail");
+		expect(statuses).toEqual([]);
+		expect(writes).toHaveLength(1);
+		expect(editor.getText()).toBe("");
+
+		controller.handleInput(readReply("type=read:status=OK"));
+		controller.handleInput(
+			readReply(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("first").toString("base64")),
+		);
+		controller.handleInput(readReply("type=read:status=DONE"));
+		expect(writes).toHaveLength(1);
+		firstImageReady.resolve();
+		await delivered[0]!.promise;
+		expect(writes).toHaveLength(2);
+		expect(writes[1]).toContain(`:pw=${Buffer.from("second").toString("base64")}:`);
+
+		controller.handleInput(readReply("type=read:status=OK", undefined, 2));
+		controller.handleInput(
+			readReply(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("second").toString("base64"), 2),
+		);
+		controller.handleInput(readReply("type=read:status=DONE", undefined, 2));
+		await delivered[1]!.promise;
+		expect(writes).toHaveLength(3);
+		expect(writes[2]).not.toContain(":pw=");
+
+		controller.handleInput(readReply("type=read:status=OK", undefined, 3));
+		controller.handleInput(
+			readReply(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("third").toString("base64"), 3),
+		);
+		controller.handleInput(readReply("type=read:status=DONE", undefined, 3));
+		await delivered[2]!.promise;
+		expect(editor.getText()).toBe("first second third tail");
+		expect(statuses).toEqual([]);
+	});
+
+	it("keeps later keys behind an enhanced image paste until its attachment work finishes", async () => {
+		const editor = new CustomEditor(defaultEditorTheme);
+		const imageReady = Promise.withResolvers<void>();
+		const delivered = Promise.withResolvers<void>();
+		const controller = new EnhancedPasteController({
+			write: () => {},
+			beginPaste: () => {
+				const finish = editor.beginPaste();
+				return text => {
+					const accepted = finish(text);
+					delivered.resolve();
+					return accepted;
+				};
+			},
+			pasteText: text => editor.pasteText(text),
+			pasteImage: async () => {
+				await imageReady.promise;
+				editor.pasteText("image ");
+			},
+			showStatus: () => {},
+		});
+		const imageMime = Buffer.from("image/png").toString("base64");
+		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(packet(`type=read:status=DATA:mime=${imageMime}`));
+		controller.handleInput(packet("type=read:status=DONE"));
+		controller.handleInput(readReply("type=read:status=OK"));
+		controller.handleInput(
+			readReply(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image").toString("base64")),
+		);
+		controller.handleInput(readReply("type=read:status=DONE"));
+		editor.handleInput("abc");
+		expect(editor.getText()).toBe("");
+
+		imageReady.resolve();
+		await delivered.promise;
+		expect(editor.getText()).toBe("image abc");
+	});
+
+	it("releases later keys when disabled with an active read, queued paste and unfinished notification", () => {
+		const editor = new CustomEditor(defaultEditorTheme);
+		const controller = new EnhancedPasteController({
+			write: () => {},
+			beginPaste: () => editor.beginPaste(),
+			pasteText: text => editor.pasteText(text),
+			pasteImage: () => {},
+			showStatus: () => {},
+		});
+		controller.handleInput(packet("type=read:status=OK"));
+		const textMime = Buffer.from("text/plain").toString("base64");
+		controller.handleInput(packet(`type=read:status=DATA:mime=${textMime}`));
+		controller.handleInput(packet("type=read:status=DONE"));
+		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(packet(`type=read:status=DATA:mime=${textMime}`));
+		controller.handleInput(packet("type=read:status=DONE"));
+		controller.handleInput(packet("type=read:status=OK"));
+		editor.handleInput("abc");
+		controller.disable();
+		expect(editor.getText()).toBe("abc");
+		controller.handleInput(readReply("type=read:status=OK"));
+		controller.handleInput(
+			readReply(`type=read:status=DATA:mime=${textMime}`, Buffer.from("late").toString("base64")),
+		);
+		controller.handleInput(readReply("type=read:status=DONE"));
+		expect(editor.getText()).toBe("abc");
 	});
 });
