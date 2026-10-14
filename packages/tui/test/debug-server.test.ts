@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import * as os from "node:os";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
-import { type Component, Input, Text, TUI, type TuiDebugTreeNode } from "../src";
+import { type Component, CURSOR_MARKER, Input, Text, TUI, type TuiDebugTreeNode } from "../src";
+import { TuiDebugServer } from "../src/debug-server";
+import { StressRenderScheduler } from "./render-stress-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
 
 interface DebugReply {
@@ -138,5 +140,80 @@ test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 		tui.stop();
 		if (previousDebugPath === undefined) delete process.env.OMP_TUI_DEBUG;
 		else process.env.OMP_TUI_DEBUG = previousDebugPath;
+	}
+});
+
+test("app-viewport debug text and info describe the painted screen, not an unpainted frame", async () => {
+	const previousBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+	Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+	const socketPath = ipcEndpoint(os.tmpdir(), `pi-tui-app-${process.pid}-${Bun.randomUUIDv7().slice(0, 8)}`);
+	const terminal = new VirtualTerminal(20, 4);
+	const scheduler = new StressRenderScheduler();
+	const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
+	const server = new TuiDebugServer(tui, socketPath);
+	let cursorColumn: number | null = 2;
+	let lastLine = "sixth";
+	tui.addChild({
+		invalidate() {},
+		render() {
+			const tail =
+				cursorColumn === null
+					? lastLine
+					: lastLine.slice(0, cursorColumn) + CURSOR_MARKER + lastLine.slice(cursorColumn);
+			return ["first", "second", "third", "fourth", "fifth", tail];
+		},
+	});
+	let client: DebugClient | undefined;
+	try {
+		tui.start();
+		server.start();
+		expect(await server.ready).toBe(true);
+		client = await connectDebugSocket(socketPath);
+		expect(await client.request({ op: "text" })).toEqual({ ok: false, error: "no frame painted yet" });
+
+		await scheduler.drain(terminal);
+		const assertPaintedScreen = async (column: number | null) => {
+			const text = await client!.request({ op: "text" });
+			expect(text).toMatchObject({ ok: true, window_top: 0, alt_screen: false });
+			expect(text.lines?.map(line => line.trimEnd())).toEqual(terminal.getViewport().map(line => line.trimEnd()));
+			const cursor =
+				column === null ? { visible: false } : { x: column, y: terminal.getCursor().row, visible: false };
+			expect(await client!.request({ op: "info" })).toMatchObject({
+				ok: true,
+				columns: 20,
+				rows: 4,
+				alt_screen: false,
+				cursor,
+			});
+			if (column !== null) {
+				expect(text).toMatchObject({ cursor });
+				expect(terminal.getCursor().col).toBe(column);
+			} else {
+				expect(text).not.toHaveProperty("cursor");
+			}
+		};
+		await assertPaintedScreen(2);
+
+		// Identical cell contents reuse the viewport, but cursor writes still change info.
+		cursorColumn = 4;
+		tui.requestRender();
+		await scheduler.drain(terminal);
+		await assertPaintedScreen(4);
+		cursorColumn = null;
+		tui.requestRender();
+		await scheduler.drain(terminal);
+		await assertPaintedScreen(null);
+
+		lastLine = "updated";
+		tui.requestRender();
+		await scheduler.drain(terminal);
+		await assertPaintedScreen(null);
+		expect((await client.request({ op: "text" })).lines?.join("\n")).toContain("updated");
+	} finally {
+		client?.close();
+		server.stop();
+		tui.stop();
+		if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+		else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;
 	}
 });
