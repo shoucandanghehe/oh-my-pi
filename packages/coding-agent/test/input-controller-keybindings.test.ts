@@ -215,7 +215,11 @@ const packet = (metadata: string, payload?: string) =>
 	`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 const base64 = (value: string) => Buffer.from(value).toString("base64");
 
-type Dispatcher = { ctx: InteractiveModeContext; input: InputHarness };
+type Dispatcher = {
+	ctx: InteractiveModeContext;
+	input: InputHarness;
+	spies: { writeRaw: Mock<(data: string) => void> };
+};
 
 function dispatchOsc({ ctx, input }: Dispatcher, raw: string): void {
 	input.dispatch(ctx, { type: "osc", raw });
@@ -230,12 +234,10 @@ function dispatchEnhancedImagePaste(target: Dispatcher, png: Uint8Array): void {
 		packet(`type=read:status=DATA:mime=${textMime}`),
 		packet(`type=read:status=DATA:mime=${imageMime}`),
 		packet("type=read:status=DONE"),
-		packet("type=read:status=OK"),
-		packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from(png).toString("base64")),
-		packet("type=read:status=DONE"),
 	]) {
 		dispatchOsc(target, raw);
 	}
+	deliverEnhancedPaste(target, "image/png", png);
 }
 
 /** Replay a kitty OSC 5522 enhanced paste that offers and delivers plain `text`. */
@@ -245,12 +247,10 @@ function dispatchEnhancedTextPaste(target: Dispatcher, text: string): void {
 		packet("type=read:status=OK:pw=secret"),
 		packet(`type=read:status=DATA:mime=${textMime}`),
 		packet("type=read:status=DONE"),
-		packet("type=read:status=OK"),
-		packet(`type=read:status=DATA:mime=${textMime}`, base64(text)),
-		packet("type=read:status=DONE"),
 	]) {
 		dispatchOsc(target, raw);
 	}
+	deliverEnhancedPaste(target, "text/plain", text);
 }
 
 /** Make `shellPaste` deliver to the focused `composer` as the shell does: past the interceptors, to its field. */
@@ -266,10 +266,14 @@ function offerTextAndHtml(target: Dispatcher): void {
 }
 
 /** Deliver `body` as the `mime` the controller requested. */
-function deliverEnhancedPaste(target: Dispatcher, mime: string, body: string): void {
-	dispatchOsc(target, packet("type=read:status=OK"));
-	dispatchOsc(target, packet(`type=read:status=DATA:mime=${base64(mime)}`, base64(body)));
-	dispatchOsc(target, packet("type=read:status=DONE"));
+function deliverEnhancedPaste(target: Dispatcher, mime: string, body: string | Uint8Array): void {
+	const request = target.spies.writeRaw.mock.calls.findLast(([data]) => data.includes("type=read:id="))?.[0];
+	const id = request?.match(/:id=([^:;]+)/)?.[1];
+	if (!id) throw new Error("Expected the driver to request an enhanced clipboard read");
+	const payload = typeof body === "string" ? base64(body) : Buffer.from(body).toString("base64");
+	dispatchOsc(target, packet(`type=read:status=OK:id=${id}`));
+	dispatchOsc(target, packet(`type=read:status=DATA:id=${id}:mime=${base64(mime)}`, payload));
+	dispatchOsc(target, packet(`type=read:status=DONE:id=${id}`));
 }
 
 /** Resolves on the next call to `mock`; the call still runs its current implementation. */
@@ -1259,7 +1263,9 @@ describe("InputController image paste into an image-accepting prompt", () => {
 
 			offerTextAndHtml(context);
 			expect(
-				context.spies.writeRaw.mock.calls.some(([data]) => data.includes(`type=read;${base64(mime)}`)),
+				context.spies.writeRaw.mock.calls.some(
+					([data]) => data.includes("type=read:id=") && data.includes(`;${base64(mime)}`),
+				),
 				`requests ${mime}`,
 			).toBe(true);
 

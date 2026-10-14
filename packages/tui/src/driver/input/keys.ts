@@ -295,7 +295,8 @@ function codepointKey(
 		}
 		return keypad.nav ? event(keyId(mask, keypad.nav), raw, kind) : null;
 	}
-	const name = codepointName(cp);
+	// Kitty reports IME commits as text with no associated physical key.
+	const name = cp === 0 && textCodepoints?.length ? "text" : codepointName(cp);
 	if (name === null) return null;
 	const textOf = (): string | undefined => {
 		if (mask & ~SHIFT) return undefined;

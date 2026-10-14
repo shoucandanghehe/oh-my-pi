@@ -1052,6 +1052,23 @@ export class InputController {
 		if (!this.#enhancedPaste) {
 			this.#enhancedPaste = new EnhancedPasteController({
 				write: data => this.ctx.shell.host?.driver.writeRaw(data),
+				beginPaste: () => {
+					const focused = this.ctx.shell.focused();
+					const session = this.ctx.viewSession;
+					const isCurrent = () => this.ctx.shell.focused() === focused && this.ctx.viewSession === session;
+					const pending = Promise.withResolvers<void>();
+					this.#trackImagePaste(pending.promise);
+					return {
+						isCurrent,
+						finish: text => {
+							try {
+								if (text !== undefined && isCurrent()) this.#pasteTextIntoFocus(text);
+							} finally {
+								pending.resolve();
+							}
+						},
+					};
+				},
 				pasteText: text => this.#pasteTextIntoFocus(text),
 				pasteImage: image =>
 					this.#pasteImageIntoFocus(sink =>
@@ -1070,7 +1087,13 @@ export class InputController {
 		}
 		const enhancedPaste = this.#enhancedPaste;
 		this.#keyHooks.push(
-			this.ctx.interceptInput(event => event.type === "osc" && enhancedPaste.handleInput(event.raw)),
+			this.ctx.interceptInput(event => {
+				if (event.type === "osc") return enhancedPaste.handleInput(event.raw);
+				if (event.type === "key" && (event.key.id === "escape" || event.key.id === "ctrl+c")) {
+					enhancedPaste.cancel();
+				}
+				return false;
+			}),
 		);
 		// A terminal already started (the startup frame) takes the mode now; one started later gets it then.
 		enhancedPaste.enable();
@@ -2963,21 +2986,22 @@ export class InputController {
 		}
 	}
 
-	async handleClipboardTextRawPaste(): Promise<void> {
+	handleClipboardTextRawPaste(): Promise<void> {
 		if (!this.#clipboardIsTerminalLocal()) {
 			this.ctx.showStatus(REMOTE_CLIPBOARD_STATUS);
-			return;
+			return Promise.resolve();
 		}
-		try {
-			const text = await this.clipboard.readText();
-			if (text) {
-				this.ctx.composer.insertText(text);
-			} else {
-				this.ctx.showStatus("No text in clipboard to paste raw");
-			}
-		} catch {
-			this.ctx.showStatus("Failed to paste raw text from clipboard");
-		}
+		const session = this.ctx.viewSession;
+		return this.#trackImagePaste(
+			this.clipboard.readText().then(
+				text => {
+					if (this.ctx.viewSession !== session || !this.#composerTakesPaste()) return;
+					if (text) this.ctx.composer.insertText(text);
+					else this.ctx.showStatus("No text in clipboard to paste raw");
+				},
+				() => this.ctx.showStatus("Failed to paste raw text from clipboard"),
+			),
+		);
 	}
 
 	/**
