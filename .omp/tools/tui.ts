@@ -99,9 +99,13 @@ export interface TuiParams {
 /** Runtime-resolved because compiled OMP hosts cannot resolve project packages while importing custom tools. */
 let vtApi: Promise<typeof KittyVt> | null = null;
 
-function loadVt(): Promise<typeof KittyVt> {
-	const modulePath = resolve(import.meta.dir, "../../node_modules/kitty-vt-wasm/dist/index.js");
-	vtApi ??= import(modulePath) as Promise<typeof KittyVt>;
+export function loadVt(
+	modulePath = resolve(import.meta.dir, "../../node_modules/kitty-vt-wasm/dist/index.js"),
+): Promise<typeof KittyVt> {
+	vtApi ??= (import(modulePath) as Promise<typeof KittyVt>).catch(error => {
+		vtApi = null;
+		throw new Error(`screen emulation needs kitty-vt-wasm — run \`bun install\` in the project root (${error})`);
+	});
 	return vtApi;
 }
 /** Decoded kitty-graphics command (the lib exports it only inside the event union). */
