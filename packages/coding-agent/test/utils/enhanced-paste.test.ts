@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { EnhancedPasteController } from "@oh-my-pi/pi-coding-agent/utils/enhanced-paste";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { defaultEditorTheme } from "../../../tui/test/test-themes";
 
 const ST = "\x1b\\";
 const BEL = "\x07";
@@ -175,5 +177,58 @@ describe("EnhancedPasteController", () => {
 		controller.handleInput(packet("type=read:status=DONE"));
 
 		expect(writes.at(-1)).toBe(`${OSC}type=read;${imageMime}${BEL}`);
+	});
+
+	it("keeps later keys behind an enhanced image paste until its attachment work finishes", async () => {
+		const editor = new CustomEditor(defaultEditorTheme);
+		const imageReady = Promise.withResolvers<void>();
+		const delivered = Promise.withResolvers<void>();
+		const controller = new EnhancedPasteController({
+			write: () => {},
+			beginPaste: () => {
+				const finish = editor.beginPaste();
+				return text => {
+					const accepted = finish(text);
+					delivered.resolve();
+					return accepted;
+				};
+			},
+			pasteText: text => editor.pasteText(text),
+			pasteImage: async () => {
+				await imageReady.promise;
+				editor.pasteText("image ");
+			},
+			showStatus: () => {},
+		});
+		const imageMime = Buffer.from("image/png").toString("base64");
+		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(packet(`type=read:status=DATA:mime=${imageMime}`));
+		controller.handleInput(packet("type=read:status=DONE"));
+		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(
+			packet(`type=read:status=DATA:mime=${imageMime}`, Buffer.from("image").toString("base64")),
+		);
+		controller.handleInput(packet("type=read:status=DONE"));
+		editor.handleInput("abc");
+		expect(editor.getText()).toBe("");
+
+		imageReady.resolve();
+		await delivered.promise;
+		expect(editor.getText()).toBe("image abc");
+	});
+
+	it("releases later keys when enhanced paste is disabled without a payload", () => {
+		const editor = new CustomEditor(defaultEditorTheme);
+		const controller = new EnhancedPasteController({
+			write: () => {},
+			beginPaste: () => editor.beginPaste(),
+			pasteText: text => editor.pasteText(text),
+			pasteImage: () => {},
+			showStatus: () => {},
+		});
+		controller.handleInput(packet("type=read:status=OK"));
+		editor.handleInput("abc");
+		controller.disable();
+		expect(editor.getText()).toBe("abc");
 	});
 });

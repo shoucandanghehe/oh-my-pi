@@ -23,6 +23,7 @@ interface PasteListingState {
 	kittyDotPayload?: true;
 	pw?: string;
 	loc?: string;
+	finish?: (text: string | undefined) => boolean;
 }
 
 interface PasteReadState {
@@ -30,12 +31,15 @@ interface PasteReadState {
 	kind: PasteReadKind;
 	mimeType: string;
 	chunks: string[];
+	finish?: (text: string | undefined) => boolean;
 }
 
-type PasteState = PasteListingState | PasteReadState;
+type PasteState = PasteListingState | PasteReadState | { phase: "cancelled"; finish?: never };
 
 export interface EnhancedPasteHandlers {
 	write(data: string): void;
+	/** Reserve ordered delivery from the paste notification through the clipboard read. */
+	beginPaste?(): ((text: string | undefined) => boolean) | undefined;
 	pasteText(text: string): void;
 	pasteImage(image: ImageContent): void | Promise<void>;
 	showStatus(message: string): void;
@@ -94,7 +98,17 @@ export class EnhancedPasteController {
 
 	disable(): void {
 		this.#handlers.write("\x1b[?5522l");
+		const state = this.#state;
 		this.#state = undefined;
+		state?.finish?.(undefined);
+	}
+
+	/** Release waiting input, but consume the cancelled read's remaining packets through DONE. */
+	cancel(): void {
+		const state = this.#state;
+		if (!state || state.phase === "cancelled") return;
+		this.#state = { phase: "cancelled" };
+		state.finish?.(undefined);
 	}
 
 	handleInput(data: string): boolean {
@@ -122,25 +136,28 @@ export class EnhancedPasteController {
 			return;
 		}
 		if (status) {
+			const state = this.#state;
 			this.#state = undefined;
 			this.#handlers.showStatus(`Enhanced paste failed: ${status}`);
+			state?.finish?.(undefined);
 		}
 	}
 
 	#handleOk(packet: Osc5522Packet): void {
-		if (this.#state?.phase === "reading") return;
+		if (this.#state?.phase === "reading" || this.#state?.phase === "cancelled") return;
 		const loc = packet.metadata.get("loc");
 		this.#state = {
 			phase: "listing",
 			mimes: [],
 			pw: packet.metadata.get("pw"),
 			loc: loc === "primary" ? loc : undefined,
+			finish: this.#state ? this.#state.finish : this.#handlers.beginPaste?.(),
 		};
 	}
 
 	#handleData(packet: Osc5522Packet): void {
 		const state = this.#state;
-		if (!state) return;
+		if (!state || state.phase === "cancelled") return;
 		const encodedMime = packet.metadata.get("mime");
 		if (!encodedMime) return;
 		const mimeType = decodeBase64Utf8(encodedMime);
@@ -178,6 +195,10 @@ export class EnhancedPasteController {
 	async #handleDone(): Promise<void> {
 		const state = this.#state;
 		if (!state) return;
+		if (state.phase === "cancelled") {
+			this.#state = undefined;
+			return;
+		}
 		if (state.phase === "listing") {
 			this.#finishListing(state);
 			return;
@@ -186,17 +207,24 @@ export class EnhancedPasteController {
 		const bytes = Buffer.concat(state.chunks.map(chunk => Buffer.from(chunk, "base64")));
 		if (bytes.byteLength === 0) {
 			this.#handlers.showStatus("Clipboard paste was empty");
+			state.finish?.(undefined);
 			return;
 		}
 		if (state.kind === "text") {
-			this.#handlers.pasteText(bytes.toString("utf8"));
+			const text = bytes.toString("utf8");
+			if (state.finish) state.finish(text);
+			else this.#handlers.pasteText(text);
 			return;
 		}
-		await this.#handlers.pasteImage({
-			type: "image",
-			data: bytes.toString("base64"),
-			mimeType: state.mimeType,
-		});
+		try {
+			await this.#handlers.pasteImage({
+				type: "image",
+				data: bytes.toString("base64"),
+				mimeType: state.mimeType,
+			});
+		} finally {
+			state.finish?.(undefined);
+		}
 	}
 
 	#finishListing(state: PasteListingState): void {
@@ -204,6 +232,7 @@ export class EnhancedPasteController {
 		if (!selected) {
 			this.#state = undefined;
 			this.#handlers.showStatus("Clipboard paste has no supported text or image data");
+			state.finish?.(undefined);
 			return;
 		}
 
@@ -212,6 +241,7 @@ export class EnhancedPasteController {
 			kind: selected.kind,
 			mimeType: selected.mimeType,
 			chunks: [],
+			finish: state.finish,
 		};
 
 		const encodedMime = Buffer.from(selected.mimeType, "utf8").toString("base64");

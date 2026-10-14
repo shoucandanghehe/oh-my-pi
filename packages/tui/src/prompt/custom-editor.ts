@@ -1467,7 +1467,7 @@ export class CustomEditor extends Editor {
 	/** Called when a bracketed paste contains one or more image or video file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
-	onPasteTextRaw?: () => void;
+	onPasteTextRaw?: () => void | Promise<void>;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
@@ -1613,6 +1613,22 @@ export class CustomEditor extends Editor {
 		return this.spaceHold.shouldRoute(data);
 	}
 
+	/** Reserve a paste before its payload arrives; later keys wait until delivery or cancellation. */
+	beginPaste(): (text: string | undefined) => boolean {
+		this.#pasteInFlight++;
+		let pending = true;
+		return text => {
+			if (!pending) return false;
+			pending = false;
+			try {
+				if (text !== undefined) this.pasteText(text);
+			} finally {
+				this.#onPasteSettled();
+			}
+			return text !== undefined;
+		};
+	}
+
 	/** Non-keyboard paste transports share the submit barrier with bracketed paste. */
 	pasteFromClipboard(): Promise<boolean> {
 		const pending = this.onPasteImage?.() ?? Promise.resolve(false);
@@ -1734,9 +1750,10 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured raw text paste (fires and handles result)
+			// Raw clipboard reads share the same input barrier as image reads.
 			if (this.#matchesAction(canonical, "app.clipboard.pasteTextRaw") && this.onPasteTextRaw) {
-				this.onPasteTextRaw();
+				const pending = this.onPasteTextRaw();
+				if (pending instanceof Promise) this.#trackAsyncPaste(pending);
 				return;
 			}
 

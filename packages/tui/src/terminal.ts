@@ -2281,6 +2281,9 @@ export class ProcessTerminal implements Terminal {
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
 		if (this.#headless) return;
+		// Stop unsolicited MIME listings before the idle drain, not after stdin
+		// is released in stop(). Already-in-flight paste events are consumed below.
+		this.#safeWrite("\x1b[?5522l");
 		if (this.#kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
