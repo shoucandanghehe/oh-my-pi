@@ -6500,6 +6500,13 @@ export class TUI extends Container {
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
+		const target = cursorControl.state;
+		this.#debugPaint = {
+			lines: appendBrailleScrollbar(fitted, scrollbarGlyphs, width),
+			windowTop: 0,
+			altScreen: false,
+			...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
+		};
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#appViewportPreviousLines = fitted;
 		this.#appViewportPreparedRows = preparedRows;
@@ -6635,9 +6642,18 @@ export class TUI extends Container {
 
 	#writeAppViewportCursor(cursorPos: { row: number; col: number } | null, height: number): void {
 		const cursorControl = this.#appViewportCursorControlSequence(cursorPos, height);
-		if (cursorControl.state) this.#recordHardwareCursorState(cursorControl.state);
-		else this.#recordHardwareCursorHidden();
 		this.terminal.write(cursorControl.seq);
+		const target = cursorControl.state;
+		if (this.#debugPaint !== undefined) {
+			this.#debugPaint = {
+				lines: this.#debugPaint.lines,
+				windowTop: this.#debugPaint.windowTop,
+				altScreen: this.#debugPaint.altScreen,
+				...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
+			};
+		}
+		if (target) this.#recordHardwareCursorState(target);
+		else this.#recordHardwareCursorHidden();
 	}
 
 	#appViewportCursorPosition(
