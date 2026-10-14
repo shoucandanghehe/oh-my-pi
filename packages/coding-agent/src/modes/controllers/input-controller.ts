@@ -766,7 +766,7 @@ export class InputController {
 			"app.clipboard.pasteTextRaw",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
 		);
-		this.ctx.editor.onPasteTextRaw = () => void this.handleClipboardTextRawPaste();
+		this.ctx.editor.onPasteTextRaw = () => this.handleClipboardTextRawPaste();
 		this.ctx.editor.onLargePaste = (text, lineCount, options) => this.handleLargePaste(text, lineCount, options);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.copyPrompt",
@@ -1049,6 +1049,16 @@ export class InputController {
 
 		this.#enhancedPaste = new EnhancedPasteController({
 			write: data => this.ctx.ui.terminal.write(data),
+			beginPaste: () => {
+				const target = this.#resolvePasteTarget();
+				if (!(target instanceof CustomEditor)) return undefined;
+				const finish = target.beginPaste();
+				return text => {
+					const accepted = finish(text);
+					this.ctx.ui.requestRender();
+					return accepted;
+				};
+			},
 			pasteText: text => {
 				const target = this.#resolvePasteTarget();
 				const focused = this.ctx.ui.getFocused();
@@ -1068,7 +1078,11 @@ export class InputController {
 				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
 			showStatus: message => this.ctx.showStatus(message),
 		});
-		this.ctx.ui.addInputListener(data => (this.#enhancedPaste?.handleInput(data) ? { consume: true } : undefined));
+		this.ctx.ui.addInputListener(data => {
+			if (this.#enhancedPaste?.handleInput(data)) return { consume: true };
+			if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) this.#enhancedPaste?.cancel();
+			return undefined;
+		});
 		this.ctx.ui.addStartListener(() => this.#enhancedPaste?.enable());
 	}
 
@@ -2477,7 +2491,7 @@ export class InputController {
 		editor.onPasteImage = () => this.handleImagePaste(editor);
 		editor.onPasteImagePath = path => this.handleImagePathPaste(path, editor);
 		editor.setActionKeys("app.clipboard.pasteTextRaw", this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"));
-		editor.onPasteTextRaw = () => void this.handleClipboardTextRawPaste(editor);
+		editor.onPasteTextRaw = () => this.handleClipboardTextRawPaste(editor);
 	}
 
 	async #insertPendingImage(
