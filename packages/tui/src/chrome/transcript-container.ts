@@ -19,7 +19,6 @@ import {
 import { extractComponentTextSelection, normalizeTextSelection, type TextSelectionRange } from "../text-selection";
 import { measureComponentRows } from "../tui";
 import { getPaddingX, getWidthConfigEpoch } from "../utils";
-import { TERMINAL } from "../terminal-capabilities";
 import { waitForImmediate } from "@oh-my-pi/pi-utils";
 import { withCodeHighlightingDisabledForLayout } from "../theme/tui-adapters";
 import { isAnimationOnlyRenderTarget } from "../render-targets";
@@ -349,11 +348,6 @@ interface MeasuredBlock {
 	rows: readonly string[];
 	/** Whether the render observed a budgeted image; see {@link measureRender}. */
 	images: boolean;
-}
-
-function isFinalized(component: Component): boolean {
-	const block = component as Component & FinalizableBlock;
-	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
 }
 
 function canRetire(component: Component): boolean {

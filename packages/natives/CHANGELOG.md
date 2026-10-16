@@ -11,6 +11,17 @@
 - Fixed Mermaid flowcharts drawing two edges between the same pair of nodes as one line, with their labels written over each other; each edge now gets its own route, line style, arrowhead and label ([#16731](https://github.com/can1357/oh-my-pi/issues/16731))
 - Fixed `renderMermaidAscii` starting an edge one cell away from its node's side when a labeled sibling edge leaves the same node from another side ([#16730](https://github.com/can1357/oh-my-pi/issues/16730))
 - Fixed Mermaid flowchart parsing swallowing leading dashes of spaceless arrows (`A-->B`, `B-.->C`, `C:::cls-->D`) into the preceding node ID or class name ([#16750](https://github.com/can1357/oh-my-pi/pull/16750) by [@berney](https://github.com/berney))
+### Breaking Changes
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Fixed
+
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.12.5] - 2026-10-21
 
