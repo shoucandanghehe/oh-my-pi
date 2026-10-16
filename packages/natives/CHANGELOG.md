@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Fixed
+
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
+
 ## [18.11.3] - 2026-10-16
 ### Breaking Changes
 

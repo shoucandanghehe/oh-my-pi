@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Added a `video` input modality to `Model.input`, the `input-modalities` axis, build-time narrowing, the model-cache row validator, and the dynamic-model input guard ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
+- Added GPT Image 2.5, Flare, and Sunburst image-model selection for Codex proxies configured with the Images API.
+
 ## [18.11.3] - 2026-10-16
 
 ### Changed

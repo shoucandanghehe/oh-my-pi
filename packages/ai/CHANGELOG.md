@@ -9,6 +9,13 @@
 ### Changed
 
 - Anthropic requests to the official API now gzip the request body, so long conversations reach the model sooner on slow uplinks; set `PI_ANTHROPIC_GZIP=0` to disable it ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))
+### Fixed
+
+- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
+- Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
+- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
+- Image edits can upload reference files to proxy endpoints that require multipart requests.
 
 ## [18.11.3] - 2026-10-16
 
