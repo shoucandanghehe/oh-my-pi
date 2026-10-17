@@ -145,6 +145,27 @@ function replaceImages(composer: Composer, images: ImageContent[], links: (strin
 afterEach(() => vi.restoreAllMocks());
 
 describe("interactive native input ingress", () => {
+	it("prewarms the focused conversation but keeps approval-owned drafts on Main", async () => {
+		const h = await createHarness(() => {});
+		h.editor.setText("main draft");
+		expect(h.session.prewarmModelConnection).toHaveBeenCalledTimes(1);
+		h.session.prewarmModelConnection.mockClear();
+
+		const focusedPrewarm = vi.fn();
+		Object.defineProperties(h.ctx, {
+			focusedAgentId: { value: "child" },
+			viewSession: { value: { ...h.session, prewarmModelConnection: focusedPrewarm } },
+		});
+		h.editor.setText("child draft");
+		expect(focusedPrewarm).toHaveBeenCalledTimes(1);
+		expect(h.session.prewarmModelConnection).not.toHaveBeenCalled();
+
+		h.ctx.approvalOwnsComposer = true;
+		h.editor.setText("approval draft");
+		expect(h.session.prewarmModelConnection).toHaveBeenCalledTimes(1);
+		expect(focusedPrewarm).toHaveBeenCalledTimes(1);
+	});
+
 	it("Ctrl+Enter chains partial text/image transforms and restores materialized images after rejection", async () => {
 		const seen: InputEvent[] = [];
 		const h = await createHarness(pi => {
@@ -712,7 +733,7 @@ describe("interactive native input ingress", () => {
 			const focusedPrompt = vi.fn(async () => true);
 			Object.defineProperties(h.ctx, {
 				focusedAgentId: { value: "focused-task" },
-				viewSession: { value: { isStreaming: true, prompt: focusedPrompt } },
+				viewSession: { value: { ...h.session, prompt: focusedPrompt } },
 			});
 			h.editor.setText("focused chat");
 			await h.pressSubmit(key);
