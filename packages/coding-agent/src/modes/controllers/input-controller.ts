@@ -788,7 +788,10 @@ export class InputController {
 			this.#draftText = text;
 			// Typing signals an imminent turn; refresh the API connection now so
 			// the handshake overlaps composition instead of delaying the send.
-			if (text) this.ctx.session.prewarmModelConnection();
+			if (text) {
+				const target = this.ctx.approvalOwnsComposer ? this.ctx.session : this.ctx.viewSession;
+				target.prewarmModelConnection();
+			}
 			const wasBashMode = this.ctx.isBashMode;
 			const wasPythonMode = this.ctx.isPythonMode;
 			const trimmed = text.trimStart();

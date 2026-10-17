@@ -139,6 +139,27 @@ async function createHarness(factory: ExtensionFactory, nativeRendering = false)
 afterEach(() => vi.restoreAllMocks());
 
 describe("interactive native input ingress", () => {
+	it("prewarms the focused conversation but keeps approval-owned drafts on Main", async () => {
+		const h = await createHarness(() => {});
+		h.editor.setText("main draft");
+		expect(h.session.prewarmModelConnection).toHaveBeenCalledTimes(1);
+		h.session.prewarmModelConnection.mockClear();
+
+		const focusedPrewarm = vi.fn();
+		Object.defineProperties(h.ctx, {
+			focusedAgentId: { value: "child" },
+			viewSession: { value: { ...h.session, prewarmModelConnection: focusedPrewarm } },
+		});
+		h.editor.setText("child draft");
+		expect(focusedPrewarm).toHaveBeenCalledTimes(1);
+		expect(h.session.prewarmModelConnection).not.toHaveBeenCalled();
+
+		h.ctx.approvalOwnsComposer = true;
+		h.editor.setText("approval draft");
+		expect(h.session.prewarmModelConnection).toHaveBeenCalledTimes(1);
+		expect(focusedPrewarm).toHaveBeenCalledTimes(1);
+	});
+
 	it("inserts a native newline on Ctrl+Enter and submits the multiline draft on plain Enter", async () => {
 		const h = await createHarness(() => {}, true);
 		h.editor.setText("first");
@@ -597,7 +618,7 @@ describe("interactive native input ingress", () => {
 			const focusedPrompt = vi.fn(async () => true);
 			Object.defineProperties(h.ctx, {
 				focusedAgentId: { value: "focused-task" },
-				viewSession: { value: { isStreaming: true, prompt: focusedPrompt } },
+				viewSession: { value: { ...h.session, prompt: focusedPrompt } },
 			});
 			h.editor.setText("focused chat");
 			await h.pressSubmit(key);
