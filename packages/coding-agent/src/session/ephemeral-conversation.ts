@@ -17,12 +17,10 @@ export interface EphemeralTurnOptions {
 	replyMaxBytes?: number;
 }
 
-/** Side-channel capabilities for a conversation: read-only tools and one-way summary sharing with Main. */
+/** Side-channel capabilities beyond the read-only investigation tools every BTW conversation has. */
 export interface EphemeralConversationSideOptions {
-	/** Allow investigation tools and read-only LSP/GitHub operations, directly or through xd://. */
-	readOnlyTools?: boolean;
-	/** Install `shareSummaryWithMain` for a user-approved BTW knowledge summary. */
-	shareSummaryWithMain?: (summary: string) => void | Promise<void>;
+	/** Mount `xd://send_to_main_session` for a user-approved summary delivered into Main. */
+	sendToMainSession?: (summary: string) => void | Promise<void>;
 	/** Present the exact summary for approval in the conversation's own view. */
 	approveSummary?: (summary: string, signal?: AbortSignal) => Promise<boolean>;
 }
@@ -85,7 +83,11 @@ export interface EphemeralConversationOptions {
 		messages: AgentMessage[],
 		options: Omit<EphemeralTurnOptions, "promptText">,
 	) => Promise<EphemeralTurnResult>;
-	turnPrefixMessages?: () => readonly AgentMessage[];
+	/** Normalize attachments and retain their hidden companions in the committed turn. */
+	prepareTurn?: (
+		turn: Pick<EphemeralConversationTurn, "images" | "prefixMessages">,
+		signal?: AbortSignal,
+	) => Promise<Pick<EphemeralConversationTurn, "images" | "prefixMessages">>;
 	checkpoint?: EphemeralConversationCheckpoint;
 	sideSessionId: string;
 	getTool?: (name: string) => AgentTool | undefined;
@@ -95,7 +97,7 @@ export interface EphemeralConversationOptions {
 		streamMessage?: AssistantMessage | null;
 		isStreaming: boolean;
 	};
-	/** Lazy: only durable BTW explicitly initializes a side-owned extension host. */
+	/** Side-owned extension host and restricted tool set; created before the first turn. */
 	createExtensionRuntime?: () => Promise<BtwExtensionRuntime>;
 }
 
@@ -106,7 +108,7 @@ export interface EphemeralConversationOptions {
 export class EphemeralConversation {
 	#baseMessages: readonly AgentMessage[] | undefined;
 	readonly #snapshotBaseMessages: EphemeralConversationOptions["snapshotBaseMessages"];
-	readonly #turnPrefixMessages: EphemeralConversationOptions["turnPrefixMessages"];
+	readonly #prepareTurn: EphemeralConversationOptions["prepareTurn"];
 	readonly #runTurn: EphemeralConversationOptions["runTurn"];
 	readonly #getTool: EphemeralConversationOptions["getTool"];
 	readonly #getRuntimeState: EphemeralConversationOptions["getRuntimeState"];
@@ -133,7 +135,7 @@ export class EphemeralConversation {
 
 	constructor(options: EphemeralConversationOptions) {
 		this.#snapshotBaseMessages = options.snapshotBaseMessages;
-		this.#turnPrefixMessages = options.turnPrefixMessages;
+		this.#prepareTurn = options.prepareTurn;
 		this.#getTool = options.getTool;
 		this.#getRuntimeState = options.getRuntimeState;
 		this.#runTurn = options.runTurn;
@@ -176,11 +178,6 @@ export class EphemeralConversation {
 				this.#extensionRuntimePending = undefined;
 			});
 		await this.#extensionRuntimePending;
-	}
-	/** Waits for an already-requested host; never allocates one for QuickAsk. */
-	async waitForExtensionRuntimeInitialization(): Promise<void> {
-		await this.#extensionRuntimePending;
-		if (this.#extensionRuntimeDisposed) throw new Error("BTW extension runtime was disposed");
 	}
 
 	async disposeExtensionRuntime(): Promise<void> {
@@ -269,8 +266,17 @@ export class EphemeralConversation {
 		this.#recordAssistantUsage(turn.assistantMessage);
 	}
 
-	#appendTurns(messages: AgentMessage[]): void {
-		for (const turn of this.#turns) {
+	async #appendTurns(messages: AgentMessage[], signal?: AbortSignal): Promise<void> {
+		for (const [index, previous] of this.#turns.entries()) {
+			const prepared =
+				previous.images?.length && this.#prepareTurn
+					? await this.#prepareTurn(
+							{ images: previous.images, prefixMessages: previous.prefixMessages ?? [] },
+							signal,
+						)
+					: undefined;
+			const turn = prepared ? { ...previous, ...prepared } : previous;
+			this.#turns[index] = turn;
 			if (turn.prefixMessages) messages.push(...turn.prefixMessages);
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text: turn.input }];
 			if (turn.images?.length) content.push(...turn.images);
@@ -287,31 +293,34 @@ export class EphemeralConversation {
 
 	async prompt(input: string, options: Omit<EphemeralTurnOptions, "promptText"> = {}): Promise<EphemeralTurnResult> {
 		if (this.#running) throw new Error("Ephemeral conversation already has a turn in progress");
-		const images = options.images?.length ? [...options.images] : undefined;
+		if (this.#extensionRuntimeDisposed) throw new Error("BTW extension runtime was disposed");
+		const requestedImages = options.images?.length ? [...options.images] : undefined;
 		const timestamp = Date.now();
 		const baseMessages = this.#baseMessages ?? this.#snapshotBaseMessages();
 		this.#baseMessages = baseMessages;
-		const messages = [...baseMessages];
-		const prefixMessages = this.#turnPrefixMessages?.() ?? [];
-		this.#appendTurns(messages);
-		messages.push(...prefixMessages);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text: input }];
-		if (images) content.push(...images);
-		messages.push({
-			role: "user",
-			content,
-			attribution: "agent",
-			timestamp,
-		});
-
-		if (this.#extensionRuntimeDisposed) throw new Error("BTW extension runtime was disposed");
 		this.#running = true;
 		try {
+			const messages = [...baseMessages];
+			await this.#appendTurns(messages, options.signal);
+			const prepared = this.#prepareTurn
+				? await this.#prepareTurn({ images: requestedImages }, options.signal)
+				: { images: requestedImages };
+			const { images, prefixMessages } = prepared;
+			if (prefixMessages) messages.push(...prefixMessages);
+			const content: (TextContent | ImageContent)[] = [{ type: "text", text: input }];
+			if (images) content.push(...images);
+			messages.push({
+				role: "user",
+				content,
+				attribution: "agent",
+				timestamp,
+			});
+			options.signal?.throwIfAborted();
 			const result = await this.#runTurn(messages, options);
 			const turn: EphemeralConversationTurn = {
 				input,
 				images,
-				prefixMessages: prefixMessages.length > 0 ? prefixMessages : undefined,
+				prefixMessages: prefixMessages?.length ? prefixMessages : undefined,
 				assistantMessage: result.assistantMessage,
 				intermediateMessages: result.intermediateMessages,
 				replyText: result.replyText,

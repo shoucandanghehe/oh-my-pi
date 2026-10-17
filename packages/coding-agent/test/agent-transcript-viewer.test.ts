@@ -2,22 +2,30 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { agentTranscriptSource, resolveAgentTranscriptLinks } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AgentTranscriptViewer, type AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import {
+	AgentTranscriptViewer,
+	type AgentTranscriptSource,
+	type AgentTranscriptViewerDeps,
+} from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type Component, ProcessTerminal, setTerminalHyperlinks, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
 import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
-import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { TspHarness } from "../../tui/test/native/tsp-harness";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 
@@ -80,6 +88,7 @@ function createNativeViewer(
 	registry: AgentRegistry,
 	cwd: string,
 	transcript: AgentTranscriptSource = agentTranscriptSource,
+	deps: Partial<AgentTranscriptViewerDeps> = {},
 ): AgentTranscriptViewer {
 	const viewer = new AgentTranscriptViewer({
 		transcript,
@@ -93,12 +102,289 @@ function createNativeViewer(
 		requestRender: () => h.tui.requestRender(),
 		onClose: () => {},
 		onHubToggle: () => {},
+		...deps,
 	});
 	h.tui.addChild(viewer);
 	return viewer;
 }
 
+function createMessageableViewer(h: TspHarness, session: AgentSession): AgentTranscriptViewer {
+	const registry = new AgentRegistry();
+	registry.register({
+		id: "Worker",
+		displayName: "Worker",
+		kind: "sub",
+		parentId: "Main",
+		status: "running",
+		session,
+	});
+	const viewer = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+		lifecycle: () => ({ ensureLive: async () => session }),
+	});
+	h.tui.setFocus(viewer);
+	return viewer;
+}
 describe("AgentTranscriptViewer", () => {
+	it("returns a real pre-dispatch failure to the editor without replacing a newer image draft", async () => {
+		const auth = createInMemoryAuthStorage();
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model: undefined, tools: [] }, convertToLlm }),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(auth),
+		});
+		const h = await TspHarness.start();
+		const viewer = createMessageableViewer(h, session);
+		try {
+			const editor = viewer.getPasteTarget()!;
+			const failedImage = { type: "image" as const, data: "ZmFpbGVk", mimeType: "image/png" };
+			const newerImage = { type: "image" as const, data: "bmV3ZXI=", mimeType: "image/png" };
+			editor.setDraft("Failed [Image #1]", [failedImage]);
+			await h.render();
+			const send = h.find(node => node.p?.actions?.click === "submit")!;
+			h.event({ ev: "action", sf: h.terminal.surface!, id: send.id, act: "submit" });
+			expect(editor.getText()).toBe("");
+			editor.setDraft("Newer [Image #1]", [newerImage]);
+			await h.until(() => editor.getExpandedText().includes("Failed [Image #2]"));
+			expect(editor.getExpandedText()).toBe("Failed [Image #2]\n\nNewer [Image #1]");
+			expect(editor.pendingImages).toEqual([newerImage, failedImage]);
+			expect(JSON.stringify(h.doc())).toContain("No model selected");
+			expect(session.messages.filter(message => message.role === "user")).toEqual([]);
+			h.terminal.send("!");
+			await h.render();
+			expect(editor.getExpandedText()).toContain("!");
+			expect(h.errors).toEqual([]);
+		} finally {
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			await session.dispose();
+			auth.close();
+		}
+	});
+
+	it("does not restore an already sent prompt when the provider records an error response", async () => {
+		const auth = createInMemoryAuthStorage();
+		const release = Promise.withResolvers<void>();
+		const provider = createMockModel({
+			responses: [
+				async () => {
+					await release.promise;
+					return { throw: "Provider rejected request" };
+				},
+			],
+		});
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [] },
+				convertToLlm,
+				streamFn: provider.stream,
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(auth),
+		});
+		const h = await TspHarness.start();
+		const viewer = createMessageableViewer(h, session);
+		try {
+			await h.render();
+			const input = h.find(node => node.k === "editor")!;
+			h.event({ ev: "send", sf: h.terminal.surface!, id: input.id, text: "Already dispatched" });
+			await h.until(() => provider.calls.length === 1);
+			const editor = viewer.getPasteTarget()!;
+			editor.setText("Keep this newer draft");
+			release.resolve();
+			await session.waitForIdle();
+			await h.render();
+			expect(session.messages.filter(message => message.role === "user")).toHaveLength(1);
+			expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+			expect(editor.getExpandedText()).toBe("Keep this newer draft");
+			expect(h.errors).toEqual([]);
+		} finally {
+			release.resolve();
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			await session.dispose();
+			auth.close();
+		}
+	});
+
+	it("dequeues pending steering then follow-up before interrupting the live steer with Shift/Alt+Up", async () => {
+		const auth = createInMemoryAuthStorage();
+		const claimed = Promise.withResolvers<void>();
+		let aborted = false;
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [] },
+				convertToLlm,
+				streamFn: async (_model, _context, options) => {
+					const live = options?.liveSteering;
+					const signal = options?.signal;
+					if (!live || !signal) throw new Error("live steering was not offered");
+					const stream = new AssistantMessageEventStream();
+					signal.addEventListener(
+						"abort",
+						() => {
+							aborted = true;
+							stream.fail(new Error("aborted"));
+						},
+						{ once: true },
+					);
+					await live.wait(signal);
+					const claim = await live.claim(signal);
+					if (!claim) throw new Error("steer was not claimed");
+					claim.accept();
+					claimed.resolve();
+					return stream;
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(auth),
+		});
+		const h = await TspHarness.start(undefined, { features: ["scroll"], nativeSurfaceMode: "screen" });
+		const viewer = createMessageableViewer(h, session);
+		const run = session.prompt("Start");
+		try {
+			await h.until(() => session.agent.state.isStreaming);
+			await session.prompt("Live input", { streamingBehavior: "steer" });
+			await claimed.promise;
+			await session.prompt("After yield", { streamingBehavior: "followUp" });
+			await session.prompt("Pending steer", { streamingBehavior: "steer" });
+			await h.render();
+			const editor = viewer.getPasteTarget()!;
+			h.terminal.send("\x1b[1;2A");
+			await h.until(() => editor.getExpandedText() === "Pending steer");
+			expect(session.getQueuedMessages()).toEqual({
+				steering: ["Live input"],
+				followUp: ["After yield"],
+				liveSteered: 1,
+			});
+			expect(aborted).toBe(false);
+			editor.clearDraft();
+			h.terminal.send("\x1b[1;3A");
+			await h.until(() => editor.getExpandedText() === "After yield");
+			expect(session.getQueuedMessages()).toEqual({
+				steering: ["Live input"],
+				followUp: [],
+				liveSteered: 1,
+			});
+			expect(aborted).toBe(false);
+			editor.clearDraft();
+			h.terminal.send("\x1b[1;2A");
+			await h.until(() => editor.getExpandedText() === "Live input");
+			await run;
+			expect(aborted).toBe(true);
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+			expect(h.errors).toEqual([]);
+		} finally {
+			await session.abort();
+			await run;
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			await session.dispose();
+			auth.close();
+		}
+	});
+
+	it("shows subagent steering until delivery and restores the selected queued image message beside the draft", async () => {
+		const auth = createInMemoryAuthStorage();
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")!, tools: [] },
+				convertToLlm,
+				streamFn: createMockModel({ responses: [{ content: ["Working"] }, { content: ["Done"] }] }).stream,
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: new ModelRegistry(auth),
+		});
+		const reachedYield = Promise.withResolvers<void>();
+		const releaseYield = Promise.withResolvers<void>();
+		let held = false;
+		session.agent.setOnBeforeYield(async () => {
+			if (held) return;
+			held = true;
+			reachedYield.resolve();
+			await releaseYield.promise;
+		});
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			parentId: "Main",
+			status: "running",
+			session,
+		});
+		const h = await TspHarness.start();
+		const viewer = new AgentTranscriptViewer({
+			agentId: "Worker",
+			transcript: agentTranscriptSource,
+			registry,
+			lifecycle: () => ({ ensureLive: async () => session }),
+			ui: h.tui,
+			cwd: process.cwd(),
+			expandKeys: [],
+			hubKeys: [],
+			createStatusLine: () => undefined,
+			requestRender: () => h.tui.requestRender(),
+			onClose() {},
+			onHubToggle() {},
+		});
+		h.tui.addChild(viewer);
+		h.tui.setFocus(viewer);
+		const run = session.prompt("Start");
+		try {
+			await reachedYield.promise;
+			const editor = viewer.getPasteTarget()!;
+			editor.setText("Change direction");
+			h.terminal.send("\r");
+			await h.until(() => session.getQueuedMessages().steering.includes("Change direction"));
+			expect(JSON.stringify(h.region("dock"))).toContain("Change direction");
+			expect(h.find(node => node.p?.role === "omp.queue.item")?.p?.title).toBe("Steering");
+			expect(editor.getText()).toBe("");
+
+			const image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
+			editor.setDraft("Inspect [Image #1]", [image]);
+			h.terminal.send("\r");
+			await h.until(() => session.getQueuedMessages().steering.length === 2);
+			const edit = h.findAll(node => node.p?.role === "omp.queue.edit").at(-1)!;
+			editor.setText("Keep this draft");
+			h.event({ ev: "action", sf: h.terminal.surface!, id: edit.id, act: "queue.edit" });
+			await h.until(() => editor.getExpandedText().includes("Inspect [Image #1]"));
+			expect(editor.getExpandedText()).toContain("Inspect [Image #1]");
+			expect(editor.getExpandedText()).toContain("Keep this draft");
+			expect(editor.pendingImages).toEqual([image]);
+			expect(session.getQueuedMessages().steering).toEqual(["Change direction"]);
+			expect(JSON.stringify(h.region("dock"))).toContain("Change direction");
+
+			releaseYield.resolve();
+			await run;
+			await h.render();
+			expect(h.find(node => node.p?.role === "omp.queue")).toBeUndefined();
+			expect(
+				session.messages.some(
+					message => message.role === "user" && JSON.stringify(message.content).includes("Change direction"),
+				),
+			).toBe(true);
+			expect(h.errors).toEqual([]);
+		} finally {
+			releaseYield.resolve();
+			await run;
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			await session.dispose();
+			auth.close();
+		}
+	});
+
 	it("replays session widgets into their own pane, follows targeted updates, and disposes on close", () => {
 		const runner = new ExtensionRunner(
 			[],

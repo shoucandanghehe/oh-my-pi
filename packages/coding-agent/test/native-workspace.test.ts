@@ -65,12 +65,6 @@ describe("Main-owned Tern workspace panes", () => {
 				]);
 				expect(native.focused).toBe(preserveFocus ? 1 : 3);
 				await native.until(() => [2, 3].every(block => native.nodes(block).some(node => node.k === "editor")));
-				for (const block of [2, 3]) {
-					expect(native.nodes(block).find(node => node.id === "main.omp-workspace")).toMatchObject({
-						k: "spacer",
-						p: { hidden: true, role: "omp.workspace" },
-					});
-				}
 				native.terminals.get(2)!.send("first draft");
 				native.terminals.get(3)!.send("second draft");
 				await native.until(
@@ -88,6 +82,32 @@ describe("Main-owned Tern workspace panes", () => {
 		);
 	}
 
+	it("coalesces concurrent splits and closes into separate balance notifications without changing focus", async () => {
+		const native = new NativePaneHarness();
+		cleanups.push(() => native.dispose());
+		const balance = vi.spyOn(native.workspace.client, "balance");
+		const keys = ["first", "second", "third"];
+		await Promise.all(
+			keys.map(key =>
+				native.workspace.open(
+					key,
+					key,
+					() => new Text(key),
+					() => {},
+					true,
+				),
+			),
+		);
+		await native.until(() => balance.mock.calls.length === 1);
+		expect(native.placements).toHaveLength(3);
+		expect(native.focused).toBe(1);
+		for (const key of keys) native.workspace.close(key);
+		await native.until(() => balance.mock.calls.length === 2);
+		await native.until(() => [...native.terminals.values()].every(terminal => terminal.surface === undefined));
+		expect(keys.every(key => !native.workspace.has(key))).toBe(true);
+		expect(native.focused).toBe(1);
+	});
+
 	it("tiles panes beside Main as a grid on a landscape window and refills the slot a closed pane leaves", async () => {
 		const native = new NativePaneHarness();
 		cleanups.push(() => native.dispose());
@@ -95,7 +115,7 @@ describe("Main-owned Tern workspace panes", () => {
 		// Tern lists new panes at their launch size, so only Main's size may drive placement.
 		const listed = native.workspace.client.splitPanes;
 		vi.spyOn(native.workspace.client, "splitPanes").mockImplementation(async () =>
-			(await listed()).map(pane => (pane.block === 1 ? { block: 1, columns: 273, rows: 80 } : pane)),
+			(await listed()).map(pane => (pane.block === 1 ? { ...pane, columns: 273, rows: 80 } : pane)),
 		);
 		for (let index = 0; index < 4; index++) {
 			await native.workspace.open(
@@ -124,11 +144,78 @@ describe("Main-owned Tern workspace panes", () => {
 		expect(native.placements.at(-1)).toEqual({ block: 2, dir: "down" });
 	});
 
-	it("starts below Main on a portrait window and measures Main again once no pane remains", async () => {
+	it("keeps landscape placement when a background Main still reports its old split size after all children close", async () => {
 		const native = new NativePaneHarness();
 		cleanups.push(() => native.dispose());
 		vi.spyOn(terminalCapabilities, "getCellDimensions").mockReturnValue({ widthPx: 14, heightPx: 26 });
-		let main = { block: 1, columns: 80, rows: 120 };
+		let main = { block: 1, columns: 196, rows: 59, shown: true };
+		const listed = native.workspace.client.splitPanes;
+		vi.spyOn(native.workspace.client, "splitPanes").mockImplementation(async () =>
+			(await listed()).map(pane => (pane.block === 1 ? main : pane)),
+		);
+		for (let index = 0; index < 2; index++) {
+			await native.workspace.open(
+				`agent:${index}`,
+				`Agent ${index}`,
+				() => new Text("Transcript"),
+				() => {},
+				true,
+			);
+		}
+		expect(native.placements).toEqual([
+			{ block: 1, dir: "right" },
+			{ block: 2, dir: "right" },
+		]);
+
+		main = { block: 1, columns: 64, rows: 59, shown: false };
+		native.focused = 99;
+		for (let index = 0; index < 2; index++) native.workspace.close(`agent:${index}`);
+		await native.workspace.open(
+			"again",
+			"Again",
+			() => new Text("Transcript"),
+			() => {},
+			true,
+		);
+		expect(native.placements.at(-1)).toEqual({ block: 1, dir: "right" });
+		expect(native.focused).toBe(99);
+	});
+
+	it("remeasures visible Main with its original cell scale after child TUIs overwrite the shared size", async () => {
+		const native = new NativePaneHarness();
+		cleanups.push(() => native.dispose());
+		const cell = vi.spyOn(terminalCapabilities, "getCellDimensions").mockReturnValue({ widthPx: 9, heightPx: 18 });
+		let main = { block: 1, columns: 158, rows: 58, shown: true };
+		const listed = native.workspace.client.splitPanes;
+		vi.spyOn(native.workspace.client, "splitPanes").mockImplementation(async () =>
+			(await listed()).map(pane => (pane.block === 1 ? main : pane)),
+		);
+		await native.workspace.open(
+			"first",
+			"First",
+			() => new Text("Transcript"),
+			() => {},
+		);
+		cell.mockReturnValue({ widthPx: 1, heightPx: 1 });
+		main = { block: 1, columns: 78, rows: 58, shown: true };
+		native.workspace.close("first");
+		await native.workspace.open(
+			"narrow",
+			"Narrow",
+			() => new Text("Transcript"),
+			() => {},
+		);
+		expect(native.placements).toEqual([
+			{ block: 1, dir: "right" },
+			{ block: 1, dir: "down" },
+		]);
+	});
+
+	it("starts below Main on a portrait window and remeasures the visible Main after all children close", async () => {
+		const native = new NativePaneHarness();
+		cleanups.push(() => native.dispose());
+		vi.spyOn(terminalCapabilities, "getCellDimensions").mockReturnValue({ widthPx: 14, heightPx: 26 });
+		let main = { block: 1, columns: 80, rows: 120, shown: true };
 		const listed = native.workspace.client.splitPanes;
 		vi.spyOn(native.workspace.client, "splitPanes").mockImplementation(async () =>
 			(await listed()).map(pane => (pane.block === 1 ? main : pane)),
@@ -149,7 +236,7 @@ describe("Main-owned Tern workspace panes", () => {
 		]);
 
 		for (let index = 0; index < 4; index++) native.workspace.close(`agent:${index}`);
-		main = { block: 1, columns: 273, rows: 80 };
+		main = { block: 1, columns: 273, rows: 80, shown: true };
 		await native.workspace.open(
 			"again",
 			"Again",
@@ -194,12 +281,12 @@ describe("Main-owned Tern workspace panes", () => {
 			mode: "inline",
 		});
 		const terminal = native.terminals.get(2)!;
-		const transcriptId = region("main")?.c?.find(node => node.id !== "main.omp-workspace")?.id;
+		const transcriptId = region("main")?.c?.[0]?.id;
 		const previousFrames = terminal.frames.length;
 		transcript.setText("Independent transcript\nStreamed tail");
 		view.ui.requestComponentRender(transcript);
 		await native.until(() => JSON.stringify(region("main")).includes("Streamed tail"));
-		expect(region("main")?.c?.find(node => node.id !== "main.omp-workspace")?.id).toBe(transcriptId);
+		expect(region("main")?.c?.[0]?.id).toBe(transcriptId);
 		expect(terminal.log.filter(message => message.verb === "o")).toHaveLength(1);
 		expect(
 			terminal.frames
@@ -296,8 +383,8 @@ describe("Main-owned Tern workspace panes", () => {
 		cleanups.push(() => native.dispose());
 		vi.spyOn(native.workspace.client, "open").mockResolvedValueOnce({ session: 1, tab: 1, block: 999 });
 		vi.spyOn(native.workspace.client, "splitPanes").mockResolvedValue([
-			{ block: 1, columns: 200, rows: 60 },
-			{ block: 999, columns: 100, rows: 32 },
+			{ block: 1, columns: 200, rows: 60, shown: true },
+			{ block: 999, columns: 100, rows: 32, shown: true },
 		]);
 		const waiting = native.workspace
 			.open(
@@ -394,7 +481,8 @@ describe("Main-owned Tern workspace panes", () => {
 		await native.until(() => submitted !== undefined);
 		expect(submitted).toBe("side input");
 		expect(JSON.stringify(main.region("main"))).toContain("Main transcript");
-		native.workspace.close("side");
+		await native.workspace.client.close(block);
+		await native.until(() => !native.workspace.has("side"));
 		await native.until(() => native.terminals.get(block)!.surface === undefined);
 		expect(main.tui.nativeRendering).toBe(true);
 		expect(isNativeRendering()).toBe(true);

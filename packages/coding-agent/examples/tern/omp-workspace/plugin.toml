@@ -1,6 +1,6 @@
 schema = 1
 id = "omp-workspace"
 name = "OMP workspace"
-version = "0.1.0"
+version = "0.2.1"
 description = "Keep OMP native workspace panes evenly split without moving focus."
 window = "window.luau"

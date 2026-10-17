@@ -2055,9 +2055,10 @@ async function prepareProviderCall(
 		(config.getDialect ? config.getDialect(model) : config.dialect) ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
 	let llmContext: Context;
+	const providerToolContext = config.advertisedTools ? { ...context, tools: config.advertisedTools(model) } : context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
-		llmContext = config.appendOnlyContext.build(context, {
+		llmContext = config.appendOnlyContext.build(providerToolContext, {
 			intentTracing: !!config.intentTracing,
 			intentDescription: config.intentDescription,
 			pruneToolDescriptions,
@@ -2066,7 +2067,7 @@ async function prepareProviderCall(
 		llmContext = {
 			systemPrompt: context.systemPrompt,
 			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, {
+			tools: normalizeTools(providerToolContext.tools, {
 				injectIntent: !!config.intentTracing,
 				intentDescription: config.intentDescription,
 				pruneDescriptions: pruneToolDescriptions,

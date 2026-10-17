@@ -12,6 +12,8 @@ import { parseMCPToolName } from "./mcp";
 /** Mounted device display callbacks, independent of tool execution state. */
 export interface XdevMountedRenderer {
 	label?: string;
+	/** Optional semantic preview while a device call is queued, before execution lifecycle events arrive. */
+	describeQueuedCall?: ToolRenderer["describeCall"];
 	describeCall?: ToolRenderer["describeCall"];
 	describeResult?: ToolRenderer["describeResult"];
 	renderCall?(...args: Parameters<ToolRenderer["renderCall"]>): unknown;
@@ -185,6 +187,8 @@ export function describeXdevCall(
 	const mounted = resolveMounted?.(name);
 	const args = decodeInnerArgs(content);
 	if (!options.executionStarted) {
+		const queued = mounted?.describeQueuedCall?.(args, options);
+		if (queued) return queued;
 		return describeDefaultToolExecution({
 			label: `queued ${displayDeviceLabel(name, mounted)}`,
 			args: displayDeviceArgs(args),

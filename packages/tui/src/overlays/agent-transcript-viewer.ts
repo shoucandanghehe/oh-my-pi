@@ -45,6 +45,9 @@ import { ChatTranscriptPane } from "../chat/chat-transcript-pane";
 import { StatusLineComponent } from "../status-line/component";
 import type { CustomEditor } from "../prompt/custom-editor";
 import { ExtensionWidgets } from "../chrome/extension-widgets";
+import { getKeybindings } from "../keybindings";
+import { QueuedMessagesBand } from "../prompt/queued-messages";
+import type { TranscriptActions } from "../chat/transcript-actions";
 
 type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose"> &
 	Partial<Pick<StatusLineComponent, "setHookStatus" | "render">>;
@@ -104,6 +107,7 @@ export interface AgentTranscriptViewerDeps {
 	/** Keys that toggle the Agent Hub (app.agents.hub + app.session.observe). */
 	hubKeys: KeyId[];
 	requestRender: () => void;
+	transcriptActions?: Pick<TranscriptActions, "copy" | "retry">;
 	/** Close just this viewer (Esc), returning to its owner. */
 	onClose: () => void;
 	/** Handle a Hub toggle key according to the viewer's host context. */
@@ -362,6 +366,9 @@ export class AgentTranscriptViewer
 	readonly #deps: AgentTranscriptViewerDeps;
 	#model: string | undefined;
 	readonly #widgets: ExtensionWidgets;
+	readonly #aboveEditor = new Container();
+	readonly #pendingMessages = new Container();
+	#detachQueue: (() => void) | undefined;
 	readonly #belowEditor = new Container();
 	#extensionPresentation: ExtensionPresentationSource | undefined;
 	#detachPresentation: (() => void) | undefined;
@@ -397,10 +404,15 @@ export class AgentTranscriptViewer
 	constructor(deps: AgentTranscriptViewerDeps) {
 		this.#deps = deps;
 		const displayId = replaceTabs(deps.agentId);
-		this.#statusLineSession = deps.registry.get(deps.agentId)?.session ?? null;
-		this.#statusLine = this.#statusLineSession ? deps.createStatusLine(deps.agentId) : undefined;
 		this.#widgets = new ExtensionWidgets(deps.ui);
+		this.#aboveEditor.addChild(this.#widgets.above);
+		this.#aboveEditor.addChild(this.#pendingMessages);
 		this.#belowEditor.addChild(this.#widgets.below);
+		const actions: TranscriptActions = {};
+		const copy = deps.transcriptActions?.copy;
+		if (copy) actions.copy = text => void this.#runTranscriptAction(() => copy(text));
+		const retry = deps.transcriptActions?.retry;
+		if (retry && this.#sendable) actions.retry = () => void this.#runTranscriptAction(retry);
 		this.#belowEditor.addChild({ render: width => this.#statusLine?.render?.(width) ?? [] });
 		const resolveLinks = deps.resolveLinks;
 		this.#pane = new ChatTranscriptPane({
@@ -419,6 +431,7 @@ export class AgentTranscriptViewer
 				// Charts are for the main session's answers, not parked subagent, advisor, or guest transcripts.
 				tableCharts: false,
 				requestRender: deps.requestRender,
+				transcriptActions: actions,
 			},
 			initialEntryId: deps.initialEntryId,
 			editor: this.#sendable
@@ -426,8 +439,8 @@ export class AgentTranscriptViewer
 						label: `Message ${displayId}`,
 						placeholder: `Message ${displayId}…`,
 						images: !deps.remote,
-						onSubmit: (text, images) => {
-							this.#submit(text, images);
+						onSubmit: (text, images, _key, imageLinks) => {
+							this.#submit(text, images, imageLinks);
 							return true;
 						},
 					}
@@ -437,7 +450,7 @@ export class AgentTranscriptViewer
 						readOnly: true,
 					},
 			expandKeys: deps.expandKeys,
-			aboveEditor: this.#widgets.above,
+			aboveEditor: this.#aboveEditor,
 			belowEditor: this.#belowEditor,
 			renderWorkspaceHeader: (width, focused) => this.renderWorkspaceHeader(width, focused),
 			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
@@ -453,6 +466,29 @@ export class AgentTranscriptViewer
 			},
 			onClose: deps.onClose,
 		});
+		const editor = this.#pane.getPasteTarget();
+		if (editor) {
+			const keys = getKeybindings().getKeys("app.message.dequeue");
+			if (keys.length > 0) editor.setActionKeys("app.message.dequeue", keys);
+			editor.onDequeue = () => {
+				const session = deps.registry.get(deps.agentId)?.session;
+				const queued = session?.getQueuedMessages?.();
+				if (!queued) return;
+				const queue =
+					queued.steering.length > queued.liveSteered
+						? "steering"
+						: queued.followUp.length > 0
+							? "followUp"
+							: "steering";
+				const index = queued[queue].length - 1;
+				void this.#editQueuedMessage(session?.getQueuedMessageEditAction?.(queue, index));
+			};
+			if (actions.retry) {
+				const retryKeys = getKeybindings().getKeys("app.retry");
+				if (retryKeys.length > 0) editor.setActionKeys("app.retry", retryKeys);
+				editor.onRetry = actions.retry;
+			}
+		}
 		// Native pointer focus must keep input and auto-close protection on the viewer.
 		const viewer = this;
 		this.#nativeComposer = {
@@ -583,6 +619,8 @@ export class AgentTranscriptViewer
 		this.#remoteToken++;
 		this.#detachPresentation?.();
 		this.#detachPresentation = undefined;
+		this.#detachQueue?.();
+		this.#detachQueue = undefined;
 		this.#widgets.clear();
 		this.#statusLine?.dispose();
 		this.#pane.dispose();
@@ -974,7 +1012,19 @@ export class AgentTranscriptViewer
 		this.#pane.handleInput(data);
 	}
 
-	#submit(trimmed: string, images?: ImageContent[]): void {
+	async #runTranscriptAction(run: () => void | Promise<void>): Promise<void> {
+		try {
+			await run();
+			if (!this.#disposed) {
+				this.#refresh(false);
+				this.#deps.requestRender();
+			}
+		} catch (error) {
+			if (!this.#disposed) this.#pane.setNotice(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	#submit(trimmed: string, images?: ImageContent[], imageLinks?: (string | undefined)[]): void {
 		this.#pane.setNotice(undefined);
 		const id = this.#deps.agentId;
 		if (this.#deps.remote) {
@@ -984,13 +1034,18 @@ export class AgentTranscriptViewer
 		}
 		const lifecycle = this.#deps.lifecycle;
 		if (!lifecycle) return;
+		const editor = this.getPasteTarget();
 		void (async () => {
+			// The pane detaches the draft after onSubmit returns, even if revival throws synchronously.
+			await Promise.resolve();
 			try {
 				// Revives a parked agent; returns the live session for running/idle.
 				const session = await lifecycle().ensureLive(id);
+				this.#syncSessionPresentation();
 				// Steers a mid-turn agent; sends a normal prompt to an idle one.
 				await session.prompt(trimmed, { streamingBehavior: "steer", images });
 			} catch (error) {
+				editor?.restoreDetachedDraft(trimmed, images, imageLinks);
 				this.#pane.setNotice(error instanceof Error ? error.message : String(error));
 			}
 			this.#deps.requestRender();
@@ -1155,6 +1210,7 @@ export class AgentTranscriptViewer
 		this.#autoCloseTimer = undefined;
 	}
 	#syncSessionPresentation(): void {
+		if (this.#disposed) return;
 		const session = this.#deps.registry.get(this.#deps.agentId)?.session ?? null;
 		const presentation = this.#deps.remote ? undefined : this.#deps.getExtensionPresentation?.(this.#deps.agentId);
 		const sessionChanged = session !== this.#statusLineSession;
@@ -1162,6 +1218,16 @@ export class AgentTranscriptViewer
 			this.#statusLine?.dispose();
 			this.#statusLine = session ? this.#deps.createStatusLine(this.#deps.agentId) : undefined;
 			this.#statusLineSession = session;
+		}
+		if (sessionChanged) {
+			this.#detachQueue?.();
+			this.#detachQueue = undefined;
+			if (!this.#deps.remote) {
+				this.#detachQueue = session?.subscribe?.(event => {
+					if (event.type === "queue_update") this.#updatePendingMessages(session);
+				});
+			}
+			this.#updatePendingMessages(this.#deps.remote ? null : session);
 		}
 		if (sessionChanged && this.#liveAssistant) {
 			this.#pane.setLiveAssistant(undefined);
@@ -1196,6 +1262,52 @@ export class AgentTranscriptViewer
 				this.#deps.requestRender();
 			},
 		});
+	}
+
+	#updatePendingMessages(session: AgentHubSession | null): void {
+		this.#pendingMessages.disposeChildren();
+		const queued = session?.getQueuedMessages?.();
+		if (queued) {
+			const groups = [
+				{
+					label: "Steering",
+					messages: queued.steering,
+					liveSteered: queued.liveSteered,
+					edits: queued.steering.map((_, index) => session?.getQueuedMessageEditAction?.("steering", index)),
+				},
+				{
+					label: "After yield",
+					messages: queued.followUp,
+					edits: queued.followUp.map((_, index) => session?.getQueuedMessageEditAction?.("followUp", index)),
+				},
+			].filter(group => group.messages.length > 0);
+			if (groups.length > 0) {
+				this.#pendingMessages.addChild(
+					new QueuedMessagesBand(
+						groups,
+						getKeybindings().getKeys("app.message.dequeue")[0] ?? "alt+up",
+						(group, index) => void this.#editQueuedMessage(groups[group]?.edits[index]),
+					),
+				);
+			}
+		}
+		this.#deps.requestRender();
+	}
+
+	async #editQueuedMessage(
+		edit: (() => Promise<{ text: string; images?: ImageContent[] } | undefined>) | undefined,
+	): Promise<void> {
+		if (!edit) return;
+		try {
+			const restored = await edit();
+			if (!restored || this.#disposed) return;
+			const editor = this.getPasteTarget();
+			if (!editor) return;
+			editor.restoreDetachedDraft(restored.text, restored.images);
+		} catch (error) {
+			this.#pane.setNotice(error instanceof Error ? error.message : String(error));
+		}
+		this.#deps.requestRender();
 	}
 
 	#getEditorTopBorder(availableWidth: number): EditorTopBorder {

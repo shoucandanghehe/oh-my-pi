@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { setTranscriptActionHandler, type TranscriptAction } from "@oh-my-pi/pi-tui/chat/transcript-actions";
+import { setTranscriptActions } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -14,7 +14,7 @@ beforeAll(async () => {
 
 let harness: TspHarness | undefined;
 afterEach(() => {
-	setTranscriptActionHandler(undefined);
+	setTranscriptActions(undefined);
 	harness?.stop();
 	harness = undefined;
 });
@@ -62,8 +62,15 @@ function texts(node: TspNode | undefined): string {
 
 describe("native transcript redesign", () => {
 	it("draws a failed request as one frame: status chip, the message once, actions that run omp's commands", async () => {
-		const actions: TranscriptAction[] = [];
-		setTranscriptActionHandler(action => actions.push(action));
+		const actions: string[] = [];
+		setTranscriptActions({
+			retry: () => {
+				actions.push("retry");
+			},
+			copy: text => {
+				actions.push(text);
+			},
+		});
 		const component = new AssistantMessageComponent(
 			failed("500 upstream overloaded\nupstream overloaded (type=server_error)"),
 		);
@@ -83,7 +90,7 @@ describe("native transcript redesign", () => {
 		harness.event({ ev: "action", sf: harness.terminal.surface!, id: retry!.id, act: "retry" });
 		const copy = harness.find(node => node.p?.role === "omp.error.action" && texts(node).startsWith("Copy"));
 		harness.event({ ev: "action", sf: harness.terminal.surface!, id: copy!.id, act: "copy-error" });
-		expect(actions).toEqual([{ act: "retry" }, { act: "copy", text: "upstream overloaded (type=server_error)" }]);
+		expect(actions).toEqual(["retry", "upstream overloaded (type=server_error)"]);
 		expect(harness.errors).toEqual([]);
 	});
 
@@ -171,8 +178,15 @@ describe("native transcript redesign", () => {
 	});
 
 	it("gives a user message no head row, and routes its toolbar to omp's copy and rewind", async () => {
-		const actions: TranscriptAction[] = [];
-		setTranscriptActionHandler(action => actions.push(action));
+		const actions: string[] = [];
+		setTranscriptActions({
+			copy: text => {
+				actions.push(text);
+			},
+			rewind: () => {
+				actions.push("rewind");
+			},
+		});
 		const user = new UserMessageComponent("Fix the build", { timestamp: Date.UTC(2026, 0, 1, 12, 30) });
 		harness = await TspHarness.start();
 		harness.tui.addChild(user);
@@ -183,12 +197,16 @@ describe("native transcript redesign", () => {
 			harness!.find(node => node.p?.role === "omp.user.tool" && prop(node, "name") === icon)!;
 		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("copy").id, act: "copy-message" });
 		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("rewind").id, act: "rewind" });
-		expect(actions).toEqual([{ act: "copy", text: "Fix the build" }, { act: "rewind" }]);
+		expect(actions).toEqual(["Fix the build", "rewind"]);
 	});
 
 	it("copies a turn's answer from its footer: the text blocks a blank line apart, no thinking", async () => {
-		const actions: TranscriptAction[] = [];
-		setTranscriptActionHandler(action => actions.push(action));
+		const actions: string[] = [];
+		setTranscriptActions({
+			copy: text => {
+				actions.push(text);
+			},
+		});
 		const answer = (...content: AssistantMessage["content"]): AssistantMessage => ({
 			...failed(""),
 			stopReason: "stop",
@@ -208,7 +226,7 @@ describe("native transcript redesign", () => {
 		await harness.render();
 		const copy = harness.find(node => node.p?.role === "omp.turn.copy");
 		harness.event({ ev: "action", sf: harness.terminal.surface!, id: copy!.id, act: "copy-answer" });
-		expect(actions).toEqual([{ act: "copy", text: "First part.\n\nSecond part." }]);
+		expect(actions).toEqual(["First part.\n\nSecond part."]);
 
 		component.updateContent(answer({ type: "thinking", thinking: "Nothing to say" }));
 		await harness.render();
@@ -218,7 +236,7 @@ describe("native transcript redesign", () => {
 	});
 
 	it("shows a user message's time on the terminal's clock", async () => {
-		setTranscriptActionHandler(() => {});
+		setTranscriptActions({ copy() {} });
 		const at = new Date(2026, 0, 1, 18, 5).getTime();
 		for (const [hour12, shown] of [
 			[false, /^18:05$/],
