@@ -26,6 +26,7 @@ import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import sleepModeDialogRefusedPrompt from "../prompts/system/sleep-mode-dialog-refused.md" with { type: "text" };
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
 import { vocalizer } from "../tts/vocalizer";
@@ -664,6 +665,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			if (this.session.advertiseHeadlessAsk) throw new ToolError(HEADLESS_FORK_ASK_ERROR);
 			context?.abort();
 			throw new ToolAbortError("Ask tool requires interactive mode");
+		}
+		// Refuse before the notification and speech below: they would wake a sleeping user.
+		if (this.session.isSleepModeActive?.()) {
+			throw new Error(prompt.render(sleepModeDialogRefusedPrompt).trim());
 		}
 		// Models occasionally inject `\r` runs into string values (observed with
 		// GLM via OpenRouter); sanitize before the dialog renders or the answer
