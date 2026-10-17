@@ -1,0 +1,1 @@
+The user is asleep (sleep mode): this prompt was not shown and nothing was approved. NEVER retry it. Decide within your authorization and record the assumption, or mark the step blocked and continue independent work.
