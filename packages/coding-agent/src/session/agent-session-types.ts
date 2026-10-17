@@ -176,6 +176,12 @@ export interface UsageFallbackConfirmation {
  */
 export type UsageFallbackConfirmer = (confirmation: UsageFallbackConfirmation, signal: AbortSignal) => Promise<boolean>;
 
+/** Sleep mode: the user is away, so dialogs that wait for their answer are refused instead of shown. */
+export interface SleepModeState {
+	/** What the user authorized the agent to decide on its own while they sleep, in their words. */
+	authorization?: string;
+}
+
 /** Identifies a retry fallback chain already entered during startup model resolution. */
 export interface InitialRetryFallbackState {
 	/** Role whose configured primary was unavailable. */

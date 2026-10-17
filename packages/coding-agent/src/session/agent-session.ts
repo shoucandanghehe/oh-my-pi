@@ -212,6 +212,9 @@ import titleForkPrompt from "../prompts/system/title-fork.md" with { type: "text
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
 import sideChannelReadonlyReminder from "../prompts/system/side-channel-readonly.md" with { type: "text" };
 import sideChannelToolDenied from "../prompts/system/side-channel-tool-denied.md" with { type: "text" };
+import sleepModeActivePrompt from "../prompts/system/sleep-mode-active.md" with { type: "text" };
+import sleepModeDialogRefusedPrompt from "../prompts/system/sleep-mode-dialog-refused.md" with { type: "text" };
+import sleepModeEndedPrompt from "../prompts/system/sleep-mode-ended.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import shareSummaryWithMainDescription from "../prompts/tools/share-summary-with-main.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -320,6 +323,7 @@ import type {
 	SessionHandoffOptions,
 	SessionOAuthAccountList,
 	SessionStats,
+	SleepModeState,
 	SteerOptions,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
@@ -1023,6 +1027,7 @@ export class AgentSession implements SettingsScope {
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
 	#vibeModeState: VibeModeState | undefined;
+	#sleepModeState: SleepModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
@@ -1385,6 +1390,7 @@ export class AgentSession implements SettingsScope {
 	 * in it (a dialog can be that run's control confirmation) and later runs hold the display again.
 	 */
 	async waitForUser<T>(dialog: () => Promise<T>): Promise<T> {
+		if (this.#sleepModeState) throw new Error(prompt.render(sleepModeDialogRefusedPrompt).trim());
 		if (this.#userWaitCount++ === 0) {
 			this.#userWaitEndedTurn = this.#promptInFlightCount > 0;
 			this.#endComputerTurn();
@@ -6585,8 +6591,10 @@ export class AgentSession implements SettingsScope {
 
 	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
 	setUsageFallbackConfirmer(confirmer: UsageFallbackConfirmer | undefined): void {
+		// Asleep: nobody answers, so stay on the current model as an unanswered prompt would.
 		this.#usageFallbackConfirmer = confirmer
-			? (confirmation, signal) => this.waitForUser(() => confirmer(confirmation, signal))
+			? (confirmation, signal) =>
+					this.#sleepModeState ? Promise.resolve(false) : this.waitForUser(() => confirmer(confirmation, signal))
 			: undefined;
 	}
 
@@ -7372,6 +7380,27 @@ export class AgentSession implements SettingsScope {
 
 	getVibeModeState(): VibeModeState | undefined {
 		return this.#vibeModeState;
+	}
+
+	getSleepModeState(): SleepModeState | undefined {
+		return this.#sleepModeState;
+	}
+
+	/**
+	 * Enters (or re-authorizes) sleep mode with `state`, or ends it with `undefined`. The agent learns of the change
+	 * at once: steered into a running turn, otherwise appended for the next one.
+	 */
+	async setSleepModeState(state: SleepModeState | undefined): Promise<void> {
+		const wasSleeping = this.#sleepModeState !== undefined;
+		this.#sleepModeState = state;
+		if (!state && !wasSleeping) return;
+		const content = state
+			? prompt.render(sleepModeActivePrompt, { authorization: state.authorization })
+			: prompt.render(sleepModeEndedPrompt);
+		await this.sendCustomMessage(
+			{ customType: "sleep-mode-context", content, display: false, attribution: "agent" },
+			{ deliverAs: this.isStreaming ? "steer" : "nextTurn" },
+		);
 	}
 
 	setVibeModeState(state: VibeModeState | undefined): void {
