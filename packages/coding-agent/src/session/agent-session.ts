@@ -3512,7 +3512,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Request preference from the live setting for the current model's API. */
-	get preferWebsockets(): boolean | undefined {
+	get preferWebsockets(): SimpleStreamOptions["preferWebsockets"] {
 		return resolveWebsocketPreference(this.settings, this.model);
 	}
 
