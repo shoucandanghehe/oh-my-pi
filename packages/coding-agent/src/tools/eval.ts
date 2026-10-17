@@ -579,8 +579,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 		const autoBgManager = session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every eval call until a slot frees up.
-		if (!cfgEvalAutoBackgroundEnabled.get(session.settings) || !autoBgManager || autoBgManager.atCapacity) {
+		// instead of failing every eval call until a slot frees up. Sleep mode
+		// backgrounds regardless of the setting: a cell may run all night, but
+		// it must not hold the turn while nobody can interrupt it.
+		const autoBackground = cfgEvalAutoBackgroundEnabled.get(session.settings) || session.isSleepModeActive?.();
+		if (!autoBackground || !autoBgManager || autoBgManager.atCapacity) {
 			return await run(signal, emitToolUpdate);
 		}
 

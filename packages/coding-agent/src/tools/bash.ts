@@ -1160,9 +1160,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const autoBgManager = this.session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every bash call until a slot frees up.
+		// instead of failing every bash call until a slot frees up. Sleep mode
+		// backgrounds regardless of the setting, as eval does.
 		if (
-			cfgBashAutoBackgroundEnabled.get(this.session.settings) &&
+			(cfgBashAutoBackgroundEnabled.get(this.session.settings) || this.session.isSleepModeActive?.()) &&
 			!pty &&
 			!bridgeTerminalAvailable &&
 			autoBgManager &&

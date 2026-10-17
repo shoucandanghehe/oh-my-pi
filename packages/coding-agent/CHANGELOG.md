@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/sleep [authorization]` keeps unattended runs moving: `ask`, approval prompts, and other dialogs fail at once instead of waiting for you, the agent decides within what you authorized or marks the step blocked, and long `bash`/`eval` calls move to the background instead of holding the turn. `/sleep off` ends it.
+
 ### Changed
 
 - With a first-party Anthropic model on the official API selected, the interactive UI opens the API connection at startup, on model switch, and when you start typing, so the next turn skips connection setup; third-party gateways and custom endpoints are never probed ([#16044](https://github.com/can1357/oh-my-pi/pull/16044) by [@H4vC](https://github.com/H4vC))

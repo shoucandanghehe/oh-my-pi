@@ -399,6 +399,34 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "sleep",
+		icon: "ghost",
+		description:
+			"Toggle sleep mode: questions and approvals are refused instead of waiting for you; optional text says what the agent may decide alone",
+		inlineHint: "[authorization|off]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => `Sleep: ${runtime.ctx.session.getSleepModeState() ? "on" : "off"}`,
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			const authorization = command.args.trim();
+			const sleeping = ctx.session.getSleepModeState() !== undefined;
+			if (authorization === "off" || (!authorization && sleeping)) {
+				await ctx.session.setSleepModeState(undefined);
+				ctx.setHookStatus("sleep", undefined);
+				ctx.showStatus(sleeping ? "Sleep mode disabled." : "Sleep mode is not active.");
+				return;
+			}
+			await ctx.session.setSleepModeState(authorization ? { authorization } : {});
+			ctx.setHookStatus("sleep", "Sleep mode");
+			ctx.showStatus(
+				authorization
+					? "Sleep mode enabled with your authorization. Questions and approvals are refused until /sleep off."
+					: "Sleep mode enabled. Questions and approvals are refused until /sleep off.",
+			);
+		},
+	},
+	{
 		name: "guided-goal",
 		icon: "compass",
 		description: "Have the agent interview you in chat, then set up goal mode",
