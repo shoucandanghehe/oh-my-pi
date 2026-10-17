@@ -37,7 +37,12 @@ export type ChatTranscriptPaneEditorOptions =
 			label: string;
 			placeholder: string;
 			readOnly?: false;
-			onSubmit: (text: string, images?: ImageContent[], key?: string) => boolean;
+			onSubmit: (
+				text: string,
+				images?: ImageContent[],
+				key?: string,
+				imageLinks?: (string | undefined)[],
+			) => boolean;
 			images?: boolean;
 			autocompleteProvider?: AutocompleteProvider;
 	  }
@@ -511,6 +516,11 @@ export class ChatTranscriptPane
 				return;
 			}
 		}
+		if (this.#editor?.matchesDequeueKey(data)) {
+			this.#editor.handleInput(data);
+			this.options.builder.requestRender();
+			return;
+		}
 		if (editorEmpty && this.#handleScroll(data)) return;
 		if (this.#editor && this.options.editor?.readOnly !== true) {
 			this.#editor.handleInput(data);
@@ -777,8 +787,11 @@ export class ChatTranscriptPane
 		const compacted = compactImageMarkers(text.trim(), editor.pendingImages.length);
 		const trimmed = compacted?.text ?? text.trim();
 		const images = compacted ? compacted.keep.map(index => editor.pendingImages[index]!) : [...editor.pendingImages];
+		const imageLinks = compacted
+			? compacted.keep.map(index => editor.pendingImageLinks[index])
+			: [...editor.pendingImageLinks];
 		if (!trimmed && images.length === 0) return;
-		if (!this.options.editor?.onSubmit(trimmed, images.length ? images : undefined, key)) {
+		if (!this.options.editor?.onSubmit(trimmed, images.length ? images : undefined, key, imageLinks)) {
 			editor.setDraft(trimmed, images);
 			return;
 		}

@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { $ } from "bun";
 import { $which, isWsl, windowsPathToWslMount } from "@oh-my-pi/pi-utils";
+import { compareVersions } from "@oh-my-pi/pi-utils/version";
 import { resolveCliEntryCmd } from "../../../subprocess/worker-client";
 import { NATIVE_PANE_WORKER_ARG } from "../../../cli/worker-selectors";
 import type { TernPane } from "./kind";
@@ -20,6 +21,7 @@ export interface TernSplitPane {
 	block: number;
 	columns: number;
 	rows: number;
+	shown: boolean;
 }
 
 interface TernPaneListing {
@@ -35,6 +37,15 @@ interface TernPaneListing {
 				pip?: { owner: number; corner: string; stashed: string | null };
 			}[];
 		}[];
+	}[];
+	detached: { id: number }[];
+}
+
+interface TernPluginCatalog {
+	plugins: {
+		id: string;
+		version: string;
+		status: "ready" | "disabled" | { failed: string };
 	}[];
 }
 
@@ -102,7 +113,12 @@ export class TernPaneClient {
 			session.tabs.flatMap(tab =>
 				tab.blocks
 					.filter(block => block.pip === undefined)
-					.map(block => ({ block: block.id, columns: block.cols, rows: block.rows })),
+					.map(block => ({
+						block: block.id,
+						columns: block.cols,
+						rows: block.rows,
+						shown: session.shown && tab.shown,
+					})),
 			),
 		);
 	}
@@ -113,8 +129,31 @@ export class TernPaneClient {
 			.cwd(this.cwd)
 			.quiet()
 			.nothrow();
+		if (result.exitCode !== 0) {
+			// A relay exit or another window may already have removed the pane.
+			const listing = await this.#listing();
+			const present =
+				listing.sessions.some(session => session.tabs.some(tab => tab.blocks.some(pane => pane.id === block))) ||
+				listing.detached.some(pane => pane.id === block);
+			if (present) throw new Error(result.stderr.toString().trim() || "Tern could not close the workspace pane");
+		}
+	}
+
+	async balance(): Promise<void> {
+		const executable = await this.#executable();
+		const catalog = await $`${executable} plugin list --json < ${new Uint8Array()}`.cwd(this.cwd).quiet().nothrow();
+		if (catalog.exitCode !== 0) throw new Error(catalog.stderr.toString().trim() || "Tern could not list plugins");
+		const plugin = (JSON.parse(catalog.text()) as TernPluginCatalog).plugins.find(
+			plugin => plugin.id === "omp-workspace",
+		);
+		if (plugin?.status !== "ready" || compareVersions(plugin.version, "0.2.0") < 0) return;
+
+		const url = `omp-workspace://balance/${this.pane.pane}`;
+		const result = await $`${executable} ctl open-url ${url} < ${new Uint8Array()}`.cwd(this.cwd).quiet().nothrow();
 		if (result.exitCode !== 0)
-			throw new Error(result.stderr.toString().trim() || "Tern could not close the workspace pane");
+			throw new Error(
+				result.stderr.toString().trim() || result.text().trim() || "Tern could not balance workspace panes",
+			);
 	}
 
 	async #listing(): Promise<TernPaneListing> {

@@ -13,7 +13,7 @@ export class BtwShareSummaryDialog extends OverlayPanel {
 	readonly #body: NativeNode[];
 	readonly nativeOverlay = {
 		role: "omp.overlay.btw.share-summary",
-		head: "Share with Main",
+		head: "Send to main session",
 		size: "md",
 	} as const;
 
@@ -22,12 +22,12 @@ export class BtwShareSummaryDialog extends OverlayPanel {
 		summary: string,
 		readonly resolve: (approved: boolean) => void,
 	) {
-		super("Share with Main", "omp.overlay.btw.share-summary");
+		super("Send to main session", "omp.overlay.btw.share-summary");
 		const source = `BTW · ${plainLine(threadTitle)}`;
 		this.#choices = new SelectList(
 			[
-				{ value: "approve", label: "Share summary" },
-				{ value: "deny", label: "Cancel" },
+				{ value: "approve", label: "Send" },
+				{ value: "deny", label: "Deny" },
 			],
 			2,
 			getSelectListTheme(),
@@ -46,11 +46,11 @@ export class BtwShareSummaryDialog extends OverlayPanel {
 			[
 				...this.#body,
 				actionBar([
-					actionButton("Cancel", "deny", {
+					actionButton("Deny", "deny", {
 						keys: approve ? "escape" : "enter",
 						tone: approve ? undefined : "accent",
 					}),
-					actionButton("Share summary", "approve", {
+					actionButton("Send", "approve", {
 						keys: approve ? "enter" : undefined,
 						tone: approve ? "accent" : undefined,
 					}),

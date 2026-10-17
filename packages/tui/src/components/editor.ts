@@ -15,7 +15,7 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
-import type { TspEditorDecoration, TspEditorProps, TspText, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspEditorProps, TspExtent, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
@@ -795,6 +795,8 @@ export class Editor implements Component, Focusable {
 	 * dialog's text field; only the prompt composer claims `omp.editor`).
 	 */
 	describeLayout: ((input: NativeNode, cx: DescribeContext) => NativeEditorLayout) | undefined;
+	/** Minimum native root width; `1` fills an embedded conversation's available width. */
+	nativeMinWidth: TspExtent | undefined;
 	/**
 	 * TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints.
 	 * Return a stable value (the same spans array) while it is unchanged: the editor node is reused by identity.
@@ -810,6 +812,7 @@ export class Editor implements Component, Focusable {
 		role: string;
 		tone: TspTone | undefined;
 		folded: boolean | undefined;
+		minWidth: TspExtent | undefined;
 		children: readonly NativeChild[];
 		node: NativeNode;
 	};
@@ -2021,6 +2024,7 @@ export class Editor implements Component, Focusable {
 			root.role === layout.role &&
 			root.tone === layout.tone &&
 			root.folded === layout.folded &&
+			root.minWidth === this.nativeMinWidth &&
 			sameItems(root.children, children)
 		) {
 			return root.node;
@@ -2029,8 +2033,16 @@ export class Editor implements Component, Focusable {
 			role: layout.role,
 			...(layout.tone ? { tone: layout.tone } : {}),
 			...(layout.folded ? { folded: true } : {}),
+			...(this.nativeMinWidth === undefined ? {} : { min: { w: this.nativeMinWidth } }),
 		});
-		this.#nativeRoot = { role: layout.role, tone: layout.tone, folded: layout.folded, children, node: described };
+		this.#nativeRoot = {
+			role: layout.role,
+			tone: layout.tone,
+			folded: layout.folded,
+			minWidth: this.nativeMinWidth,
+			children,
+			node: described,
+		};
 		return described;
 	}
 

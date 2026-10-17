@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
-import type { ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { Context, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -122,12 +122,14 @@ describe("BTW investigation capabilities", () => {
 			}
 			let requests = 0;
 			let results: ToolResultMessage[] = [];
+			let declaredTools: Context["tools"];
 			const sideStreamFn: StreamFn = (_model, context) => {
 				const stream = new AssistantMessageEventStream();
 				const first = requests++ === 0;
 				queueMicrotask(() => {
 					const message = createAssistantMessage("Investigation complete");
 					if (first) {
+						declaredTools = context.tools;
 						message.content = calls;
 						message.stopReason = "toolUse";
 						stream.push({ type: "done", reason: "toolUse", message });
@@ -156,11 +158,11 @@ describe("BTW investigation capabilities", () => {
 				xdev,
 			});
 			try {
-				const conversation = session.createEphemeralConversation("Investigate", undefined, undefined, {
-					readOnlyTools: true,
-				});
+				const conversation = session.createEphemeralConversation("Investigate", undefined, undefined);
 				await conversation.initializeExtensionRuntime();
 				await conversation.prompt("Inspect the fixture without changing it");
+				// Same declarations as Main's request, so the side request reuses Main's cached prefix.
+				expect(declaredTools).toEqual((await session.agent.buildSideRequestContext([])).tools);
 				const structural = results.find(result => result.toolCallId === "structural-search");
 				expect(structural?.content).toEqual(
 					expect.arrayContaining([

@@ -42,9 +42,13 @@ function btwSummaryRenderer(customRenderer?: MessageRenderer): MessageRenderer {
 		for (const entry of message.details.summaries) {
 			sources.addChild(
 				new FramedMessageComponent({
-					message: { customType: `BTW · ${plainLine(entry.threadTitle)}`, content: replaceTabs(entry.summary) },
+					message: {
+						customType: `From BTW · ${plainLine(entry.threadTitle)}`,
+						content: replaceTabs(entry.summary),
+					},
 					role: "omp.custom.btw-summary",
 					borderColor: "borderAccent",
+					prose: true,
 				}),
 			);
 		}

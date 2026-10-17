@@ -1,4 +1,5 @@
 import { type AgentMessage, PAUSE_SHUTDOWN_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { ContinuePausedAgentsResult } from "./agent-session-types";
 import type { BtwPausedRequest, BtwThreadEvent, BtwThreadModelRef, RestoredBtwThread } from "./btw-thread";
@@ -8,7 +9,6 @@ import type {
 	EphemeralConversationSideOptions,
 	EphemeralTurnResult,
 } from "./ephemeral-conversation";
-import type { BtwSummarySource } from "./messages";
 
 export type BtwThreadPhase = "ready" | "running" | "error";
 
@@ -30,8 +30,10 @@ export interface BtwManagerOptions {
 		checkpoint: EphemeralConversationCheckpoint | undefined,
 		sideOptions?: EphemeralConversationSideOptions,
 	) => EphemeralConversation;
-	/** Builds durable side capabilities bound to the source BTW thread. */
-	createSideOptions?: (source: BtwSummarySource) => EphemeralConversationSideOptions;
+	/** Builds durable side capabilities bound to the BTW thread `threadKey`. */
+	createSideOptions?: (threadKey: string) => EphemeralConversationSideOptions;
+	/** Names a thread from its first question; null keeps the question-derived title. */
+	generateTitle?: (input: string) => Promise<string | null>;
 	nextKey: () => string;
 	now: () => number;
 	onChange?: () => void;
@@ -40,6 +42,7 @@ export interface BtwManagerOptions {
 interface BtwThreadOptions {
 	key: string;
 	title: string;
+	titleExplicit?: boolean;
 	createdAt: number;
 	anchorLeafId: string;
 	model: BtwThreadModelRef;
@@ -55,7 +58,8 @@ interface BtwThreadOptions {
 
 export class BtwThread {
 	readonly key: string;
-	readonly title: string;
+	title: string;
+	readonly titleExplicit: boolean;
 	readonly createdAt: number;
 	anchorLeafId: string;
 	readonly model: BtwThreadModelRef;
@@ -73,6 +77,7 @@ export class BtwThread {
 	constructor(options: BtwThreadOptions) {
 		this.key = options.key;
 		this.title = options.title;
+		this.titleExplicit = options.titleExplicit ?? false;
 		this.createdAt = options.createdAt;
 		this.anchorLeafId = options.anchorLeafId;
 		this.model = options.model;
@@ -102,6 +107,7 @@ export class BtwManager {
 	readonly #closeEvents: BtwManagerOptions["closeEvents"];
 	readonly #createConversation: BtwManagerOptions["createConversation"];
 	readonly #createSideOptions: BtwManagerOptions["createSideOptions"];
+	readonly #generateTitle: BtwManagerOptions["generateTitle"];
 	readonly #nextKey: BtwManagerOptions["nextKey"];
 	readonly #now: BtwManagerOptions["now"];
 	readonly #onChange: BtwManagerOptions["onChange"];
@@ -117,6 +123,7 @@ export class BtwManager {
 		this.#closeEvents = options.closeEvents;
 		this.#createConversation = options.createConversation;
 		this.#createSideOptions = options.createSideOptions;
+		this.#generateTitle = options.generateTitle;
 		this.#nextKey = options.nextKey;
 		this.#now = options.now;
 		this.#onChange = options.onChange;
@@ -143,24 +150,23 @@ export class BtwManager {
 	 * Create a durable child thread directly, journaling it before any turn runs.
 	 * The first prompt is driven by the caller via {@link prompt}.
 	 */
-	createChild(input: string, anchorLeafId: string, model: BtwThreadModelRef): string {
+	createChild(input: string, anchorLeafId: string, model: BtwThreadModelRef, title?: string): string {
 		const key = this.#nextKey();
-		const title =
+		const threadTitle =
+			title ||
 			input
 				.replace(/[\r\n\t ]+/g, " ")
 				.trim()
-				.slice(0, 60) || "BTW";
+				.slice(0, 60) ||
+			"BTW";
 		const thread = new BtwThread({
 			key,
-			title,
+			title: threadTitle,
+			titleExplicit: Boolean(title),
 			createdAt: this.#now(),
 			anchorLeafId,
 			model,
-			conversation: this.#createConversation(
-				model,
-				undefined,
-				this.#createSideOptions?.({ threadKey: key, threadTitle: title }),
-			),
+			conversation: this.#createConversation(model, undefined, this.#createSideOptions?.(key)),
 		});
 		thread.conversation.freeze();
 		this.#threads.set(key, thread);
@@ -276,6 +282,7 @@ export class BtwManager {
 		const trimmed = input.trim();
 		if (!trimmed && !images?.length) throw new Error("BTW input must not be empty");
 		const requestImages = images?.length ? [...images] : undefined;
+		if (!thread.titleExplicit && thread.turns.length === 0 && trimmed) void this.#nameThread(thread, trimmed);
 		this.setDraft(key, "");
 		this.persistDraft(key);
 		const request: BtwThreadRequest = {
@@ -357,6 +364,20 @@ export class BtwManager {
 				this.#onChange?.();
 			}
 		}
+	}
+
+	async #nameThread(thread: BtwThread, input: string): Promise<void> {
+		let title: string | null | undefined;
+		try {
+			title = await this.#generateTitle?.(input);
+		} catch (error) {
+			logger.warn("BTW thread title generation failed", { error: String(error) });
+			return;
+		}
+		if (!title || this.#threads.get(thread.key) !== thread) return;
+		thread.title = title;
+		this.#appendEvent({ version: 1, op: "title", key: thread.key, title });
+		this.#onChange?.();
 	}
 
 	prepareForPausedExit(): void {
@@ -462,6 +483,7 @@ export class BtwManager {
 			op: "create",
 			key: thread.key,
 			title: thread.title,
+			...(thread.titleExplicit ? { titleExplicit: true } : {}),
 			createdAt: thread.createdAt,
 			anchorLeafId: thread.anchorLeafId,
 			model: thread.model,
@@ -492,14 +514,11 @@ export class BtwManager {
 		const thread = new BtwThread({
 			key: restored.key,
 			title: restored.title,
+			titleExplicit: restored.titleExplicit,
 			createdAt: restored.createdAt,
 			anchorLeafId: restored.anchorLeafId,
 			model: restored.model,
-			conversation: this.#createConversation(
-				restored.model,
-				checkpoint,
-				this.#createSideOptions?.({ threadKey: restored.key, threadTitle: restored.title }),
-			),
+			conversation: this.#createConversation(restored.model, checkpoint, this.#createSideOptions?.(restored.key)),
 			phase: restored.phase,
 			error: restored.error,
 			draft: restored.draft,

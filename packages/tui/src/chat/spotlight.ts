@@ -9,7 +9,7 @@ import type { TspPropNode, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node, propNode, span, text } from "../native/describe";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { Component } from "../tui";
-import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import { getTranscriptActions } from "./transcript-actions";
 
 /** Original lines a result's heat and the sheet cover; later lines are shown in neither. */
 export const SPOTLIGHT_VIEW_LINES = 5_000;
@@ -443,7 +443,7 @@ export class SpotlightNotice implements Component {
 						),
 					}
 				: { title: "Spotlight: passthrough", aria: "Spotlight: passthrough" }),
-			...(original && hasTranscriptActions() ? { actions: { click: "spotlight" } } : {}),
+			...(original && getTranscriptActions()?.spotlight ? { actions: { click: "spotlight" } } : {}),
 			...(this.#hidden ? { hidden: true } : {}),
 		});
 		return this.#native;
@@ -460,12 +460,7 @@ export class SpotlightNotice implements Component {
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action" || event.act !== "spotlight" || !this.#spotlight.original) return;
-		runTranscriptAction({
-			act: "spotlight",
-			toolCallId: this.#toolCallId,
-			spotlight: this.#spotlight,
-			reduced: this.#reduced,
-		});
+		void getTranscriptActions()?.spotlight?.(this.#spotlight, this.#reduced);
 	}
 }
 

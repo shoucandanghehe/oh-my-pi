@@ -61,6 +61,7 @@ import { toolRenderName, ToolExecutionComponent, type ToolExecutionHandle } from
 import { TranscriptContainer } from "../chrome/transcript-container";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
+import type { TranscriptActions } from "./transcript-actions";
 
 /** A stream and its persisted entry identify the same provider response. */
 export function sameAssistantTurn(
@@ -92,6 +93,7 @@ export interface ChatTranscriptBuilderDeps {
 	resolveLinks?: (texts: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 	requestRender: () => void;
 	onVirtualLayoutUpdate?: (component: Component) => void;
+	transcriptActions?: TranscriptActions;
 }
 
 export class ChatTranscriptBuilder {
@@ -278,6 +280,8 @@ export class ChatTranscriptBuilder {
 			this.#deps.proseOnlyThinking?.() ?? true,
 			this.#linkTargets,
 			this.#deps.expandThinkingBlocks?.() ?? false,
+			undefined,
+			this.#deps.transcriptActions,
 		);
 		component.setMidStreamPublication(false);
 		component.setImagesVisible(displayPreferences.showImages);
@@ -533,6 +537,7 @@ export class ChatTranscriptBuilder {
 								liveSteered: message.role === "user" && message.liveSteered === true,
 								timestamp: message.timestamp,
 								images: imageContent(message.content),
+								transcriptActions: this.#deps.transcriptActions,
 							}),
 						);
 					}
@@ -623,6 +628,7 @@ export class ChatTranscriptBuilder {
 				this.#linkTargets,
 				expandThinkingBlocks,
 				{ renderers: this.#deps.textRenderers ?? [], contentOffset: 0 },
+				this.#deps.transcriptActions,
 			);
 		if (live) {
 			this.#streamingAssistant = { beforeTools: live, toolCalls: [] };
@@ -671,6 +677,7 @@ export class ChatTranscriptBuilder {
 				this.#linkTargets,
 				expandThinkingBlocks,
 				{ renderers: this.#deps.textRenderers ?? [], contentOffset: timeline.contentOffsets.get(toolCallId) ?? 0 },
+				this.#deps.transcriptActions,
 			);
 			this.#mountProse(component);
 			lastAssistantComponent = component;
