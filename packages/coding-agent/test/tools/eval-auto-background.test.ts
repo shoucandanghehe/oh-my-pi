@@ -224,4 +224,28 @@ describe("EvalTool auto-background", () => {
 		expect(asyncJobManager.getJob(jobId)?.status).toBe("completed");
 		await asyncJobManager.dispose();
 	});
+
+	it("backgrounds a no-deadline cell in sleep mode even with auto-background off", async () => {
+		const asyncJobManager = new AsyncJobManager({});
+		const cell = mockGatedCell("watched\n");
+		const tool = new EvalTool({
+			...makeSession(
+				Settings.isolated({ "eval.autoBackground.enabled": false, "eval.autoBackground.thresholdMs": 10 }),
+				asyncJobManager,
+			),
+			isSleepModeActive: () => true,
+		});
+
+		// `timeout: 0` waiting on a file that never appears held a turn for two hours before: the
+		// gated cell cannot finish, so execute() returning proves sleep mode released the turn.
+		const result = await tool.execute("call-sleep", { language: "js", code: "await watch()", timeout: 0 });
+
+		expect(result.details?.async?.state).toBe("running");
+		const job = asyncJobManager.getJob(result.details?.async?.jobId ?? "");
+		expect(job?.status).toBe("running");
+		cell.release();
+		await job?.promise;
+		expect(job?.status).toBe("completed");
+		await asyncJobManager.dispose();
+	});
 });
