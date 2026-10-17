@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Typing in a focused agent conversation now prewarms that agent's model connection instead of Main's.
 - Fixed typing and input-method commits appearing before clipboard text pasted just ahead of them.
 - The todo tool description now warns that phase-wide `done`/`drop` overwrite already-dropped, blocked, or completed tasks, and that progress `done` counts include dropped tasks.
 - The workflowz notice no longer advertises a per-call `model` option for `agent()`/`workpool()`, which Python rejected and JavaScript silently ignored.
