@@ -24,7 +24,7 @@ import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
 import { base64ImageNode, openableImageProps } from "../native/blobs";
-import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
+import { getTranscriptActions, runTurnAction, turnHoldEntries, type TranscriptActions } from "./transcript-actions";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -70,6 +70,7 @@ export interface UserBubbleOptions {
 	skillPath?: (name: string) => string | undefined;
 	/** When the message was sent (ms); shown beside the native hover toolbar. */
 	timestamp?: number;
+	transcriptActions?: TranscriptActions;
 }
 
 /**
@@ -137,6 +138,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	readonly #liveSteered: boolean;
 	readonly #synthetic: boolean;
 	readonly #timestamp: number | undefined;
+	readonly #transcriptActions: TranscriptActions | undefined;
 	readonly #images: readonly ImageContent[];
 	readonly #imageLinks: readonly (string | undefined)[] | undefined;
 	/** Display text: image markers collapsed to chips and model mentions to their labels. */
@@ -168,6 +170,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		this.#liveSteered = options.liveSteered === true;
 		this.#synthetic = options.synthetic === true;
 		this.#timestamp = options.timestamp;
+		this.#transcriptActions = options.transcriptActions;
 		this.#images = options.images ?? [];
 		this.#imageLinks = options.imageLinks;
 		this.#text = text;
@@ -211,34 +214,40 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		this.#nativeHour12 = hour12;
 		this.#nativeLinked = linked;
 		const children: NativeChild[] = [];
-		if (!this.#synthetic && hasTranscriptActions()) {
-			const tools: NativeChild[] = [
-				// `copy-message`, not Tern's local `copy` (that would copy the icon's empty label).
-				node(
-					"icon",
-					{
-						name: "copy",
-						role: "omp.user.tool",
-						title: "Copy message",
-						aria: "Copy message",
-						actions: { click: "copy-message" },
-					},
-					undefined,
-					"copy",
-				),
-				node(
-					"icon",
-					{
-						name: "rewind",
-						role: "omp.user.tool",
-						title: "Rewind the conversation to an earlier message",
-						aria: "Rewind",
-						actions: { click: "rewind" },
-					},
-					undefined,
-					"rewind",
-				),
-			];
+		const actions = this.#transcriptActions ?? getTranscriptActions();
+		if (!this.#synthetic && (actions?.copy || actions?.rewind)) {
+			const tools: NativeChild[] = [];
+			if (actions.copy)
+				tools.push(
+					// `copy-message`, not Tern's local `copy` (that would copy the icon's empty label).
+					node(
+						"icon",
+						{
+							name: "copy",
+							role: "omp.user.tool",
+							title: "Copy message",
+							aria: "Copy message",
+							actions: { click: "copy-message" },
+						},
+						undefined,
+						"copy",
+					),
+				);
+			if (actions.rewind)
+				tools.push(
+					node(
+						"icon",
+						{
+							name: "rewind",
+							role: "omp.user.tool",
+							title: "Rewind the conversation to an earlier message",
+							aria: "Rewind",
+							actions: { click: "rewind" },
+						},
+						undefined,
+						"rewind",
+					),
+				);
 			if (this.#timestamp !== undefined) {
 				const at = new Date(this.#timestamp);
 				tools.push(
@@ -282,7 +291,7 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		// A phone's long press lists the turn's actions (a desktop keeps the hover toolbar): they need the
 		// prompt's timestamp to find its entry.
 		const hold =
-			!this.#synthetic && hasTranscriptActions() && this.#timestamp !== undefined
+			!this.#synthetic && actions?.turn && this.#timestamp !== undefined
 				? {
 						actions: {
 							hold: turnHoldEntries("user", { id: "copy-message", label: "Copy message", icon: "copy" }),
@@ -303,9 +312,10 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	/** Hover toolbar and hold-menu choices: omp's own copy, rewind, edit, retry and fork commands. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
-		if (event.act === "copy-message") runTranscriptAction({ act: "copy", text: this.#text });
-		else if (event.act === "rewind") runTranscriptAction({ act: "rewind" });
-		else if (this.#timestamp !== undefined) runTurnAction(event.act, { role: "user", at: this.#timestamp });
+		const actions = this.#transcriptActions ?? getTranscriptActions();
+		if (event.act === "copy-message") void actions?.copy?.(this.#text);
+		else if (event.act === "rewind") void actions?.rewind?.();
+		else if (this.#timestamp !== undefined) runTurnAction(event.act, { role: "user", at: this.#timestamp }, actions);
 	}
 
 	/**

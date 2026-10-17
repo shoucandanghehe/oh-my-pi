@@ -33,6 +33,12 @@ export interface AgentHubSession {
 		cost: number;
 		contextUsage?: { tokens: number; contextWindow: number } | null;
 	};
+	getQueuedMessages?(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number };
+	getQueuedMessageEditAction?(
+		queue: "steering" | "followUp",
+		index: number,
+	): (() => Promise<{ text: string; images?: ImageContent[] } | undefined>) | undefined;
+	subscribe?(listener: (event: { type: string }) => void): () => void;
 	abort(options?: { reason?: string }): Promise<void>;
 }
 /** Structural view of an agent-registry record. */

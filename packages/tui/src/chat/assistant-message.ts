@@ -22,7 +22,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantTextRenderer, AssistantTextRendering, AssistantThinkingRenderer, AssistantThinkingRenderResult } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
-import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
+import { getTranscriptActions, runTurnAction, turnHoldEntries, type TranscriptActions } from "./transcript-actions";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
 import { NativeImageCache, nativeMediaNode } from "../native/blobs";
@@ -633,6 +633,7 @@ export class AssistantMessageComponent extends Container {
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
 	#expandThinkingBlocks: boolean;
+	readonly #transcriptActions: TranscriptActions | undefined;
 
 	constructor(
 		message?: AssistantMessage,
@@ -644,6 +645,7 @@ export class AssistantMessageComponent extends Container {
 		linkTargets?: ReadonlyMap<string, string>,
 		expandThinkingBlocks = false,
 		textRendering?: AssistantTextRendering,
+		transcriptActions?: TranscriptActions,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -654,6 +656,7 @@ export class AssistantMessageComponent extends Container {
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
 		this.#expandThinkingBlocks = expandThinkingBlocks;
+		this.#transcriptActions = transcriptActions;
 
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -1143,7 +1146,7 @@ export class AssistantMessageComponent extends Container {
 			const usage = formatTurnUsage(this.#turnUsage);
 			const line: NativeChild[] = [];
 			// Led by Copy and a dot: `⧉ · 12.4s · 19K tok this turn`.
-			if (answered && hasTranscriptActions()) {
+			if (answered && (this.#transcriptActions ?? getTranscriptActions())?.copy) {
 				line.push(
 					// `copy-answer`, not Tern's local `copy` (that would copy the icon's empty label).
 					node(
@@ -1169,7 +1172,7 @@ export class AssistantMessageComponent extends Container {
 		// A phone's long press on a turn's answer lists its actions (a desktop keeps the usage line's Copy).
 		const at = this.#answerMessage?.timestamp;
 		const hold =
-			this.#turnUsage && answered && at !== undefined && !this.#rewound && hasTranscriptActions()
+			this.#turnUsage && answered && at !== undefined && !this.#rewound && (this.#transcriptActions ?? getTranscriptActions())?.turn
 				? {
 						actions: {
 							hold: turnHoldEntries("assistant", { id: "copy-answer", label: "Copy reply", icon: "copy" }),
@@ -1237,7 +1240,8 @@ export class AssistantMessageComponent extends Container {
 				key: "message",
 			}),
 		];
-		if (message.stopReason === "error" && hasTranscriptActions()) {
+		const actions = this.#transcriptActions ?? getTranscriptActions();
+		if (message.stopReason === "error" && (actions?.retry || actions?.copy || actions?.switchModel)) {
 			const button = (act: string, label: string, keys: readonly string[], title: string): NativeNode =>
 				node(
 					"row",
@@ -1250,9 +1254,11 @@ export class AssistantMessageComponent extends Container {
 					"row",
 					{ gap: "sm", role: "omp.error.actions" },
 					[
-						button("retry", "Retry", ["F5"], "Retry the failed turn"),
-						button("copy-error", "Copy error", [], "Copy the error message"),
-						button("switch-model", "Switch model", ["⌥P"], "Pick another model for this session"),
+						...(actions.retry ? [button("retry", "Retry", ["F5"], "Retry the failed turn")] : []),
+						...(actions.copy ? [button("copy-error", "Copy error", [], "Copy the error message")] : []),
+						...(actions.switchModel
+							? [button("switch-model", "Switch model", ["⌥P"], "Pick another model for this session")]
+							: []),
 					],
 					"actions",
 				),
@@ -1264,13 +1270,14 @@ export class AssistantMessageComponent extends Container {
 
 	/** Control clicks (the error frame's actions, the turn footer's Copy): omp's own retry, clipboard and model-picker paths. */
 	#handleAction(act: string): void {
-		if (act === "retry") runTranscriptAction({ act: "retry" });
-		else if (act === "switch-model") runTranscriptAction({ act: "switch-model" });
-		else if (act === "copy-error" && this.#errorText) runTranscriptAction({ act: "copy", text: this.#errorText });
+		const actions = this.#transcriptActions ?? getTranscriptActions();
+		if (act === "retry") void actions?.retry?.();
+		else if (act === "switch-model") void actions?.switchModel?.();
+		else if (act === "copy-error" && this.#errorText) void actions?.copy?.(this.#errorText);
 		else if (act === "copy-answer") {
 			const text = this.#answerText();
-			if (text) runTranscriptAction({ act: "copy", text });
-		} else if (this.#answerMessage) runTurnAction(act, { role: "assistant", at: this.#answerMessage.timestamp });
+			if (text) void actions?.copy?.(text);
+		} else if (this.#answerMessage) runTurnAction(act, { role: "assistant", at: this.#answerMessage.timestamp }, actions);
 	}
 
 	/** The answer as the transcript shows it: its text blocks' markdown, a blank line apart, without thinking or tool calls. */

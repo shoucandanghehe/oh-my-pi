@@ -27,6 +27,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Container } from "@oh-my-pi/pi-tui";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
@@ -41,6 +42,7 @@ type StubEditor = {
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
 	imageLinks?: (string | undefined)[];
+	restoreDetachedDraft: CustomEditor["restoreDetachedDraft"];
 };
 
 type PromptCustomMessage = Mock<
@@ -76,6 +78,7 @@ function createStubInputControllerContext(opts: {
 }) {
 	let editorText = "";
 	const editor: StubEditor = {
+		restoreDetachedDraft: CustomEditor.prototype.restoreDetachedDraft,
 		setText(text) {
 			editorText = text;
 		},
@@ -810,6 +813,7 @@ function createStubInteractiveModeContextForUiHelpers(
 ) {
 	let editorText = "";
 	const editor: StubEditor = {
+		restoreDetachedDraft: CustomEditor.prototype.restoreDetachedDraft,
 		setText(text) {
 			editorText = text;
 		},

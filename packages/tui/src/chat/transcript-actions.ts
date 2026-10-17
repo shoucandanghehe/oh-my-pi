@@ -1,9 +1,3 @@
-/**
- * Pointer actions on transcript blocks in a native terminal (a user message's
- * hover toolbar, an error frame's action row). Blocks describe the controls;
- * the interactive host registers the one handler that runs omp's existing
- * commands for them, so a click and the key binding take the same path.
- */
 import type { TspMenuEntry } from "@oh-my-pi/pi-wire";
 import type { SpotlightDetails } from "./spotlight";
 
@@ -23,49 +17,27 @@ export interface TurnMessage {
  */
 export type TurnAct = "edit" | "retry" | "rewind" | "fork";
 
-export type TranscriptAction =
-	/** Retry the last failed turn (`app.retry`). */
-	| { readonly act: "retry" }
-	/** Open the temporary model picker (`app.model.selectTemporary`). */
-	| { readonly act: "switch-model" }
-	/** Open the transcript rewind selector. */
-	| { readonly act: "rewind" }
-	/** Run a turn's hold-menu action on `message`. */
-	| { readonly act: "turn"; readonly turn: TurnAct; readonly message: TurnMessage }
-	/** Resume the session stored at `path` (a welcome card's recent session). */
-	| { readonly act: "resume"; readonly path: string }
-	/** Put `text` on the clipboard. */
-	| { readonly act: "copy"; readonly text: string }
-	/**
-	 * Open the Spotlight sheet of a shaped tool result: its original beside `reduced`, the text the model saw (a
-	 * held-out result's sheet shows the would-be text its trace's `shapedUrl` names instead).
-	 */
-	| {
-			readonly act: "spotlight";
-			readonly toolCallId: string;
-			readonly spotlight: SpotlightDetails;
-			readonly reduced: string;
-	  };
 
-type Handler = (action: TranscriptAction) => void;
-
-let handler: Handler | undefined;
-
-/** Register (or clear, with `undefined`) the host's handler. */
-export function setTranscriptActionHandler(next: Handler | undefined): void {
-	handler = next;
+/** Commands a transcript's own host supports. Missing commands have no controls. */
+export interface TranscriptActions {
+	copy?: (text: string) => void | Promise<void>;
+	retry?: () => void | Promise<void>;
+	switchModel?: () => void | Promise<void>;
+	rewind?: () => void | Promise<void>;
+	turn?: (turn: TurnAct, message: TurnMessage) => void | Promise<void>;
+	resume?: (path: string) => void | Promise<void>;
+	spotlight?: (details: SpotlightDetails, reduced: string) => void | Promise<void>;
 }
 
-/** Run `action` through the host; false when no host handles actions. */
-export function runTranscriptAction(action: TranscriptAction): boolean {
-	if (!handler) return false;
-	handler(action);
-	return true;
+let actions: TranscriptActions | undefined;
+
+/** Configure the interactive Main host. Detached transcripts provide their own actions. */
+export function setTranscriptActions(next: TranscriptActions | undefined): void {
+	actions = next;
 }
 
-/** Whether a host handles actions (controls are only described when one does). */
-export function hasTranscriptActions(): boolean {
-	return handler !== undefined;
+export function getTranscriptActions(): TranscriptActions | undefined {
+	return actions;
 }
 
 /** The hold-menu action names of each {@link TurnAct}. */
@@ -92,9 +64,9 @@ export function turnHoldEntries(role: TurnMessage["role"], copy: TspMenuEntry): 
 }
 
 /** Runs hold-menu action `act` (a {@link turnHoldEntries} id) on `message`; false when `act` is no turn action. */
-export function runTurnAction(act: string, message: TurnMessage): boolean {
+export function runTurnAction(act: string, message: TurnMessage, host = getTranscriptActions()): boolean {
 	const turn = TURN_ACTS[act];
 	if (!turn) return false;
-	runTranscriptAction({ act: "turn", turn, message });
+	void host?.turn?.(turn, message);
 	return true;
 }

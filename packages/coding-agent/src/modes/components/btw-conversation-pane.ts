@@ -38,9 +38,10 @@ import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
 import type { ExtensionPresentationSource } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
+import type { ComposerFacts } from "@oh-my-pi/pi-tui/status-line/types";
 import { BtwShareSummaryDialog } from "./btw-share-summary-dialog";
 
-import { node, span } from "@oh-my-pi/pi-tui/native/describe";
+import { col, node, span, text } from "@oh-my-pi/pi-tui/native/describe";
 import type { DescribeContext, NativeNode, NativeSurface, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { actionBar, actionButton } from "@oh-my-pi/pi-tui/native/overlay";
 import { SelectListSheet } from "@oh-my-pi/pi-tui/native/picker";
@@ -148,6 +149,11 @@ export class BtwConversationPane
 {
 	readonly #pane: ChatTranscriptPane;
 	readonly #options: BtwConversationPaneOptions;
+	readonly #header: Component = {
+		render: () => [],
+		describe: () => this.#describeHeader(),
+		handleNativeEvent: event => this.handleNativeEvent(event),
+	};
 	readonly #widgets: ExtensionWidgets;
 	readonly #statusKeys = new Set<string>();
 	#presentation: ExtensionPresentationSource | undefined;
@@ -155,6 +161,7 @@ export class BtwConversationPane
 	#menu: { kind: "threads" | "actions"; list: SelectList; handle: OverlayHandle } | undefined;
 	readonly #approvalLifetime = new AbortController();
 	#approvalTail = Promise.resolve();
+	#approval: { finish: (approved: boolean) => void } | undefined;
 	readonly #scrollOffsets = new Map<string, number>();
 	#threads: readonly BtwThreadView[] = [];
 	#selectedKey: string | undefined;
@@ -220,7 +227,7 @@ export class BtwConversationPane
 		});
 	}
 
-	async approveSummary(threadTitle: string, summary: string, signal?: AbortSignal): Promise<boolean> {
+	async approveSummary(threadKey: string, summary: string, signal?: AbortSignal): Promise<boolean> {
 		const lifetime = this.#approvalLifetime.signal;
 		const approvalSignal = signal ? AbortSignal.any([signal, lifetime]) : lifetime;
 		const previous = this.#approvalTail;
@@ -230,17 +237,26 @@ export class BtwConversationPane
 			await previous;
 			if (approvalSignal.aborted) return false;
 			const result = Promise.withResolvers<boolean>();
+			let overlay: OverlayHandle | undefined;
 			const finish = (approved: boolean): void => {
 				approvalSignal.removeEventListener("abort", abort);
-				overlay.hide();
+				this.#approval = undefined;
+				overlay?.hide();
 				this.#options.requestRender();
 				result.resolve(approved);
 			};
 			const abort = (): void => finish(false);
-			const dialog = new BtwShareSummaryDialog(threadTitle, summary, finish);
-			const overlay = this.#options.ui.showOverlay(dialog, { width: "80%", maxHeight: "80%" });
+			if (this.#options.ui.nativeRendering) {
+				this.#approval = { finish };
+				this.#options.onSelectThread(threadKey);
+			} else {
+				const title = this.#threads.find(thread => thread.key === threadKey)?.title ?? "BTW";
+				const dialog = new BtwShareSummaryDialog(title, summary, finish);
+				overlay = this.#options.ui.showOverlay(dialog, { width: "80%", maxHeight: "80%" });
+			}
 			approvalSignal.addEventListener("abort", abort, { once: true });
 			if (approvalSignal.aborted) abort();
+			this.#options.requestRender();
 			return await result.promise;
 		} finally {
 			finished.resolve();
@@ -251,34 +267,35 @@ export class BtwConversationPane
 		role: "omp.overlay.btw",
 		size: "lg",
 		anchor: "center",
-		head: "BTW threads",
+		head: "",
 	} as const;
 
 	describeSurface(cx: DescribeContext): NativeSurface {
 		const surface = this.#pane.describeSurface(cx);
-		return { ...surface, main: [this.#describeHeader(), ...surface.main], dock: [this] };
+		return { ...surface, main: [this.#header, ...surface.main], dock: [this] };
 	}
 
 	describe(cx: DescribeContext): NativeNode {
-		const controls = [
-			...(this.#threads.length > 0
-				? [
-						actionButton(
-							`${this.#threads.length} ${this.#threads.length === 1 ? "thread" : "threads"}`,
-							"threads",
-							{ keys: "alt+t" },
-						),
-					]
-				: []),
-			actionButton("+", "new", { title: "New thread" }),
-			...(this.#selected() ? [actionButton("···", "more", { title: "Thread actions" })] : []),
-			null,
-			actionButton("Close", "close"),
-		];
 		const composer = node(
 			"col",
-			{ gap: "xs", shrink: 0 },
-			[actionBar(controls), this.#pane.describeComposer()],
+			{ gap: "xs", shrink: 0, align: "stretch" },
+			[
+				...(this.#approval
+					? [
+							col(
+								[
+									text("Send this summary to the main session?"),
+									actionBar([
+										actionButton("Send", "approve", { keys: "enter", tone: "accent" }),
+										actionButton("Deny", "deny", { keys: "escape" }),
+									]),
+								],
+								{ role: "omp.btw.summary-approval", gap: "sm", shrink: 0 },
+							),
+						]
+					: []),
+				this.#pane.describeComposer(),
+			],
 			"composer",
 		);
 		return this.#options.nativePane
@@ -308,6 +325,17 @@ export class BtwConversationPane
 					: selected?.error
 						? [node("badge", { text: "Error", tone: "error" }, undefined, "error")]
 						: []),
+				...(this.#threads.length > 0
+					? [
+							actionButton(
+								`${this.#threads.length} ${this.#threads.length === 1 ? "thread" : "threads"} ▾`,
+								"threads",
+								{ keys: "alt+t" },
+							),
+						]
+					: []),
+				actionButton("+", "new", { title: "New thread" }),
+				...(selected ? [actionButton("···", "more", { title: "Thread actions" })] : []),
 			],
 			"header",
 		);
@@ -315,6 +343,10 @@ export class BtwConversationPane
 
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
+		if (this.#approval && (event.act === "approve" || event.act === "deny")) {
+			this.#approval.finish(event.act === "approve");
+			return;
+		}
 		if (event.act === "threads") this.#openMenu("threads");
 		else if (event.act === "more") this.#openMenu("actions");
 		else this.#runNativeAction(event.act);
@@ -338,7 +370,7 @@ export class BtwConversationPane
 				value: thread.key,
 				label: replaceTabs(thread.title),
 				description: [
-					thread.phase === "running" ? "Replying" : thread.phase,
+					thread.phase === "running" ? "Replying" : thread.phase === "error" ? "Error" : undefined,
 					thread.unread ? `${thread.unread} unread` : undefined,
 					thread.draft ? "Draft" : undefined,
 				]
@@ -350,9 +382,7 @@ export class BtwConversationPane
 		if (!selected) return [];
 		return [
 			...(this.#options.canCopy(selected.key) ? [{ value: "copy-thread", label: "Copy conversation" }] : []),
-			...(selected.phase !== "running" && selected.turns.length > 0
-				? [{ value: "promote", label: "Promote to a new session" }]
-				: []),
+			...(selected.phase !== "running" && selected.turns.length > 0 ? [{ value: "promote", label: "Promote" }] : []),
 			{ value: "delete", label: "Delete thread" },
 		];
 	}
@@ -602,6 +632,11 @@ export class BtwConversationPane
 	}
 
 	handleInput(data: string): void {
+		if (this.#approval) {
+			if (matchesKey(data, "enter")) this.#approval.finish(true);
+			else if (matchesKey(data, "escape")) this.#approval.finish(false);
+			return;
+		}
 		if (
 			this.#options.ui.nativeRendering &&
 			matchesKey(data, "escape") &&
@@ -862,7 +897,48 @@ export class BtwConversationPane
 		if (displayed && displayed.key !== previousKey) this.#options.onDisplayThread?.(displayed.key);
 		this.#options.statusLine.setRuntimeStatus(displayed?.status, displayed?.title);
 		const editor = this.#pane.getPasteTarget();
-		if (editor) editor.disableSubmit = displayed?.phase === "running";
+		if (editor) {
+			editor.nativeMinWidth = 1;
+			editor.disableSubmit = displayed?.phase === "running";
+			const usage = displayed?.status?.stats.contextUsage;
+			const facts: ComposerFacts = {
+				context: node("meter", {
+					role: "omp.composer.context",
+					style: "bar",
+					value: usage ? usage.percent / 100 : null,
+					label: usage ? `${Math.round(usage.percent)}%` : undefined,
+					total: usage ? String(usage.contextWindow) : undefined,
+				}),
+				extras: node("status", { role: "omp.composer.extras", transparent: true, grow: 1 }, [
+					...(displayed
+						? [
+								node(
+									"seg",
+									{ spans: [span(displayed.status?.model.name ?? displayed.model.id)], icon: "model" },
+									undefined,
+									"model",
+								),
+							]
+						: []),
+					node("seg", { spans: [span("Read-only", "muted")] }, undefined, "read-only"),
+					...(usage
+						? [
+								node(
+									"seg",
+									{ spans: [span(`${Math.round(usage.percent)}% context`, "muted")] },
+									undefined,
+									"context",
+								),
+							]
+						: []),
+				]),
+				usage: text(""),
+			};
+			editor.composerFacts = {
+				describeComposerFacts: () => facts,
+				handleNativeEvent: () => {},
+			};
+		}
 		const samePresentation = this.#presentation === displayed?.extensionRunner;
 		this.#syncPresentation(displayed?.extensionRunner);
 		const sameRenderedRequest =

@@ -12,6 +12,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { hasFileDeleteFallback, hasFileWriteFallback } from "@oh-my-pi/pi-coding-agent/tools/file-write-fallback";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createMainWriteTool, sendToMainSessionCall } from "./helpers/btw-send-to-main";
 import { GlobTool } from "../src/tools/glob";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -81,7 +82,7 @@ describe("durable BTW extension runtime", () => {
 			sideStreamFn,
 		});
 		sessions.push(session);
-		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, { readOnlyTools: true });
+		const conversation = session.createEphemeralConversation("BTW");
 		await conversation.initializeExtensionRuntime();
 		const result = await conversation.prompt("Find the TypeScript file");
 		expect(result.replyText).toContain("found-by-btw.ts");
@@ -153,7 +154,7 @@ describe("durable BTW extension runtime", () => {
 		sessions.push(session);
 		const quick = session.createEphemeralConversation("quick ask");
 		expect(quick.extensionRunner).toBeUndefined();
-		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, { readOnlyTools: true });
+		const conversation = session.createEphemeralConversation("BTW");
 		expect(conversation.extensionRunner).toBeUndefined();
 		expect(factoryRuns).toBe(0);
 		await conversation.initializeExtensionRuntime();
@@ -167,7 +168,7 @@ describe("durable BTW extension runtime", () => {
 			setStatus: () => {},
 		});
 		expect(widgets).toContain("side 1");
-		const sibling = session.createEphemeralConversation("Another BTW", undefined, undefined, { readOnlyTools: true });
+		const sibling = session.createEphemeralConversation("Another BTW");
 		await sibling.initializeExtensionRuntime();
 		expect(factoryRuns).toBe(2);
 		expect(sibling.extensionRunner).not.toBe(runner);
@@ -216,7 +217,7 @@ describe("durable BTW extension runtime", () => {
 			preparedExtensions: [{ path: "unsafe", resolvedPath: "unsafe", factory, error: null }],
 		});
 		sessions.push(session);
-		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, { readOnlyTools: true });
+		const conversation = session.createEphemeralConversation("BTW");
 		expect(hasFileWriteFallback()).toBe(false);
 		await conversation.initializeExtensionRuntime();
 		expect(conversation.getTool("read")).toBeUndefined();
@@ -249,7 +250,7 @@ describe("durable BTW extension runtime", () => {
 			preparedExtensions: [{ path: "pending", resolvedPath: "pending", factory, error: null }],
 		});
 		sessions.push(session);
-		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, { readOnlyTools: true });
+		const conversation = session.createEphemeralConversation("BTW");
 		const init = conversation.initializeExtensionRuntime();
 		const dispose = conversation.disposeExtensionRuntime();
 		binding.resolve();
@@ -259,11 +260,12 @@ describe("durable BTW extension runtime", () => {
 		await expect(conversation.prompt("cannot revive")).rejects.toThrow("disposed");
 	});
 
-	it("keeps the explicit share-summary approval in the side runner", async () => {
+	it("keeps the explicit send-to-main approval in the side runner", async () => {
 		const mainEmit = vi.fn(async () => undefined);
 		const select = vi.fn(async () => "Deny");
 		const mainRunner = {
 			hasUI: () => true,
+			getRegisteredTool: () => undefined,
 			getUIContext: () => ({ select }),
 			getExtensionPaths: () => [],
 			hasHandlers: () => false,
@@ -275,14 +277,7 @@ describe("durable BTW extension runtime", () => {
 			queueMicrotask(() => {
 				const message = createAssistantMessage("");
 				if (request++ === 0) {
-					message.content = [
-						{
-							type: "toolCall",
-							id: "share-1",
-							name: "shareSummaryWithMain",
-							arguments: { summary: "Context from BTW" },
-						},
-					];
+					message.content = [sendToMainSessionCall("share-1", "Context from BTW")];
 					message.stopReason = "toolUse";
 					stream.push({ type: "done", reason: "toolUse", message });
 				} else {
@@ -292,20 +287,22 @@ describe("durable BTW extension runtime", () => {
 			});
 			return stream;
 		};
+		const write = createMainWriteTool();
 		const session = new AgentSession({
-			agent: new Agent({ initialState: { model, systemPrompt: [], messages: [], tools: [] } }),
+			agent: new Agent({ initialState: { model, systemPrompt: [], messages: [], tools: [write] } }),
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
 			modelRegistry: { resolver: () => async () => "key", getAvailable: () => [model] } as never,
 			preparedExtensions: [],
 			extensionRunner: mainRunner as never,
+			toolRegistry: new Map([["write", write]]),
+			builtInToolNames: new Set(["write"]),
 			sideStreamFn: streamFn,
 		});
 		sessions.push(session);
 		const share = vi.fn(async () => {});
 		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, {
-			readOnlyTools: true,
-			shareSummaryWithMain: share,
+			sendToMainSession: share,
 		});
 		await conversation.initializeExtensionRuntime();
 		await conversation.prompt("Share summary");
@@ -373,7 +370,7 @@ describe("durable BTW extension runtime", () => {
 			sideStreamFn: streamFn,
 		});
 		sessions.push(session);
-		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, { readOnlyTools: true });
+		const conversation = session.createEphemeralConversation("BTW");
 		await conversation.initializeExtensionRuntime();
 		await conversation.prompt("Read repository");
 		expect(blocked).toBe(true);
@@ -459,7 +456,7 @@ describe("durable BTW extension runtime", () => {
 			sideStreamFn: streamFn,
 		});
 		sessions.push(session);
-		const conversation = session.createEphemeralConversation("BTW", undefined, undefined, { readOnlyTools: true });
+		const conversation = session.createEphemeralConversation("BTW");
 		await conversation.initializeExtensionRuntime();
 		await conversation.prompt("Inspect");
 		expect(native.execute).toHaveBeenCalledTimes(1);

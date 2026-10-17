@@ -8,6 +8,7 @@ import btwConversationPrompt from "../prompts/system/btw-conversation.md" with {
 import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
 import type { AgentSession } from "./agent-session";
 import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwTurns } from "./btw-history";
+import type { BtwSummarySource } from "./messages";
 import type { EphemeralConversationTurn, EphemeralTurnResult } from "./ephemeral-conversation";
 
 export interface BtwTurnStart {
@@ -57,10 +58,11 @@ export function patchLatestBtwTurn(record: BtwHistoryRecord, patch: Partial<BtwH
 
 /**
  * Run one `/btw` question as an ephemeral turn; earlier turns of its topic are replayed as context.
+ * The turn has the same read-only tools and `xd://send_to_main_session` device as a durable BTW thread.
  * Not `async`: returns the session's own promise so callers settle on the same tick as the turn.
  */
 export function runBtwTurn(
-	session: Pick<AgentSession, "model" | "createEphemeralConversation">,
+	session: Pick<AgentSession, "model" | "createEphemeralConversation" | "publishBtwSummary">,
 	args: {
 		question: string;
 		/** Images attached to this question; earlier turns replay their own. */
@@ -69,6 +71,8 @@ export function runBtwTurn(
 		/** Ask for steering prompts in an `<inject>` block (the `btw.inject` setting). */
 		inject?: boolean;
 		conversationKey: string;
+		/** Topic identity attached to a summary sent to Main. */
+		source: BtwSummarySource;
 		onTextDelta: (delta: string) => void;
 		signal: AbortSignal;
 	},
@@ -80,7 +84,7 @@ export function runBtwTurn(
 		if (!turn.answer) continue;
 		history.push({
 			input: turn.question,
-			images: turn.images,
+			images: turn.images ? [...turn.images] : undefined,
 			replyText: turn.answer,
 			timestamp: turn.createdAt,
 			assistantMessage: {
@@ -106,8 +110,9 @@ export function runBtwTurn(
 		btwConversationPrompt,
 		{ turns: history, sideSessionId: args.conversationKey },
 		model,
+		{ sendToMainSession: summary => session.publishBtwSummary({ ...args.source, summary }) },
 	);
-	return conversation.prompt(args.inject ? prompt.render(btwUserPrompt, { question: args.question, inject: true }) : args.question, {
+	const turn = conversation.prompt(args.inject ? prompt.render(btwUserPrompt, { question: args.question, inject: true }) : args.question, {
 		images: args.images,
 		// /btw answers are read in full and saved to history: keep the
 		// repeated-line collapse, but not the 4 KiB cap meant for one-liners.
@@ -115,4 +120,7 @@ export function runBtwTurn(
 		onTextDelta: args.onTextDelta,
 		signal: args.signal,
 	});
+	const dispose = () => conversation.disposeExtensionRuntime();
+	void turn.then(dispose, dispose);
+	return turn;
 }

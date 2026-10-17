@@ -278,6 +278,8 @@ export interface AgentOptions {
 	 * call misses.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
+	/** Provider-declared tools when they differ from the executable state tools. */
+	advertisedTools?: AgentLoopConfig["advertisedTools"];
 
 	/** Enable intent tracing schema injection/stripping in the harness. */
 	intentTracing?: boolean;
@@ -392,6 +394,8 @@ export interface AgentChildOptions {
 	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
 	/** `null` disables the parent's unadvertised-tool resolver in an isolated child. */
 	resolveFallbackTool?: AgentOptions["resolveFallbackTool"] | null;
+	/** Declare the parent's tools to the provider while executing only this child's tools. */
+	advertiseParentTools?: boolean;
 	afterToolCall?: AgentLoopConfig["afterToolCall"];
 	transformAssistantMessage?: AgentLoopConfig["transformAssistantMessage"];
 	/**
@@ -528,6 +532,7 @@ export class Agent {
 	#speculativeToolExecution?: SpeculativeToolExecutionConfig;
 	#resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 	#suggestFallbackToolNames?: () => Iterable<string>;
+	#advertisedTools?: AgentLoopConfig["advertisedTools"];
 	#intentTracing: boolean;
 	#intentDescription?: string;
 	#pruneToolDescriptions: boolean;
@@ -644,6 +649,7 @@ export class Agent {
 		this.#speculativeToolExecution = opts.speculativeToolExecution;
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
 		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
+		this.#advertisedTools = opts.advertisedTools;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#intentDescription = opts.intentDescription;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
@@ -721,6 +727,7 @@ export class Agent {
 				options.resolveFallbackTool === null
 					? undefined
 					: (options.resolveFallbackTool ?? this.#resolveFallbackTool),
+			advertisedTools: options.advertiseParentTools ? model => this.#toolsForModel(model) : undefined,
 			intentTracing: this.#intentTracing,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
 			dialect: this.#dialect,
@@ -2199,6 +2206,7 @@ export class Agent {
 			speculativeToolExecution: this.#speculativeToolExecution,
 			resolveFallbackTool: this.#resolveFallbackTool,
 			suggestFallbackToolNames: this.#suggestFallbackToolNames,
+			advertisedTools: this.#advertisedTools,
 			intentTracing: this.#intentTracing,
 			intentDescription: this.#intentDescription,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
