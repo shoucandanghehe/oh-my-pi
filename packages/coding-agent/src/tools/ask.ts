@@ -40,6 +40,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectItem } from "../extensibility/extensions";
 import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
+import sleepModeDialogRefusedPrompt from "../prompts/system/sleep-mode-dialog-refused.md" with { type: "text" };
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
 import askResultTemplate from "../prompts/tools/ask-result.md" with { type: "text" };
@@ -402,6 +403,10 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			if (this.session.advertiseHeadlessAsk) throw new ToolError(HEADLESS_FORK_ASK_ERROR);
 			context?.abort();
 			throw new ToolAbortError("Ask tool requires interactive mode");
+		}
+		// Refuse before notification and speech: they would wake a sleeping user.
+		if (this.session.isSleepModeActive?.()) {
+			throw new Error(prompt.render(sleepModeDialogRefusedPrompt).trim());
 		}
 
 		const form = parseHtmlForm(params.html);
