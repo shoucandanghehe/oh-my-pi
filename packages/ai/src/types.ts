@@ -768,6 +768,9 @@ export interface LiveSteerClaim {
 	reject(): void;
 }
 
+/** `"only"` requires WebSocket transport without an SSE fallback. */
+export type OpenAIWebSocketPreference = boolean | "only";
+
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/**
@@ -836,8 +839,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
-	preferWebsockets?: boolean;
+	/** Prefer WebSocket transport, disable it, or require it without an SSE fallback. */
+	preferWebsockets?: OpenAIWebSocketPreference;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
 	 * the request targets OpenRouter (`model.provider === "openrouter"`). Common

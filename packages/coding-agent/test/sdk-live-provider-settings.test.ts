@@ -103,5 +103,9 @@ describe("primary-agent provider settings changed mid-session", () => {
 		// Owned dialect: no native tool specs; the catalog rides in the system prompt.
 		expect(second?.context.tools).toBeUndefined();
 		expect((second?.context.systemPrompt?.length ?? 0) > (first?.context.systemPrompt?.length ?? 0)).toBe(true);
+
+		cfgProvidersOpenaiWebsockets.set(settings, "only");
+		await session.sendUserMessage("third");
+		expect(requests.at(-1)?.options?.preferWebsockets).toBe("only");
 	});
 });

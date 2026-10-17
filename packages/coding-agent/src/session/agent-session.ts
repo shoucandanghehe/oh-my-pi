@@ -3091,7 +3091,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Hint forwarded to provider calls that support websocket transport; read live from `providers.openaiWebsockets`. */
-	get preferWebsockets(): boolean | undefined {
+	get preferWebsockets(): SimpleStreamOptions["preferWebsockets"] {
 		return resolveOpenAIWebsocketPreference(this.settings);
 	}
 

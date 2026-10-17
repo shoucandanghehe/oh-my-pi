@@ -7,7 +7,14 @@
  * compaction item as replacement history.
  */
 
-import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type {
+	Api,
+	CodexCompactionContext,
+	FetchImpl,
+	Model,
+	OpenAIWebSocketPreference,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
@@ -256,7 +263,7 @@ export async function requestCompactionV2Streaming(
 		retryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
-		preferWebsockets?: boolean;
+		preferWebsockets?: OpenAIWebSocketPreference;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -331,7 +338,7 @@ async function attemptCompactionV2Streaming(
 		codexMetadata?: OpenAICodexCompatibilityMetadata;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
-		preferWebsockets?: boolean;
+		preferWebsockets?: OpenAIWebSocketPreference;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item

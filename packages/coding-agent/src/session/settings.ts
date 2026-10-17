@@ -1097,17 +1097,22 @@ export const cfgProvidersKimiApiFormat = register({
 export const cfgProvidersOpenaiWebsockets = register({
 	id: "providers.openaiWebsockets",
 	type: "enum",
-	values: ["auto", "off", "on"] as const,
+	values: ["auto", "off", "on", "only"] as const,
 	default: "auto",
 	ui: {
 		tab: "providers",
 		group: "Protocol",
 		label: "OpenAI WebSockets",
-		description: "Websocket policy for OpenAI Codex models (auto uses model defaults, on forces, off disables)",
+		description: "WebSocket transport policy for OpenAI Codex models",
 		options: [
 			{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
 			{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },
-			{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
+			{ value: "on", label: "On", description: "Prefer websockets, falling back to SSE on failure" },
+			{
+				value: "only",
+				label: "WS only",
+				description: "Require websockets; report failures instead of falling back to SSE",
+			},
 		],
 	},
 });

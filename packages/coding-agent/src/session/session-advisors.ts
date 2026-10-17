@@ -470,7 +470,7 @@ export interface SessionAdvisorsHost {
 	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	/** Live `providers.openaiWebsockets` hint for provider calls. */
-	preferWebsockets(): boolean | undefined;
+	preferWebsockets(): SimpleStreamOptions["preferWebsockets"];
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;

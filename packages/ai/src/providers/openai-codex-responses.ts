@@ -35,6 +35,7 @@ import type {
 	FetchImpl,
 	MediaContent,
 	Model,
+	OpenAIWebSocketPreference,
 	ProviderSessionState,
 	RawSseEvent,
 	ServiceTier,
@@ -171,7 +172,7 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	textVerbosity?: "low" | "medium" | "high";
 	codexMode?: boolean;
 	toolChoice?: ToolChoice;
-	preferWebsockets?: boolean;
+	preferWebsockets?: OpenAIWebSocketPreference;
 	serviceTier?: ServiceTier;
 	/**
 	 * Responses Lite transport opt-in. Normal inference defaults to full
@@ -1669,6 +1670,10 @@ async function openInitialCodexEventStream(
 	transport: CodexTransport;
 }> {
 	const { transformedBody, websocketState } = requestContext;
+	const websocketOnly = options?.preferWebsockets === "only";
+	if (websocketOnly && !websocketState) {
+		throw new CodexWebSocketTransportError("WebSocket-only mode requires sessionId and providerSessionState");
+	}
 	if (websocketState && shouldUseCodexWebSocket(model, websocketState, options?.preferWebsockets)) {
 		const websocketRetryBudget = CODEX_WEBSOCKET_RETRY_BUDGET;
 		let websocketRetries = 0;
@@ -1689,7 +1694,8 @@ async function openInitialCodexEventStream(
 				const isFatal = CODEX_WEBSOCKET_FATAL_PATTERNS.some(pattern =>
 					fatalWebSocketMessage.includes(pattern.toLowerCase()),
 				);
-				const activateFallback = isFatal || websocketRetries >= websocketRetryBudget;
+				const exhausted = websocketRetries >= websocketRetryBudget;
+				const activateFallback = !websocketOnly && (isFatal || exhausted);
 				recordCodexWebSocketFailure(websocketState, activateFallback);
 				CODEX_DEBUG &&
 					logger.debug("[codex] codex websocket fallback", {
@@ -1699,6 +1705,7 @@ async function openInitialCodexEventStream(
 						activated: activateFallback,
 						fatal: isFatal,
 					});
+				if (websocketOnly && exhausted) throw error;
 				if (!activateFallback) {
 					websocketRetries += 1;
 					await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries), {
@@ -1780,8 +1787,7 @@ async function* streamCodexCompactionEvents(
 	const previousModelsEtag = websocketState?.modelsEtag;
 	try {
 		if (initial.transport === "websocket") {
-			// Do not expose a WebSocket attempt until it finishes: an SSE replay
-			// must replace, not extend, any partial compaction output.
+			// Buffer an attempt so a replay replaces, rather than extends, its output.
 			const bufferedEvents: Array<Record<string, unknown>> = [];
 			try {
 				for await (const event of initial.eventStream) bufferedEvents.push(event);
@@ -1790,7 +1796,8 @@ async function* streamCodexCompactionEvents(
 					throw error;
 				}
 				const state = requestContext.websocketState;
-				if (state) recordCodexWebSocketFailure(state, true);
+				if (state) recordCodexWebSocketFailure(state, options.preferWebsockets !== "only");
+				if (options.preferWebsockets === "only") throw error;
 				const fallback = await openCodexSseTransport(model, requestContext, requestSetup, options, state);
 				if (state) state.lastTransport = fallback.transport;
 				yield* drainCodexCompactionEvents(fallback.eventStream, requestContext);
@@ -1807,9 +1814,12 @@ async function* streamCodexCompactionEvents(
 					createCodexProviderStreamError(failure),
 				)
 			) {
-				const replay = await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState);
+				const replay =
+					options.preferWebsockets === "only"
+						? await openInitialCodexEventStream(model, options, requestSetup, requestContext)
+						: await openCodexSseTransport(model, requestContext, requestSetup, options, websocketState);
 				if (websocketState) websocketState.lastTransport = replay.transport;
-				yield* drainCodexCompactionEvents(replay.eventStream, requestContext);
+				yield* streamCodexCompactionEvents(model, options, requestSetup, requestContext, replay);
 				completed = true;
 				return;
 			}
@@ -2859,7 +2869,7 @@ class CodexStreamProcessor {
 		if (await this.#tryRecoverPreviousResponseNotFound(error)) {
 			return true;
 		}
-		if (await this.#tryReplayWebsocketFailureOverSse(error)) {
+		if (await this.#tryRecoverWebSocketTransportError(error)) {
 			return true;
 		}
 		if (await this.#tryRetryProviderError(error)) {
@@ -2976,9 +2986,9 @@ class CodexStreamProcessor {
 				retry: this.runtime.websocketStreamRetries,
 			});
 
-		if (this.output.content.length > 0) {
-			// Content already emitted to the caller — cannot safely continue on a new WS.
-			// Reset and replay the full request over SSE.
+		const websocketOnly = this.options?.preferWebsockets === "only";
+		if (this.output.content.length > 0 && !websocketOnly) {
+			// Replace the partial response with a full SSE replay.
 			this.runtime.resetAccumulators();
 			resetOutputState(this.output);
 			this.firstTokenTime = undefined;
@@ -2987,15 +2997,13 @@ class CodexStreamProcessor {
 			return true;
 		}
 
-		// No content emitted yet — clear accumulator state from the failed attempt
-		// (blockless native items can exist even with empty content) and reconnect
-		// over websocket, bounded by the shared retry budget: an account-scoped
-		// limit can reject every fresh connection, and an unbounded loop would
-		// hammer the endpoint with zero backoff.
+		// Reconnect with full input, bounded by the shared retry budget.
 		this.runtime.resetAccumulators();
+		if (websocketOnly) resetOutputState(this.output);
 		this.firstTokenTime = undefined;
 		if (this.runtime.websocketStreamRetries >= CODEX_WEBSOCKET_RETRY_BUDGET) {
-			recordCodexWebSocketFailure(websocketState, true);
+			recordCodexWebSocketFailure(websocketState, !websocketOnly);
+			if (websocketOnly) throw error;
 			await this.#reopenSseStream(websocketState);
 			return true;
 		}
@@ -3072,12 +3080,15 @@ class CodexStreamProcessor {
 		return true;
 	}
 
-	async #tryReplayWebsocketFailureOverSse(error: unknown): Promise<boolean> {
+	async #tryRecoverWebSocketTransportError(error: unknown): Promise<boolean> {
 		const websocketState = this.requestContext.websocketState;
+		const websocketOnly = this.options?.preferWebsockets === "only";
 		const canReplay =
 			this.runtime.transport === "websocket" &&
 			websocketState &&
-			isCodexWebSocketRetryableStreamError(error) &&
+			(websocketOnly
+				? error instanceof CodexWebSocketTransportError
+				: isCodexWebSocketRetryableStreamError(error)) &&
 			this.runtime.canSafelyReplayWebsocketOverSse &&
 			!this.runtime.sawTerminalEvent &&
 			!this.options?.signal?.aborted;
@@ -3085,15 +3096,13 @@ class CodexStreamProcessor {
 
 		const state = websocketState;
 		const streamError = error instanceof Error ? error : new Error(String(error));
-		const replayingBufferedOutputOverSse = this.output.content.length > 0;
+		const hasBufferedOutput = this.output.content.length > 0;
 		const fatalWebSocketMessage = streamError.message.toLowerCase();
 		const isFatal = CODEX_WEBSOCKET_FATAL_PATTERNS.some(pattern =>
 			fatalWebSocketMessage.includes(pattern.toLowerCase()),
 		);
-		const activateFallback =
-			replayingBufferedOutputOverSse ||
-			isFatal ||
-			this.runtime.websocketStreamRetries >= CODEX_WEBSOCKET_RETRY_BUDGET;
+		const exhausted = this.runtime.websocketStreamRetries >= CODEX_WEBSOCKET_RETRY_BUDGET;
+		const activateFallback = !websocketOnly && (hasBufferedOutput || isFatal || exhausted);
 		recordCodexWebSocketFailure(state, activateFallback);
 		CODEX_DEBUG &&
 			logger.debug("[codex] codex websocket stream fallback", {
@@ -3102,15 +3111,15 @@ class CodexStreamProcessor {
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 				activated: activateFallback,
 				fatal: isFatal,
-				replayedBufferedOutput: replayingBufferedOutputOverSse,
+				replayedBufferedOutput: hasBufferedOutput,
 			});
+		if (websocketOnly && exhausted) throw error;
 
 		if (!activateFallback) {
 			this.runtime.websocketStreamRetries += 1;
-			// Full re-send on a fresh socket: clear accumulator state from the failed
-			// attempt. Content is empty here, but blockless native items (e.g.
-			// web_search_call) may already have accumulated.
+			// A new socket needs a full request, not the failed attempt's partial state.
 			this.runtime.resetAccumulators();
+			if (websocketOnly) resetOutputState(this.output);
 			this.firstTokenTime = undefined;
 			await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
 				signal: this.requestSetup.requestSignal,
@@ -3223,21 +3232,28 @@ class CodexStreamProcessor {
 
 	async #reopenWebSocketStream(state: CodexWebSocketSessionState): Promise<void> {
 		try {
-			const next = await openCodexWebSocketTransport(
-				this.model,
-				this.options,
-				this.requestContext,
-				this.requestSetup,
-				state,
-				this.runtime.websocketStreamRetries,
-				this.options ? event => this.options?.onSseEvent?.(event, this.model) : undefined,
-			);
+			const next =
+				this.options?.preferWebsockets === "only"
+					? await openInitialCodexEventStream(this.model, this.options, this.requestSetup, this.requestContext)
+					: await openCodexWebSocketTransport(
+							this.model,
+							this.options,
+							this.requestContext,
+							this.requestSetup,
+							state,
+							this.runtime.websocketStreamRetries,
+							this.options ? event => this.options?.onSseEvent?.(event, this.model) : undefined,
+						);
 			this.runtime.eventStream = next.eventStream;
 			this.runtime.requestBodyForState = next.requestBodyForState;
 			this.runtime.transport = next.transport;
 			state.lastTransport = next.transport;
 		} catch (error) {
 			if (!(error instanceof CodexWebSocketTransportError)) throw error;
+			if (this.options?.preferWebsockets === "only") {
+				recordCodexWebSocketFailure(state, false);
+				throw error;
+			}
 			// Reopen failed at the websocket layer (handshake refused, connect timeout, etc.).
 			// Activate fallback so subsequent turns use SSE, and replay this turn over SSE
 			// instead of surfacing a raw transport error to the caller.
@@ -3537,8 +3553,9 @@ function releaseIdleCodexWebSocket(state: CodexWebSocketSessionState): void {
 function shouldUseCodexWebSocket(
 	model: Model<"openai-codex-responses">,
 	state: CodexWebSocketSessionState | undefined,
-	preferWebsockets?: boolean,
+	preferWebsockets?: OpenAIWebSocketPreference,
 ): boolean {
+	if (preferWebsockets === "only") return state !== undefined;
 	// Explicitly disabled by the model or session state.
 	if (model.preferWebsockets === false) return false;
 	// Explicitly disabled by the session state.
@@ -3601,7 +3618,7 @@ export function getOpenAICodexTransportDetails(
 	options?: {
 		sessionId?: string;
 		baseUrl?: string;
-		preferWebsockets?: boolean;
+		preferWebsockets?: OpenAIWebSocketPreference;
 		providerSessionState?: Map<string, ProviderSessionState>;
 	},
 ): OpenAICodexTransportDetails {
@@ -3626,7 +3643,7 @@ export function getOpenAICodexTransportDetails(
 	return {
 		websocketPreferred,
 		lastTransport: state?.lastTransport,
-		websocketDisabled: state?.disableWebsocket ?? false,
+		websocketDisabled: options?.preferWebsockets !== "only" && (state?.disableWebsocket ?? false),
 		websocketConnected: state?.connection?.isOpen() ?? false,
 		fallbackCount: state?.fallbackCount ?? 0,
 		canAppend: state?.canAppend ?? false,
