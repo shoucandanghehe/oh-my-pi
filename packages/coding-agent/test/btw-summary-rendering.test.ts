@@ -71,10 +71,10 @@ describe("BTW summary source cards", () => {
 		const original = JSON.stringify(message);
 		const container = mount(mode, message, new TUI(new VirtualTerminal(120, 40)));
 		const output = Bun.stripANSI(container.render(120).join("\n"));
-		expect(output).toContain("BTW · Cache & latency");
+		expect(output).toContain("From BTW · Cache & latency");
 		expect(output).toContain("cache invalidation");
 		expect(output).toContain("a < b");
-		expect(output).toContain("BTW · Approval <review>");
+		expect(output).toContain("From BTW · Approval <review>");
 		expect(output).toContain("Decision");
 		expect(output).toContain("Wait for explicit approval.");
 		for (const internal of [
@@ -104,7 +104,7 @@ describe("BTW summary source cards", () => {
 				const head = node.k === "card" ? node.p?.head : undefined;
 				return typeof head === "string" ? head : head?.map(part => part.t).join("");
 			}),
-		).toEqual(["BTW · Cache & latency", "BTW · Approval <review>"]);
+		).toEqual(["From BTW · Cache & latency", "From BTW · Approval <review>"]);
 		expect(
 			harness.findAll(node => node.k === "md").map(node => (node.k === "md" ? node.p?.text : undefined)),
 		).toEqual([
@@ -140,8 +140,8 @@ describe("BTW summary source cards", () => {
 		]) {
 			const component = new CustomMessageComponent(summaryMessage(), renderer);
 			const output = Bun.stripANSI(component.render(120).join("\n"));
-			expect(output).toContain("BTW · Cache & latency");
-			expect(output).toContain("BTW · Approval <review>");
+			expect(output).toContain("From BTW · Cache & latency");
+			expect(output).toContain("From BTW · Approval <review>");
 			expect(output).not.toContain("btw:summary");
 			component.dispose();
 		}

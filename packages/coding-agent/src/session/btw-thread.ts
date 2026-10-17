@@ -43,6 +43,7 @@ export type BtwThreadEvent =
 			turns: readonly EphemeralConversationTurn[];
 	  })
 	| (BtwThreadEventBase & { op: "turn"; turn: EphemeralConversationTurn })
+	| (BtwThreadEventBase & { op: "title"; title: string })
 	| (BtwThreadEventBase & { op: "draft"; text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] })
 	| (BtwThreadEventBase & { op: "read"; through: number })
 	| (BtwThreadEventBase & { op: "request"; input?: string; images?: ImageContent[]; timestamp?: number })

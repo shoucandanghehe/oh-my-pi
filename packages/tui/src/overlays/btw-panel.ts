@@ -4,11 +4,11 @@ import { getMarkdownTheme, theme } from "../theme/theme";
 import { sanitizeErrorLine } from "../chrome/error-block";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { StreamingPanelContent } from "../chrome/streaming-panel";
-import { boundKeys, interruptKey } from "../chrome/keybinding-hints";
+import { interruptKey } from "../chrome/keybinding-hints";
 import { formatKeyHint } from "../app-keybindings";
-import type { NativeNode } from "../native/node";
+import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, md, node, span, text } from "../native/describe";
-import { hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
+import { actionBar, actionButton } from "../native/overlay";
 
 type BtwPanelState = "running" | "complete" | "branching" | "aborted" | "error";
 
@@ -18,6 +18,7 @@ interface BtwPanelComponentOptions {
 	canBranch?: () => boolean;
 	canFollowUp?: () => boolean;
 	canOpenThread?: boolean;
+	onAction?: (action: "open" | "copy" | "promote" | "follow-up" | "close") => void;
 }
 
 export class BtwPanelComponent extends OverlayPanel {
@@ -34,15 +35,18 @@ export class BtwPanelComponent extends OverlayPanel {
 	#baseTitle: string;
 	readonly #question: string;
 	readonly #content: StreamingPanelContent;
+	readonly #onAction: BtwPanelComponentOptions["onAction"];
+	#toolActivity: string | undefined;
 	#native: { node: NativeNode; canFollowUp: boolean; canBranch: boolean } | undefined;
 
 	constructor(options: BtwPanelComponentOptions) {
-		const baseTitle = `/btw ${replaceTabs(options.question)}`;
+		const baseTitle = `BTW · ${replaceTabs(options.question)}`;
 		super(baseTitle, "omp.overlay.btw");
 		this.#baseTitle = baseTitle;
 		this.#question = replaceTabs(options.question);
 		this.#tui = options.tui;
 		this.#canBranch = options.canBranch;
+		this.#onAction = options.onAction;
 		this.#content = new StreamingPanelContent(() => ({
 			sections: [this.#contentComponent()],
 			footer: () => this.#footerLine(),
@@ -50,6 +54,24 @@ export class BtwPanelComponent extends OverlayPanel {
 		this.addChild(this.#content);
 		this.#canOpenThread = options.canOpenThread === true;
 		this.#rebuild();
+	}
+
+	setToolActivity(activity: string | undefined): void {
+		if (activity === this.#toolActivity || this.#closed) return;
+		this.#toolActivity = activity;
+		this.#rebuild();
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		if (
+			event.act === "open" ||
+			event.act === "copy" ||
+			event.act === "promote" ||
+			event.act === "follow-up" ||
+			event.act === "close"
+		)
+			this.#onAction?.(event.act);
 	}
 
 	appendText(delta: string): void {
@@ -147,17 +169,25 @@ export class BtwPanelComponent extends OverlayPanel {
 		const memo = this.#native;
 		if (memo && memo.canFollowUp === canFollowUp && memo.canBranch === canBranch) return memo.node;
 		// Inline in the dock, styled as a sheet by role: a borderless column headed by the question.
-		const title = text([span("/btw", "accent"), span(` ${this.#question}`)], { truncate: "end", lines: 1 });
+		const title = text([span("BTW", "accent"), span(` ${this.#question}`)], { truncate: "end", lines: 1, grow: 1 });
 		const live = this.#state === "running" || this.#state === "branching";
 		const head = node("row", { role: "omp.sheet.head", gap: "sm", align: "center" }, [
 			...(live ? [node("spinner", {})] : []),
 			title,
 		]);
-		const described = col([head, this.#describeBody(), this.#describeFooter(canFollowUp, canBranch)], {
-			role: this.nativeRole,
-			gap: "sm",
-			tone: this.#state === "error" ? "error" : this.#state === "aborted" ? "warning" : undefined,
-		});
+		const described = col(
+			[
+				head,
+				...(this.#toolActivity ? [text([span(this.#toolActivity, "muted")], { truncate: "end", lines: 1 })] : []),
+				this.#describeBody(),
+				this.#describeFooter(canFollowUp, canBranch),
+			],
+			{
+				role: this.nativeRole,
+				gap: "sm",
+				tone: this.#state === "error" ? "error" : this.#state === "aborted" ? "warning" : undefined,
+			},
+		);
 		this.#native = { node: described, canFollowUp, canBranch };
 		return described;
 	}
@@ -167,33 +197,19 @@ export class BtwPanelComponent extends OverlayPanel {
 			return text([span(sanitizeErrorLine(this.#errorMessage ?? "Unknown error"), "error")], { wrap: "word" });
 		}
 		const answer = this.#visibleAnswer;
-		if (answer) return md(answer, { stream: this.#state === "running" });
+		if (answer) return col([md(answer, { stream: this.#state === "running" })], { role: "omp.assistant" });
 		const waiting = this.#state === "running" ? `${theme.status.pending} Waiting for response…` : "No text returned.";
 		return text([span(waiting, "dim")]);
 	}
 
 	#describeFooter(canFollowUp: boolean, canBranch: boolean): NativeNode {
-		const esc: NativeHint = { keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "to close" };
-		const open: NativeHint[] = this.#canOpenThread ? [{ keys: ["enter"], label: "open thread" }] : [];
-		switch (this.#state) {
-			case "running":
-				return hintsRow([...open, { ...esc, label: "to cancel" }]);
-			case "complete": {
-				const hints: NativeHint[] = [...open];
-				if (this.isCopyable()) hints.push({ keys: ["c"], label: this.#copied ? "to copy again" : "to copy" });
-				if (canFollowUp) hints.push({ keys: ["f"], label: "to follow up" });
-				if (canBranch) hints.push({ keys: ["b"], label: this.#canOpenThread ? "promote to chat" : "to branch" });
-				hints.push(esc);
-				if (!this.#copied) return hintsRow(hints);
-				return statusHintsRow([span("✓ Copied to clipboard", "success")], hints);
-			}
-			case "branching":
-				return text([span(`${theme.status.pending} Branching to chat…`, "muted")]);
-			case "aborted":
-				return statusHintsRow([span(`${theme.status.warning} Cancelled`, "warning")], [...open, esc]);
-			case "error":
-				return statusHintsRow([span(`${theme.status.error} Error`, "error")], [...open, esc]);
-		}
+		return actionBar([
+			...(this.#canOpenThread ? [actionButton("Open thread", "open", { keys: "enter", tone: "accent" })] : []),
+			...(this.isCopyable() ? [actionButton(this.#copied ? "Copied" : "Copy", "copy", { keys: "c" })] : []),
+			...(canFollowUp ? [actionButton("Follow up", "follow-up", { keys: "f" })] : []),
+			...(canBranch ? [actionButton("Promote", "promote", { keys: "b" })] : []),
+			actionButton("Close", "close", { keys: "escape" }),
+		]);
 	}
 
 	#rebuild(): void {
@@ -220,7 +236,7 @@ export class BtwPanelComponent extends OverlayPanel {
 				if (this.isCopyable()) actions.push(this.#copied ? `${copyKey} to copy again` : `${copyKey} copy`);
 				if (this.#canFollowUp?.()) actions.push(`${formatKeyHint("f")} to follow up`);
 				if (this.#canBranch?.() ?? this.isBranchable()) {
-					actions.push(`${formatKeyHint("b")} ${this.#canOpenThread ? "promote to chat" : "branch to chat"}`);
+					actions.push(`${formatKeyHint("b")} Promote`);
 				}
 				actions.push(`${esc} dismiss`);
 				if (this.#copied) {

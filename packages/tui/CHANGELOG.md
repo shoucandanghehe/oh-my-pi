@@ -80,6 +80,79 @@
 - Fixed pasting sometimes inserting a block of base64 text instead of the pasted text in terminals that deliver pastes through the Kitty clipboard protocol (OSC 5522), most often with dictation apps that paste for you; a slow paste now arrives whole, and keys typed while a paste never finishes are given back instead of lost ([#16170](https://github.com/can1357/oh-my-pi/pull/16170) by [@H4vC](https://github.com/H4vC))
 - Fixed a streaming table bouncing everything below it up and down while its last cell was still being written ([#16116](https://github.com/can1357/oh-my-pi/pull/16116) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
 - Fixed inline images in iTerm2 being sized for the wrong cell shape, which left charts smeared or offset ([#16118](https://github.com/can1357/oh-my-pi/pull/16118) by [@galtamam-cmyk](https://github.com/galtamam-cmyk))
+### Fixed
+
+- Subagent panes now restore failed submissions without losing newer drafts or attached images.
+- Queue-edit shortcuts in subagent panes now take priority over scrolling and restore pending messages before live steering.
+- Subagent panes now show queued steering messages above the composer, with editing and automatic removal after delivery.
+- Fixed enhanced-paste clipboard notifications leaking into the parent shell when quitting.
+- App-viewport debug tools now report the painted screen and current cursor instead of missing frames.
+- Ctrl+Enter now inserts a newline instead of sending the draft in Windows Tern, including WSL.
+- IME text in Kitty keyboard input is no longer dropped when the modifier field is omitted.
+- IRC message ages in Tern now appear beside the title instead of as a separate ticking timer.
+- BTW summaries now show source titles and formatted summaries instead of model-facing protocol markup.
+- BTW cards now use prose text, compact tool activity and clickable actions; summary cards identify their source as `From BTW`.
+- Native transcripts now retain existing message cards while tool-call arguments stream.
+- File links from OMP running in WSL now open the corresponding files in Windows Tern, including native tool cards and file lists.
+- Parent IRC steering messages now retain their sender and message body in live and replayed transcript cards.
+- Audio and video attachments now remain visible in native tool cards, including custom tools and mounted tool devices.
+- Fixed streamed SVG drawings staying hidden beneath write tool cards after their images finish rendering.
+- Fixed long native transcript panes intermittently hiding their entire conversation while preserving keyboard scrolling.
+- Agent transcript panes now preserve streaming message nodes when replies are saved and retain visible content during asynchronous reloads.
+- Fixed Ctrl+O not expanding or collapsing tool output in Tern native transcripts.
+- Closing one native pane no longer disables native rendering or changes symbols in other live panes.
+- Fixed app-viewport screen recording and live streaming missing viewport updates.
+- Fixed native renderer transitions so applications can assemble semantic components before the first frame, and native input bypasses app-viewport interception. ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2))
+- Reduced background work during app-viewport tool animations while preserving offscreen content growth and scrolling.
+- Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
+- Workspace panes can retain their layout while hidden on small terminals, and nested panes support independent text selection and drag capture.
+- Added estimated-height virtual viewport providers for tall component trees.
+- Added app-viewport workspace primitives for recursively nested panes, weighted minimum-size layout, pane-local focus and scrolling, draggable split sashes, and drag-to-dock pane reordering.
+- Added a reusable draggable Braille scrollbar mode to `ScrollView`.
+- Added live dragged-pane content ghosts with accent drop frames to app-viewport workspaces.
+- Added inline placeholder hints to `Editor`.
+- Added per-pane workspace headers, themed split sashes, and automatic any-motion mouse reporting for hover-aware app-viewport panes, including transient hover cleanup when the pointer leaves a pane.
+- App-viewport redraws now restore Kitty images after a display reset and preserve cursor placement with the shared frame preparation path.
+- Workspace header clicks no longer initiate a pane drag from sub-cell pointer jitter.
+- Markdown-heavy views resize faster by reusing exact layout measurements.
+- App-viewport updates no longer wait for a fixed 30 FPS cadence; slow-frame and terminal-output backpressure remain in effect.
+- Consecutive workspace splits now use current layout geometry without requiring an intermediate render; background splits no longer briefly steal focus.
+- Text and Markdown components now measure offscreen row counts without building styled or selection-mapped render output.
+- Virtualized hosts can now measure exact component and Markdown row counts without painting syntax-highlighted offscreen content.
+- Fixed Loader-synchronized component animations stalling when expensive frames trigger spinner backpressure.
+- Fixed app-viewport selections drifting when content repaints between mouse press and drag.
+- Fixed component-scoped app-viewport repaints overriding a pending full-frame compose.
+- Fixed nested virtual viewports clamping scroll offsets before trailing sibling components.
+- Fixed app-viewport selection bounds excluding column-zero fenced-code rows when the surrounding Markdown message uses horizontal padding.
+- Fixed repeated focus requests briefly blurring and refocusing the unchanged component.
+- Fixed app-viewport right-click treating focused input selections as empty when the hardware-cursor marker preceded recalled history text, which incorrectly fell through to paste.
+- Fixed app-viewport workspace sash dragging fully rendering tall component-owned panes instead of using their visible-tail render path.
+- Fixed truncated OSC 8 hyperlinks and SGR styles leaking from one horizontal app-viewport workspace pane into its sibling.
+- Fixed workspace pane drop previews inheriting the foreground color of the content they cover.
+- Fixed dragged-pane ghost content shifting one row and one column inside its destination frame.
+- Fixed app-viewport pane focus transitions targeting stale components after a pane swapped its active input widget.
+- Fixed app-viewport drag-to-copy selections crossing workspace pane boundaries or copying visual wrapping, padding, and pane scrollbars instead of logical text, while preserving content that legitimately starts in column zero.
+- Fixed active app-viewport workspace selections staying on stale screen rows, failing to follow a stationary pointer during pane-local wheel scrolling, being cleared when a drag anchor moved offscreen, or highlighting sticky rows outside the origin scroll region.
+- Fixed Windows app-viewport resizes leaving stale or duplicated rows after the terminal grid reflowed.
+- Fixed app-viewport scrolling recomposing the entire transcript per wheel tick: scroll/selection-only frames now reuse the last composed frame and only re-emit the viewport window, making scroll frames O(viewport) instead of O(transcript) on long sessions.
+- Fixed app-viewport sticky chrome selection (status/editor bottom bar) jumping upward when the transcript grows under follow-to-tail streaming: selection anchors/focuses on sticky rows now remap with the scroll-region shift.
+- Fixed app-viewport component-scoped frames bypassing partial composition and retaining consumed render targets, avoiding full-tree animation walks and stale component retention.
+- Fixed app-viewport text selection continuing under the pointer when the mouse wheel scrolls during a drag, instead of cancelling the drag and leaving a stale range.
+- Fixed app-viewport selection highlighting and copy for sticky chrome (status powerline / editor), so chrome backgrounds no longer hide the selection fill and editor rows stay selectable without edge auto-scroll.
+- Fixed app-viewport multi-line copy keeping right-padded trailing spaces from rendered rows instead of emitting clean line breaks.
+- Fixed the mid-prompt `/` autocomplete popup lingering until Esc on tokens that are neither a path nor skill-shaped. Skill suggestions previously stayed alive through fuzzy subsequence matches against long skill descriptions, so nearly any prose token kept the popup hovering; matching is now gated to the `skill:` namespace (bare `/`, `s`, `sk`, …), explicit `skill:` queries (fuzzy search retained), and bare skill-name prefixes (`/hum` → `skill:humanizer`). Everything else falls through to path completion or dismisses the popup, and the Tab/Enter staleness guard shares the same gate so a stale popup can no longer rewrite tokens like `/scan` into `/skill:…`.
+- Fixed app viewport drag selection temporarily dropping wide Unicode graphemes when the pointer crossed their first display cell.
+- Fixed app viewport right-click copy retaining the selection; the next right click now requests paste.
+- Fixed `/resume` leaving the session picker scrollbar visible after selecting a session in the app viewport renderer.
+- Fixed emergency exits leaving app-viewport mouse reporting enabled, restoring native terminal drag selection.
+- Fixed app viewport treating near-origin pixel mouse reports as terminal-cell coordinates, preserving wide-character selections during repaint.
+- Fixed switching from the app viewport to a Tern inline surface while the alternate screen was still active.
+- Fixed native keyboard transcript scrolling in BTW and agent views.
+- Fixed native pause sheets not updating barrier readiness or offering durable exit.
+
+### Removed
+
+- Made the app viewport scrollbar thumb denser while retaining its four subrow scroll-position slots.
 
 ## [18.12.1] - 2026-10-17
 

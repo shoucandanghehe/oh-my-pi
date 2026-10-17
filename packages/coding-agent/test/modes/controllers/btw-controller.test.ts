@@ -1784,7 +1784,6 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 
 		expect(ctx.btwContainer.children).toHaveLength(0);
-		expect(createConversation.mock.calls[0]?.[3]).toMatchObject({ readOnlyTools: true });
 		const completedTranscript = Bun.stripANSI(pane.render(100).join("\n"));
 		expect(completedTranscript).toContain("fixture.ts");
 		expect(completedTranscript.match(/Inspecting fixture/g)).toHaveLength(1);
@@ -2128,8 +2127,7 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 		expect(frozenMain).toEqual(["main-v1"]);
 
-		expect(capturedSideOptions).toMatchObject({ readOnlyTools: true });
-		await capturedSideOptions?.shareSummaryWithMain?.("Cache invalidation must happen after commit.");
+		await capturedSideOptions?.sendToMainSession?.("Cache invalidation must happen after commit.");
 		expect(publishBtwSummary).toHaveBeenLastCalledWith({
 			threadKey: expect.any(String),
 			threadTitle: "First?",

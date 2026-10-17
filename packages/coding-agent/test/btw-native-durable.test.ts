@@ -20,6 +20,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { ManualScheduler, TspTestTerminal, tspEvent } from "../../tui/test/native/tsp-harness";
 import { NativePaneHarness } from "./helpers/native-pane-harness";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createMainWriteTool, sendToMainSessionCall } from "./helpers/btw-send-to-main";
 import { AgentRegistry } from "../src/registry/agent-registry";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -62,13 +63,17 @@ async function harness(scroll = true, manualProbe = false, native?: NativePaneHa
 	const mainMessage = { role: "user" as const, content: "Main stays native", timestamp: 1 };
 	manager.appendMessage(mainMessage);
 	await manager.ensureOnDisk();
+	const write = createMainWriteTool();
 	const session = new AgentSession({
-		agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [mainMessage] } }),
+		agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [write], messages: [mainMessage] } }),
+		toolRegistry: new Map([["write", write]]),
+		builtInToolNames: new Set(["write"]),
 		sessionManager: manager,
 		settings: Settings.isolated({ "startup.quiet": true, "compaction.enabled": false }),
 		modelRegistry: registry,
 		sideStreamFn,
 	});
+	vi.spyOn(session, "generateTitle").mockResolvedValue(null);
 	const terminal = new TspTestTerminal({ cols: 120, rows: 32, features: scroll ? ["scroll"] : [], manualProbe });
 	const scheduler = new ManualScheduler();
 	const previous = Bun.env.PI_TUI_RENDER_BACKEND;
@@ -226,7 +231,7 @@ describe("durable BTW through the native terminal and production controller", ()
 			const partial = createAssistantMessage("");
 			partial.content = [
 				{ type: "text", text: "I can share this context." },
-				{ type: "toolCall", id: "share", name: "shareSummaryWithMain", arguments: { summary: "First" } },
+				sendToMainSessionCall("share", "First"),
 			];
 			if (postToolText) partial.content.push({ type: "text", text: "Waiting for your approval." });
 			partial.stopReason = "toolUse";
@@ -236,12 +241,7 @@ describe("durable BTW through the native terminal and production controller", ()
 			const user = native.nodes(block).find(node => node.k === "card" && node.p?.role === "omp.user")!;
 			const terminal = native.terminals.get(block)!;
 			const before = terminal.frames.length;
-			partial.content[1] = {
-				type: "toolCall",
-				id: "share",
-				name: "shareSummaryWithMain",
-				arguments: { summary: "First and second" },
-			};
+			partial.content[1] = sendToMainSessionCall("share", "First and second");
 			h.requests[0]!.stream.push({
 				type: "toolcall_delta",
 				contentIndex: 1,
@@ -262,12 +262,7 @@ describe("durable BTW through the native terminal and production controller", ()
 				const textIndex = nodes.findIndex(node => node.k === "md" && node.p?.text === "Waiting for your approval.");
 				expect(toolIndex).toBeGreaterThanOrEqual(0);
 				expect(textIndex).toBeGreaterThan(toolIndex);
-				partial.content.push({
-					type: "toolCall",
-					id: "another-share",
-					name: "shareSummaryWithMain",
-					arguments: { summary: "Another note" },
-				});
+				partial.content.push(sendToMainSessionCall("another-share", "Another note"));
 				h.requests[0]!.stream.push({ type: "toolcall_start", contentIndex: 3, partial: structuredClone(partial) });
 				await native.until(() => JSON.stringify(native.nodes(block)).includes("Another note"));
 				const rebuiltNodes = native.nodes(block);
@@ -280,21 +275,34 @@ describe("durable BTW through the native terminal and production controller", ()
 				expect(betweenTools).toBeLessThan(toolIndices[1]!);
 			}
 			h.requests[0]!.stream.push({ type: "done", reason: "toolUse", message: partial });
-			await native.until(() =>
-				native.nodes(block).some(node => node.k === "overlay" && node.p?.role === "omp.overlay.btw.share-summary"),
-			);
+			await native.until(() => native.nodes(block).some(node => node.p?.role === "omp.btw.summary-approval"));
+			const pendingCard = native.nodes(block).find(node => node.k === "tool")!;
+			expect(pendingCard.c).toMatchObject([
+				{ k: "col", p: { role: "omp.assistant" }, c: [{ k: "md", p: { text: "First and second" } }] },
+			]);
+			expect(
+				native.nodes(block).filter(node => node.k === "md" && node.p?.text === "First and second"),
+			).toHaveLength(1);
 			expect(h.mode.ui.hasOverlay()).toBe(false);
 			expect(
 				h.mode.session.messages.some(message => message.role === "custom" && message.customType === "btw:summary"),
 			).toBe(false);
-			native.action(block, "approve");
+			if (postToolText) native.action(block, "approve");
+			else terminal.send("\r");
 			if (postToolText) {
-				await native.until(() =>
-					native.nodes(block).some(node => node.k === "overlay" && JSON.stringify(node).includes("Another note")),
+				await native.until(
+					() =>
+						native.nodes(block).some(node => node.p?.role === "omp.btw.summary-approval") &&
+						native.nodes(block).some(node => node.k === "tool" && node.p?.status === "done"),
 				);
 				native.action(block, "approve");
 			}
 			await h.requestStarted(1);
+			const sentCard = native.nodes(block).find(node => node.k === "tool")!;
+			expect(sentCard.c).toMatchObject([
+				{ k: "col", p: { role: "omp.assistant" }, c: [{ k: "md", p: { text: "First and second" } }] },
+			]);
+			expect(JSON.stringify(sentCard)).not.toContain("Summary sent to the main session.");
 			expect(
 				h.mode.session.messages.filter(
 					message => message.role === "custom" && message.customType === "btw:summary",
@@ -323,23 +331,14 @@ describe("durable BTW through the native terminal and production controller", ()
 			await h.mode.handleBtwCommand("private context");
 			await h.requestStarted(0);
 			const message = createAssistantMessage("");
-			message.content = [
-				{
-					type: "toolCall",
-					id: "private-share",
-					name: "shareSummaryWithMain",
-					arguments: { summary: "Do not send this" },
-				},
-			];
+			message.content = [sendToMainSessionCall("private-share", "Do not send this")];
 			message.stopReason = "toolUse";
 			h.requests[0]!.stream.push({ type: "done", reason: "toolUse", message });
 			await native.until(() => native.workspace.has("btw"));
 			const block = native.focused;
-			await native.until(() =>
-				native.nodes(block).some(node => node.k === "overlay" && node.p?.role === "omp.overlay.btw.share-summary"),
-			);
+			await native.until(() => native.nodes(block).some(node => node.p?.role === "omp.btw.summary-approval"));
 			expect(h.mode.ui.hasOverlay()).toBe(false);
-			if (reason === "cancelled") native.action(block, "deny");
+			if (reason === "cancelled") native.terminals.get(block)!.send("\x1b");
 			else native.terminals.get(block)!.closeInput();
 			await h.requestStarted(1);
 			const result = h.requests[1]!.context.messages.find(
@@ -361,14 +360,21 @@ describe("durable BTW through the native terminal and production controller", ()
 		expect(h.mode.hasActiveBtw()).toBe(true);
 		expect(h.mode.ui.hasOverlay()).toBe(false);
 		expect(h.mode.ui.getFocused()).toBe(h.mode.editor);
-		h.terminal.send("\r");
+		h.action("open");
 		await h.until(() => h.mode.ui.hasOverlay());
 		expect(h.mode.workspaceEnabled).toBe(false);
 		expect(h.nodes().some(node => node.k === "rows")).toBe(false);
+		const btwComposer = h
+			.nodes()
+			.filter(node => node.p?.role === "omp.editor")
+			.at(-1)!;
+		expect(JSON.stringify(btwComposer)).toContain("Read-only");
+		expect(JSON.stringify(btwComposer)).not.toContain("status.model");
 		expect(JSON.stringify(h.nodes())).toContain("Main stays native");
 		const firstKey = (await h.records())[0]!.id;
 		h.pane().getPasteTarget()!.pasteText("first draft");
-		h.action("close");
+		h.pane().handleInput("\x1b");
+		h.flush();
 		expect(h.mode.ui.getFocused()).toBe(h.mode.editor);
 		expect(h.requests[0]!.options.signal?.aborted).toBe(false);
 		await h.mode.handleBtwCommand("");
@@ -449,7 +455,8 @@ describe("durable BTW through the native terminal and production controller", ()
 		expect(h.nodes().filter(node => node.k === "overlay")).toHaveLength(1);
 		expect(h.nodes().some(node => node.k === "rows")).toBe(false);
 		expect((await h.records())[0]!.id).toBe(key);
-		h.action("close");
+		h.pane().handleInput("\x1b");
+		h.flush();
 		expect(h.mode.ui.getFocused()).toBe(h.mode.editor);
 		expect(h.terminal.errors).toEqual([]);
 	});
@@ -565,7 +572,7 @@ describe("durable BTW through the native terminal and production controller", ()
 		expect(JSON.stringify(native.nodes(firstBlock))).toContain("native split question");
 		native.terminals.get(firstBlock)!.send("Side draft");
 		await native.until(() => h.pane().getPasteTarget()?.getText() === "Side draft");
-		native.action(firstBlock, "close");
+		native.terminals.get(firstBlock)!.send("\x1b");
 		await native.until(() => !native.workspace.has("btw"));
 		expect(h.mode.editor.getText()).toBe("Main draft");
 		expect(h.requests[0]!.options.signal?.aborted).toBe(false);

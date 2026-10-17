@@ -5,23 +5,15 @@
  * queued message reached the model as text only and the image was silently
  * dropped.
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 
-interface StubEditor {
-	setText: (text: string) => void;
-	getText: () => string;
-	getExpandedText: () => string;
-	setCollapsedText: (text: string) => void;
-	composerChips: () => unknown[];
-	addToHistory: (text: string) => void;
-	imageLinks?: unknown;
-	pendingImages: ImageContent[];
-	pendingImageLinks: (string | undefined)[];
-	clearDraft: (text?: string) => void;
-}
+beforeAll(() => initTheme());
+
 interface PromptOptionsLike {
 	streamingBehavior?: "steer" | "followUp";
 	images?: ImageContent[];
@@ -32,34 +24,11 @@ function createContext(opts: {
 	pendingImages: ImageContent[];
 	pendingImageLinks?: (string | undefined)[];
 }) {
-	let editorText = "";
-	const editor: StubEditor = {
-		setText(text) {
-			editorText = text;
-		},
-		getText() {
-			return editorText;
-		},
-		getExpandedText() {
-			return editorText;
-		},
-		setCollapsedText(text) {
-			editorText = text;
-		},
-		composerChips() {
-			return [];
-		},
-		addToHistory: vi.fn(),
-		pendingImages: opts.pendingImages,
-		pendingImageLinks: opts.pendingImageLinks ? [...opts.pendingImageLinks] : opts.pendingImages.map(() => undefined),
-		clearDraft(text?: string) {
-			if (text !== undefined) this.addToHistory(text);
-			this.setText("");
-			this.imageLinks = undefined;
-			this.pendingImages = [];
-			this.pendingImageLinks = [];
-		},
-	};
+	const editor = new CustomEditor(getEditorTheme());
+	editor.pendingImages = [...opts.pendingImages];
+	editor.pendingImageLinks = opts.pendingImageLinks
+		? [...opts.pendingImageLinks]
+		: opts.pendingImages.map(() => undefined);
 	const prompt = vi.fn(async (_text: string, _options?: PromptOptionsLike) => {});
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
@@ -187,7 +156,7 @@ describe("InputController.handleFollowUp image forwarding", () => {
 		await controller.handleFollowUp();
 
 		expect(showError).toHaveBeenCalledWith("queue rejected");
-		expect(editor.getText()).toBe("[Image #1] look at this");
+		expect(editor.getExpandedText()).toBe("[Image #1] look at this");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
 		expect(ctx.editor.imageLinks).toEqual(["local://draft.png"]);
@@ -208,7 +177,7 @@ describe("InputController.handleFollowUp image forwarding", () => {
 		await controller.handleFollowUp();
 
 		expect(showError).toHaveBeenCalledWith("model not configured");
-		expect(editor.getText()).toBe("[Image #1]");
+		expect(editor.getExpandedText()).toBe("[Image #1]");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual([undefined]);
 		expect(ctx.editor.imageLinks).toEqual([undefined]);
@@ -263,7 +232,7 @@ describe("InputController.handleFollowUp image forwarding", () => {
 		expect(handleGoalModeCommand).toHaveBeenCalledTimes(1);
 		expect(showError).toHaveBeenCalledTimes(1);
 		expect(showError).toHaveBeenCalledWith("goal setup failed");
-		expect(editor.getText()).toBe("/goal set Ship the release [Image #1]\n\nlater draft");
+		expect(editor.getExpandedText()).toBe("/goal set Ship the release [Image #1]\n\nlater draft");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
 		expect(ctx.editor.imageLinks).toEqual(["local://draft.png"]);

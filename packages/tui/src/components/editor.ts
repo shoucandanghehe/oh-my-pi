@@ -15,7 +15,7 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
-import type { TspEditorDecoration, TspEditorProps, TspText, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspEditorProps, TspExtent, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
@@ -629,6 +629,8 @@ export class Editor implements Component, Focusable {
 	 * dialog's text field; only the prompt composer claims `omp.editor`).
 	 */
 	describeLayout: ((input: NativeNode, cx: DescribeContext) => NativeEditorLayout) | undefined;
+	/** Minimum native root width; `1` fills an embedded conversation's available width. */
+	nativeMinWidth: TspExtent | undefined;
 	/**
 	 * TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints.
 	 * Return a stable value (the same spans array) while it is unchanged: the editor node is reused by identity.
@@ -640,7 +642,13 @@ export class Editor implements Component, Focusable {
 	#nativeDecor?: { text: string; generation: number; decor: readonly TspEditorDecoration[] | undefined };
 	#nativeEditor?: { props: TspEditorProps; node: NativeNode };
 	#nativeOverlay?: { list: SelectList; caret: string; node: NativeNode };
-	#nativeRoot?: { role: string; tone: TspTone | undefined; children: readonly NativeChild[]; node: NativeNode };
+	#nativeRoot?: {
+		role: string;
+		tone: TspTone | undefined;
+		minWidth: TspExtent | undefined;
+		children: readonly NativeChild[];
+		node: NativeNode;
+	};
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
@@ -1759,11 +1767,27 @@ export class Editor implements Component, Focusable {
 			this.#nativeOverlay = undefined;
 		}
 		const root = this.#nativeRoot;
-		if (root && root.role === layout.role && root.tone === layout.tone && sameItems(root.children, children)) {
+		if (
+			root &&
+			root.role === layout.role &&
+			root.tone === layout.tone &&
+			root.minWidth === this.nativeMinWidth &&
+			sameItems(root.children, children)
+		) {
 			return root.node;
 		}
-		const described = col(children, layout.tone ? { role: layout.role, tone: layout.tone } : { role: layout.role });
-		this.#nativeRoot = { role: layout.role, tone: layout.tone, children, node: described };
+		const described = col(children, {
+			role: layout.role,
+			...(layout.tone ? { tone: layout.tone } : {}),
+			...(this.nativeMinWidth === undefined ? {} : { min: { w: this.nativeMinWidth } }),
+		});
+		this.#nativeRoot = {
+			role: layout.role,
+			tone: layout.tone,
+			minWidth: this.nativeMinWidth,
+			children,
+			node: described,
+		};
 		return described;
 	}
 

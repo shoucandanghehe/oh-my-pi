@@ -44,6 +44,7 @@
 - `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
 - `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
 - Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
+- Added `advertisedTools` (and `advertiseParentTools` for `createChild()`) to declare a different tool catalog to the provider than the tools a loop may execute, so a restricted child can share its parent's cached prompt prefix.
 
 ### Changed
 

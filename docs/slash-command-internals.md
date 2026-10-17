@@ -325,18 +325,22 @@ subagent's `/btw` uses its own scoped history rather than the Main workspace.
 - Closing the workspace keeps its threads and drafts, including empty threads.
   Reopening does not dispatch another model request.
 
-All BTW threads have durable side capabilities from their first turn: read-only
-tools and the approval-gated `shareSummaryWithMain` tool. Main remains separate
-unless the user explicitly hands off, promotes, or approves a summary.
+Every BTW conversation, inline `/btw` answers and workspace threads alike, has the
+same side capabilities from its first turn: read-only investigation tools and the
+approval-gated `xd://send_to_main_session` device. Main remains separate unless
+the user explicitly hands off, promotes, or approves a summary.
 
-Permitted investigation tools (when enabled in Main) are `read`, `glob`, `grep`,
-`ast_grep`, `web_search`, `recall`, and `reflect`. LSP diagnostics/navigation and
-GitHub read/search operations also work, including through `write xd://<tool>`.
-The same operation boundary applies to direct and device calls: LSP mutations,
-GitHub writes, filesystem writes, and resolution devices are blocked. Shell,
-eval/browser execution, memory writes, session/process control, and unclassified
-MCP tools remain unavailable. A tool's `read` approval tier alone is not sufficient
-to grant BTW access.
+BTW requests declare Main's exact tool catalog so they reuse Main's cached prompt
+prefix; permission is enforced only at execution. Permitted investigation tools
+(when enabled in Main) are `read`, `glob`, `grep`, `ast_grep`, `web_search`,
+`recall`, and `reflect`. LSP diagnostics/navigation and GitHub read/search
+operations also work, including through `write xd://<tool>`. The same operation
+boundary applies to direct and device calls: LSP mutations, GitHub writes,
+filesystem writes, and resolution devices are blocked. Shell, eval/browser
+execution, memory writes, session/process control, and unclassified MCP tools
+fail without executing. A tool's `read` approval tier alone is not sufficient to
+grant BTW access. `xd://send_to_main_session` is mounted only inside BTW and
+always asks the user to approve the exact summary.
 
 BTW checkpoints live under the session's `btw-history/` artifacts directory, not
 in Main's journal. They retain frozen context, complete turn messages, provider

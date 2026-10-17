@@ -1,38 +1,18 @@
-/**
- * Pointer actions on transcript blocks in a native terminal (a user message's
- * hover toolbar, an error frame's action row). Blocks describe the controls;
- * the interactive host registers the one handler that runs omp's existing
- * commands for them, so a click and the key binding take the same path.
- */
-export type TranscriptAction =
-	/** Retry the last failed turn (`app.retry`). */
-	| { readonly act: "retry" }
-	/** Open the temporary model picker (`app.model.selectTemporary`). */
-	| { readonly act: "switch-model" }
-	/** Open the transcript rewind selector. */
-	| { readonly act: "rewind" }
-	/** Resume the session stored at `path` (a welcome card's recent session). */
-	| { readonly act: "resume"; readonly path: string }
-	/** Put `text` on the clipboard. */
-	| { readonly act: "copy"; readonly text: string };
-
-type Handler = (action: TranscriptAction) => void;
-
-let handler: Handler | undefined;
-
-/** Register (or clear, with `undefined`) the host's handler. */
-export function setTranscriptActionHandler(next: Handler | undefined): void {
-	handler = next;
+/** Commands a transcript's own host supports. Missing commands have no controls. */
+export interface TranscriptActions {
+	copy?: (text: string) => void | Promise<void>;
+	retry?: () => void | Promise<void>;
+	switchModel?: () => void | Promise<void>;
+	rewind?: () => void | Promise<void>;
 }
 
-/** Run `action` through the host; false when no host handles actions. */
-export function runTranscriptAction(action: TranscriptAction): boolean {
-	if (!handler) return false;
-	handler(action);
-	return true;
+let actions: TranscriptActions | undefined;
+
+/** Configure the interactive Main host. Detached transcripts provide their own actions. */
+export function setTranscriptActions(next: TranscriptActions | undefined): void {
+	actions = next;
 }
 
-/** Whether a host handles actions (controls are only described when one does). */
-export function hasTranscriptActions(): boolean {
-	return handler !== undefined;
+export function getTranscriptActions(): TranscriptActions | undefined {
+	return actions;
 }

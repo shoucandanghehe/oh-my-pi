@@ -119,6 +119,8 @@ import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { col, md } from "@oh-my-pi/pi-tui/native/describe";
+import type { ToolRenderer } from "@oh-my-pi/pi-tui/tools/renderer";
 import { loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
@@ -216,7 +218,7 @@ import sleepModeActivePrompt from "../prompts/system/sleep-mode-active.md" with 
 import sleepModeDialogRefusedPrompt from "../prompts/system/sleep-mode-dialog-refused.md" with { type: "text" };
 import sleepModeEndedPrompt from "../prompts/system/sleep-mode-ended.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
-import shareSummaryWithMainDescription from "../prompts/tools/share-summary-with-main.md" with { type: "text" };
+import sendToMainSessionDescription from "../prompts/tools/send-to-main-session.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
@@ -239,7 +241,7 @@ import {
 	toReasoningEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
-import type { ImageAttachmentEntry, ToolSession } from "../tools";
+import type { ImageAttachmentEntry, Tool, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
@@ -676,37 +678,65 @@ const createSideChannelReadonlyMessage = (): AgentMessage => ({
 	timestamp: Date.now(),
 });
 
-const shareSummaryWithMainSchema = type({
-	summary: type("string").describe(
-		"A concise summary of facts, conclusions, decisions, and unresolved questions from this side-thread.",
-	),
+const sendToMainSessionSchema = type({
+	summary: type("string").describe("Facts, conclusions, decisions, and open questions from this side thread."),
 });
 
-function createShareSummaryWithMainTool(
-	shareSummaryWithMain: (summary: string) => void | Promise<void>,
-): AgentTool<typeof shareSummaryWithMainSchema> {
+/** BTW-only `xd://` device that delivers a user-approved summary into Main. */
+function createSendToMainSessionTool(sendToMainSession: (summary: string) => void | Promise<void>): Tool &
+	Pick<
+		ToolRenderer<typeof sendToMainSessionSchema.infer>,
+		"describeCall" | "describeResult" | "mergeCallAndResult"
+	> & {
+		describeQueuedCall: ToolRenderer<typeof sendToMainSessionSchema.infer>["describeCall"];
+	} {
+	const describeCall: ToolRenderer<typeof sendToMainSessionSchema.infer>["describeCall"] = (args, options) => ({
+		head: options.cancelled ? "Not sent" : "Waiting for approval",
+		body: [col([md(replaceTabs(args.summary ?? ""))], { role: "omp.assistant" })],
+		open: true,
+	});
 	return {
-		name: SHARE_SUMMARY_WITH_MAIN_TOOL_NAME,
-		label: "Share Summary with Main",
-		description: shareSummaryWithMainDescription,
-		parameters: shareSummaryWithMainSchema,
+		name: "send_to_main_session",
+		label: "Send to Main Session",
+		description: sendToMainSessionDescription,
+		parameters: sendToMainSessionSchema,
 		intent: "omit",
 		approval: {
 			tier: "write",
 			policy: "prompt",
-			reason: "Sharing a BTW-authored summary with Main requires user confirmation",
+			reason: "Sending a BTW summary to the main session requires user confirmation",
 		},
 		formatApprovalDetails: args => [
-			`Summary:\n${replaceTabs((args as typeof shareSummaryWithMainSchema.infer).summary)}`,
+			`Summary:\n${replaceTabs((args as typeof sendToMainSessionSchema.infer).summary)}`,
 		],
-		async execute(_toolCallId: string, params: typeof shareSummaryWithMainSchema.infer) {
-			await shareSummaryWithMain(params.summary);
-			return { content: [{ type: "text", text: "Summary shared with the main agent." }] };
+		mergeCallAndResult: true,
+		describeCall,
+		describeQueuedCall: describeCall,
+		describeResult: (result, _options, args) => ({
+			head: result.isError ? "Not sent" : "Sent to main session",
+			body: [
+				col([md(replaceTabs(args?.summary ?? ""))], { role: "omp.assistant" }),
+				...(result.isError
+					? [
+							md(
+								replaceTabs(
+									result.content
+										.filter(part => part.type === "text")
+										.map(part => part.text ?? "")
+										.join("\n"),
+								),
+							),
+						]
+					: []),
+			],
+			open: true,
+		}),
+		async execute(_toolCallId: string, params: typeof sendToMainSessionSchema.infer) {
+			await sendToMainSession(params.summary);
+			return { content: [{ type: "text", text: "Summary sent to the main session." }] };
 		},
 	};
 }
-
-export const SHARE_SUMMARY_WITH_MAIN_TOOL_NAME = "shareSummaryWithMain";
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
@@ -12661,21 +12691,23 @@ export class AgentSession implements SettingsScope {
 		if (!model) {
 			throw new Error("No active model on session");
 		}
-		const readOnlyTools = options?.readOnlyTools === true;
-		const shareSummaryWithMain = options?.shareSummaryWithMain;
-		const shareSummaryWithMainTool = shareSummaryWithMain
-			? this.#tools.wrapRuntimeTool(createShareSummaryWithMainTool(shareSummaryWithMain))
+		const sendToMainSession = options?.sendToMainSession;
+		const sendToMainSessionTool = sendToMainSession
+			? this.#tools.wrapRuntimeTool(createSendToMainSessionTool(sendToMainSession))
 			: undefined;
 		const cacheSessionId = this.sessionId;
 		const sideSessionId = checkpoint?.sideSessionId ?? `${cacheSessionId}:side:${Snowflake.next()}`;
 		const mainTools = [...this.agent.state.tools];
 		let sideRuntime: BtwExtensionRuntime | undefined;
 		const child = this.agent.createChild({
+			// Execution starts empty and is filled by the side runtime; the provider
+			// sees Main's tool catalog so the side request reuses Main's cached prefix.
 			initialState: {
 				model,
 				messages: [],
 				tools: [],
 			},
+			advertiseParentTools: true,
 			sessionId: sideSessionId,
 			promptCacheKey: this.agent.promptCacheKey ?? cacheSessionId,
 			streamFn: this.#sideStreamFn,
@@ -12692,29 +12724,16 @@ export class AgentSession implements SettingsScope {
 			onSseEvent: this.#onSseEvent,
 			preferWebsockets: this.preferWebsockets,
 			serviceTier: this.#models.effectiveServiceTier(model),
-			beforeToolCall: ctx => {
-				if (readOnlyTools && sideRuntime && this.#tools.isReadOnlySideToolCall(ctx.tool, ctx.args))
-					return undefined;
-				if (shareSummaryWithMainTool && ctx.toolCall.name === SHARE_SUMMARY_WITH_MAIN_TOOL_NAME) {
-					return sideRuntime?.runner.hasUI()
-						? undefined
-						: { block: true, reason: "shareSummaryWithMain requires interactive user approval." };
-				}
-				return { block: true, reason: sideChannelToolDenied };
-			},
+			beforeToolCall: ctx =>
+				sideRuntime?.permits(ctx.tool, ctx.args) ? undefined : { block: true, reason: sideChannelToolDenied },
 			transformAssistantMessage: message => {
 				if (!this.#obfuscator?.hasSecrets()) return;
 				message.content = deobfuscateAssistantContent(this.#obfuscator, message.content);
 			},
 		});
-		const createCapabilityReminder = readOnlyTools
-			? createSideChannelReadonlyMessage
-			: createSideChannelNoToolsMessage;
 		const conversation = new EphemeralConversation({
 			snapshotBaseMessages: () => {
-				const baseMessages = this.#buildEphemeralBaseSnapshot().map(message =>
-					readOnlyTools ? cloneMessageNotification(message) : message,
-				);
+				const baseMessages = this.#buildEphemeralBaseSnapshot().map(cloneMessageNotification);
 				baseMessages.push({
 					role: "developer",
 					content: [{ type: "text", text: instructions }],
@@ -12725,39 +12744,37 @@ export class AgentSession implements SettingsScope {
 			},
 			checkpoint,
 			getTool: name => child.state.tools.find(tool => tool.name === name),
-			createExtensionRuntime: readOnlyTools
-				? async () => {
-						if (
-							!this.#preparedExtensions &&
-							((this.#extensionPaths?.length ?? 0) > 0 ||
-								(this.#extensionRunner?.getExtensionPaths?.().length ?? 0) > 0)
-						) {
-							throw new Error("BTW cannot bind Main extensions without prepared factories");
-						}
-						const toolInfos = this.getAllToolInfos();
-						const runtime = await BtwExtensionRuntime.create({
-							agent: child,
-							mainTools,
-							availableTools: toolInfos
-								.map(info => this.#tools.getToolByName(info.name))
-								.filter((tool): tool is AgentTool => tool !== undefined),
-							mountedNames: this.#tools.getMountedXdevToolNames(),
-							preparedExtensions: this.#preparedExtensions ?? [],
-							modelRegistry: this.#modelRegistry,
-							settings: this.settings,
-							cwd: this.sessionManager.getCwd(),
-							toolInfos,
-							isReadOnlyToolCall: (tool, args) => this.#tools.isReadOnlySideToolCall(tool, args),
-							shareSummaryTool: shareSummaryWithMainTool,
-							approveSummary: options?.approveSummary,
-							approvalUI: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
-						});
-						child.setTools(runtime.tools);
-						sideRuntime = runtime;
-						return runtime;
-					}
-				: undefined,
-			turnPrefixMessages: () => [createCapabilityReminder()],
+			createExtensionRuntime: async () => {
+				if (
+					!this.#preparedExtensions &&
+					((this.#extensionPaths?.length ?? 0) > 0 ||
+						(this.#extensionRunner?.getExtensionPaths?.().length ?? 0) > 0)
+				) {
+					throw new Error("BTW cannot bind Main extensions without prepared factories");
+				}
+				const toolInfos = this.getAllToolInfos();
+				const runtime = await BtwExtensionRuntime.create({
+					agent: child,
+					mainTools,
+					availableTools: toolInfos
+						.map(info => this.#tools.getToolByName(info.name))
+						.filter((tool): tool is AgentTool => tool !== undefined),
+					mountedNames: this.#tools.getMountedXdevToolNames(),
+					preparedExtensions: this.#preparedExtensions ?? [],
+					modelRegistry: this.#modelRegistry,
+					settings: this.settings,
+					cwd: this.sessionManager.getCwd(),
+					toolInfos,
+					isReadOnlyToolCall: (tool, args) => this.#tools.isReadOnlySideToolCall(tool, args),
+					sendToMainSessionTool,
+					approveSummary: options?.approveSummary,
+					approvalUI: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
+				});
+				child.setTools(runtime.tools);
+				sideRuntime = runtime;
+				return runtime;
+			},
+			turnPrefixMessages: () => [createSideChannelReadonlyMessage()],
 			getRuntimeState: () => ({
 				model: child.state.model,
 				thinkingLevel: child.state.thinkingLevel,
@@ -12765,7 +12782,7 @@ export class AgentSession implements SettingsScope {
 				streamMessage: child.state.streamMessage?.role === "assistant" ? child.state.streamMessage : null,
 			}),
 			runTurn: async (messages, turnOptions) => {
-				await conversation.waitForExtensionRuntimeInitialization();
+				await conversation.initializeExtensionRuntime();
 				try {
 					return await this.#runEphemeralConversationTurn(child, messages, turnOptions);
 				} finally {

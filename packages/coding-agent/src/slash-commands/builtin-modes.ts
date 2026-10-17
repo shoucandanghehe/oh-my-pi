@@ -1,4 +1,4 @@
-import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText } from "./helpers/draft";
 import * as path from "node:path";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -86,7 +86,7 @@ async function runWithDetachedModeDraft(
 			if (runtime.draftDetached) {
 				// Newer typing may already sit in the editor: merge the submission
 				// back beside it so each draft's image markers keep their images.
-				restoreDetachedDraft(editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				editor.restoreDetachedDraft(command.text, runtime.input?.images, runtime.input?.imageLinks);
 				return;
 			}
 			editor.pendingImages = [...(runtime.input?.images ?? []), ...editor.pendingImages];

@@ -272,7 +272,7 @@ export interface ComposerFacts {
 	 */
 	readonly context: NativeNode;
 	/** The model chip's label: name plus the advisor, fast-mode and slow-mode marks. */
-	readonly model: SegmentView;
+	readonly model?: SegmentView;
 	/**
 	 * `status` (role `omp.composer.extras`, `grow: 1`) of the other configured
 	 * segments as `seg`s; the bar's flexible space, so present even when empty.

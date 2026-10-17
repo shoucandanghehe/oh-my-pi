@@ -5,6 +5,8 @@ import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
+import { displayArgsForToolCall } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
+import { toolRenderers } from "@oh-my-pi/pi-tui/tools";
 import { logger, prompt, Snowflake, toError, withTimeout } from "@oh-my-pi/pi-utils";
 import btwConversationPrompt from "../../prompts/system/btw-conversation.md" with { type: "text" };
 import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
@@ -609,6 +611,12 @@ export class BtwController {
 					tui: this.ctx.ui,
 					canBranch: () => this.canBranch(),
 					canFollowUp: () => this.canFollowUp(),
+					onAction: action => {
+						if (action === "copy") void this.handleCopy();
+						else if (action === "promote") void this.handleBranch();
+						else if (action === "follow-up") this.handleFollowUp();
+						else if (action === "close") this.handleEscape();
+					},
 				}),
 				abortController: new AbortController(),
 				question: trimmedQuestion,
@@ -782,6 +790,12 @@ export class BtwController {
 				tui: this.ctx.ui,
 				canBranch: () => this.canBranch(),
 				canOpenThread: this.ctx.workspaceEnabled || this.ctx.ui.nativeRendering,
+				onAction: action => {
+					if (action === "open") void this.handleOpenThread();
+					else if (action === "copy") void this.handleCopy();
+					else if (action === "promote") void this.handleBranch();
+					else if (action === "close") this.handleEscape();
+				},
 			}),
 		};
 		if (turn) request.component.setAnswer(turn.replyText);
@@ -902,15 +916,19 @@ export class BtwController {
 				if (!model) throw new Error(`BTW model is unavailable: ${modelRef.provider}/${modelRef.id}`);
 				return this.ctx.session.createEphemeralConversation(btwConversationPrompt, checkpoint, model, sideOptions);
 			},
-			createSideOptions: source => ({
-				readOnlyTools: true,
-				shareSummaryWithMain: summary => this.ctx.session.publishBtwSummary({ ...source, summary }),
+			createSideOptions: threadKey => ({
+				sendToMainSession: summary =>
+					this.ctx.session.publishBtwSummary({
+						threadKey,
+						threadTitle: manager.thread(threadKey)?.title ?? "BTW",
+						summary,
+					}),
 				approveSummary:
 					this.ctx.workspaceEnabled || this.ctx.ui.nativeRendering
-						? (summary, signal) =>
-								this.#approveThreadSummary(source.threadKey, source.threadTitle, summary, signal)
+						? (summary, signal) => this.#approveThreadSummary(threadKey, summary, signal)
 						: undefined,
 			}),
+			generateTitle: input => this.ctx.session.generateTitle(input),
 			nextKey: () => `btw-${Snowflake.next()}`,
 			now: Date.now,
 			onChange: () => this.#updateWorkspacePane(),
@@ -921,18 +939,13 @@ export class BtwController {
 		return manager;
 	}
 
-	async #approveThreadSummary(
-		threadKey: string,
-		threadTitle: string,
-		summary: string,
-		signal?: AbortSignal,
-	): Promise<boolean> {
+	async #approveThreadSummary(threadKey: string, summary: string, signal?: AbortSignal): Promise<boolean> {
 		const manager = this.#manager;
 		if (signal?.aborted || !manager?.select(threadKey)) return false;
 		if (!(await this.#openWorkspacePane(manager))) return false;
 		if (signal?.aborted || manager !== this.#manager || !this.#workspacePane) return false;
 		this.#detachActiveRequest();
-		return this.#workspacePane.approveSummary(threadTitle, summary, signal);
+		return this.#workspacePane.approveSummary(threadKey, summary, signal);
 	}
 
 	#historyRecord(thread: BtwThread): BtwThreadHistoryRecord {
@@ -1182,7 +1195,32 @@ export class BtwController {
 	#updateWorkspacePane(): void {
 		const manager = this.#manager;
 		const pane = this.#workspacePane;
-		if (!manager || !pane) return;
+		if (!manager) return;
+		const inline = this.#activeRequest;
+		const thread = inline?.threadKey ? manager.thread(inline.threadKey) : undefined;
+		if (inline && thread) {
+			const messages = thread.request
+				? [...thread.request.messages, ...(thread.request.streamMessage ? [thread.request.streamMessage] : [])]
+				: (thread.turns.at(-1)?.intermediateMessages ?? []);
+			const activity = messages
+				.flatMap(message =>
+					message.role === "assistant"
+						? message.content.flatMap(part => {
+								if (part.type !== "toolCall") return [];
+								const summary = toolRenderers[part.name]?.activitySummary?.(displayArgsForToolCall(part), {
+									expanded: false,
+									isPartial: thread.phase === "running",
+								});
+								return [
+									replaceTabs(summary ? [summary.label, summary.detail].filter(Boolean).join(" ") : part.name),
+								];
+							})
+						: [],
+				)
+				.join(" · ");
+			inline.component.setToolActivity(activity || undefined);
+		}
+		if (!pane) return;
 		const threads: BtwThreadView[] = manager.children.map(thread => ({
 			key: thread.key,
 			title: thread.title,
@@ -1357,6 +1395,7 @@ export class BtwController {
 				question: request.question,
 				history: request.history,
 				conversationKey: request.conversationKey,
+				source: { threadKey: request.record.id, threadTitle: request.record.question },
 				onTextDelta: delta => {
 					const latest = getBtwLatestTurn(request.record);
 					if (latest.status !== "running") return;

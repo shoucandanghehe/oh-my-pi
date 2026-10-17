@@ -252,7 +252,7 @@ import {
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
-import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
+import { setTranscriptActions } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -2310,6 +2310,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
 			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
+			transcriptActions: {
+				copy: copyToClipboard,
+				retry: lifecycle
+					? async () => {
+							const session = await lifecycle().ensureLive(agentId);
+							await session.retry();
+						}
+					: undefined,
+			},
 			requestRender: () => {
 				if (viewer) ui.requestComponentRender(viewer);
 				else ui.requestRender();
@@ -2694,29 +2703,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#inputController.setupEditorSubmitHandler();
 		// Native transcript controls (user-message toolbar, error-frame actions)
 		// run the same commands as their key bindings.
-		setTranscriptActionHandler(action => {
-			switch (action.act) {
-				case "retry":
-					void this.#inputController.handleRetry();
-					return;
-				case "switch-model":
-					this.showModelSelector({ temporaryOnly: true });
-					return;
-				case "rewind":
-					this.showUserMessageSelector();
-					return;
-				case "resume":
-					this.handleResumeSession(action.path).catch((error: unknown) =>
-						this.showError(error instanceof Error ? error.message : String(error)),
-					);
-					return;
-				case "copy":
-					copyToClipboard(action.text).then(
-						() => this.showStatus("Copied to clipboard"),
-						(error: unknown) =>
-							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
-					);
-			}
+		setTranscriptActions({
+			retry: () => void this.#inputController.handleRetry(),
+			switchModel: () => this.showModelSelector({ temporaryOnly: true }),
+			rewind: () => this.showUserMessageSelector(),
+			copy: text => {
+				copyToClipboard(text).then(
+					() => this.showStatus("Copied to clipboard"),
+					(error: unknown) =>
+						this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
+				);
+			},
 		});
 
 		// Wire observer registry to EventBus

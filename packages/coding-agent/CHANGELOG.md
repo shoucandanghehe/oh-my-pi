@@ -325,6 +325,7 @@
 - Fixed a failed streamed edit preview ending the whole run without retry: the harness now re-drives the turn with the preview diagnostic so the model can read the file again and correct the patch, and gives up with a notice only after two recoveries
 - Fixed MCP OAuth login requesting every scope in an authorization server's catalogue when the protected resource advertises no scopes; `/mcp reauth` now falls back to configured scopes or authorization-server defaults ([#15996](https://github.com/can1357/oh-my-pi/pull/15996) by [@unclesamwk](https://github.com/unclesamwk)).
 - Fixed the incomplete-todo stop reminder firing (and resuming work) when the agent's final message asks for permission or a decision before a closing status line, through "If you confirm, I'll…"/"Separately, tell me…"-style requests, or with a non-English question followed by another sentence ([#15986](https://github.com/can1357/oh-my-pi/issues/15986))
+- Subagent transcript actions no longer operate Main: copy and retry stay in the child pane, while unsupported rewind and model-switch controls remain hidden.
 - Tern now supports durable BTW threads with native thread selection, drafts, follow-ups, copy, deletion, and promotion.
 - Tern can now show BTW and agent transcripts in native split panes beside Main, with shared session state and pane-local input.
 - Native agent and BTW panes in Tern now adapt to available space in a multi-column grid instead of stacking into one shrinking column.
@@ -378,7 +379,7 @@
 - Changed BTW knowledge sharing: the BTW-only `xd://send_to_main_session` device publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
 - App-viewport subagents now share a stable auxiliary area with up to two visible transcripts and overflow tabs (Alt+Left/Right); completed panes still close automatically, while focused and manually opened panes stay available.
 - Very large sessions now resume faster, while large agent transcript panes load incrementally and reflow only visible rows during split-pane resizing.
-- Changed durable BTW knowledge sharing: `shareSummaryWithMain` now publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
+- Changed BTW knowledge sharing: the BTW-only `xd://send_to_main_session` device publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
 - Changed durable BTW panes to open with the thread rail collapsed by default, provide a `+ New BTW` action that immediately creates a blank thread, and let `/new` omit its first question.
 - BTW thread-rail hover previews and pinned expand/collapse actions now use a short interruptible slide animation.
 - Agent Hub now opens selected agents in persistent app-viewport workspace panes beside the sticky main-session editor, with pane-local transcript scrolling and the existing native-scrollback behavior preserved on other backends.

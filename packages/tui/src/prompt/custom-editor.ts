@@ -34,6 +34,7 @@ import {
 	PLACEHOLDER_REGEX,
 	referencedAttachments,
 	renderPlaceholders,
+	shiftImageMarkers,
 	skillChipLabel,
 	skillChipStyle,
 	skillToken,
@@ -606,6 +607,25 @@ export class CustomEditor extends Editor {
 		this.pendingImageLinks = images ? images.map(() => undefined) : [];
 		this.setCollapsedText(text);
 		void this.#materializeDraftLinks();
+	}
+
+	/**
+	 * Return a detached submission beside newer typing, preserving both drafts'
+	 * images and shifting the restored markers to their appended attachments.
+	 */
+	restoreDetachedDraft(
+		text: string,
+		images?: readonly ImageContent[],
+		imageLinks?: readonly (string | undefined)[],
+	): void {
+		const currentText = this.getExpandedText();
+		const restoredText = shiftImageMarkers(text, this.pendingImages.length);
+		if (images?.length) {
+			this.pendingImages.push(...images);
+			this.pendingImageLinks.push(...(imageLinks ?? images.map(() => undefined)));
+			this.imageLinks = this.pendingImageLinks;
+		}
+		this.setCollapsedText([restoredText, currentText].filter(part => part.trim()).join("\n\n"));
 	}
 
 	/** Set restored text with image, skill, and model references collapsed into atomic chips.
@@ -1263,7 +1283,7 @@ export class CustomEditor extends Editor {
 		const thinkingHint = thinkingKey ? `  ${formatTooltipKey(thinkingKey)}` : "";
 		// The level collapses into the model chip's icon; its own tooltip and click stay.
 		const modelIcon =
-			facts && thinking !== undefined && effortGlyph && state.thinkingInModel
+			facts?.model && thinking !== undefined && effortGlyph && state.thinkingInModel
 				? node(
 						"effort",
 						{
@@ -1277,7 +1297,7 @@ export class CustomEditor extends Editor {
 					)
 				: undefined;
 		const model =
-			facts &&
+			facts?.model &&
 			node(
 				"row",
 				{
@@ -1542,6 +1562,14 @@ export class CustomEditor extends Editor {
 
 	#matchesAction(canonical: string | undefined, action: ConfigurableEditorAction): boolean {
 		return canonical !== undefined && (this.#actionMatchKeys.get(action)?.has(canonical) ?? false);
+	}
+
+	/** Pane scrolling must yield to a configured dequeue action only when it has a handler. */
+	matchesDequeueKey(data: string): boolean {
+		const key = parseKey(data);
+		return Boolean(
+			this.onDequeue && key !== undefined && this.#matchesAction(canonicalKeyId(key), "app.message.dequeue"),
+		);
 	}
 
 	/** Whether `data` is exactly one keypress the base editor would treat as submit. */

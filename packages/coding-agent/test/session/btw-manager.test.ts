@@ -18,6 +18,7 @@ import {
 import { BTW_SUMMARY_MESSAGE_TYPE, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createMainWriteTool, sendToMainSessionCall } from "../helpers/btw-send-to-main";
 
 const MODEL: BtwThreadModelRef = { provider: "anthropic", id: "claude-sonnet-4-5" };
 const usage: Usage = {
@@ -421,7 +422,7 @@ describe("BtwManager", () => {
 		expect(store.getRecords()[0]?.baseMessages.map(userText)).toEqual(["Main before creation"]);
 	});
 
-	it("reads and shares an approved summary with Main during its first turn, then restores native tool history", async () => {
+	it("names the first turn, persists its title, and sends Main a summary with that title", async () => {
 		const model = buildModel({
 			id: "btw-first-turn",
 			name: "BTW First Turn",
@@ -435,7 +436,8 @@ describe("BtwManager", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		const summary = "The package is @oh-my-pi/pi-coding-agent.";
-		const store = await BtwHistoryStore.openThreads(undefined);
+		const directory = TempDir.createSync("@pi-btw-title-");
+		let store = await BtwHistoryStore.openThreads(directory.path());
 		let sideRequests = 0;
 		const sideStreamFn: StreamFn = (_model, context) => {
 			const stream = new AssistantMessageEventStream();
@@ -444,12 +446,7 @@ describe("BtwManager", () => {
 				if (request === 1) {
 					const toolCalls = [
 						{ type: "toolCall" as const, id: "read-package", name: "read", arguments: {} },
-						{
-							type: "toolCall" as const,
-							id: "share-package",
-							name: "shareSummaryWithMain",
-							arguments: { summary },
-						},
+						sendToMainSessionCall("share-package", summary),
 					];
 					const message = assistant("");
 					message.content = toolCalls;
@@ -491,9 +488,10 @@ describe("BtwManager", () => {
 			runScoped: <T>(run: () => T): T => run(),
 		} as never;
 		const wrappedReadTool = new ExtensionToolWrapper(readTool, extensionRunner);
+		const write = createMainWriteTool();
 		const session = new AgentSession({
 			agent: new Agent({
-				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [wrappedReadTool] },
+				initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [wrappedReadTool, write] },
 				streamFn: () => {
 					const stream = new AssistantMessageEventStream();
 					queueMicrotask(() => {
@@ -507,18 +505,26 @@ describe("BtwManager", () => {
 			settings: Settings.isolated({ "compaction.enabled": false, "tools.approvalMode": "yolo" }),
 			modelRegistry: { getApiKey: async () => "key", resolver: () => async () => "key" } as never,
 			extensionRunner,
-			toolRegistry: new Map([["read", wrappedReadTool]]),
-			builtInToolNames: ["read"],
+			toolRegistry: new Map<string, AgentTool>([
+				["read", wrappedReadTool],
+				["write", write],
+			]),
+			builtInToolNames: ["read", "write"],
 			sideStreamFn,
 		});
 		try {
 			const options: Omit<BtwManagerOptions, "restoredThreads" | "appendEvent" | "flushEvents"> = {
 				createConversation: (_model, checkpoint, sideOptions) =>
 					session.createEphemeralConversation("side instructions", checkpoint, model, sideOptions),
-				createSideOptions: source => ({
-					readOnlyTools: true,
-					shareSummaryWithMain: sharedSummary => session.publishBtwSummary({ ...source, summary: sharedSummary }),
+				createSideOptions: threadKey => ({
+					sendToMainSession: sharedSummary =>
+						session.publishBtwSummary({
+							threadKey,
+							threadTitle: manager.thread(threadKey)!.title,
+							summary: sharedSummary,
+						}),
 				}),
+				generateTitle: async () => "Package identity",
 				nextKey: () => "thread-capabilities",
 				now: () => 100,
 			};
@@ -535,10 +541,14 @@ describe("BtwManager", () => {
 			).toMatchObject({
 				attribution: "agent",
 				details: {
-					summaries: [{ threadKey: key, threadTitle: "Identify package", summary }],
+					summaries: [{ threadKey: key, threadTitle: "Package identity", summary }],
 				},
 			});
+			await store.close();
+			store = await BtwHistoryStore.openThreads(directory.path());
+			expect(store.getRecords().find(record => record.id === key)?.title).toBe("Package identity");
 			const restored = storedManager(store, options);
+			expect(restored.thread(key)?.title).toBe("Package identity");
 			const followup = await restored.prompt(key, "What did you read?");
 			expect(followup.replyText).toBe("Read the package name.");
 			expect(
@@ -549,6 +559,8 @@ describe("BtwManager", () => {
 			]);
 		} finally {
 			await session.dispose();
+			await store.close();
+			directory.removeSync();
 		}
 	});
 	it("does not append a late turn after the manager is abandoned", async () => {

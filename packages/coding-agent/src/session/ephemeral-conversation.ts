@@ -17,12 +17,10 @@ export interface EphemeralTurnOptions {
 	replyMaxBytes?: number;
 }
 
-/** Side-channel capabilities for a conversation: read-only tools and one-way summary sharing with Main. */
+/** Side-channel capabilities beyond the read-only investigation tools every BTW conversation has. */
 export interface EphemeralConversationSideOptions {
-	/** Allow investigation tools and read-only LSP/GitHub operations, directly or through xd://. */
-	readOnlyTools?: boolean;
-	/** Install `shareSummaryWithMain` for a user-approved BTW knowledge summary. */
-	shareSummaryWithMain?: (summary: string) => void | Promise<void>;
+	/** Mount `xd://send_to_main_session` for a user-approved summary delivered into Main. */
+	sendToMainSession?: (summary: string) => void | Promise<void>;
 	/** Present the exact summary for approval in the conversation's own view. */
 	approveSummary?: (summary: string, signal?: AbortSignal) => Promise<boolean>;
 }
@@ -95,7 +93,7 @@ export interface EphemeralConversationOptions {
 		streamMessage?: AssistantMessage | null;
 		isStreaming: boolean;
 	};
-	/** Lazy: only durable BTW explicitly initializes a side-owned extension host. */
+	/** Side-owned extension host and restricted tool set; created before the first turn. */
 	createExtensionRuntime?: () => Promise<BtwExtensionRuntime>;
 }
 
@@ -176,11 +174,6 @@ export class EphemeralConversation {
 				this.#extensionRuntimePending = undefined;
 			});
 		await this.#extensionRuntimePending;
-	}
-	/** Waits for an already-requested host; never allocates one for QuickAsk. */
-	async waitForExtensionRuntimeInitialization(): Promise<void> {
-		await this.#extensionRuntimePending;
-		if (this.#extensionRuntimeDisposed) throw new Error("BTW extension runtime was disposed");
 	}
 
 	async disposeExtensionRuntime(): Promise<void> {
