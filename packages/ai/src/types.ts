@@ -791,6 +791,9 @@ export interface LiveSteerClaim {
 	reject(): void;
 }
 
+/** `"only"` requires WebSocket transport without an SSE fallback. */
+export type OpenAIWebSocketPreference = boolean | "only";
+
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	/**
@@ -859,8 +862,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	kimiApiFormat?: "openai" | "anthropic";
 	/** API format for Synthetic provider: "openai" or "anthropic" (default: "openai") */
 	syntheticApiFormat?: "openai" | "anthropic";
-	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
-	preferWebsockets?: boolean;
+	/** Standard Responses is opt-in and catalog-gated; false vetoes true. Codex additionally supports "only" without SSE fallback. */
+	preferWebsockets?: OpenAIWebSocketPreference;
 	/**
 	 * OpenRouter routing-variant suffix automatically appended to model IDs when
 	 * the request targets OpenRouter (`model.provider === "openrouter"`). Common
