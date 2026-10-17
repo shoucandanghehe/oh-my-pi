@@ -35,6 +35,7 @@ export type BtwThreadEvent =
 	| (BtwThreadEventBase & {
 			op: "create";
 			title: string;
+			titleExplicit?: boolean;
 			createdAt: number;
 			anchorLeafId: string;
 			model: BtwThreadModelRef;
@@ -43,6 +44,7 @@ export type BtwThreadEvent =
 			turns: readonly EphemeralConversationTurn[];
 	  })
 	| (BtwThreadEventBase & { op: "turn"; turn: EphemeralConversationTurn })
+	| (BtwThreadEventBase & { op: "title"; title: string })
 	| (BtwThreadEventBase & { op: "draft"; text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] })
 	| (BtwThreadEventBase & { op: "read"; through: number })
 	| (BtwThreadEventBase & { op: "request"; input?: string; images?: ImageContent[]; timestamp?: number })
@@ -52,6 +54,8 @@ export type BtwThreadEvent =
 export interface RestoredBtwThread {
 	key: string;
 	title: string;
+	/** User-supplied headings must survive restoration without automatic renaming. */
+	titleExplicit?: boolean;
 	createdAt: number;
 	anchorLeafId: string;
 	model: BtwThreadModelRef;

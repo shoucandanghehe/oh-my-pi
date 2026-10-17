@@ -33,9 +33,10 @@ export class NativeWorkspace {
 	#server: Server<PaneEntry> | undefined;
 	#placementTail: Promise<void> | undefined;
 	#layout: SplitLayout | undefined;
+	#balanceScheduled = false;
 
 	constructor(
-		readonly client: Pick<TernPaneClient, "open" | "focus" | "focused" | "splitPanes" | "close">,
+		readonly client: Pick<TernPaneClient, "open" | "focus" | "focused" | "splitPanes" | "close" | "balance">,
 		readonly main: number,
 	) {}
 
@@ -57,7 +58,7 @@ export class NativeWorkspace {
 			if (this.#panes.get(key) !== existing) throw new Error("Native workspace view closed while focusing");
 			const block = existing.block;
 			if (!preserveFocus && block !== undefined) {
-				await this.#place(existing, () => this.client.focus(block));
+				await this.#mutate(existing, () => this.client.focus(block));
 			}
 			return view;
 		}
@@ -80,7 +81,7 @@ export class NativeWorkspace {
 		// Attach the rejection handler before launching, since a failed relay can close immediately.
 		void connected.catch(() => {});
 		try {
-			await this.#place(entry, async () => {
+			await this.#mutate(entry, async () => {
 				const previousFocus = preserveFocus ? await this.client.focused() : undefined;
 				const layout = this.#layoutFor(await this.client.splitPanes());
 				const placement = layout.next();
@@ -99,6 +100,7 @@ export class NativeWorkspace {
 				}
 				if (previousFocus !== undefined) await this.client.focus(previousFocus);
 				else if (!preserveFocus) await this.client.focus(result.block);
+				this.#scheduleBalance();
 			});
 			await connected;
 			if (this.#panes.get(key) !== entry) throw new Error("Native workspace view was closed while connecting");
@@ -109,17 +111,10 @@ export class NativeWorkspace {
 				? {
 						render: width => component.render(width),
 						describe: () => node("col", { grow: 1 }, [component]),
+						describeSurface: cx => component.describeSurface?.(cx) ?? { main: [component], dock: [] },
 						handleInput: data => component.handleInput?.(data),
 					}
 				: component;
-			const describeSurface = component.describeSurface;
-			focused.describeSurface = cx => {
-				const surface = describeSurface?.call(component, cx) ?? { main: [component], dock: [] };
-				return {
-					...surface,
-					main: [node("spacer", { hidden: true, role: "omp.workspace" }, [], "omp-workspace"), ...surface.main],
-				};
-			};
 			ui.addChild(focused);
 			ui.setFocus(focused);
 			ui.start();
@@ -130,11 +125,9 @@ export class NativeWorkspace {
 			pending.reject(error);
 			void pending.promise.catch(() => {});
 			if (this.#panes.get(key) === entry) this.close(key);
-			if (entry.block !== undefined) this.#forget(entry.block);
-			if (entry.block !== undefined && !entry.socket) {
-				void this.client
-					.close(entry.block)
-					.catch(closeError => logger.warn("Could not close failed native pane", { error: String(closeError) }));
+			else if (entry.block !== undefined) {
+				this.#layout?.remove(entry.block);
+				this.#closePane(entry.block);
 			}
 			throw error;
 		} finally {
@@ -159,13 +152,14 @@ export class NativeWorkspace {
 		const entry = this.#panes.get(key);
 		if (!entry) return;
 		this.#panes.delete(key);
-		if (entry.block !== undefined) this.#forget(entry.block);
+		if (entry.block !== undefined) this.#layout?.remove(entry.block);
 		entry.onClosed();
 		entry.terminal.ready.reject(new Error("Native workspace view closed"));
 		entry.view?.component.dispose?.();
 		entry.view?.ui.stop();
 		entry.terminal.stop();
 		entry.onClose();
+		if (entry.block !== undefined) this.#closePane(entry.block);
 		if (this.#panes.size === 0) {
 			this.#server?.stop();
 			this.#server = undefined;
@@ -176,34 +170,52 @@ export class NativeWorkspace {
 		for (const key of this.#panes.keys()) this.close(key);
 	}
 
-	/** Drops panes Tern no longer lists; the layout is re-measured from Main once no pane remains. */
+	/** Hidden tabs retain old split sizes; re-measure empty layouts only while Main is shown. */
 	#layoutFor(listed: readonly TernSplitPane[]): SplitLayout {
 		const present = new Set(listed.map(pane => pane.block));
 		for (const block of this.#layout?.agents ?? []) {
-			if (!present.has(block)) this.#forget(block);
+			if (!present.has(block)) this.#layout?.remove(block);
 		}
-		if (this.#layout) return this.#layout;
+		if (this.#layout?.agents.length) return this.#layout;
 		const main = listed.find(pane => pane.block === this.main);
 		if (!main) throw new Error("Tern did not list the Main pane");
-		this.#layout = new SplitLayout(this.main, main, getCellDimensions());
+		if (!this.#layout || main.shown) {
+			this.#layout = new SplitLayout(this.main, main, this.#layout?.cell ?? getCellDimensions());
+		}
 		return this.#layout;
 	}
 
-	#forget(block: number): void {
-		this.#layout?.remove(block);
-		if (this.#layout?.agents.length === 0) this.#layout = undefined;
+	#closePane(block: number): void {
+		void this.#mutate(undefined, () => this.client.close(block))
+			.then(() => this.#scheduleBalance())
+			.catch(error => logger.warn("Could not close native pane", { error: String(error) }));
+	}
+
+	#scheduleBalance(): void {
+		if (this.#balanceScheduled) return;
+		this.#balanceScheduled = true;
+		setImmediate(() => {
+			void this.#mutate(undefined, async () => {
+				this.#balanceScheduled = false;
+				await this.client.balance();
+			}).catch(error => {
+				this.#balanceScheduled = false;
+				logger.warn("Could not balance native workspace panes", { error: String(error) });
+			});
+		});
 	}
 
 	/** Serialize Tern mutations, not relay connection; cancellation releases the next launch. */
-	async #place(entry: PaneEntry, change: () => Promise<void>): Promise<void> {
+	async #mutate(entry: PaneEntry | undefined, change: () => Promise<void>): Promise<void> {
 		const previous = this.#placementTail;
 		const finished = Promise.withResolvers<void>();
-		const released = Promise.race([finished.promise, entry.closed]);
+		const released = entry ? Promise.race([finished.promise, entry.closed]) : finished.promise;
 		const tail = previous ? previous.then(() => released) : released;
 		this.#placementTail = tail;
 		try {
 			if (previous) await previous;
-			if (this.#panes.get(entry.key) !== entry) throw new Error("Native workspace view closed before placement");
+			if (entry && this.#panes.get(entry.key) !== entry)
+				throw new Error("Native workspace view closed before placement");
 			await change();
 		} finally {
 			finished.resolve();

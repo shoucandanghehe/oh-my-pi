@@ -301,16 +301,19 @@ export class SessionProviderBoundary {
 	}
 
 	/** Normalizes image payloads for the active model. */
-	normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
-		return normalizeModelContextImages(images, { model: this.#host.activeRouteModel() ?? this.#host.model() });
+	normalizeImagesForModel(
+		images: ImageContent[] | undefined,
+		model = this.#host.activeRouteModel() ?? this.#host.model(),
+	): Promise<ImageContent[] | undefined> {
+		return normalizeModelContextImages(images, { model });
 	}
 
 	/** Builds a hidden vision-model description for attachments sent to a text-only model. */
 	async buildImageDescriptionNotice(
 		normalizedImages: ImageContent[],
 		signal?: AbortSignal,
+		model = this.#host.activeRouteModel() ?? this.#host.model(),
 	): Promise<CustomMessage | undefined> {
-		const model = this.#host.activeRouteModel() ?? this.#host.model();
 		if (!shouldDescribeImagesForTextModel(model, this.#host.settings)) return undefined;
 
 		let blocks: TextContent[];

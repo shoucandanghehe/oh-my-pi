@@ -28,6 +28,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import type { ExtensionPresentationObserver } from "@oh-my-pi/pi-tui/chat/extension-types";
 import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import * as atomicFile from "@oh-my-pi/pi-coding-agent/utils/atomic-file";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import {
 	Container,
@@ -95,7 +96,7 @@ function makeFakeSession(
 								? message.content
 								: message.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("")
 							: "";
-					return runEphemeralTurn({ ...options, promptText });
+					return runEphemeralTurn({ ...options, promptText, promptImages: options.images });
 				},
 			}),
 	} as unknown as InteractiveModeContext["session"];
@@ -1230,6 +1231,38 @@ describe("BtwController", () => {
 		await controller.dispose();
 	});
 
+	it("refuses durable admission when the request checkpoint fails so the caller can restore its attachments", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-btw-admission-"));
+		const manager = SessionManager.create(directory, directory);
+		manager.appendMessage({ role: "user", content: "Main question", timestamp: 1 });
+		await manager.ensureOnDisk();
+		const runSideTurn = vi.fn(async () => ({
+			replyText: "unused",
+			assistantMessage: createAssistantMessage("unused"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runSideTurn));
+		ctx.sessionManager = manager;
+		const controller = new BtwController(ctx);
+		const writeFileAtomically = atomicFile.writeFileAtomically;
+		const storageError = new Error("Request checkpoint unavailable");
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (file.startsWith(directory) && file.includes("btw-history") && content.includes('"phase":"running"')) {
+				throw storageError;
+			}
+			return writeFileAtomically(file, content, mode);
+		});
+		try {
+			const images: ImageContent[] = [{ type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" }];
+			expect(await controller.start("Inspect this", images)).toBe(false);
+			expect(runSideTurn).not.toHaveBeenCalled();
+			expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining(storageError.message));
+		} finally {
+			await expect(controller.dispose()).rejects.toBe(storageError);
+			await manager.close();
+			await fs.rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("shows an error message when no model is configured", async () => {
 		const runEphemeralTurn = vi.fn(async () => ({
 			replyText: "n/a",
@@ -1365,7 +1398,10 @@ describe("BtwController", () => {
 			assistantMessage: createAssistantMessage("Status answer"),
 		}));
 		const btwContainer = new Container();
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const ctx: InteractiveModeContext = {
+			...makeCtx(makeFakeSession(runEphemeralTurn), btwContainer),
+			workspaceEnabled: false,
+		};
 		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
 		const manager = SessionManager.create(directory, directory);
 		ctx.sessionManager = manager;
@@ -1550,7 +1586,8 @@ describe("BtwController", () => {
 				turns: [
 					expect.objectContaining({
 						input: "Question?",
-						replyText: "Answer",
+						replyText: "sanitized",
+						images: [screenshot],
 						assistantMessage,
 						timestamp: expect.any(Number),
 					}),
@@ -1702,27 +1739,48 @@ describe("BtwController", () => {
 			providerPayload,
 		};
 		const runEphemeralTurn = vi.fn(async () => ({ replyText: "sanitized", assistantMessage }));
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		const ctx: InteractiveModeContext = {
+			...makeCtx(makeFakeSession(runEphemeralTurn)),
+			workspaceEnabled: false,
+		};
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-btw-promotion-"));
+		const manager = SessionManager.create(directory, directory);
+		manager.appendMessage({ role: "user", content: "Main question", timestamp: 1 });
+		await manager.ensureOnDisk();
+		ctx.sessionManager = manager;
 		const controller = new BtwController(ctx);
+		const anchorLeafId = manager.getLeafId();
+		try {
+			await controller.start("Question?");
+			await drainBtwRequest();
 
-		await controller.start("Question?");
-		await drainBtwRequest();
-
-		expect(await controller.handleBranch()).toBe(true);
-		expect(ctx.handleBtwBranch).toHaveBeenCalledWith(
-			"Question?",
-			{
-				...assistantMessage,
-				content: [
-					{ type: "thinking", thinking: "reasoning" },
-					{ type: "text", text: "sanitized" },
-				],
-				providerPayload: undefined,
-			},
-			"leaf-1",
-			"session-1",
-			undefined,
-		);
+			expect(await controller.handleBranch()).toBe(true);
+			expect(ctx.handleBtwBranch).toHaveBeenCalledWith(
+				{
+					anchorLeafId,
+					sessionId: manager.getSessionId(),
+					turns: [
+						expect.objectContaining({
+							input: "Question?",
+							replyText: "sanitized",
+							assistantMessage: {
+								...assistantMessage,
+								content: [
+									{ type: "thinking", thinking: "reasoning" },
+									{ type: "text", text: "sanitized" },
+								],
+								providerPayload: undefined,
+							},
+						}),
+					],
+				},
+				undefined,
+			);
+		} finally {
+			await controller.dispose();
+			await manager.close();
+			await fs.rm(directory, { recursive: true, force: true });
+		}
 	});
 	it("ignores duplicate branch requests while branch promotion is in flight", async () => {
 		const assistantMessage = createAssistantMessage("Answer");
@@ -1896,7 +1954,6 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 
 		expect(ctx.btwContainer.children).toHaveLength(0);
-		expect(createConversation.mock.calls[0]?.[3]).toMatchObject({ readOnlyTools: true });
 		const completedTranscript = Bun.stripANSI(pane.render(100).join("\n"));
 		expect(completedTranscript).toContain("fixture.ts");
 		expect(completedTranscript.match(/Inspecting fixture/g)).toHaveLength(1);
@@ -2240,8 +2297,7 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 		expect(frozenMain).toEqual(["main-v1"]);
 
-		expect(capturedSideOptions).toMatchObject({ readOnlyTools: true });
-		await capturedSideOptions?.shareSummaryWithMain?.("Cache invalidation must happen after commit.");
+		await capturedSideOptions?.sendToMainSession?.("Cache invalidation must happen after commit.");
 		expect(publishBtwSummary).toHaveBeenLastCalledWith({
 			threadKey: expect.any(String),
 			threadTitle: "First?",

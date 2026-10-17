@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -207,7 +207,9 @@ describe("BTW follow-up lifecycle", () => {
 
 		expect(await h.controller.startFollowUp(topic.id, "How do I fix it?")).toBe(true);
 
-		expect(h.requests.at(-1)?.args.history?.[0]?.content).toContainEqual(screenshot);
+		const priorQuestion = h.requests.at(-1)?.args.history?.[0];
+		if (priorQuestion?.role !== "user") throw new Error("Expected the historical BTW question");
+		expect(priorQuestion.content).toContainEqual(screenshot);
 	});
 
 	it("blocks flushing, relocation, branching and disposal after a terminal CAS failure without losing the answer", async () => {

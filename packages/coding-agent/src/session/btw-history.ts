@@ -85,6 +85,7 @@ const RECORD_FIELDS: Record<string, true> = {
 	version: true,
 	id: true,
 	title: true,
+	titleExplicit: true,
 	createdAt: true,
 	anchorLeafId: true,
 	model: true,
@@ -109,6 +110,7 @@ function parseThreadRecord(value: unknown): BtwThreadHistoryRecord {
 		typeof r.id !== "string" ||
 		!ID_PATTERN.test(r.id) ||
 		typeof r.title !== "string" ||
+		(r.titleExplicit !== undefined && typeof r.titleExplicit !== "boolean") ||
 		!isTimestamp(r.createdAt) ||
 		typeof r.anchorLeafId !== "string" ||
 		!r.anchorLeafId ||
@@ -372,9 +374,11 @@ export class BtwHistoryStore<T extends HistoryRecord = BtwHistoryRecord> {
 					timestamp: new Date(stored.record.createdAt).toISOString(),
 				};
 				await resolveBlobRefsInEntries([entry], blobs);
-				await Promise.all(stored.record.draftImages.map(async image => {
-					image.data = await resolveImageData(blobs, image.data);
-				}));
+				await Promise.all(
+					stored.record.draftImages.map(async image => {
+						image.data = await resolveImageData(blobs, image.data);
+					}),
+				);
 			} else {
 				const titleName = titleFileName(stored.record.id);
 				const title = titleNames.has(titleName) ? await readTitle(path.join(directory, titleName)) : undefined;
@@ -406,7 +410,7 @@ export class BtwHistoryStore<T extends HistoryRecord = BtwHistoryRecord> {
 		// Capture before yielding: callers may keep mutating their streaming record.
 		const { title, ...fields } = record;
 		const saved = snapshotRecord(parseRecord(isThreadRecord(record) ? record : fields) as T);
-		const snapshot = title === undefined ? saved : Object.freeze({ ...saved, title });
+		const snapshot: T = title === undefined ? saved : Object.freeze<T>({ ...saved, title });
 		if (isThreadRecord(snapshot) !== (this.#format === "thread")) throw new Error("Wrong BTW history record format");
 		if (this.#directory === undefined) {
 			this.#records.set(snapshot.id, snapshot);

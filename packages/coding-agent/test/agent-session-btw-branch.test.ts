@@ -175,10 +175,11 @@ describe("AgentSession.branchFromBtw", () => {
 	it.each([
 		["a vision model", ["text", "image"]],
 		["a text-only model, with a vision description", ["text"]],
-	] as const)("keeps the images of the /btw question in the branch for %s", async (_label, input) => {
+	] as const)("keeps every promoted turn's images and durable descriptions for %s", async (_label, input) => {
 		const describe = vi
 			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
-			.mockResolvedValue([{ type: "text", text: "A red square." }]);
+			.mockResolvedValueOnce([{ type: "text", text: "A red square." }])
+			.mockResolvedValueOnce([{ type: "text", text: "A blue circle." }]);
 		const activeSession = await createSession({
 			model: { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, input: [...input] },
 		});
@@ -186,20 +187,35 @@ describe("AgentSession.branchFromBtw", () => {
 		await activeSession.sessionManager.flush();
 		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
 
-		await activeSession.branchFromBtw(
-			"what is wrong here? [Image #1]",
-			createBtwAssistant(),
-			requiredLeafId(activeSession),
-			activeSession.sessionManager.getSessionId(),
-			[screenshot],
-		);
-
-		expect(activeSession.messages.at(-2)).toMatchObject({
-			role: "user",
-			content: [{ type: "text", text: "what is wrong here? [Image #1]" }, screenshot],
+		const secondImage: ImageContent = { type: "image", data: "Y2lyY2xl", mimeType: "image/png" };
+		await activeSession.branchFromBtw({
+			anchorLeafId: requiredLeafId(activeSession),
+			sessionId: activeSession.sessionManager.getSessionId(),
+			turns: [
+				{ ...createBtwTurn("what is wrong here? [Image #1]"), images: [screenshot] },
+				{ ...createBtwTurn("and here? [Image #2]"), images: [secondImage] },
+			],
 		});
-		expect(JSON.stringify(activeSession.messages.at(-3)).includes("A red square.")).toBe(input.length === 1);
-		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 1 : 0);
+		await activeSession.sessionManager.flush();
+		const restored = await SessionManager.open(activeSession.sessionFile!);
+		try {
+			const messages = restored.buildSessionContext().messages;
+			const users = messages.filter(message => message.role === "user");
+			expect(users.slice(-2)).toMatchObject([
+				{ content: [{ type: "text", text: "what is wrong here? [Image #1]" }, screenshot] },
+				{ content: [{ type: "text", text: "and here? [Image #2]" }, secondImage] },
+			]);
+			for (const [question, description] of [
+				["what is wrong here? [Image #1]", "A red square."],
+				["and here? [Image #2]", "A blue circle."],
+			]) {
+				const index = messages.findIndex(message => JSON.stringify(message).includes(question));
+				expect(JSON.stringify(messages[index - 1]).includes(description)).toBe(input.length === 1);
+			}
+			expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 2 : 0);
+		} finally {
+			await restored.close();
+		}
 	});
 	it("does not record a late advisor turn into a /btw branch", async () => {
 		const activeSession = await createSession();

@@ -55,10 +55,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import sideChannelNoToolsReminder from "../src/prompts/system/side-channel-no-tools.md" with { type: "text" };
 import sideChannelReadonlyReminder from "../src/prompts/system/side-channel-readonly.md" with { type: "text" };
 import { ToolContextStore } from "../src/tools/context";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { createMainWriteTool, sendToMainSessionCall } from "./helpers/btw-send-to-main";
 
 function createAgent(): Agent {
 	return new Agent({
@@ -483,7 +483,7 @@ describe("AgentSession message pipeline", () => {
 		const turn = session.runEphemeralTurn({
 			promptText: "Follow-up",
 			history,
-			images: [image],
+			promptImages: [image],
 			conversationKey: "topic-a",
 		});
 		await entered.promise;
@@ -1429,7 +1429,10 @@ describe("AgentSession message pipeline", () => {
 		expect(deltas).toEqual(["Recovered without tools"]);
 		expect(executions).toBe(0);
 		expect(capturedContexts).toHaveLength(2);
-		expect(capturedContexts[0]?.tools?.map(tool => tool.name)).toEqual([]);
+		// The side request declares Main's catalog for prompt-cache reuse, yet the tool never executes.
+		expect(capturedContexts[0]?.tools).toEqual([
+			expect.objectContaining({ name: "side_tool", description: tool.description }),
+		]);
 		expect(capturedOptions[0]?.promptCacheKey).toBe(session.sessionId);
 		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
 		expect(capturedContexts[1]?.messages.find(message => message.role === "toolResult")).toMatchObject({
@@ -1458,9 +1461,7 @@ describe("AgentSession message pipeline", () => {
 			},
 		]);
 
-		const restored = session.createEphemeralConversation("side instructions", checkpoint, undefined, {
-			readOnlyTools: true,
-		});
+		const restored = session.createEphemeralConversation("side instructions", checkpoint, undefined);
 		await restored.prompt("Follow up?");
 
 		expect(capturedContexts).toHaveLength(3);
@@ -1470,22 +1471,20 @@ describe("AgentSession message pipeline", () => {
 			isError: true,
 		});
 		const restoredMessages = capturedContexts[2]?.messages ?? [];
-		const reminderIndex = (text: string): number =>
-			restoredMessages.findIndex(
-				message =>
-					message.role === "developer" &&
-					JSON.stringify(message.content) === JSON.stringify([{ type: "text", text }]),
-			);
+		const reminderIndexes = restoredMessages.flatMap((message, index) =>
+			message.role === "developer" &&
+			JSON.stringify(message.content) === JSON.stringify([{ type: "text", text: sideChannelReadonlyReminder }])
+				? [index]
+				: [],
+		);
 		const userIndex = (text: string): number =>
 			restoredMessages.findIndex(message => message.role === "user" && getConvertedUserText(message) === text);
-		const noToolsIndex = reminderIndex(sideChannelNoToolsReminder);
-		const readonlyIndex = reminderIndex(sideChannelReadonlyReminder);
-		const quickUserIndex = userIndex("Question?");
-		const durableUserIndex = userIndex("Follow up?");
-		expect(noToolsIndex).toBeGreaterThanOrEqual(0);
-		expect(noToolsIndex).toBeLessThan(quickUserIndex);
-		expect(readonlyIndex).toBeGreaterThan(quickUserIndex);
-		expect(readonlyIndex).toBeLessThan(durableUserIndex);
+		const firstUserIndex = userIndex("Question?");
+		const restoredUserIndex = userIndex("Follow up?");
+		expect(reminderIndexes).toHaveLength(2);
+		expect(reminderIndexes[0]).toBeLessThan(firstUserIndex);
+		expect(reminderIndexes[1]).toBeGreaterThan(firstUserIndex);
+		expect(reminderIndexes[1]).toBeLessThan(restoredUserIndex);
 	});
 
 	it("prompts for a durable BTW summary without waiting for Main's transcript preview", async () => {
@@ -1507,12 +1506,10 @@ describe("AgentSession message pipeline", () => {
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
 				if (requests === 1) {
-					const toolCall = {
-						type: "toolCall" as const,
-						id: "share-summary-call",
-						name: "shareSummaryWithMain",
-						arguments: { summary: "Cache invalidation must happen after commit." },
-					};
+					const toolCall = sendToMainSessionCall(
+						"share-summary-call",
+						"Cache invalidation must happen after commit.",
+					);
 					const message = createAssistantMessage("");
 					message.content = [toolCall];
 					message.stopReason = "toolUse";
@@ -1553,16 +1550,18 @@ describe("AgentSession message pipeline", () => {
 			getUIContext: () => ({ select }),
 			hasHandlers: () => false,
 			hasUI: () => true,
+			getRegisteredTool: () => undefined,
 			waitForToolApprovalPreview: previewWait,
 		};
 		const shareWithMain = vi.fn(async (_summary: string) => {});
+		const write = createMainWriteTool();
 		const session = new AgentSession({
 			agent: new Agent({
 				initialState: {
 					model,
 					systemPrompt: ["system prompt"],
 					messages: [],
-					tools: [],
+					tools: [write],
 				},
 				getToolContext: toolCall => toolContextStore.getContext(toolCall),
 			}),
@@ -1570,13 +1569,14 @@ describe("AgentSession message pipeline", () => {
 			settings,
 			modelRegistry,
 			extensionRunner: extensionRunner as never,
+			toolRegistry: new Map([["write", write]]),
+			builtInToolNames: new Set(["write"]),
 			sideStreamFn,
 		});
 		sessions.push(session);
 
 		const conversation = session.createEphemeralConversation("side instructions", undefined, undefined, {
-			readOnlyTools: true,
-			shareSummaryWithMain: shareWithMain,
+			sendToMainSession: shareWithMain,
 		});
 		await conversation.initializeExtensionRuntime();
 		const result = await conversation.prompt("Share what we found with Main.");
@@ -1618,12 +1618,7 @@ describe("AgentSession message pipeline", () => {
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
 				if (sideRequests === 1) {
-					const toolCall = {
-						type: "toolCall" as const,
-						id: "share-summary-call",
-						name: "shareSummaryWithMain",
-						arguments: { summary },
-					};
+					const toolCall = sendToMainSessionCall("share-summary-call", summary);
 					const message = createAssistantMessage("");
 					message.content = [toolCall];
 					message.stopReason = "toolUse";
@@ -1638,13 +1633,14 @@ describe("AgentSession message pipeline", () => {
 			return stream;
 		};
 		const select = vi.fn(async (_title: string) => "Approve");
+		const write = createMainWriteTool();
 		const session = new AgentSession({
 			agent: new Agent({
 				initialState: {
 					model,
 					systemPrompt: ["system prompt"],
 					messages: [],
-					tools: [],
+					tools: [write],
 				},
 				streamFn: mainStreamFn,
 				convertToLlm,
@@ -1661,8 +1657,11 @@ describe("AgentSession message pipeline", () => {
 				getUIContext: () => ({ select }),
 				hasHandlers: () => false,
 				hasUI: () => true,
+				getRegisteredTool: () => undefined,
 				runScoped: <T>(run: () => T): T => run(),
 			} as never,
+			toolRegistry: new Map([["write", write]]),
+			builtInToolNames: new Set(["write"]),
 			sideStreamFn,
 		});
 		sessions.push(session);
@@ -1671,11 +1670,11 @@ describe("AgentSession message pipeline", () => {
 			appendEvent: () => {},
 			createConversation: (_modelRef, checkpoint, sideOptions) =>
 				session.createEphemeralConversation("side instructions", checkpoint, model, sideOptions),
-			createSideOptions: source => ({
-				readOnlyTools: true,
-				shareSummaryWithMain: sharedSummary =>
+			createSideOptions: threadKey => ({
+				sendToMainSession: sharedSummary =>
 					session.publishBtwSummary({
-						...source,
+						threadKey,
+						threadTitle: manager.thread(threadKey)!.title,
 						summary: sharedSummary,
 					}),
 			}),
@@ -1692,7 +1691,7 @@ describe("AgentSession message pipeline", () => {
 
 		expect(result.replyText).toBe("Summary shared.");
 		expect(select).toHaveBeenCalledTimes(1);
-		expect(select.mock.calls[0]?.[0]).toContain("Allow tool: shareSummaryWithMain");
+		expect(select.mock.calls[0]?.[0]).toContain("Allow tool: send_to_main_session");
 		expect(select.mock.calls[0]?.[0]).toContain(summary);
 		const record = session.agent.state.messages.find(
 			message => message.role === "custom" && message.customType === BTW_SUMMARY_MESSAGE_TYPE,
@@ -1794,9 +1793,7 @@ describe("AgentSession message pipeline", () => {
 		});
 		sessions.push(session);
 
-		const conversation = session.createEphemeralConversation("side instructions", undefined, undefined, {
-			readOnlyTools: true,
-		});
+		const conversation = session.createEphemeralConversation("side instructions", undefined, undefined);
 		const result = await conversation.prompt("Try the inherited name");
 
 		expect(result.replyText).toBe("Recovered without executing");
@@ -1857,21 +1854,14 @@ describe("AgentSession message pipeline", () => {
 		const checkpoint = original.checkpoint();
 		const firstTurn = checkpoint.turns[0];
 		if (!firstTurn) throw new Error("Expected one side-conversation turn");
-		const { prefixMessages: _prefixMessages, ...legacyTurn } = firstTurn;
+		const { prefixMessages, ...legacyTurn } = firstTurn;
+		if (!prefixMessages?.length) throw new Error("Expected a per-turn capability reminder");
+		// Legacy checkpoints stored the capability reminder once in the frozen base instead of per turn.
 		const legacyCheckpoint = {
 			...checkpoint,
-			baseMessages: [
-				...checkpoint.baseMessages,
-				{
-					role: "developer" as const,
-					content: [{ type: "text" as const, text: sideChannelNoToolsReminder }],
-					attribution: "agent" as const,
-					timestamp: Date.now(),
-				},
-			],
+			baseMessages: [...checkpoint.baseMessages, ...prefixMessages],
 			turns: [legacyTurn],
 		};
-		expect(legacyCheckpoint.baseMessages).toHaveLength(checkpoint.baseMessages.length + 1);
 		session.agent.appendMessage({ role: "user", content: "late main turn", timestamp: Date.now() });
 		const restored = session.createEphemeralConversation("side instructions", legacyCheckpoint);
 		await restored.prompt("Question 2?", { dedupeReply: false });
@@ -1881,12 +1871,13 @@ describe("AgentSession message pipeline", () => {
 			firstMessages.map(({ timestamp: _timestamp, ...message }) => message),
 		);
 		expect(
-			capturedContexts[1]?.messages.some(
+			capturedContexts[1]?.messages.filter(
 				message =>
 					message.role === "developer" &&
-					JSON.stringify(message.content) === JSON.stringify([{ type: "text", text: sideChannelNoToolsReminder }]),
+					JSON.stringify(message.content) ===
+						JSON.stringify([{ type: "text", text: sideChannelReadonlyReminder }]),
 			),
-		).toBe(true);
+		).toHaveLength(2);
 		expect(restored.turns.map(turn => turn.input)).toEqual(["Question 1?", "Question 2?"]);
 		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
 		expect(capturedContexts[1]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
@@ -1896,6 +1887,113 @@ describe("AgentSession message pipeline", () => {
 			(message): message is Extract<Message, { role: "user" }> => message.role === "user",
 		);
 		expect(restoredUsers?.map(getConvertedUserText)).toEqual(["anchor main turn", "Question 1?", "Question 2?"]);
+	});
+
+	it.each([
+		["sends the image to a vision model", ["text", "image"]],
+		["describes the image for a text-only model", ["text"]],
+	] as const)("ephemeral prompt and history images: %s", async (_label, input) => {
+		const describe = vi
+			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
+			.mockResolvedValue([{ type: "text", text: "A red square." }]);
+		const model = buildModel({
+			id: "side-stream-model",
+			name: "Side Stream Model",
+			api: "anthropic",
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: [...input],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const contexts: Context[] = [];
+		const sideStreamFn: StreamFn = (_model, context) => {
+			contexts.push({ ...context, messages: structuredClone(context.messages) });
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Red") }));
+			return stream;
+		};
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["system prompt"], messages: [], tools: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn,
+		});
+		sessions.push(session);
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+
+		await session.runEphemeralTurn({ promptText: "What colour is this?", promptImages: [screenshot] });
+
+		const request = JSON.stringify(contexts[0]?.messages);
+		expect(contexts[0]?.messages.at(-1)?.content).toContainEqual(expect.objectContaining({ type: "image" }));
+		expect(request.includes("A red square.")).toBe(input.length === 1);
+		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 1 : 0);
+
+		// A follow-up replays the image from history with the same handling.
+		await session.runEphemeralTurn({
+			promptText: "And the border?",
+			history: [
+				{ role: "user", content: [{ type: "text", text: "What colour is this?" }, screenshot], timestamp: 1 },
+				createAssistantMessage("Red"),
+			],
+		});
+		expect(JSON.stringify(contexts[1]?.messages).includes("A red square.")).toBe(input.length === 1);
+		expect(describe).toHaveBeenCalledTimes(input.length === 1 ? 2 : 0);
+		expect(agent.state.messages).toEqual([]);
+	});
+
+	it("keeps a frozen side model's image descriptions in its checkpoint across follow-ups and restore", async () => {
+		const describe = vi
+			.spyOn(imageVisionFallback, "describeAttachedImagesForTextModel")
+			.mockResolvedValue([{ type: "text", text: "A red square." }]);
+		const sideModel = buildModel({
+			...getBundledModel("anthropic", "claude-sonnet-4-5"),
+			input: ["text"],
+		});
+		const contexts: Context[] = [];
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model: sideModel, systemPrompt: ["system prompt"], messages: [], tools: [] },
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+			sideStreamFn: (_model, context) => {
+				contexts.push({ ...context, messages: structuredClone(context.messages) });
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Red") }));
+				return stream;
+			},
+		});
+		sessions.push(session);
+		const conversation = session.createEphemeralConversation("side instructions");
+		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
+		// Main changes to a vision model while this thread retains its text-only model.
+		session.agent.setModel(getBundledModel("anthropic", "claude-sonnet-4-5"));
+		await conversation.prompt("What colour?", { images: [screenshot] });
+		const checkpoint = structuredClone(conversation.checkpoint());
+		expect(JSON.stringify(checkpoint.turns[0]?.prefixMessages)).toContain("A red square.");
+		await conversation.prompt("And the border?");
+		const restored = session.createEphemeralConversation("side instructions", checkpoint, sideModel);
+		await restored.prompt("What shape?");
+
+		expect(describe).toHaveBeenCalledTimes(1);
+		for (const context of contexts) {
+			expect(JSON.stringify(context.messages)).toContain("A red square.");
+			expect(
+				context.messages.flatMap(message =>
+					message.role === "user" && Array.isArray(message.content) ? message.content : [],
+				),
+			).toContainEqual(screenshot);
+		}
+		expect(session.agent.state.messages).toEqual([]);
+		expect(checkpoint.turns).toHaveLength(1);
 	});
 
 	it.each(["anthropic-messages", "ollama-chat", "openai-responses"])(

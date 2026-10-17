@@ -27,8 +27,12 @@ export class SplitLayout {
 	readonly #stack: SplitDir;
 	#lanes: number[][] = [];
 
-	/** The window shape is read once: Tern lists stale sizes and the shared cell size changes as panes connect. */
-	constructor(main: number, extent: Extent, cell: CellSize) {
+	/** Capture Main's cell scale before child TUIs overwrite the process-wide value. */
+	constructor(
+		main: number,
+		extent: Extent,
+		readonly cell: CellSize,
+	) {
 		this.#main = main;
 		const wide = extent.columns * cell.widthPx >= extent.rows * cell.heightPx;
 		this.#lane = wide ? "right" : "down";

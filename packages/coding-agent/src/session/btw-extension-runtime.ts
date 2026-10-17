@@ -9,9 +9,8 @@ import { ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/exte
 import type { ExtensionUIContext, PreparedExtension, ToolInfo } from "../extensibility/extensions/types";
 import { ExtensionToolWrapper, RegisteredToolAdapter } from "../extensibility/extensions/wrapper";
 import { applyToolProxy } from "../extensibility/tool-proxy";
-import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import { unwrapHashlineHeaderPath } from "../tools/plan-mode-guard";
-import { dispatchXdevTool, type XdevState, xdevDocs, xdevListing } from "../tools/xdev";
+import { dispatchXdevTool, resolveXdevTool, type XdevState, xdevDocs, xdevListing } from "../tools/xdev";
 import { SessionManager } from "./session-manager";
 
 const SIDE_NATIVE_TOOLS: Record<string, true> = {
@@ -41,7 +40,7 @@ function isolateModel(model: Model): Model {
 	return detached as unknown as Model;
 }
 
-/** An explicit, independent extension binding for a durable side conversation. */
+/** An explicit, independent extension binding and restricted tool set for a BTW conversation. */
 export class BtwExtensionRuntime {
 	readonly runner: ExtensionRunner;
 	readonly tools: AgentTool[];
@@ -52,6 +51,8 @@ export class BtwExtensionRuntime {
 	#eventTail = Promise.resolve();
 	#turnIndex = 0;
 	#disposed = false;
+	/** Whether a call to one of {@link tools} stays within BTW's read-only and send-to-main permissions. */
+	readonly permits: (tool: AgentTool, args: Record<string, unknown>) => boolean;
 
 	constructor(
 		runner: ExtensionRunner,
@@ -59,12 +60,14 @@ export class BtwExtensionRuntime {
 		tools: AgentTool[],
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
+		permits: (tool: AgentTool, args: Record<string, unknown>) => boolean,
 	) {
 		this.runner = runner;
 		this.tools = tools;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
 		this.#agent = agent;
+		this.permits = permits;
 		this.#unsubscribe = agent.subscribe(event => {
 			this.#eventTail = this.#eventTail
 				.then(() => this.#emitAgentEvent(event))
@@ -85,7 +88,7 @@ export class BtwExtensionRuntime {
 		cwd: string;
 		toolInfos: readonly ToolInfo[];
 		isReadOnlyToolCall: (tool: AgentTool, args: Record<string, unknown>) => boolean;
-		shareSummaryTool?: AgentTool;
+		sendToMainSessionTool?: AgentTool;
 		approveSummary?: (summary: string, signal?: AbortSignal) => Promise<boolean>;
 		approvalUI?: ExtensionUIContext;
 	}): Promise<BtwExtensionRuntime> {
@@ -119,6 +122,7 @@ export class BtwExtensionRuntime {
 			mountedNames: new Set(),
 			builtInNames: new Set(),
 			isActive: name => directNames.has(name) && xdev.tools.has(name),
+			resolve: name => resolveXdevTool(xdev, name),
 		};
 		const tools: AgentTool[] = [];
 		for (const mainTool of options.availableTools) {
@@ -152,20 +156,41 @@ export class BtwExtensionRuntime {
 			if (mountedNames.has(sideTool.name)) xdev.mountedNames.add(sideTool.name);
 			if (directNames.has(sideTool.name)) tools.push(sideTool);
 		}
+		const sendToMainSession = options.sendToMainSessionTool
+			? new ExtensionToolWrapper(
+					options.sendToMainSessionTool instanceof ExtensionToolWrapper
+						? options.sendToMainSessionTool.unwrap()
+						: options.sendToMainSessionTool,
+					runner,
+				)
+			: undefined;
+		if (sendToMainSession) {
+			xdev.tools.set(sendToMainSession.name, sendToMainSession);
+			xdev.builtInNames.add(sendToMainSession.name);
+			xdev.mountedNames.add(sendToMainSession.name);
+		}
+		let deviceWriteTool: AgentTool | undefined;
 		const mainWrite = options.mainTools.find(tool => tool.name === "write");
 		if (mainWrite && safeNames.has("write") && xdev.mountedNames.size > 0) {
 			const native = mainWrite instanceof ExtensionToolWrapper ? mainWrite.unwrap() : mainWrite;
 			if (!(native instanceof RegisteredToolAdapter) && !(native instanceof ExtensionToolWrapper)) {
+				// Main's write declaration stays untouched; only the execution is device-only.
 				const deviceWrite = {
-					description: writeDeviceOnlyDescription,
-					approval: (args: unknown) => {
-						const resolved = resolveReadOnlyDevice(args);
-						return resolved ? ("read" as const) : ("exec" as const);
-					},
+					name: native.name,
+					label: native.label,
+					description: native.description,
+					parameters: native.parameters,
+					session: { xdev },
+					// The send device runs its own mandatory approval inside the dispatch.
+					approval: (args: unknown) => (resolvePermittedDevice(args) ? ("read" as const) : ("exec" as const)),
 					execute: async (...args: Parameters<AgentTool["execute"]>) => {
-						const input = args[1];
-						const resolved = resolveReadOnlyDevice(input);
+						const resolved = resolvePermittedDevice(args[1]);
 						if (!resolved) throw new Error("Only read-only xd:// devices are available in BTW");
+						const sendsToMain = resolved.target === sendToMainSession;
+						if (sendsToMain && !runner.hasUI()) {
+							throw new Error(`${resolved.name} requires interactive user approval.`);
+						}
+						const context = args[4];
 						const { result, xdev: dispatch } = await dispatchXdevTool(
 							xdev,
 							resolved.name,
@@ -173,22 +198,26 @@ export class BtwExtensionRuntime {
 							args[0],
 							args[2],
 							args[3],
-							args[4] ? { ...args[4], xdevApproved: true } : undefined,
+							context && !sendsToMain ? { ...context, xdevApproved: true } : context,
 						);
 						return { ...result, details: { xdev: dispatch } };
 					},
 				};
 				applyToolProxy(native, deviceWrite);
-				tools.push(new ExtensionToolWrapper(deviceWrite as AgentTool, runner));
+				deviceWriteTool = new ExtensionToolWrapper(deviceWrite, runner);
+				tools.push(deviceWriteTool);
 			}
 		}
-		function resolveReadOnlyDevice(input: unknown): { name: string; content: string } | undefined {
+		function resolvePermittedDevice(
+			input: unknown,
+		): { name: string; content: string; target: AgentTool } | undefined {
 			if (!input || typeof input !== "object" || !("path" in input) || !("content" in input)) return undefined;
 			if (typeof input.path !== "string" || typeof input.content !== "string") return undefined;
 			const name = parseXdUrl(unwrapHashlineHeaderPath(input.path))?.name;
 			if (!name) return undefined;
 			const target = xdev.tools.get(name);
 			if (!target) return undefined;
+			if (target === sendToMainSession) return { name, content: input.content, target };
 			let decoded: unknown;
 			try {
 				decoded = JSON.parse(input.content);
@@ -197,20 +226,15 @@ export class BtwExtensionRuntime {
 			}
 			if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return undefined;
 			return options.isReadOnlyToolCall(target, decoded as Record<string, unknown>)
-				? { name, content: input.content }
+				? { name, content: input.content, target }
 				: undefined;
 		}
-		if (options.shareSummaryTool) {
-			const native =
-				options.shareSummaryTool instanceof ExtensionToolWrapper
-					? options.shareSummaryTool.unwrap()
-					: options.shareSummaryTool;
-			tools.push(new ExtensionToolWrapper(native, runner));
-		}
-		const side = new BtwExtensionRuntime(runner, agent, tools, sessionManager, queryRegistry);
+		const permits = (tool: AgentTool, args: Record<string, unknown>): boolean =>
+			tool === deviceWriteTool ? resolvePermittedDevice(args) !== undefined : options.isReadOnlyToolCall(tool, args);
+		const side = new BtwExtensionRuntime(runner, agent, tools, sessionManager, queryRegistry, permits);
 		const ui = options.approvalUI;
 		const sideUI =
-			options.shareSummaryTool && (ui || options.approveSummary)
+			sendToMainSession && (ui || options.approveSummary)
 				? (Object.create(runner.getUIContext()) as ExtensionUIContext)
 				: undefined;
 		if (sideUI) {
@@ -218,7 +242,7 @@ export class BtwExtensionRuntime {
 				const approval = dialogOptions?.toolApproval;
 				if (
 					!approval ||
-					approval.toolName !== options.shareSummaryTool?.name ||
+					approval.toolName !== sendToMainSession?.name ||
 					choices.length !== 2 ||
 					choices[0] !== "Approve" ||
 					choices[1] !== "Deny"

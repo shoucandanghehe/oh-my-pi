@@ -13,6 +13,7 @@ import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-
 import { type Component, type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 type FakeEditor = {
@@ -47,6 +48,7 @@ type FakeEditor = {
 	pendingImages: ImageContent[];
 	pendingImageLinks: (string | undefined)[];
 	clearDraft(historyText?: string): void;
+	restoreDetachedDraft: CustomEditor["restoreDetachedDraft"];
 };
 
 type InputListenerResult = { consume: boolean } | undefined;
@@ -132,6 +134,7 @@ async function createContext() {
 	const handlesBtwCopyKey = vi.fn(() => false);
 	const isGuidedGoalInterviewActive = vi.fn(() => false);
 	const editor: FakeEditor = {
+		restoreDetachedDraft: CustomEditor.prototype.restoreDetachedDraft,
 		setText(text: string) {
 			editorText = text;
 		},

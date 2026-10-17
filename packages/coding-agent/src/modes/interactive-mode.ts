@@ -266,7 +266,7 @@ import {
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
-import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
+import { setTranscriptActions } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -2459,6 +2459,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
 			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
+			transcriptActions: {
+				copy: copyToClipboard,
+				retry: lifecycle
+					? async () => {
+							const session = await lifecycle().ensureLive(agentId);
+							await session.retry();
+						}
+					: undefined,
+			},
 			requestRender: () => {
 				if (viewer) ui.requestComponentRender(viewer);
 				else ui.requestRender();

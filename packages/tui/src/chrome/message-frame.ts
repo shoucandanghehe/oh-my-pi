@@ -50,6 +50,8 @@ export interface FramedMessageOptions<M extends FramedMessage> {
 	readonly customRenderer?: FramedRenderer<M>;
 	/** Semantic role of the native card. */
 	readonly role: string;
+	/** Render markdown with the assistant prose face rather than the frame's monospace face. */
+	readonly prose?: boolean;
 }
 
 /**
@@ -117,7 +119,7 @@ export class FramedMessageComponent<M extends FramedMessage> extends Container {
 					collapsed: collapseAfterLines !== undefined ? !this.#expanded : undefined,
 					preview: collapseAfterLines !== undefined ? { lines: collapseAfterLines } : undefined,
 				},
-				[md(this.#messageText())],
+				[this.#options.prose ? col([md(this.#messageText())], { role: "omp.assistant" }) : md(this.#messageText())],
 			);
 		});
 	}
