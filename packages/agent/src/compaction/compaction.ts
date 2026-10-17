@@ -749,8 +749,8 @@ export interface SummaryOptions {
 	remotePromptCacheKey?: string;
 	/** Mutable provider state used to keep Codex compaction on the live session identity. */
 	providerSessionState?: Map<string, ProviderSessionState>;
-	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
-	preferWebsockets?: boolean;
+	/** Codex remote compaction WebSocket preference, including WS-only mode. */
+	preferWebsockets?: SimpleStreamOptions["preferWebsockets"];
 	/** Daybreak Blue request on Codex remote compaction; see `StreamOptions.codexAccessPrograms`. */
 	codexAccessPrograms?: boolean;
 	/** Classification shared by every provider request in this logical compaction. */
