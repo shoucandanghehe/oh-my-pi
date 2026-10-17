@@ -4,6 +4,7 @@
 
 ### Added
 
+- Agents, child conversations, and Codex streamed compaction now accept `preferWebsockets: "only"` to prevent SSE fallback after WebSocket failures.
 - Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
 - `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
 - `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.

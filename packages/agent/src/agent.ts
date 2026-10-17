@@ -152,8 +152,8 @@ export interface AgentOptions {
 	 */
 	kimiApiFormat?: "openai" | "anthropic";
 
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
-	preferWebsockets?: boolean;
+	/** Provider WebSocket preference, including WS-only mode. */
+	preferWebsockets?: SimpleStreamOptions["preferWebsockets"];
 
 	/**
 	 * Custom stream function (for proxy backends, etc.). Default uses streamSimple.
@@ -507,7 +507,7 @@ export class Agent {
 	#runningPrompt?: Promise<void>;
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
-	#preferWebsockets?: boolean;
+	#preferWebsockets?: SimpleStreamOptions["preferWebsockets"];
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	#speculativeToolExecution?: SpeculativeToolExecutionConfig;
 	#resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;

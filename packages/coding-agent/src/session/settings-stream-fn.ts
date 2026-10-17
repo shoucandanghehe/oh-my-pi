@@ -38,9 +38,9 @@ import {
 } from "./settings";
 
 /** Map `providers.openaiWebsockets` to the provider `preferWebsockets` hint (`auto` → model default). */
-export function resolveOpenAIWebsocketPreference(settings: Settings): boolean | undefined {
+export function resolveOpenAIWebsocketPreference(settings: Settings): SimpleStreamOptions["preferWebsockets"] {
 	const setting = cfgProvidersOpenaiWebsockets.get(settings);
-	return setting === "on" ? true : setting === "off" ? false : undefined;
+	return setting === "only" ? "only" : setting === "on" ? true : setting === "off" ? false : undefined;
 }
 
 function timeoutSecondsToMs(value: number): number | undefined {

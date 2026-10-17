@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `providers.openaiWebsockets: only` to keep Codex turns and streamed compaction on WebSockets without falling back to full-context SSE requests.
 - `/sleep [authorization]` keeps unattended runs moving: `ask`, approval prompts, and other dialogs fail at once instead of waiting for you, the agent decides within what you authorized or marks the step blocked, and long `bash`/`eval` calls move to the background instead of holding the turn. `/sleep off` ends it.
 
 ### Changed

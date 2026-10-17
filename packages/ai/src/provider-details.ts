@@ -1,5 +1,5 @@
 import { getOpenAICodexTransportDetails, type OpenAICodexTransportDetails } from "./providers/openai-codex-responses";
-import type { Api, Model, Provider, ProviderSessionState } from "./types";
+import type { Api, Model, OpenAIWebSocketPreference, Provider, ProviderSessionState } from "./types";
 
 export interface ProviderDetailField {
 	label: string;
@@ -22,7 +22,7 @@ export interface ProviderDetailsContext {
 	 * Rendered as a `Source` field; omitted when undefined.
 	 */
 	credentialSource?: string;
-	preferWebsockets?: boolean;
+	preferWebsockets?: OpenAIWebSocketPreference;
 	providerSessionState?: Map<string, ProviderSessionState>;
 }
 

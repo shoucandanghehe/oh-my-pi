@@ -3578,6 +3578,255 @@ describe("openai-codex streaming", () => {
 		expect(fallbackDetails.fallbackCount).toBe(1);
 	});
 
+	it.each(["handshake", "stream", "connection-limit", "reopen"] as const)(
+		"WS-only surfaces exhausted %s retries and resumes incremental turns on the next request",
+		async failurePhase => {
+			using tempDir = TempDir.createSync("@pi-codex-ws-only-");
+			setAgentDir(tempDir.path());
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const fetchMock = vi.fn<FetchImpl>(() => {
+				throw new Error("WS-only must not send an SSE request");
+			});
+			let failing = true;
+			let connections = 0;
+			const sentRequests: Array<Record<string, unknown>> = [];
+			class RecoveringWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					connections += 1;
+					if (failing && (failurePhase === "handshake" || (failurePhase === "reopen" && connections > 1))) {
+						queueMicrotask(() => {
+							this.readyState = MockWebSocket.CLOSED;
+							this.emit("error", new Event("error"));
+						});
+					} else {
+						this.scheduleOpen();
+					}
+				}
+
+				override send(data: string): void {
+					sentRequests.push(requireRecord(JSON.parse(data), "request"));
+					if (failing) {
+						if (failurePhase === "connection-limit") {
+							this.sendJson({
+								type: "error",
+								code: "websocket_connection_limit_reached",
+								message: "connection limit reached",
+							});
+						} else {
+							this.readyState = MockWebSocket.CLOSED;
+							this.emit("close", { code: 1006 } as CloseEvent);
+						}
+						return;
+					}
+					this.emitCodexResponse({
+						messageId: `msg_${sentRequests.length}`,
+						responseId: `resp_${sentRequests.length}`,
+						text: "Recovered",
+						terminalType: "response.completed",
+					});
+				}
+			}
+			global.WebSocket = RecoveringWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel();
+			const context = createCodexTestContext();
+			const options = {
+				apiKey: createCodexTestToken(),
+				sessionId: `ws-only-${failurePhase}`,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+				preferWebsockets: "only" as const,
+				fetch: fetchMock,
+			};
+			try {
+				const failed = await streamOpenAICodexResponses(model, context, options).result();
+				expect(failed.stopReason).toBe("error");
+				expect(failed.errorMessage).toContain(
+					failurePhase === "connection-limit" ? "connection limit reached" : "Codex websocket transport error",
+				);
+				expect(connections).toBe(failurePhase === "reopen" ? 7 : 6);
+				expect(getOpenAICodexTransportDetails(model, options)).toMatchObject({
+					websocketDisabled: false,
+					fallbackCount: 0,
+				});
+				expect(fetchMock).not.toHaveBeenCalled();
+
+				failing = false;
+				const recovered = await streamOpenAICodexResponses(model, context, options).result();
+				expect(recovered.stopReason).toBe("stop");
+				expect(recovered.content).toEqual([expect.objectContaining({ type: "text", text: "Recovered" })]);
+				expect(sentRequests.at(-1)?.previous_response_id).toBeUndefined();
+				const responseId = `resp_${sentRequests.length}`;
+				const followup = await streamOpenAICodexResponses(
+					model,
+					{
+						...context,
+						messages: [
+							...context.messages,
+							recovered,
+							{ role: "user", content: "Next question", timestamp: Date.now() },
+						],
+					},
+					options,
+				).result();
+				expect(followup.stopReason).toBe("stop");
+				expect(sentRequests.at(-1)?.previous_response_id).toBe(responseId);
+				expect(sentRequests.at(-1)?.input).toHaveLength(1);
+				expect(JSON.stringify(sentRequests.at(-1)?.input)).toContain("Next question");
+				expect(JSON.stringify(sentRequests.at(-1)?.input)).not.toContain("Say hello");
+				expect(fetchMock).not.toHaveBeenCalled();
+			} finally {
+				for (const state of options.providerSessionState.values()) state.close();
+			}
+		},
+	);
+
+	it.each(["close", "error", "connection-limit"] as const)(
+		"WS-only reconnects after %s with partial output and restores delta-only input",
+		async failure => {
+			using tempDir = TempDir.createSync("@pi-codex-ws-only-replay-");
+			setAgentDir(tempDir.path());
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			const fetchMock = vi.fn<FetchImpl>(() => {
+				throw new Error("WS-only must not replay over SSE");
+			});
+			const sentRequests: Array<Record<string, unknown>> = [];
+			let connections = 0;
+			class ReplayingWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					connections += 1;
+					this.scheduleOpen();
+				}
+
+				override send(data: string): void {
+					sentRequests.push(requireRecord(JSON.parse(data), "request"));
+					if (sentRequests.length === 2) {
+						this.sendJson({
+							type: "response.output_item.added",
+							item: {
+								type: "message",
+								id: "msg_partial",
+								role: "assistant",
+								status: "in_progress",
+								content: [],
+							},
+						});
+						this.sendJson({ type: "response.content_part.added", part: { type: "output_text", text: "" } });
+						this.sendJson({ type: "response.output_text.delta", delta: "Abandoned partial output" });
+						if (failure === "connection-limit") {
+							this.sendJson({
+								type: "error",
+								code: "websocket_connection_limit_reached",
+								message: "connection limit reached",
+							});
+						} else {
+							this.readyState = MockWebSocket.CLOSED;
+							this.emit(failure, failure === "close" ? ({ code: 1006 } as CloseEvent) : new Event("error"));
+						}
+						return;
+					}
+					this.emitCodexResponse({
+						messageId: `msg_${sentRequests.length}`,
+						responseId: `resp_${sentRequests.length}`,
+						text: `Answer ${sentRequests.length}`,
+						terminalType: "response.completed",
+					});
+				}
+			}
+			global.WebSocket = ReplayingWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel();
+			const context = createCodexTestContext();
+			const options = {
+				apiKey: createCodexTestToken(),
+				sessionId: `ws-only-partial-${failure}`,
+				providerSessionState: new Map<string, ProviderSessionState>(),
+				preferWebsockets: "only" as const,
+				fetch: fetchMock,
+			};
+			try {
+				const first = await streamOpenAICodexResponses(model, context, options).result();
+				expect(first.stopReason).toBe("stop");
+				context.messages.push(first, { role: "user", content: "Second question", timestamp: Date.now() });
+				const recovered = await streamOpenAICodexResponses(model, context, options).result();
+				expect(recovered.stopReason).toBe("stop");
+				expect(recovered.content).toEqual([expect.objectContaining({ type: "text", text: "Answer 3" })]);
+				expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+				expect(sentRequests[2]?.previous_response_id).toBeUndefined();
+				expect(JSON.stringify(sentRequests[2]?.input)).toContain("Say hello");
+				expect(JSON.stringify(sentRequests[2]?.input)).toContain("Second question");
+
+				context.messages.push(recovered, { role: "user", content: "Third question", timestamp: Date.now() });
+				const third = await streamOpenAICodexResponses(model, context, options).result();
+				expect(third.stopReason).toBe("stop");
+				expect(sentRequests[3]?.previous_response_id).toBe("resp_3");
+				expect(sentRequests[3]?.input).toHaveLength(1);
+				expect(JSON.stringify(sentRequests[3]?.input)).toContain("Third question");
+				expect(JSON.stringify(sentRequests[3]?.input)).not.toContain("Say hello");
+				expect(connections).toBe(2);
+				expect(fetchMock).not.toHaveBeenCalled();
+			} finally {
+				for (const state of options.providerSessionState.values()) state.close();
+			}
+		},
+	);
+
+	it("WS-only surfaces compaction transport failure without disabling later websocket requests", async () => {
+		using tempDir = TempDir.createSync("@pi-codex-ws-only-compaction-");
+		setAgentDir(tempDir.path());
+		const fetchMock = vi.fn<FetchImpl>(() => {
+			throw new Error("WS-only compaction must not fall back to SSE");
+		});
+		let failing = true;
+		class ClosedCompactionWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(): void {
+				if (failing) {
+					this.readyState = MockWebSocket.CLOSED;
+					this.emit("close", { code: 1006 } as CloseEvent);
+				} else {
+					this.emitCodexResponse({
+						messageId: "msg_after_compaction",
+						responseId: "resp_after_compaction",
+						text: "Recovered",
+					});
+				}
+			}
+		}
+		global.WebSocket = ClosedCompactionWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel();
+		const options = {
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-only-compaction",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			preferWebsockets: "only" as const,
+			fetch: fetchMock,
+		};
+		try {
+			const events = await openCodexCompactionEventStream(
+				model,
+				{ model: model.id, input: [{ type: "compaction_trigger" }] },
+				options,
+			);
+			await expect(events.next()).rejects.toThrow("websocket closed (1006)");
+			expect(fetchMock).not.toHaveBeenCalled();
+			expect(getOpenAICodexTransportDetails(model, options)).toMatchObject({
+				websocketDisabled: false,
+				fallbackCount: 0,
+			});
+			failing = false;
+			const recovered = await streamOpenAICodexResponses(model, createCodexTestContext(), options).result();
+			expect(recovered.stopReason).toBe("stop");
+			expect(recovered.content).toEqual([expect.objectContaining({ type: "text", text: "Recovered" })]);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			for (const state of options.providerSessionState.values()) state.close();
+		}
+	});
+
 	it.each(["during handshake", "before request", "during request"] as const)(
 		"preserves timeout classification when compaction is aborted %s",
 		async phase => {

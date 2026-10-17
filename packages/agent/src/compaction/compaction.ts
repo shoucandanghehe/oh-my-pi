@@ -732,8 +732,8 @@ export interface SummaryOptions {
 	promptCacheKey?: string;
 	/** Mutable provider state used to keep Codex compaction on the live session identity. */
 	providerSessionState?: Map<string, ProviderSessionState>;
-	/** Whether Codex remote compaction should prefer the provider WebSocket transport. */
-	preferWebsockets?: boolean;
+	/** Codex remote compaction WebSocket preference, including WS-only mode. */
+	preferWebsockets?: SimpleStreamOptions["preferWebsockets"];
 	/** Classification shared by every provider request in this logical compaction. */
 	codexCompaction?: CodexCompactionContext;
 	/** Provider-visible tools for remote compaction transports that replay native tool history. */

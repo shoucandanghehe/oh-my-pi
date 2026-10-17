@@ -61,6 +61,7 @@ import type {
 	Message,
 	Model,
 	ProviderSessionState,
+	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -419,7 +420,7 @@ export interface SessionMaintenanceHost {
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
 	/** Live `providers.openaiWebsockets` hint for provider calls. */
-	preferWebsockets(): boolean | undefined;
+	preferWebsockets(): SimpleStreamOptions["preferWebsockets"];
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
