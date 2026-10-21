@@ -7,6 +7,7 @@ import { TspTestTerminal, tspEvent } from "../../../tui/test/native/tsp-harness"
 
 export class RelayTestTerminal extends TspTestTerminal {
 	#disconnect: (() => void) | undefined;
+	closed = false;
 
 	override start(
 		input: (data: string) => void,
@@ -27,6 +28,10 @@ export class RelayTestTerminal extends TspTestTerminal {
 	}
 
 	closeInput(): void {
+		if (this.closed) return;
+		this.closed = true;
+		this.docs.clear();
+		this.surface = undefined;
 		this.#disconnect?.();
 	}
 }
@@ -57,16 +62,20 @@ export class NativePaneHarness {
 				},
 				focused: async () => this.focused,
 				splitPanes: async () => [
-					{ block: 1, columns: 200, rows: 60 },
-					...[...this.terminals].map(([block, terminal]) => ({
-						block,
-						columns: terminal.columns,
-						rows: terminal.rows,
-					})),
+					{ block: 1, columns: 200, rows: 60, shown: true },
+					...[...this.terminals]
+						.filter(([, terminal]) => !terminal.closed)
+						.map(([block, terminal]) => ({
+							block,
+							columns: terminal.columns,
+							rows: terminal.rows,
+							shown: true,
+						})),
 				],
 				close: async block => {
 					this.terminals.get(block)?.closeInput();
 				},
+				balance: async () => {},
 			},
 			1,
 		);

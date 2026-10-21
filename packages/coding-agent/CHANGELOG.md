@@ -11,6 +11,8 @@
 
 ### Fixed
 
+- Native workspace panes now keep the correct split direction when reopened in background tabs or after resizing Main.
+- Fixed native workspace panes failing to rebalance in long-running Tern sessions; background tabs rebalance when selected.
 - Subagent transcript actions no longer operate Main: copy and retry stay in the child pane, while unsupported rewind and model-switch controls remain hidden.
 - Tern now supports durable BTW threads with native thread selection, drafts, follow-ups, copy, deletion, and promotion.
 - Tern can now show BTW and agent transcripts in native split panes beside Main, with shared session state and pane-local input.
@@ -39,6 +41,7 @@
 - Terminal-owned image paste now remains available when OMP adopts its startup composer ([#15369](https://github.com/can1357/oh-my-pi/pull/15369) by [@LoneExile](https://github.com/LoneExile)).
 - Native agent and BTW split panes can now automatically even out without changing focus using the bundled `omp-workspace` Tern window plugin.
 - Fixed native workspace split balancing on Tern 0.9.4 without moving focus; background tabs rebalance when shown.
+- Native agent and BTW panes now keep automatic split balancing across concurrent opens, closes, and background tabs.
 - Native agent panes in Tern now tile beside Main as a grid that follows the window's shape instead of a row of narrow columns.
 - Resumed sessions in Tern no longer lose their transcript when native rendering activates during history replay.
 - Fixed `find` exhausting its deadline on a rate-limited judge despite a healthy fallback; later batches skip it until the earliest credential reset ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
