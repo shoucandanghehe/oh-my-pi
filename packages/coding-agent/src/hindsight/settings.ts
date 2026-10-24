@@ -269,6 +269,12 @@ export const cfgHindsightMentalModelAutoSeed = register({
 	},
 });
 
+export const cfgHindsightMentalModelMaxTokens = register({
+	id: "hindsight.mentalModelMaxTokens",
+	type: "number",
+	default: undefined,
+});
+
 export const cfgHindsightMentalModelMaxRenderChars = register({
 	id: "hindsight.mentalModelMaxRenderChars",
 	type: "number",

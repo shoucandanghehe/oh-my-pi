@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { TypingInterruptedError, typeIntoElement } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
+import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import {
 	formatSelectorMatchHint,
@@ -6,6 +8,7 @@ import {
 	toActionableHandle,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ElementHandle } from "puppeteer-core";
+import { chromiumAvailable } from "./chromium-probe";
 
 // Regression coverage for the invisible-output failure mode: `console.log` and
 // `print` reach the runtime as `onText` chunks, which the browser
@@ -187,7 +190,11 @@ describe("browser handle enrichment — guarded actions", () => {
 
 		await firstStarted.promise;
 		deadline.abort(new Error("action deadline"));
-		await expect(action).rejects.toThrow("action deadline");
+		await expect(action).rejects.toMatchObject({
+			constructor: TypingInterruptedError,
+			progress: expect.stringMatching(/0 of 3.*completed keyboard calls.*in-flight character/),
+			cause: deadline.signal.reason,
+		});
 		releaseFirst.resolve();
 		await firstFinished.promise;
 
@@ -322,3 +329,63 @@ describe("browser selector timeout hint", () => {
 		expect(hint).toContain("hidden or covered");
 	});
 });
+
+it.skipIf(!(await chromiumAvailable()))(
+	"reports zero completed characters when the first real browser key is still in flight and sends no later keys",
+	async () => {
+		const browserHandle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browserHandle)) throw new Error("Expected a Puppeteer browser");
+		const page = await browserHandle.browser.newPage();
+		const firstDelivered = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const firstFinished = Promise.withResolvers<void>();
+		const originalType = page.keyboard.type.bind(page.keyboard);
+		const dispatched: string[] = [];
+		page.keyboard.type = async (text, options) => {
+			dispatched.push(text);
+			await originalType(text, options);
+			firstDelivered.resolve();
+			await releaseFirst.promise;
+			firstFinished.resolve();
+		};
+		try {
+			await page.setContent(`<textarea id="area" oninput="this.value = this.value.toUpperCase()"></textarea>`);
+			const handle = await page.$("#area");
+			if (!handle) throw new Error("Expected #area");
+			const deadline = new AbortController();
+			const action = typeIntoElement(handle, "abc", deadline.signal);
+			await firstDelivered.promise;
+			deadline.abort(new Error("action deadline"));
+			await expect(action).rejects.toMatchObject({
+				constructor: TypingInterruptedError,
+				progress: expect.stringMatching(/0 of 3.*completed keyboard calls.*in-flight character/),
+			});
+			// Completed keyboard calls are not the final field value: the in-flight key already arrived,
+			// and the page's input handler transformed it. Releasing that call must not dispatch b or c.
+			expect(
+				await handle.evaluate(el => {
+					// Puppeteer's callback types cannot name DOM globals in this test environment.
+					const field = el as unknown as { value: string };
+					return field.value;
+				}),
+			).toBe("A");
+			releaseFirst.resolve();
+			await firstFinished.promise;
+			// A real CDP round trip lets any incorrectly resumed typing continuation dispatch its next key.
+			expect(
+				await handle.evaluate(el => {
+					const field = el as unknown as { value: string };
+					return field.value;
+				}),
+			).toBe("A");
+			expect(dispatched).toEqual(["a"]);
+			await handle.dispose();
+		} finally {
+			releaseFirst.resolve();
+			page.keyboard.type = originalType;
+			await page.close().catch(() => undefined);
+			if (browserHandle.browser.connected) await releaseBrowser(browserHandle, { kill: true });
+		}
+	},
+	30_000,
+);

@@ -45,6 +45,7 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		retainTimeoutMs: 60_000,
 		mentalModelsEnabled: true,
 		mentalModelAutoSeed: false,
+		mentalModelMaxTokens: undefined,
 		mentalModelMaxRenderChars: 16_000,
 		...overrides,
 	};

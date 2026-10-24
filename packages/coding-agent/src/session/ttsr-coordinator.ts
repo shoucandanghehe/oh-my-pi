@@ -25,6 +25,7 @@ import {
 	type TtsrOutput,
 } from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
+import ttsrProseReminderTemplate from "../prompts/system/ttsr-prose-reminder.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
 import type { AgentSessionEvent } from "./agent-session-events";
@@ -354,13 +355,13 @@ export class TtsrCoordinator {
 		return `TTSR matched ${label}: ${rules.map(rule => rule.name).join(", ")}`;
 	}
 
-	#getInjectionContent(): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
+	#getInjectionContent(template: string): { content: string; rules: Rule[]; matched: Record<string, string> } | undefined {
 		if (this.#pendingInjections.length === 0) return undefined;
 		const rules = this.#pendingInjections;
 		const matched = this.#pendingExcerpts;
 		const content = rules
 			.map(rule =>
-				prompt.render(ttsrInterruptTemplate, {
+				prompt.render(template, {
 					name: rule.name,
 					path: this.#displayRulePath(rule.path),
 					matched:
@@ -514,7 +515,7 @@ export class TtsrCoordinator {
 			this.#pendingExcerpts = {};
 			return;
 		}
-		const injection = this.#getInjectionContent();
+		const injection = this.#getInjectionContent(ttsrProseReminderTemplate);
 		if (!injection) return;
 		const ruleNames = injection.rules.map(rule => rule.name);
 		const deliveryId = this.#reserveDeferredInjection(injection.rules);
@@ -722,7 +723,7 @@ export class TtsrCoordinator {
 				if (this.#manager?.getSettings().contextMode === "discard") {
 					this.#host.agent.replaceMessages(this.#host.agent.state.messages.slice(0, targetAssistantIndex));
 				}
-				const injection = this.#getInjectionContent();
+				const injection = this.#getInjectionContent(ttsrInterruptTemplate);
 				if (injection) {
 					const details = { rules: injection.rules.map(rule => rule.name), matched: injection.matched };
 					this.#host.agent.appendMessage({

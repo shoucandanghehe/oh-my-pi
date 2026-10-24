@@ -461,7 +461,7 @@ async function focusTextEntryTarget(
  * Puppeteer's `keyboard.type()` cannot be cancelled, so awaiting it whole under a deadline would leave
  * the rest of the text typing behind a rejected call.
  *
- * @throws TypingInterruptedError when `signal` aborts after at least one key was sent.
+ * @throws TypingInterruptedError when `signal` aborts after a key dispatch began, even if none completed.
  */
 async function typeKeys(
 	page: Page,
@@ -471,16 +471,23 @@ async function typeKeys(
 ): Promise<void> {
 	const characters = Array.from(text);
 	let typed = 0;
+	let inFlight = false;
 	try {
 		for (const character of characters) {
 			throwIfAborted(signal);
-			await untilAborted(signal, () => page.keyboard.type(character, options));
+			await untilAborted(signal, () => {
+				inFlight = true;
+				return page.keyboard.type(character, options);
+			});
+			inFlight = false;
 			typed++;
 		}
 	} catch (error) {
-		if (signal?.aborted && typed > 0) {
+		if (signal?.aborted && (typed > 0 || inFlight)) {
 			throw new TypingInterruptedError(
-				`typing stopped after ${typed} of ${characters.length} characters (the field keeps what was typed)`,
+				`typing stopped after ${typed} of ${characters.length} characters completed` +
+					" (completed keyboard calls, not the final field value" +
+					(inFlight ? "; one in-flight character may already have arrived or may still arrive)" : ")"),
 				{ cause: signal.reason },
 			);
 		}

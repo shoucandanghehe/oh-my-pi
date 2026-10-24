@@ -47,6 +47,7 @@ describe("handleReadTheDocs versioned source guard", () => {
 		expect(result).not.toBeNull();
 		expect(result?.method).toBe("readthedocs");
 		expect(result?.contentType).toBe("text/html");
+		expect(result?.finalUrl).toBe(PAGE_URL);
 		expect(result?.content).toContain("Versioned v3.18.5");
 		expect(result?.content).not.toContain("MAIN BRANCH RST SOURCE");
 		expect(result?.notes.join("\n")).not.toContain("Fetched raw source");

@@ -463,6 +463,7 @@ describe("Hindsight recall across a resume", () => {
 		retainTimeoutMs: 60_000,
 		mentalModelsEnabled: false,
 		mentalModelAutoSeed: false,
+		mentalModelMaxTokens: undefined,
 		mentalModelMaxRenderChars: 16_000,
 	};
 
