@@ -1,8 +1,8 @@
 <setup>
-Reusable setup: write a script, run `%load <path>` in a standalone `code` cell. Quoted paths and `local://` work; source is not echoed. Definitions persist; edited files require another `%load`.
+Reusable setup: write a script, run `%load <path>` in a standalone `code` cell. Quoted paths and `local://` work; source is not echoed. Definitions persist in retained kernels; edited files require another `%load`.
 {{#if py}}Missing Python dependency: `%pip install <distribution>` (e.g. `PIL` comes from `pillow`).{{/if}}
 {{#if js}}Missing JS dependency: `%bun add <pkg>` installs into a managed per-project environment; `%environment project` selects project dependencies.{{#unless autoProvision}} Automatic provisioning disabled: use an existing environment or `%environment project`.{{/unless}}{{/if}}
-Percent commands are standalone cells. Install preserves kernel state.
+Percent commands are standalone cells. Install preserves retained-kernel state.
 </setup>
 ```
 budget → {{#if py}}budget.total, budget.spent(), budget.remaining(){{/if}}{{#ifAll py js}}; JS: {{/ifAll}}{{#if js}}await budget.total(), await budget.spent(), await budget.remaining(){{/if}}. Ceiling +Nk advisory; +Nk! hard.

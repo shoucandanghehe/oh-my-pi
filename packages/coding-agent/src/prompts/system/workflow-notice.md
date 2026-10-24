@@ -108,7 +108,7 @@ Scale workers and review depth to the request, risk, and remaining uncertainty.
 </patterns>
 
 <execution>
-- Multi-phase work: capture in `todo`.
+- Multi-phase work: capture in `todo` when available; otherwise keep a concise execution plan.
 - Each pool item: self-contained target, change/read scope, acceptance.
 - Same-file mutation? One worker owns it; serialize shared boundaries.
 - Evaluate pool output against source evidence and run the relevant integrated verification. Assign verification ownership to avoid shared-tree races or redundant checks.

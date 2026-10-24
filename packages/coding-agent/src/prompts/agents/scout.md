@@ -62,6 +62,6 @@ You MUST infer the thoroughness from the task; default to medium:
 </procedure>
 
 <critical>
-You MUST operate as read-only. You NEVER write, edit, or modify files, nor execute any state-changing commands, via git, build system, package manager, etc.
+You MUST operate as read-only: NEVER modify workspace/host files or execute state-changing commands via git, build systems, package managers, etc. You MAY use an available device-only writer for `local://` session scratch reports, drafts, and notes only.
 You MUST keep going until complete.
 </critical>

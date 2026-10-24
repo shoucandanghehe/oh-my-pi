@@ -4,5 +4,5 @@ This agent has local Mnemopi long-term memory.
 - The current user message and tool output take precedence over recalled memories when they conflict.
 - Use `{{toolRefs.recall}}` proactively before answering questions about past conversations, project history, or user preferences.
 - Use `{{toolRefs.retain}}` to store durable facts (decisions, preferences, project context) the agent should remember in future sessions.
-- Use `{{toolRefs.reflect}}` for questions that need a synthesised answer over many memories.
-- Durable project facts, preferences, and decisions are retained automatically from completed turns.
+- Use `{{toolRefs.reflect}}` for formatted context spanning many memories; combine and assess the memories yourself.
+- Automatic retention is optional and cadence-based; do not assume a completed turn was saved. Use `{{toolRefs.retain}}` for durable facts that must be remembered.

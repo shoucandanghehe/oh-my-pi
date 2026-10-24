@@ -386,7 +386,10 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				displayContent: displayLines.join("\n"),
 			};
 			if (result.limitReached) {
-				outputLines.push("", "Result limit reached; narrow path or use skip to page through results.");
+				outputLines.push(
+					"",
+					`Result limit reached (${DEFAULT_AST_LIMIT} matches per page); narrow \`path\` or use \`skip\` to read later matches.`,
+				);
 			}
 			if (cappedParseErrors.length) {
 				outputLines.push("", ...formatParseErrors(cappedParseErrors, parseErrorsTotal));

@@ -10,7 +10,7 @@ After each successful state-changing op: if nothing is `in_progress`, the earlie
 |`init`|`items: string[]`|Flattened single-phase init|
 |`start`|`task`|Mark in progress|
 |`done`|`task` or `phase`|Mark completed; `phase` overwrites every task in it, including `abandoned` and `blocked`|
-|`drop`|`task` or `phase`|Mark abandoned; `phase` overwrites every task in it, including `completed`. Progress `done` counts include abandoned tasks; the task list marks each one `(dropped)`|
+|`drop`|`task` or `phase`|Mark abandoned; `phase` overwrites every task in it, including `completed`. Progress `closed` counts include abandoned tasks; the task list marks each one `(dropped)`|
 |`block`|`task` or `phase`; optional `reason`|Mark blocked: awaiting external input; never auto-promotes; excluded from stop-time incomplete-todo reminder|
 |`unblock`|`task` or `phase`|Blocked task → `pending`|
 |`rm`|optional `task` or `phase`|Remove task/phase; omit both → clear|

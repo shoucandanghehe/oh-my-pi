@@ -8,4 +8,4 @@ Structural AST-aware rewrites via ast-grep. Use for codemods where text replace 
 - TS: tolerate annotations — `async function $NAME($$$ARGS): $_ { $$$BODY }`. Delete with empty `out`: `{"pat":"console.log($$$)","out":""}`.
 - 1:1 substitution — no splitting/merging captures.
 - Matches are STAGED as a proposal, not applied: finalize by writing a one-sentence reason to `xd://resolve` (apply) or `xd://reject` (discard).
-- Parse issues → malformed rewrite, not clean no-op. For one-off text edits, prefer the Edit tool.
+- Parse issues may identify malformed patterns, incompatible file languages, or invalid source syntax. Syntax-error files are skipped; other files continue. Inspect diagnostics before changing the pattern. For one-off text edits, prefer the Edit tool.

@@ -469,7 +469,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const content = typeof message.content === "string" ? message.content : "";
 		expect(message?.customType).toBe("goal-mode-context");
 		expect(content).toContain("<todo_context>");
-		expect(content).toContain("Overall: 1/3 done, 2 open.");
+		expect(content).toContain("Overall: 1/3 closed (completed or abandoned), 2 open.");
 		expect(content).toContain("- Planning &lt;/todo_context&gt; &amp; prep");
 		expect(content).toContain("- [completed] Identify gaps");
 		expect(content).toContain("- [in_progress] Choose &lt;next&gt; &amp; slice &lt;/todo_context&gt;");
