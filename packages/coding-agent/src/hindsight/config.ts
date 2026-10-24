@@ -18,6 +18,7 @@ import {
 	cfgHindsightGlobalScope,
 	cfgHindsightMentalModelAutoSeed,
 	cfgHindsightMentalModelMaxRenderChars,
+	cfgHindsightMentalModelMaxTokens,
 	cfgHindsightMentalModelsEnabled,
 	cfgHindsightRecallBudget,
 	cfgHindsightRecallContextTurns,
@@ -78,6 +79,8 @@ export interface HindsightConfig {
 
 	mentalModelsEnabled: boolean;
 	mentalModelAutoSeed: boolean;
+	/** Unset uses the generation budget from each built-in seed. */
+	mentalModelMaxTokens: number | undefined;
 	mentalModelMaxRenderChars: number;
 }
 
@@ -125,6 +128,7 @@ export function loadHindsightConfig(settings: Settings): HindsightConfig {
 
 		mentalModelsEnabled: cfgHindsightMentalModelsEnabled.get(settings),
 		mentalModelAutoSeed: cfgHindsightMentalModelAutoSeed.get(settings),
+		mentalModelMaxTokens: cfgHindsightMentalModelMaxTokens.get(settings),
 		mentalModelMaxRenderChars: cfgHindsightMentalModelMaxRenderChars.get(settings),
 	};
 

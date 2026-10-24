@@ -1338,6 +1338,7 @@ export class CommandController {
 					recallTagsMatch: state.recallTagsMatch,
 				},
 				config.scoping,
+				config.mentalModelMaxTokens,
 			);
 			if (seeds.length === 0) {
 				this.ctx.showStatus(`No built-in seeds apply to scoping=${config.scoping}.`);

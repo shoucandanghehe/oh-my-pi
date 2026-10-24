@@ -50,7 +50,7 @@ fn open(url: &Url, _: &Context) -> Option<Action> {
 
 		let page = final_url.path().to_owned();
 		let Some(source) = edit_source(&nodes, &page, &mut notes) else {
-			return finish(content, notes);
+			return finish(content, notes, &final_url);
 		};
 		fetch(Fetch::get(source.clone()), move |reply, _| {
 			match reply
@@ -59,25 +59,25 @@ fn open(url: &Url, _: &Context) -> Option<Action> {
 			{
 				Some(text) => {
 					notes.push(format!("Fetched raw source from {source}"));
-					let mut done = Done::new(text, METHOD);
+					let mut done = Done::new(text, METHOD).url(final_url.as_str());
 					for note in notes {
 						done = done.note(note);
 					}
 					done.finish()
 				},
-				None => finish(content, notes),
+				None => finish(content, notes, &final_url),
 			}
 		})
 	})
 }
 
 /// Finish on the extracted content, or say it could not be extracted.
-fn finish(mut content: String, mut notes: Vec<String>) -> Option<Action> {
+fn finish(mut content: String, mut notes: Vec<String>, url: &Url) -> Option<Action> {
 	if content.is_empty() {
 		"No content extracted from Read the Docs page".clone_into(&mut content);
 		notes.push("Failed to extract content".to_owned());
 	}
-	let mut done = Done::new(content, METHOD);
+	let mut done = Done::new(content, METHOD).url(url.as_str());
 	for note in notes {
 		done = done.note(note);
 	}
@@ -427,6 +427,7 @@ mod tests {
 		.unwrap();
 		assert_eq!(requests, 1);
 		assert_eq!(done.method, "readthedocs");
+		assert_eq!(done.url.as_deref(), Some(PAGE));
 		assert!(done.markdown.contains("Versioned v3.18.5"));
 		assert!(!done.markdown.contains("MAIN BRANCH RST SOURCE"));
 		assert!(!done.notes.join("\n").contains("Fetched raw source"));
