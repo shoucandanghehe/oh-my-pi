@@ -11,6 +11,17 @@
 
 ### Fixed
 
+- ReadTheDocs reads preserve the requested documentation version instead of substituting development-branch source ([#16835](https://github.com/can1357/oh-my-pi/issues/16835)).
+- Non-interrupting TTSR prose reminders no longer claim that completed output was interrupted ([#15861](https://github.com/can1357/oh-my-pi/issues/15861)).
+- New Hindsight mental models use a 4096-token generation budget, configurable with `hindsight.mentalModelMaxTokens`, without changing existing models ([#6300](https://github.com/can1357/oh-my-pi/issues/6300)).
+- URL `read` line selectors now match the body line numbers reported by `grep` ([#16877](https://github.com/can1357/oh-my-pi/issues/16877)).
+- Web reads no longer replace valid HTML with guessed Markdown URLs, and alternate content reports its actual source URL ([#16834](https://github.com/can1357/oh-my-pi/issues/16834)).
+- Deleted open files no longer remain in LSP references or rename previews ([#16880](https://github.com/can1357/oh-my-pi/issues/16880)).
+- LSP diagnostics now reflect external changes to already-open dependencies, including diagnostics after Write/Edit ([#16836](https://github.com/can1357/oh-my-pi/issues/16836)).
+- Browser fill/type stops continued typing after a timeout and reports partial progress instead of a hidden-element hint ([#16833](https://github.com/can1357/oh-my-pi/issues/16833)).
+- Managed headless browser pages no longer overflow the stack after repeatedly acquiring a canvas context ([#16879](https://github.com/can1357/oh-my-pi/issues/16879)).
+- XLSX reads preserve numeric-looking text cells, including long IDs and leading zeros ([#16831](https://github.com/can1357/oh-my-pi/issues/16831)).
+- Hashline edits preserve required boundary lines when trimming them would break an otherwise valid replacement ([#16799](https://github.com/can1357/oh-my-pi/issues/16799)).
 - Native workspace panes now keep the correct split direction when reopened in background tabs or after resizing Main.
 - Fixed native workspace panes failing to rebalance in long-running Tern sessions; background tabs rebalance when selected.
 - Subagent transcript actions no longer operate Main: copy and retry stay in the child pane, while unsupported rewind and model-switch controls remain hidden.

@@ -1,4 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
+import { cfgHindsightScoping } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
+import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { BankScope } from "@oh-my-pi/pi-coding-agent/hindsight/bank";
 import {
 	type HindsightApi,
@@ -193,6 +200,106 @@ describe("ensureMentalModels", () => {
 		).resolves.toBeUndefined();
 		expect(calls.created).toHaveLength(0);
 	});
+});
+
+type SeedCreateRequest = Pick<MentalModelSummary, "id" | "name" | "source_query" | "tags" | "max_tokens" | "trigger">;
+
+describe("mental-model generation budget", () => {
+	it.each(["automatic bootstrap", "manual seed command"] as const)(
+		"%s applies the generation budget only to missing models",
+		async route => {
+			vi.spyOn(cfgHindsightScoping, "get").mockReturnValue("per-project-tagged");
+			const models = new Map<string, MentalModelSummary>();
+			const created: SeedCreateRequest[] = [];
+			const mutations: string[] = [];
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				async fetch(request) {
+					const url = new URL(request.url);
+					if (request.method !== "GET") mutations.push(`${request.method} ${url.pathname}`);
+					if (url.pathname === "/v1/default/banks/seed-test/mental-models") {
+						if (request.method === "GET") return Response.json({ items: [...models.values()] });
+						if (request.method === "POST") {
+							const body = (await request.json()) as SeedCreateRequest;
+							created.push(body);
+							models.set(body.id, { ...body, bank_id: "seed-test" });
+							return Response.json({ operation_id: `created-${body.id}` });
+						}
+					}
+					return new Response("Unexpected request", { status: 400 });
+				},
+			});
+			const client = new HindsightApiCtor({ baseUrl: `http://127.0.0.1:${server.port}` });
+
+			async function seed(project: string, maxTokens?: number): Promise<void> {
+				const settings = Settings.isolated({
+					"memory.backend": "hindsight",
+					"hindsight.mentalModelsEnabled": true,
+					"hindsight.mentalModelAutoSeed": true,
+					...(maxTokens === undefined ? {} : { "hindsight.mentalModelMaxTokens": maxTokens }),
+				});
+				const scope: BankScope = { bankId: "seed-test", retainTags: [`project:${project}`] };
+				const published = Promise.withResolvers<void>();
+				const state = new HindsightSessionState({
+					sessionId: `seed-${project}`,
+					client,
+					...scope,
+					config: loadHindsightConfig(settings),
+					session: { refreshBaseSystemPrompt: async () => published.resolve() } as unknown as AgentSession,
+					banksSet: new Set(["seed-test"]),
+				});
+				try {
+					if (route === "automatic bootstrap") {
+						await state.runMentalModelLoad(scope);
+						await published.promise;
+					} else {
+						const errors: string[] = [];
+						const controller = new CommandController({
+							settings,
+							session: { getHindsightSessionState: () => state },
+							showStatus: () => {},
+							showWarning: (message: string) => errors.push(message),
+							showError: (message: string) => errors.push(message),
+						} as unknown as InteractiveModeContext);
+						await controller.handleMemoryCommand("/memory mm seed");
+						expect(errors).toEqual([]);
+					}
+				} finally {
+					state.dispose();
+				}
+			}
+
+			try {
+				await seed("first");
+				expect(Object.fromEntries(created.map(model => [model.id, model.max_tokens]))).toEqual({
+					"user-preferences": 4096,
+					"project-conventions-first": 4096,
+					"project-decisions-first": 4096,
+				});
+
+				const curated = models.get("user-preferences")!;
+				curated.max_tokens = 600;
+				curated.source_query = "Operator-curated query";
+				const existing = structuredClone([...models.values()]);
+				await seed("first", 6144);
+				expect(created).toHaveLength(3);
+				expect([...models.values()]).toEqual(existing);
+
+				await seed("second", 6144);
+				expect(Object.fromEntries(created.slice(3).map(model => [model.id, model.max_tokens]))).toEqual({
+					"project-conventions-second": 6144,
+					"project-decisions-second": 6144,
+				});
+				expect(models.get("user-preferences")).toEqual(curated);
+				expect(mutations).toEqual(
+					Array.from({ length: 5 }, () => "POST /v1/default/banks/seed-test/mental-models"),
+				);
+			} finally {
+				server.stop(true);
+			}
+		},
+	);
 });
 
 /* -------------------------------------------------------------------------- */

@@ -322,6 +322,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const detailed = targets.length > 1 || truncatedGlobTargets;
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
+			const reconciledClients = new Set<LspClient>();
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
 			if (truncatedGlobTargets) {
@@ -363,6 +364,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						if (isProjectAwareLspServer(serverConfig)) {
 							await waitForProjectLoaded(client, signal);
 							throwIfAborted(signal);
+						}
+						if (!reconciledClients.has(client)) {
+							await reconcileOpenFilesFromDisk(client, signal);
+							reconciledClients.add(client);
 						}
 						const minVersion = client.diagnosticsVersion;
 						await refreshFile(client, resolved, signal);

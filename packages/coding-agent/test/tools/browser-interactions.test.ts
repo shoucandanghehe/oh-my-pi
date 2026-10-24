@@ -89,6 +89,122 @@ afterAll(async () => {
 	if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
 });
 
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser text-entry cancellation", () => {
+	test.each([
+		["tab", "fill"],
+		["tab", "type"],
+		["frame", "fill"],
+		["frame", "type"],
+		["handle", "fill"],
+		["handle", "type"],
+	] as const)(
+		"%s.%s stops after its deadline and reports partial input",
+		async (scope, method) => {
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const context = { session, toolCallId: `browser-cancel-${scope}-${method}` };
+			const tabName = `cancel-${crypto.randomUUID()}`;
+			const inputHtml = `<!doctype html><textarea id="field"></textarea>
+<iframe id="inner" srcdoc='<textarea id="field"></textarea>'></iframe>`;
+			await prelude.invoke(
+				{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(inputHtml)}` },
+				context,
+			);
+			try {
+				const target =
+					scope === "frame"
+						? `await tab.frame("#inner")`
+						: scope === "handle"
+							? `await tab.waitFor("#field")`
+							: "tab";
+				const result = await prelude.invoke(
+					{
+						action: "run",
+						name: tabName,
+						code: `const target = ${target};
+const doc = ${scope === "frame" ? `page.frames().find(frame => frame.parentFrame())` : "page"};
+const action = target.${method}(${scope === "handle" ? "" : '"#field", '}"x".repeat(50_000)).then(
+  () => "completed",
+  error => error.message,
+);
+// The page must receive actual input before the timeout can count as a cancellation test.
+await doc.waitForFunction(() => document.querySelector("#field").value.length > 0, { polling: 10, timeout: 1500 });
+const error = await action;
+const atTimeout = await doc.$eval("#field", field => field.value.length);
+// Watch for forbidden post-timeout growth, not merely a snapshot taken before the next key.
+let continued = false;
+try {
+  await doc.waitForFunction(
+    before => document.querySelector("#field").value.length > before + 1,
+    { polling: 10, timeout: 250 },
+    atTimeout,
+  );
+  continued = true;
+} catch (error) {
+  if (error.name !== "TimeoutError") throw error;
+}
+const after = await doc.$eval("#field", field => field.value.length);
+return { error, atTimeout, after, continued };`,
+						// The existing operation budget is capped at 2 s, leaving time to observe cancellation.
+						timeout: 3,
+					},
+					context,
+				);
+				const value = valueFrom<{ error: string; atTimeout: number; after: number; continued: boolean }>(result);
+				expect(value.atTimeout).toBeGreaterThan(0);
+				expect(value.atTimeout).toBeLessThan(50_000);
+				expect(value.continued).toBe(false);
+				expect(value.after).toBeLessThanOrEqual(value.atTimeout + 1);
+				expect(value.error).toMatch(/timed out after \d+ms/);
+				expect(value.error).toContain("of 50000 characters completed");
+				expect(value.error).toContain("partial text");
+				expect(value.error).not.toMatch(/hidden|covered|no elements match/);
+			} finally {
+				await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+			}
+		},
+		20_000,
+	);
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("managed browser canvas stealth", () => {
+	test("keeps canvas drawing stable across repeated context access and navigation", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-canvas-stealth" };
+		const tabName = `canvas-${crypto.randomUUID()}`;
+		const url = "data:text/html,<canvas id=canvas></canvas>";
+		await prelude.invoke({ action: "open", name: tabName, url }, context);
+		try {
+			for (const navigate of [false, true]) {
+				const result = await prelude.invoke(
+					{
+						action: "run",
+						name: tabName,
+						code: `${navigate ? `await tab.goto(${JSON.stringify(`${url}<p>new document</p>`)});` : ""}
+return await tab.evaluate(() => {
+  const canvas = document.querySelector("#canvas");
+  const context = canvas.getContext("2d");
+  const fillText = context.fillText;
+  for (let i = 0; i < 20_000; i++) canvas.getContext("2d");
+  context.fillText("canvas regression", 10, 30);
+  return {
+    stable: context.fillText === fillText,
+    painted: context.getImageData(0, 0, canvas.width, canvas.height).data.some(value => value !== 0),
+  };
+});`,
+						timeout: 10,
+					},
+					context,
+				);
+				expect(valueFrom<{ stable: boolean; painted: boolean }>(result)).toEqual({ stable: true, painted: true });
+			}
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
+});
+
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser click timeouts", () => {
 	test("says why a click that never became clickable timed out", async () => {
 		const session = makeSession();

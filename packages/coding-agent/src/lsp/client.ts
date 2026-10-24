@@ -636,9 +636,7 @@ async function reconcileExecutedChanges(
 				}
 			}
 			if (!deleted) continue;
-			await sendNotification(activeClient, "textDocument/didClose", { textDocument: { uri } }, signal);
-			activeClient.openFiles.delete(uri);
-			activeClient.diagnostics.delete(uri);
+			await closeDocument(activeClient, uri, signal);
 		}
 		for (const uri of finalUris) {
 			if (!activeClient.openFiles.has(uri)) continue;
@@ -1344,7 +1342,8 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
  * positions from disk. This reads the file and, when its contents diverge from the
  * text last sent to the server, pushes a `didChange` so the server's copy matches
  * the disk text the position was derived from. Untracked files fall through to
- * {@link ensureFileOpen}; unchanged files send nothing.
+ * {@link ensureFileOpen}; unchanged files send nothing, and deleted tracked files
+ * are closed so they no longer contribute references or rename edits.
  * Returns `true` only when a `didChange` was pushed for a reconciled overlay — the
  * caller can then wait for fresh diagnostics, since the stale ones were dropped.
  * A file with an in-flight OMP write ({@link beginPendingDiskWrite}) is skipped
@@ -1390,8 +1389,9 @@ export async function reconcileFileFromDisk(
 			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
-			if (isEnoent(err)) return;
-			throw err;
+			if (!isEnoent(err)) throw err;
+			if (!pendingDiskWrites.has(uri)) await closeDocument(client, uri, signal);
+			return;
 		}
 
 		// Re-check after the (awaited) disk read: a write may have started and
@@ -1634,7 +1634,7 @@ export async function notifyWorkspaceWatchedFiles(
 
 /**
  * Refresh a file in the LSP client.
- * Increments version, sends didChange and didSave notifications.
+ * Sends didChange and didSave for existing files, or didClose for deleted tracked files.
  */
 export async function refreshFile(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
 	throwIfAborted(signal);
@@ -1664,8 +1664,9 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
-			if (isEnoent(err)) return;
-			throw err;
+			if (!isEnoent(err)) throw err;
+			if (!pendingDiskWrites.has(uri)) await closeDocument(client, uri, signal);
+			return;
 		}
 		const version = ++info.version;
 		throwIfAborted(signal);
@@ -1698,6 +1699,12 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 	} finally {
 		fileOperationLocks.delete(lockKey);
 	}
+}
+
+async function closeDocument(client: LspClient, uri: string, signal?: AbortSignal): Promise<void> {
+	await sendNotification(client, "textDocument/didClose", { textDocument: { uri } }, signal);
+	client.openFiles.delete(uri);
+	client.diagnostics.delete(uri);
 }
 
 async function waitForExit(client: LspClient, timeoutMs: number): Promise<boolean> {

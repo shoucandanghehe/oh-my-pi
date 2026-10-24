@@ -458,10 +458,7 @@ fn is_js_frame_noise(program: &str, trimmed: &str) -> bool {
 	}
 }
 
-/// True when `trimmed` is a biome/oxlint `│`-bar code-frame gutter row: a run
-/// of ASCII digits, optional spaces, then the box-drawing bar `│` (`3 │
-/// interface`, `12 │ items.forEach(...)`). The bar makes this form unambiguous,
-/// so it is stripped unconditionally — no genuine summary line matches it.
+/// Numbered code-frame row with an ASCII or box-drawing gutter.
 fn is_gutter_bar_line(trimmed: &str) -> bool {
 	let mut rest = trimmed;
 	let digits = rest
@@ -471,7 +468,7 @@ fn is_gutter_bar_line(trimmed: &str) -> bool {
 		return false;
 	}
 	rest = rest[digits..].trim_start_matches(' ');
-	rest.starts_with('│')
+	rest.starts_with(['|', '│'])
 }
 
 /// True when `trimmed` begins with a tsc-pretty BARE line-number gutter: a run
@@ -563,6 +560,9 @@ pub fn group_diagnostics(input: &str) -> String {
 }
 
 fn split_diagnostic(line: &str) -> Option<(&str, &str)> {
+	if is_gutter_bar_line(line.trim_start()) {
+		return None;
+	}
 	if let Some((file, rest)) = split_tsc_diagnostic(line) {
 		return Some((file, rest));
 	}
@@ -581,7 +581,7 @@ fn split_tsc_diagnostic(line: &str) -> Option<(&str, &str)> {
 	if !looks_like_path(file)
 		|| !loc
 			.split(',')
-			.all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+			.all(|part| !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
 	{
 		return None;
 	}
@@ -682,6 +682,35 @@ mod tests {
 		assert!(out.contains("3 diagnostics in 2 files"));
 		assert!(out.contains("src/a.ts (2 diagnostics)"));
 		assert!(out.contains("Top codes:"));
+	}
+
+	#[test]
+	fn ruff_source_frame_calls_do_not_invent_diagnostic_files() {
+		let mut input = String::new();
+		for (file, call) in
+			[("a.py", "skill.read()"), ("b.py", "widget.fetch(1)"), ("c.py", "resource.load(1,2)")]
+		{
+			for line in 14..=16 {
+				input.push_str(&format!(
+					"F821 Undefined name\n  --> {file}:{line}:8\n   |\n{line} | assert {call}\n   |        ^^^^^\n\n"
+				));
+			}
+		}
+		input.push_str("Found 9 errors.\n");
+
+		let out = condense_lint_output("ruff", &input, 1);
+		assert!(
+			!out
+				.lines()
+				.any(|line| line.contains("| assert") && line.contains("diagnostics)")),
+			"source frames must not become diagnostic files: {out}"
+		);
+		assert_eq!(out.matches("F821").count(), 9);
+		assert!(out.contains("Found 9 errors."), "Ruff's diagnostic count must survive: {out}");
+		for file in ["a.py", "b.py", "c.py"] {
+			assert!(out.contains(&format!("{file}:14:8")), "Ruff's locations must survive: {out}");
+		}
+		assert!(out.contains("14 | assert skill.read()"), "code-frame context must survive: {out}");
 	}
 
 	#[test]

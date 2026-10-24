@@ -1151,14 +1151,25 @@ pub fn apply_edits(
 	validate_bounds(&target, &lines)?;
 	let indentation_warnings = repair_indentation(&mut target, &lines);
 	let (landed, landing_warnings) = repair_landings(&target, &lines, options.path);
-	let (normalized, echo_warnings, ambiguities) = normalize_echoes(&landed, &lines, options.path);
+	let (normalized, mut echo_warnings, ambiguities) =
+		normalize_echoes(&landed, &lines, options.path);
+	let baseline = parses_cleanly(options.path, text);
+	let mut authored = materialize(&lines, &normalized);
+	let mut authored_parses = parses_cleanly(options.path, &authored.0);
+	if baseline && !authored_parses && !echo_warnings.is_empty() {
+		// Compare complete patches: separate hunks can supply matching openers
+		// and closers.
+		let untrimmed = materialize(&lines, &landed);
+		if parses_cleanly(options.path, &untrimmed.0) {
+			authored = untrimmed;
+			authored_parses = true;
+			echo_warnings.clear();
+		}
+	}
 	let mut leading = clipboard_warnings;
 	leading.extend(indentation_warnings);
 	leading.extend(landing_warnings);
 	leading.extend(echo_warnings);
-	let authored = materialize(&lines, &normalized);
-	let baseline = parses_cleanly(options.path, text);
-	let authored_parses = parses_cleanly(options.path, &authored.0);
 	let finish = |result: (String, Option<u32>), mut warnings: Vec<String>| {
 		if !parses_cleanly(options.path, &result.0) && baseline {
 			warnings.push(edit_broke_parse_warning(result.1));

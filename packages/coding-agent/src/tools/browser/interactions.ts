@@ -5,6 +5,7 @@ import type {
 	ElementHandle,
 	Frame,
 	JSHandle,
+	KeyboardTypeOptions,
 	KeyInput,
 	KeyPressOptions,
 	MouseButton,
@@ -432,6 +433,50 @@ export async function focusTextEntryTarget(
 	if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
 }
 
+/** An interrupted keyboard loop reports completed dispatches, not the field's final value. */
+export class TextEntryInterruptedError extends ToolAbortError {
+	readonly progress: string;
+
+	constructor(completed: number, total: number, cause: unknown) {
+		const progress =
+			`${completed} of ${total} characters completed; the field may contain partial text` +
+			" (one in-flight character may still arrive)";
+		super(`Text input interrupted: ${progress}`, { cause });
+		this.progress = progress;
+	}
+}
+
+/** Type one code point at a time so abort stops before the next key dispatch. */
+async function typeKeys(
+	handle: ElementHandle,
+	text: string,
+	options: Readonly<KeyboardTypeOptions> | undefined,
+	signal?: AbortSignal,
+): Promise<void> {
+	let completed = 0;
+	try {
+		for (const character of text) {
+			throwIfAborted(signal);
+			await untilAborted(signal, () => handle.frame.page().keyboard.type(character, options));
+			completed++;
+		}
+	} catch (error) {
+		if (signal?.aborted) throw new TextEntryInterruptedError(completed, [...text].length, error);
+		throw error;
+	}
+}
+
+/** Focus once, then use the same cancellable keyboard loop as fill. */
+export async function typeViaHandle(
+	handle: ElementHandle,
+	text: string,
+	options: Readonly<KeyboardTypeOptions> | undefined,
+	signal?: AbortSignal,
+): Promise<void> {
+	await focusTextEntryTarget(handle, "type into", signal);
+	await typeKeys(handle, text, options, signal);
+}
+
 /**
  * Input types set through a picker or slider, with an example of the value each takes. Typing into
  * one fills its segments by keystroke rules (`2026-10-12` became `61012-02-02`) or nothing at all
@@ -457,16 +502,8 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
  * viewport/stability/enabled preconditions wait on `requestAnimationFrame`
  * and `IntersectionObserver` callbacks that a backgrounded headless tab never
  * delivers (#12892).
- *
- * `type` overrides how the value is entered, for callers that need their own
- * abort-aware keyboard loop.
  */
-export async function fillViaHandle(
-	handle: ElementHandle,
-	value: string,
-	signal?: AbortSignal,
-	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
-): Promise<void> {
+export async function fillViaHandle(handle: ElementHandle, value: string, signal?: AbortSignal): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
 	const picker = await untilAborted(signal, () =>
 		handle.evaluate(
@@ -590,7 +627,7 @@ export async function fillViaHandle(
 		);
 	}
 	if (picker) return;
-	await untilAborted(signal, () => type(value));
+	await typeKeys(handle, value, { delay: 0 }, signal);
 }
 
 interface QueryCandidate {

@@ -32,11 +32,10 @@
  * Untagged seeds (e.g. `user-preferences`) read every memory in the bank — the
  * reflect call applies no tag filter when `tags` is empty.
  *
- * Seed lifecycle is **create-only**: changes to `source_query`, `tags`,
- * `max_tokens`, or `trigger` in `seeds.json` will NOT propagate to existing
- * models on the server. Operators who want a structural change must
- * `/memory mm refresh <id>` (content-only) or `/memory mm delete <id>`
- * followed by a re-seed.
+ * Seed lifecycle is **create-only**: seed definitions and the configured
+ * generation budget apply only to missing models. Existing models are unchanged
+ * by automatic bootstrap and `/memory mm seed`; refresh updates content, not
+ * the stored generation budget.
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
@@ -86,7 +85,11 @@ export interface MentalModelSeed {
  * banks, project seeds use project-suffixed ids and accept matching legacy
  * bare ids as already present.
  */
-export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping): MentalModelSeed[] {
+export function resolveSeedsForScope(
+	scope: BankScope,
+	scoping: HindsightScoping,
+	maxTokens?: number,
+): MentalModelSeed[] {
 	const out: MentalModelSeed[] = [];
 	for (const seed of BUILTIN_SEEDS) {
 		if (!seed.scopes.includes(scoping)) continue;
@@ -97,7 +100,7 @@ export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping
 			name: seed.name,
 			sourceQuery: seed.source_query,
 			tags,
-			maxTokens: seed.max_tokens,
+			maxTokens: maxTokens ?? seed.max_tokens,
 			trigger: seed.trigger,
 			legacyIds: id === seed.id ? undefined : [seed.id],
 		});

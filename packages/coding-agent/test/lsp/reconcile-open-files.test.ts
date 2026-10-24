@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { reconcileOpenFilesFromDisk } from "@oh-my-pi/pi-coding-agent/lsp/client";
+import {
+	beginPendingDiskWrite,
+	endPendingDiskWrite,
+	reconcileOpenFilesFromDisk,
+	refreshFile,
+} from "@oh-my-pi/pi-coding-agent/lsp/client";
 import type { LspClient } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 
@@ -70,6 +75,45 @@ describe("reconcileOpenFilesFromDisk", () => {
 			expect(await reconcileOpenFilesFromDisk(client)).toBe(0);
 			expect(frames.length).toBe(before);
 		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("closes an open document deleted outside OMP", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-reconcile-open-"));
+		try {
+			const file = path.join(dir, "consumer.py");
+			await Bun.write(file, "from api import value\n");
+			const uri = fileToUri(file);
+			const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "python" }]]));
+			await fs.unlink(file);
+
+			await reconcileOpenFilesFromDisk(client);
+			expect(frames.filter(frame => frame.includes("textDocument/didClose") && frame.includes(uri))).toHaveLength(1);
+			expect(client.openFiles.has(uri)).toBe(false);
+			await reconcileOpenFilesFromDisk(client);
+			expect(frames).toHaveLength(1);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("keeps a missing pending-write overlay open, then closes it once no write owns it", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-refresh-missing-"));
+		const file = path.join(dir, "new.ts");
+		const uri = fileToUri(file);
+		const { client, frames } = fakeClient(new Map([[uri, { version: 1, languageId: "typescript" }]]));
+		beginPendingDiskWrite(file);
+		try {
+			await refreshFile(client, file);
+			expect(frames).toEqual([]);
+			expect(client.openFiles.has(uri)).toBe(true);
+			endPendingDiskWrite(file);
+			await refreshFile(client, file);
+			expect(frames.filter(frame => frame.includes("textDocument/didClose") && frame.includes(uri))).toHaveLength(1);
+			expect(client.openFiles.has(uri)).toBe(false);
+		} finally {
+			endPendingDiskWrite(file);
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});

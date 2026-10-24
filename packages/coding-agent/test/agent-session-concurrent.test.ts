@@ -1700,6 +1700,7 @@ describe("AgentSession TTSR resume gate", () => {
 		// The rendered interrupt the model receives references the rule by a
 		// project-relative path, never the absolute home path.
 		expect(text).toContain('reason="rule_violation"');
+		expect(text).toContain("Output interrupted:");
 		expect(text).toContain(`path="${expectedRel}"`);
 		expect(text).not.toContain(ruleAbsPath);
 	});

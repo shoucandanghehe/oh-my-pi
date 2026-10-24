@@ -51,11 +51,9 @@ describe("browser run output — stream text reaches the tool result", () => {
 // was a live failure.
 describe("browser handle enrichment — fill()", () => {
 	it("adds a fill() that clears the current value before typing", async () => {
-		const calls: string[] = [];
 		const node = { value: "old", focused: false };
 		const stub = {
 			evaluate: async (fn: (el: unknown) => unknown) => {
-				calls.push("evaluate");
 				fn({
 					get value() {
 						return node.value;
@@ -69,15 +67,19 @@ describe("browser handle enrichment — fill()", () => {
 					matches: () => false,
 				});
 			},
-			type: async (text: string) => {
-				calls.push("type");
-				node.value += text;
+			frame: {
+				page: () => ({
+					keyboard: {
+						type: async (text: string) => {
+							node.value += text;
+						},
+					},
+				}),
 			},
 		} as unknown as ElementHandle;
 
 		await toActionableHandle(stub).fill("fresh");
 
-		expect(calls).toEqual(["evaluate", "evaluate", "type"]);
 		expect(node.focused).toBe(true);
 		expect(node.value).toBe("fresh");
 	});
@@ -156,42 +158,50 @@ describe("browser handle enrichment — guarded actions", () => {
 		expect(clicks).toBe(1);
 	});
 
-	it("stops handle.type() before dispatching more characters after timeout", async () => {
-		const typed: string[] = [];
-		const firstStarted = Promise.withResolvers<void>();
-		const releaseFirst = Promise.withResolvers<void>();
-		const firstFinished = Promise.withResolvers<void>();
-		const stub = {
-			type: async () => {},
-			evaluate: async (fn: (el: unknown) => unknown) => {
-				fn({ focus: () => {}, matches: () => false });
-			},
-			frame: {
-				page: () => ({
-					keyboard: {
-						type: async (character: string) => {
-							firstStarted.resolve();
-							await releaseFirst.promise;
-							typed.push(character);
-							firstFinished.resolve();
+	it.each(["type", "fill"] as const)(
+		"reports partial handle.%s() input and stops dispatch after timeout",
+		async method => {
+			const typed: string[] = [];
+			const secondStarted = Promise.withResolvers<void>();
+			const releaseSecond = Promise.withResolvers<void>();
+			const secondFinished = Promise.withResolvers<void>();
+			const stub = {
+				type: async () => {},
+				evaluate: async (fn: (el: unknown) => unknown) => {
+					return fn({ value: "old", focus: () => {}, matches: () => false });
+				},
+				frame: {
+					page: () => ({
+						keyboard: {
+							type: async (character: string) => {
+								if (typed.length === 1) {
+									secondStarted.resolve();
+									await releaseSecond.promise;
+									typed.push(character);
+									secondFinished.resolve();
+								} else typed.push(character);
+							},
 						},
-					},
-				}),
-			},
-			dispose: async () => {},
-		} as unknown as ElementHandle;
-		const deadline = new AbortController();
-		const guard: HandleOpGuard = (_label, fn) => fn(deadline.signal);
-		const action = toActionableHandle(stub, guard).type("abc");
+					}),
+				},
+				dispose: async () => {},
+			} as unknown as ElementHandle;
+			const deadline = new AbortController();
+			const guard: HandleOpGuard = (_label, fn) => fn(deadline.signal);
+			const action = toActionableHandle(stub, guard)[method]("\u{20000}bc");
 
-		await firstStarted.promise;
-		deadline.abort(new Error("action deadline"));
-		await expect(action).rejects.toThrow("action deadline");
-		releaseFirst.resolve();
-		await firstFinished.promise;
+			await secondStarted.promise;
+			deadline.abort(new Error("action deadline"));
+			try {
+				await expect(action).rejects.toThrow("1 of 3 characters completed");
+			} finally {
+				releaseSecond.resolve();
+				await secondFinished.promise;
+			}
 
-		expect(typed).toEqual(["a"]);
-	});
+			expect(typed).toEqual(["\u{20000}", "b"]);
+		},
+	);
 
 	it("passes arguments and return values through the guarded method unchanged", async () => {
 		const received: unknown[][] = [];

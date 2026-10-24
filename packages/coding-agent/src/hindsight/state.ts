@@ -515,12 +515,9 @@ export class HindsightSessionState {
 			// is idempotent (PUT) and skips after the first call via `banksSet`.
 			await ensureBankExists(this.client, this.bankId, this.config, this.banksSet);
 
-			// Seeding is opt-in (`hindsight.mentalModelAutoSeed`). Default behaviour is
-			// read-only: we surface whatever models the operator has curated on the
-			// bank, but we do NOT POST to create new ones unless they explicitly
-			// asked. `/memory mm seed` remains the explicit-write entry point.
+			// Bootstrap creates missing models only; existing models retain their server-side configuration.
 			if (this.config.mentalModelAutoSeed) {
-				const seeds = resolveSeedsForScope(scope, this.config.scoping);
+				const seeds = resolveSeedsForScope(scope, this.config.scoping, this.config.mentalModelMaxTokens);
 				if (seeds.length > 0) {
 					await ensureMentalModels(this.client, this.bankId, seeds, this.config.debug);
 				}
