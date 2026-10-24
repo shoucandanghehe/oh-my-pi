@@ -9,6 +9,7 @@ Creates or overwrites file at specified path.
 
 <critical>
 - You SHOULD use Edit tool for modifying existing files
+- In hashline display mode, text writes auto-strip copied `[PATH#TAG]` headers and numbered read/grep prefixes; such payloads are not written verbatim. Messages, process input, and setting values are exempt.
 - Create project documentation only when the user or applicable project/workflow instructions explicitly require it. Required `local://` planning artifacts are not unsolicited project documentation.
 - You NEVER use emojis unless requested
 </critical>

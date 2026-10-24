@@ -1,4 +1,4 @@
-Edit files: `apply_patch` shell command.
+Edit files with the `apply_patch` tool; submit patch text directly as its input.
 
 `apply_patch`: stripped-down, file-oriented diff; easy to parse, safe to apply.
 

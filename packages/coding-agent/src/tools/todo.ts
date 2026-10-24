@@ -676,7 +676,7 @@ function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false):
 			idx > currentIdx && phase.tasks.some(task => task.status === "completed" || task.status === "abandoned"),
 	);
 	lines.push(
-		`Overall: ${closedAll}/${tasks.length} done, ${remainingTasks.length} open${blockedAll > 0 ? `, ${blockedAll} blocked` : ""}.`,
+		`Overall: ${closedAll}/${tasks.length} closed (completed or abandoned), ${remainingTasks.length} open${blockedAll > 0 ? `, ${blockedAll} blocked` : ""}.`,
 	);
 	lines.push(
 		`Active phase ${currentIdx + 1}/${phases.length} "${current.name}" (${done}/${current.tasks.length})${

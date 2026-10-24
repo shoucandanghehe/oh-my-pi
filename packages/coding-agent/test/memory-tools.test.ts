@@ -281,7 +281,7 @@ describe("Mnemopi tool factories", () => {
 			isActive: name => name === "reflect",
 		};
 
-		expect(reflect.description).toContain("unlike `xd://recall`, blends them");
+		expect(reflect.description).toContain("`reflect`: Hindsight synthesizes an answer across memories");
 		expect(recall.description).toContain("`reflect`: synthesized answer");
 		expect(recall.description).toContain("Before any `xd://memory_edit update`");
 		expect(edit.description).toContain("Only ids returned by `xd://recall`.");

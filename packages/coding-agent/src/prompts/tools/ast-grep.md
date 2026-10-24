@@ -15,6 +15,6 @@ Structural code search via ast-grep. Use when syntax shape matters more than tex
 
 <critical>
 - AVOID repo-root scans — narrow `path` first.
-- Parse issues = query failure, not absence: fix pattern or tighten `path` before concluding "no matches".
+- Parse issues may identify pattern, language, or source syntax errors; matches may still be returned. Inspect diagnostics before changing the pattern or concluding absence.
 {{#if eagerDelegation}}- Broad cross-subsystem exploration → {{#if scoutAvailable}}Task tool + scout{{else}}Task tool{{/if}} subagent first.{{/if}}
 </critical>

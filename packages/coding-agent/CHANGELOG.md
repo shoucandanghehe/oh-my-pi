@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Tool and system prompts no longer promise behavior the runtime lacks (read/grep/glob limits, edit-mode atomicity, LSP/GitHub/web-search parameters, Eval backends, `proc://` modes, memory and session notices); todo progress now reads `closed (completed or abandoned)` ([#15857](https://github.com/can1357/oh-my-pi/issues/15857)).
 - ReadTheDocs reads preserve the requested documentation version instead of substituting development-branch source ([#16835](https://github.com/can1357/oh-my-pi/issues/16835)).
 - Non-interrupting TTSR prose reminders no longer claim that completed output was interrupted ([#15861](https://github.com/can1357/oh-my-pi/issues/15861)).
 - New Hindsight mental models use a 4096-token generation budget, configurable with `hindsight.mentalModelMaxTokens`, without changing existing models ([#6300](https://github.com/can1357/oh-my-pi/issues/6300)).

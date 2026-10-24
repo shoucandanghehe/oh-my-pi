@@ -22,7 +22,7 @@
 {{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
 {{#if evalToolsEnabled}}`tools`: eval-defined, run in your kernel.
 {{/if}}{{#if effortEnabled}}`effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
-{{/if}}{{#if structured}}`schemaMode`: default permissive warns after retries; strict fails.
+{{/if}}{{#if structured}}`schemaMode`: inherits the parent session's mode when omitted (permissive if unset). Permissive warns after retries; strict fails.
 {{/if}}{{#if isolationEnabled}}{{#if applyIsolatedChanges}}`isolated`: worktree; successful changes apply to parent.
 {{else}}`isolated`: worktree; changes retained, not applied.
 {{/if}}{{/if}}Children start blank;{{#if ircEnabled}} parent IRC steers immediately;{{/if}} large payloads via `local://<path>`, NEVER inline.

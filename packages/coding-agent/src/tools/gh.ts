@@ -98,7 +98,9 @@ const githubSchema = type({
 	"since?": type("string").describe("lower-bound date filter"),
 	"until?": type("string").describe("upper-bound date filter"),
 	"dateField?": type("'created' | 'updated'").describe("date field"),
-	"limit?": type("number").describe("max results"),
+	"limit?": type("number").describe(
+		"Search result limit; default 10, floored and capped at 50. Single window, not total matches; no pagination parameter. Narrow the query/date range for more.",
+	),
 	"run?": type("string").describe("actions run id or url"),
 	"tail?": type("number").describe("log lines per failed job"),
 });
