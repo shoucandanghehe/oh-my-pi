@@ -164,6 +164,7 @@ export type MentalModelMode = "full" | "delta";
 export interface MentalModelTrigger {
 	mode?: MentalModelMode;
 	refresh_after_consolidation?: boolean;
+	min_refresh_interval_seconds?: number;
 }
 
 /** Shape returned by list/get on the mental-models endpoint. Fields are populated by `detail`. */

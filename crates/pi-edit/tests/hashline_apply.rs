@@ -217,6 +217,105 @@ fn drops_duplicated_leading_and_trailing_boundary_lines_around_a_range_replaceme
 }
 
 #[test]
+fn preserves_the_cpp_function_closer_when_boundary_echo_trimming_breaks_the_parse() {
+	let file = concat!(
+		"namespace example {\n",
+		"class SessionCache {\n",
+		"public:\n",
+		"  SessionCache();\n",
+		"};\n",
+		"namespace {\n\n\n\n",
+		"constexpr const char* suffix = \"-old\";\n",
+		"int old_key() {\n",
+		"    return 1;\n",
+		"}\n",
+		"}\n",
+		"SessionCache::SessionCache() {}\n",
+		"} // namespace example\n",
+	);
+	let result = apply(
+		file,
+		&replacement(
+			10,
+			13,
+			&[
+				"constexpr const char* main_suffix = \"-main\";",
+				"constexpr const char* draft_suffix = \"-draft\";",
+				"int new_key() {",
+				"    int result = 2;",
+				"    return result;",
+				"}",
+			],
+			1,
+		),
+		Some("closer.cpp"),
+	);
+	assert_eq!(
+		result.text,
+		concat!(
+			"namespace example {\n",
+			"class SessionCache {\n",
+			"public:\n",
+			"  SessionCache();\n",
+			"};\n",
+			"namespace {\n\n\n\n",
+			"constexpr const char* main_suffix = \"-main\";\n",
+			"constexpr const char* draft_suffix = \"-draft\";\n",
+			"int new_key() {\n",
+			"    int result = 2;\n",
+			"    return result;\n",
+			"}\n",
+			"}\n",
+			"SessionCache::SessionCache() {}\n",
+			"} // namespace example\n",
+		)
+	);
+	assert!(parses_cleanly(Some("closer.cpp"), file));
+	assert!(parses_cleanly(Some("closer.cpp"), &result.text));
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+#[test]
+fn preserves_boundary_echoes_when_only_the_complete_multi_hunk_patch_parses() {
+	let file = "namespace outer {\nint old_key() {\n    return 1;\n}\n}\n";
+	let mut edits = replacement(2, 4, &["int new_key() {", "    return 2;", "}", "}"], 1);
+	edits.extend(replacement(1, 1, &["namespace outer {", "namespace inner {"], 2));
+	let result = apply(file, &edits, Some("closer.cpp"));
+	assert_eq!(
+		result.text,
+		"namespace outer {\nnamespace inner {\nint new_key() {\n    return 2;\n}\n}\n}\n"
+	);
+	assert!(parses_cleanly(Some("closer.cpp"), &result.text));
+	assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+}
+
+#[test]
+fn keeps_boundary_echo_trimming_when_the_complete_patch_still_does_not_parse() {
+	let file = "namespace outer {\nint old_key() {\n    return 1;\n}\n}\n";
+	let mut edits =
+		replacement(2, 4, &["int new_key() {", "    int result = 2;", "    return result;", "}"], 1);
+	edits.push(insert_after(5, "int broken(", 2));
+	let result = apply(file, &edits, Some("closer.cpp"));
+	assert_eq!(
+		result.text,
+		"namespace outer {\nint new_key() {\n    int result = 2;\n    return result;\n}\nint \
+		 broken(\n"
+	);
+	assert!(
+		result
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("boundary echo"))
+	);
+	assert!(
+		result
+			.warnings
+			.iter()
+			.any(|warning| warning.contains("syntax error"))
+	);
+}
+
+#[test]
 fn rejects_a_leading_keeper_echo_when_the_payload_cannot_fill_the_widened_range() {
 	let file = "{\n    auto* handle = payloadFor<PyThreadHandle>(self);\n    if (!handle)\n        \
 	            return threadError(globalObject, \"thread not started\");\n    handle.setDone();\n}";

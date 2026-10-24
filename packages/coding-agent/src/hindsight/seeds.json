@@ -4,29 +4,29 @@
 		{
 			"id": "user-preferences",
 			"name": "User Preferences",
-			"source_query": "What durable preferences has the user expressed across sessions about collaboration, communication, tooling, and code style? Skip anything the user already wrote into AGENTS.md, CLAUDE.md, skill files, or other instruction files, because the agent loads those directly. Skip one-off requests, task progress, and approvals or caveats tied to a single action.",
+			"source_query": "What durable personal preferences has the user expressed across sessions about response language, communication and reporting style, code style and design taste, and preferred tools? State each as a short preference, not as a procedure. Exclude step-by-step workflows, verification or review procedures, approval and delegation rules, project-specific facts, one-off requests, task progress, and per-action approvals.",
 			"scopes": ["global", "per-project", "per-project-tagged"],
 			"projectTagged": false,
-			"max_tokens": 600,
-			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+			"max_tokens": 1000,
+			"trigger": { "mode": "full", "refresh_after_consolidation": true, "min_refresh_interval_seconds": 21600 }
 		},
 		{
 			"id": "project-conventions",
 			"name": "Project Conventions",
-			"source_query": "What conventions does this project follow for code style, build, testing, release, and review that are not already stated in its AGENTS.md, CLAUDE.md, CONTRIBUTING, or other rule files the agent loads directly? Prefer concrete commands, paths, and tool versions. Skip task progress and one-off approvals.",
+			"source_query": "What conventions does this project follow for code style, build, testing, release, and review? Prefer concrete commands, paths, and tool versions. Exclude general working habits that are not specific to this project, task progress, and one-off approvals.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
-			"max_tokens": 800,
-			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+			"max_tokens": 1000,
+			"trigger": { "mode": "full", "refresh_after_consolidation": true, "min_refresh_interval_seconds": 21600 }
 		},
 		{
 			"id": "project-decisions",
 			"name": "Project Decisions",
-			"source_query": "What durable architectural or product decisions have been made for this project, and what rationale or trade-offs were recorded? Exclude decisions already written in the project's rule files, transient plans, unresolved ideas, active task state, and per-action approvals.",
+			"source_query": "What durable architectural or product decisions have been made for this project, and what rationale or trade-offs were recorded? Exclude general working habits that are not specific to this project, transient plans, unresolved ideas, active task state, and per-action approvals.",
 			"scopes": ["per-project", "per-project-tagged"],
 			"projectTagged": true,
-			"max_tokens": 800,
-			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+			"max_tokens": 1000,
+			"trigger": { "mode": "full", "refresh_after_consolidation": true, "min_refresh_interval_seconds": 21600 }
 		}
 	]
 }
