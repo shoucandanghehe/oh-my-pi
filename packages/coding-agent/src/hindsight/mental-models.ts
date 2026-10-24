@@ -32,22 +32,15 @@
  * Untagged seeds (e.g. `user-preferences`) read every memory in the bank — the
  * reflect call applies no tag filter when `tags` is empty.
  *
- * Seed lifecycle is **create-only**: changes to `source_query`, `tags`,
- * `max_tokens`, or `trigger` in `seeds.json` will NOT propagate to existing
- * models on the server. Operators who want a structural change must
- * `/memory mm refresh <id>` (content-only) or `/memory mm delete <id>`
- * followed by a re-seed.
+ * Seed lifecycle is **create-only**: seed definitions and the configured
+ * generation budget apply only to missing models. Existing models are unchanged
+ * by automatic bootstrap and `/memory mm seed`; refresh updates content, not
+ * the stored generation budget.
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BankScope } from "./bank";
-import type {
-	HindsightClientApi,
-	MentalModelListResponse,
-	MentalModelMode,
-	MentalModelSummary,
-	MentalModelTrigger,
-} from "./client";
+import type { HindsightClientApi, MentalModelListResponse, MentalModelSummary, MentalModelTrigger } from "./client";
 import type { HindsightScoping } from "./config";
 import seedsData from "./seeds.json" with { type: "json" };
 
@@ -57,7 +50,7 @@ interface RawSeed {
 	source_query: string;
 	scopes: HindsightScoping[];
 	projectTagged: boolean;
-	trigger?: { mode?: MentalModelMode; refresh_after_consolidation?: boolean };
+	trigger?: MentalModelTrigger;
 	max_tokens?: number;
 	extra_tags?: string[];
 }
@@ -86,7 +79,11 @@ export interface MentalModelSeed {
  * banks, project seeds use project-suffixed ids and accept matching legacy
  * bare ids as already present.
  */
-export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping): MentalModelSeed[] {
+export function resolveSeedsForScope(
+	scope: BankScope,
+	scoping: HindsightScoping,
+	maxTokens?: number,
+): MentalModelSeed[] {
 	const out: MentalModelSeed[] = [];
 	for (const seed of BUILTIN_SEEDS) {
 		if (!seed.scopes.includes(scoping)) continue;
@@ -97,7 +94,7 @@ export function resolveSeedsForScope(scope: BankScope, scoping: HindsightScoping
 			name: seed.name,
 			sourceQuery: seed.source_query,
 			tags,
-			maxTokens: seed.max_tokens,
+			maxTokens: maxTokens ?? seed.max_tokens,
 			trigger: seed.trigger,
 			legacyIds: id === seed.id ? undefined : [seed.id],
 		});
@@ -266,9 +263,9 @@ const SECTION_SEPARATOR = "\n\n";
 
 /**
  * Format a sorted list of models into the final `<mental_models>` wrapper,
- * bounded by `budgetChars`. Per-model truncation is divided proportionally
- * across the visible models; an overflow is signalled with a marker so the
- * model can tell context is missing.
+ * bounded by `budgetChars`. Models shorter than an even share render in full
+ * and leave their unused room to longer ones; an overflow is signalled with a
+ * marker so the model can tell context is missing.
  *
  * Exported for unit testing of the budget contract — callers should go
  * through `loadMentalModelsBlock`.
@@ -305,22 +302,23 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	const truncatedOverhead = `<mental_models>\n${TRUNCATION_MARKER}\n</mental_models>`.length;
 	const cleanOverhead = `<mental_models>\n\n</mental_models>`.length;
 	const innerBudget = Math.max(0, budgetChars - truncatedOverhead);
-	const headerCost = models.reduce((sum, m) => sum + sectionHeader(m).length, 0);
-	const separatorCost = SECTION_SEPARATOR.length * Math.max(0, models.length - 1);
-	const perModelBudget = Math.max(
-		120,
-		Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
+	const entries = models.map(model => ({ header: sectionHeader(model), body: (model.content ?? "").trim() }));
+	const fixedCost = entries.reduce(
+		(sum, entry, i) => sum + entry.header.length + (i > 0 ? SECTION_SEPARATOR.length : 0),
+		0,
+	);
+	const bodyBudgets = allocateBodyBudgets(
+		entries.map(entry => entry.body.length),
+		Math.max(0, innerBudget - fixedCost),
 	);
 
 	const sections: string[] = [];
 	let consumed = 0;
 	let truncated = false;
-	for (const model of models) {
-		const header = sectionHeader(model);
-		const body = (model.content ?? "").trim();
-		const truncatedBody = truncateTo(body, perModelBudget);
-		if (truncatedBody.length < body.length) truncated = true;
-		const section = `${header}${truncatedBody}`;
+	for (const [index, entry] of entries.entries()) {
+		const truncatedBody = truncateTo(entry.body, bodyBudgets[index]);
+		if (truncatedBody.length < entry.body.length) truncated = true;
+		const section = `${entry.header}${truncatedBody}`;
 		const sectionCost = section.length + (sections.length > 0 ? SECTION_SEPARATOR.length : 0);
 		if (consumed + sectionCost > innerBudget && sections.length > 0) {
 			truncated = true;
@@ -344,6 +342,18 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 		assembled = `<mental_models>\n${body}${TRUNCATION_MARKER}\n</mental_models>`;
 	}
 	return assembled;
+}
+
+/** Short bodies keep their full length; the budget they leave unused is split evenly among the longer ones. */
+function allocateBodyBudgets(lengths: number[], total: number): number[] {
+	const budgets = lengths.map(() => 0);
+	const order = lengths.map((_, index) => index).sort((a, b) => lengths[a] - lengths[b]);
+	let remaining = total;
+	for (const [rank, index] of order.entries()) {
+		budgets[index] = Math.min(lengths[index], Math.floor(remaining / (order.length - rank)));
+		remaining -= budgets[index];
+	}
+	return budgets;
 }
 
 function truncateTo(text: string, maxChars: number): string {
