@@ -772,7 +772,7 @@ describe("subagent runtime fallback on a real provider error", () => {
 	 * Spawns a real `pinned-worker` child whose role shares the `default` model. The primary
 	 * fails every request with a retryable error; `default`'s chain names a fallback that yields.
 	 */
-	async function runPinnedWorker(id: string, roleChain: string[] | undefined) {
+	async function runPinnedWorker(id: string, roleChain: string[] | undefined, boundToSmol = false) {
 		const authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("primary", "test-key");
 		authStorage.keys.setRuntime("fallback", "test-key");
@@ -817,6 +817,7 @@ describe("subagent runtime fallback on a real provider error", () => {
 				id,
 				modelOverride: ["primary/bad-runtime-model"],
 				modelRole: "pinned-worker",
+				delegationRole: boundToSmol ? "smol" : undefined,
 				authStorage,
 				modelRegistry,
 				settings: Settings.isolated({
@@ -830,6 +831,7 @@ describe("subagent runtime fallback on a real provider error", () => {
 					modelRoles: {
 						default: "primary/bad-runtime-model",
 						"pinned-worker": "primary/bad-runtime-model",
+						...(boundToSmol ? { smol: "primary/bad-runtime-model", slow: "fallback/working-model" } : {}),
 					},
 					"retry.fallbackChains": {
 						default: ["fallback/working-model"],
@@ -861,5 +863,13 @@ describe("subagent runtime fallback on a real provider error", () => {
 		expect(result.exitCode).toBe(0);
 		expect(result.resolvedModel).toBe("fallback/working-model");
 		expect(result.resolvedModelIsFallback).toBe(true);
+	});
+
+	it("keeps a worker authorized when its runtime fallback matches a higher model role", async () => {
+		const { result, primaryRequests, fallbackRequests } = await runPinnedWorker("TierBoundRetry", undefined, true);
+		expect(primaryRequests).toBeGreaterThan(0);
+		expect(fallbackRequests).toBeGreaterThan(0);
+		expect(result.exitCode).toBe(0);
+		expect(result.resolvedModel).toBe("fallback/working-model");
 	});
 });

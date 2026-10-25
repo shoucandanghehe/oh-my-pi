@@ -164,6 +164,18 @@ describe("AgentSession model persistence", () => {
 		session = result.session;
 		return result;
 	}
+
+	it("preserves the selected tier across new sessions even when roles share a model", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const created = await createSession({
+			initialModel: model,
+			modelRoles: { default: modelValue(model), slow: modelValue(model) },
+		});
+		await created.session.setModel(model, "slow");
+		await created.session.newSession();
+		expect(created.session.sessionManager.getLastModelChangeRole()).toBe("slow");
+		expect(created.session.sessionManager.buildSessionContext().models.slow).toBe(modelValue(model));
+	});
 	it("switches the active model without persisting by default", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");

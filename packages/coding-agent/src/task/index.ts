@@ -69,6 +69,7 @@ import {
 } from "./file-approval";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
+import { delegationAgents, delegationContext, type DelegationContext } from "./model-policy";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
@@ -177,6 +178,7 @@ interface TaskDescriptionOptions {
 	planMode: boolean;
 	asyncGuidance: string;
 	parentSpawns: string;
+	delegation: DelegationContext;
 }
 
 /** Plan mode hides seance; a `spawns` list led by it defaults to the next permitted agent. */
@@ -232,6 +234,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		seanceGuidance: seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance : "",
 		ircEnabled: options.ircEnabled,
 		asyncGuidance: options.asyncGuidance,
+		delegation: options.delegation,
 	});
 }
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
@@ -930,7 +933,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
 		const perCallModel = perCallModelEnabled(this.session.settings, "task");
 		return renderDescription({
-			agents,
+			agents: [
+				...agents,
+				...delegationAgents(this.session).filter(role => !agents.some(agent => agent.name === role.name)),
+			],
 			sessionAgents,
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
@@ -953,6 +959,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			planMode,
 			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			delegation: delegationContext(this.session),
 		});
 	}
 	private constructor(

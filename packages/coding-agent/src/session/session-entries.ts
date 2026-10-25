@@ -11,6 +11,7 @@ import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { CompactionMethod } from "./compaction-methods";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import type { DelegationRole } from "../task/model-policy";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import type { RuntimeIdentity } from "./runtime-identity";
 
@@ -288,6 +289,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	agent?: string;
 	/** Semantic model role declared by the agent, retained even after concrete model resolution. */
 	modelRole?: string;
+	/** Authorized execution tier; inherited tasks retain their parent's semantic tier. */
+	delegationRole?: DelegationRole;
 	/** Initially resolved provider/model selector for historical display. */
 	resolvedModel?: string;
 	/** The model came from a per-call `model`; cold revival re-checks it against the current operator grants. */
