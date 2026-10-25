@@ -298,6 +298,7 @@ import {
 import type { AgentDefinition } from "./task/types";
 import { refreshAgentDiscovery } from "./task";
 import { AgentOutputManager } from "./task/output-manager";
+import type { DelegationRole } from "./task/model-policy";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
@@ -632,6 +633,8 @@ export interface CreateAgentSessionOptions {
 	spawns?: string;
 	/** User-authorized model agents inherited from the parent session for nested delegation. */
 	inheritedSessionAgents?: readonly AgentDefinition[];
+	/** Assigned child tier, preserved independently of concrete-model aliases. */
+	delegationRole?: DelegationRole;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -2794,6 +2797,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getModelString: () => (hasExplicitModel && model ? formatModelStringWithRouting(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
+			getDelegationRole: () =>
+				options.delegationRole && model && getActiveModelString() === formatModelStringWithRouting(model)
+					? options.delegationRole
+					: undefined,
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),

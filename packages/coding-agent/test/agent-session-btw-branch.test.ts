@@ -7,6 +7,7 @@ import type { Api, AssistantMessage, ImageContent, Model } from "@oh-my-pi/pi-ai
 import { createMockModel, type MockCall, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { loadAdvisorTranscriptCosts } from "@oh-my-pi/pi-coding-agent/advisor/transcript-recorder";
+import { applyModelPatch } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -226,7 +227,7 @@ describe("AgentSession.branchFromBtw", () => {
 		["a text-only model, with a vision description", ["text"]],
 	] as const)("keeps the images of the /btw question in the branch for %s", async (_label, input) => {
 		const activeSession = await createSession({
-			model: { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, input: [...input] },
+			model: applyModelPatch(getBundledModel("anthropic", "claude-sonnet-4-5")!, { input: [...input] }, "merge"),
 		});
 		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
 		await activeSession.sessionManager.flush();

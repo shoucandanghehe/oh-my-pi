@@ -59,6 +59,12 @@ import {
 	runIsolatedSubprocess,
 } from "./isolation-runner";
 import { generateTaskName, sanitizeAgentId } from "./name-generator";
+import {
+	authorizeAgentDelegation,
+	delegationAgents,
+	selectedDelegationRole,
+	type DelegationRole,
+} from "./model-policy";
 import { AgentOutputManager } from "./output-manager";
 import { ovnfsWorkspace } from "./ovnfs";
 import { resolveSpawnPolicy, spawnDenial } from "./spawn-policy";
@@ -207,6 +213,8 @@ export interface EffectiveSubagentPolicy {
 	modelOverride?: string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/** Capability tier, separate from the alias retained for retry routing. */
+	delegationRole?: DelegationRole;
 	/** Extension routing note explaining a `before_subagent_spawn` model replacement. */
 	modelRoute?: string;
 	/** Exact-name `task.agentServiceTierOverrides` entry for this agent, applied after model resolution. */
@@ -503,7 +511,8 @@ export async function resolveEffectiveSubagentPolicy(
 
 	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
 	const sessionAgents = request.session.getSessionAgents?.() ?? [];
-	const agents = [...discovery.agents, ...sessionAgents];
+	const roleAgents = delegationAgents(request.session);
+	const agents = [...discovery.agents, ...sessionAgents, ...roleAgents];
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
@@ -577,7 +586,7 @@ export async function resolveEffectiveSubagentPolicy(
 				);
 	const parentActiveModelPattern = perCallModelGrants ? undefined : request.session.getActiveModelString?.();
 	const modelResolution = {
-		requestModel: request.model,
+		requestModel: request.model ?? (roleAgents.includes(agent) ? agent.model : undefined),
 		settingsOverride: agentModelOverrides[agentName],
 		agentModel: effectiveAgent.model,
 		settings: request.session.settings,
@@ -588,8 +597,12 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role. A per-call
 	// model is already one exact selector and stays literal, never a role alias.
-	const { patterns: modelOverride, role: modelRole } = perCallModelGrants
-		? { patterns: [(perCallSelector as string).trim()], role: undefined }
+	const {
+		patterns: modelOverride,
+		role: modelRole,
+		inheritsSessionModel,
+	} = perCallModelGrants
+		? { patterns: [(perCallSelector as string).trim()], role: undefined, inheritsSessionModel: false }
 		: resolveAgentModelSelection(modelResolution);
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
@@ -606,6 +619,11 @@ export async function resolveEffectiveSubagentPolicy(
 		effectiveAgent,
 		modelOverride,
 		modelRole,
+		delegationRole: selectedDelegationRole(
+			request.session,
+			perCallModelGrants && roleAgents.includes(agent) ? agentName : modelRole,
+			inheritsSessionModel,
+		),
 		serviceTierOverride,
 		compactionThresholdOverride,
 		oauthAccountPools,
@@ -665,7 +683,15 @@ async function applySpawnHook(
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
-	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
+	return {
+		...policy,
+		modelOverride: replacement,
+		modelRoute: spawnResult.note,
+		delegationRole: selectedDelegationRole(
+			request.session,
+			resolveExplicitModelRole(spawnResult.model, request.session.settings),
+		),
+	};
 }
 
 /** Reserve a session-global agent id only after preflight has succeeded. */
@@ -761,6 +787,7 @@ function buildExecutorOptions(
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,
 		modelRole: policy.modelRole,
+		delegationRole: policy.delegationRole,
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
@@ -987,6 +1014,20 @@ function describeSalvagedWork(result: SingleResult): string {
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
+	try {
+		await authorizeAgentDelegation(
+			request.session,
+			{
+				agent: policy.agentName,
+				assignment: request.assignment,
+			},
+			request.signal,
+		);
+	} catch (error) {
+		throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
+			cause: error,
+		});
+	}
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";

@@ -349,7 +349,6 @@ describe("runEvalAgent", () => {
 	it("routes an agent() model above a pinned agent in eval-only mode", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
 		await runEvalAgentAndWait(
 			{ prompt: "work", agent: "reviewer", model: "p/requested:high" },
 			{
@@ -358,21 +357,34 @@ describe("runEvalAgent", () => {
 				}),
 			},
 		);
-
 		expect(runSpy.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
 	});
 
+	it("dispatches an available role agent while preserving omitted agent defaults", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const session = makeSession({
+			settings: Settings.isolated({
+				"task.isolation.enabled": false,
+				modelRoles: { default: "p/default", slow: "p/active", task: "p/task" },
+			}),
+		});
+
+		await runEvalAgentAndWait({ prompt: "work", agent: "default" }, { session });
+		await runEvalAgentAndWait({ prompt: "work" }, { session });
+
+		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["p/default"]);
+		expect(runSpy.mock.calls[1]?.[0].modelOverride).toEqual(["p/task"]);
+	});
+
 	it.each([
-		// The gate wins over the selector check, so an invalid selector still reports the disabled gate.
 		{ mode: "off", model: "@smol", error: /task\.perCallModel: off/ },
 		{ mode: "on", model: "default", error: /invalid `model`/ },
-		// The argument schema accepts only a string, so a candidate array never reaches preflight.
 		{ mode: "on", model: ["p/preferred:high", "p/alternative"], error: /model must be a string/ },
 	])("rejects agent() model $model under $mode before dispatch", async ({ mode, model, error }) => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
 		const settings = Settings.isolated({ "task.perCallModel": mode, "task.isolation.enabled": false });
-
 		await expect(
 			runEvalAgent({ prompt: "work", agent: "reviewer", model }, { session: makeSession({ settings }) }),
 		).rejects.toThrow(error);
@@ -620,9 +632,13 @@ describe("agent() through eval runtimes", () => {
 
 	it("exposes agent() in JavaScript and parses structured output", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-js-");
-		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent");
+		const { session, sessionFile } = makeEvalSession(
+			tempDir,
+			"js-agent",
+			Settings.isolated({ modelRoles: { default: "p/default", slow: "p/active" } }),
+		);
 		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
 			singleResult(options, {
 				output: options.outputSchema ? '{"ok":true,"n":3}' : "hello from agent",
 				...(options.outputSchema
@@ -641,7 +657,7 @@ describe("agent() through eval runtimes", () => {
 		const result = await executeJs(
 			[
 				'const textHandle = await agent("hi");',
-				'const dataHandle = await agent("json", { schema: { type: "object" } });',
+				'const dataHandle = await agent("json", { agent: "default", schema: { type: "object" } });',
 				'const node = await agent("handle", { schema: { type: "object" } });',
 				"const [text, data, nodeData] = await wait([textHandle, dataHandle, node]);",
 				"return JSON.stringify({ text, data, node: { data: nodeData, handle: node.handle, id: node.id } });",
@@ -655,6 +671,9 @@ describe("agent() through eval runtimes", () => {
 		expect(output.data).toEqual({ ok: true, n: 3 });
 		expect(output.node.data).toEqual({ ok: true, n: 3 });
 		expect(output.node.handle).toBe(`agent://${output.node.id}`);
+		expect(runSpy.mock.calls.find(([options]) => options.assignment === "json")?.[0].modelOverride).toEqual([
+			"p/default",
+		]);
 	});
 
 	it("waits for an existing JavaScript agent by displayed id and rejects unknown ids", async () => {
@@ -748,9 +767,13 @@ describe("agent() through eval runtimes", () => {
 
 	it("exposes agent() in the Python runtime", async () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-py-");
-		const { session, sessionFile, sessionId } = makeEvalSession(tempDir, "py-agent");
+		const { session, sessionFile, sessionId } = makeEvalSession(
+			tempDir,
+			"py-agent",
+			Settings.isolated({ modelRoles: { default: "p/default", slow: "p/active" } }),
+		);
 		mockAgents();
-		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
 			singleResult(options, {
 				output: options.outputSchema ? "not JSON" : "hello from python",
 				...(options.outputSchema
@@ -767,7 +790,7 @@ describe("agent() through eval runtimes", () => {
 		);
 
 		const result = await executePython(
-			'import json\nplain = agent("hi")\nstructured = agent("structured", schema={"type": "object"})\nnode = agent("handle", schema={"type": "object"})\ntext, data, node_data = wait([plain, structured, node])\nprint(text)\nprint(json.dumps(data))\nprint(json.dumps({"data": node_data, "handle": node.handle, "id": node.id}))',
+			'import json\nplain = agent("hi")\nstructured = agent("structured", agent="default", schema={"type": "object"})\nnode = agent("handle", schema={"type": "object"})\ntext, data, node_data = wait([plain, structured, node])\nprint(text)\nprint(json.dumps(data))\nprint(json.dumps({"data": node_data, "handle": node.handle, "id": node.id}))',
 			{
 				cwd: tempDir.path(),
 				sessionId,
@@ -788,6 +811,9 @@ describe("agent() through eval runtimes", () => {
 		const node = JSON.parse(lines[2] ?? "");
 		expect(node.data).toEqual({ ok: true });
 		expect(node.handle).toBe(`agent://${node.id}`);
+		expect(runSpy.mock.calls.find(([options]) => options.assignment === "structured")?.[0].modelOverride).toEqual([
+			"p/default",
+		]);
 	});
 
 	it("waits for an existing Python agent by displayed id and rejects unknown ids", async () => {
