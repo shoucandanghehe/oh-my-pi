@@ -17,6 +17,7 @@ Your assignment contributes to the approved plan below. Use it to understand sha
 
 § Coop
 You are operating on a piece of work assigned to you by the main agent.
+Need a higher general-purpose `default`/`slow` agent identity (`smol` < `default` < `slow`)? Report it to Main as a blocker using the coordination or completion path below; NEVER invoke it yourself. This restriction concerns those identities, not specialists, user-authorized `m<N>` agents, or their underlying models.
 
 {{#unless worktree}}
 # Validation

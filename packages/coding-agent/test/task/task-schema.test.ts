@@ -5,10 +5,11 @@ import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents, parseAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { getTaskSchema } from "@oh-my-pi/pi-coding-agent/task/types";
-import { isBundledSeance, seanceTaskSchemaFields } from "@oh-my-pi/pi-coding-agent/task/seance";
+import { isBundledSeance, seanceTaskSchemaFields, validateSeanceParams } from "@oh-my-pi/pi-coding-agent/task/seance";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import type { TaskItem } from "@oh-my-pi/pi-tui/tools/task";
 
 let taskSchemaSessionIndex = 0;
 
@@ -32,7 +33,7 @@ function createSession(
 const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
-// `model`, `outputSchema`, and its validation mode. The batch shape (`tasks[]` + shared
+// `outputSchema` and its validation mode. The batch shape (`tasks[]` + shared
 // `context`) is gated by the `task.batch` setting (default on, covered by
 // test/task/task-batch.test.ts).
 
@@ -152,7 +153,7 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits seance fields when they are not enabled", () => {
+	it("omits historical source and model fields when seance is not enabled", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
@@ -244,7 +245,7 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
-	it("rejects a model override for an ordinary task after the enabled schema accepts it", async () => {
+	it("rejects a raw model for an ordinary task after the seance-enabled schema accepts it", async () => {
 		const schema = getTaskSchema({
 			isolationEnabled: false,
 			batchEnabled: false,
@@ -257,6 +258,33 @@ describe("task spawn validation", () => {
 			model: "anthropic/claude-sonnet-4-5",
 		};
 		expect(schema(params) instanceof type.errors).toBe(false);
-		expect(await executeText(params, [bundledSeance])).toContain("`model` is only accepted for the `seance` agent.");
+		expect(await executeText(params, [bundledSeance])).toContain(
+			"`model` is only accepted for the bundled `seance` agent.",
+		);
+	});
+
+	it("validates mixed batch model selectors without allowing historical fields on ordinary agents", () => {
+		const ordinary = { agent: "scout", task: "Inspect auth.", solutionSpace: "bounded inspection" };
+		const historical = {
+			agent: "seance",
+			task: "Read history.",
+			solutionSpace: "historical lookup",
+			sourceSession: "/sessions/source.jsonl",
+			model: ["anthropic/claude-sonnet-4-5", "openai/gpt-5"],
+		};
+		const validate = (item: TaskItem, seanceAdvertised = true) =>
+			validateSeanceParams({
+				params: { context: "Auth review", tasks: [ordinary, item] },
+				batchEnabled: true,
+				defaultAgent: "task",
+				seanceAdvertised,
+			});
+		expect(validate(historical)).toBeUndefined();
+		expect(validate({ ...ordinary, model: "@slow" })).toContain("`model` is only accepted");
+		expect(validate({ ...historical, agent: "scout" })).toContain("`sourceSession` is only accepted");
+		// A project agent shadowing bundled seance is an ordinary agent.
+		expect(validate({ ...ordinary, agent: "seance", model: "openai/gpt-5" }, false)).toContain(
+			"`model` is only accepted",
+		);
 	});
 });

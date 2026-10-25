@@ -169,14 +169,12 @@ function validateSeanceFields(
 	label: string,
 	seanceAdvertised: boolean,
 ): string | undefined {
-	if (agent !== SEANCE_AGENT_NAME) {
+	if (agent !== SEANCE_AGENT_NAME || !seanceAdvertised) {
 		if (item.sourceSession !== undefined)
-			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
-		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+			return `\`sourceSession\` is only accepted for the bundled \`${SEANCE_AGENT_NAME}\` agent.`;
+		if (item.model !== undefined) return `\`model\` is only accepted for the bundled \`${SEANCE_AGENT_NAME}\` agent.`;
 		return undefined;
 	}
-	// Hidden bundled seance (plan mode, policy) is rejected at spawn; a custom shadow is an ordinary agent.
-	if (!seanceAdvertised) return undefined;
 	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
 		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
 	}

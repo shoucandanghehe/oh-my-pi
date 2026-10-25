@@ -33,16 +33,17 @@ describe("eval js agent() handle", () => {
 		const sandbox = loadPrelude(async (name, args) => {
 			seenName = name;
 			seenArgs = args as Record<string, unknown>;
-			return { id: "abc123", agent: "task" };
+			return { id: "abc123", agent: "default" };
 		});
 		const handle = (await (sandbox.agent as AgentHelper)("say hi", {
 			label: "Greeter",
+			agent: "default",
 		})) as Record<string, unknown>;
 		expect(seenName).toBe("__agent__");
-		expect(seenArgs).toEqual({ prompt: "say hi", label: "Greeter" });
+		expect(seenArgs).toEqual({ prompt: "say hi", label: "Greeter", agent: "default" });
 		expect(handle.kind).toBe("agent");
 		expect(handle.id).toBe("abc123");
-		expect(handle.agent).toBe("task");
+		expect(handle.agent).toBe("default");
 		expect(handle.handle).toBe("agent://abc123");
 	});
 

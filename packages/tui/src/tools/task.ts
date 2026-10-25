@@ -2254,7 +2254,7 @@ export interface TaskItem {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** Historical model override accepted only by the bundled seance agent. */
 	model?: string | string[];
 	/** Inline instructions; exactly one of task or taskFile is required. */
 	task?: string;
@@ -2286,7 +2286,7 @@ export interface TaskParams {
 	agent?: string;
 	/** Historical source session selected by the bundled consult agent. */
 	sourceSession?: string;
-	/** Optional model selector override for the historical source session. */
+	/** Delegation tier (flat form); see {@link TaskItem.model}. */
 	model?: string | string[];
 	/** The work (flat form). */
 	task?: string;

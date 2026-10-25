@@ -1345,6 +1345,8 @@ export interface AgentModelSelection {
 	patterns: string[];
 	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
 	role: string | undefined;
+	/** No explicit selector won; the child inherits the active session model and tier. */
+	inheritsSessionModel?: true;
 }
 
 /**
@@ -1355,7 +1357,11 @@ export interface AgentModelSelection {
  */
 export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
 	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
-	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
+	return {
+		patterns,
+		role: resolveExplicitModelRole(source, options.settings),
+		...(source === undefined ? { inheritsSessionModel: true as const } : {}),
+	};
 }
 
 /** Effective agent model patterns alone, for callers with no interest in role identity. */

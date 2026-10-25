@@ -42,6 +42,7 @@ import {
 	stripInternalDetailsFields,
 } from "./messages";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import type { DelegationRole } from "../task/model-policy";
 import { createInterruptedToolResults, sessionExitFollowsLastMessage } from "./exit-diagnostics";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import {
@@ -3677,6 +3678,7 @@ export class SessionManager {
 		tools: string[];
 		agent?: string;
 		modelRole?: string;
+		delegationRole?: DelegationRole;
 		resolvedModel?: string;
 		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
@@ -4726,6 +4728,7 @@ export interface PersistedSessionInit {
 	tools: string[];
 	agent?: string;
 	modelRole?: string;
+	delegationRole?: DelegationRole;
 	resolvedModel?: string;
 	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
@@ -4754,6 +4757,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			tools: entry.tools,
 			agent: entry.agent,
 			modelRole: entry.modelRole,
+			delegationRole: entry.delegationRole,
 			resolvedModel: entry.resolvedModel,
 			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,

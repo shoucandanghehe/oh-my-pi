@@ -9,8 +9,11 @@
 {{/if}}
 
 # Task Design
-- **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Use `scout` (faster model) for read-only research.{{/if}} Omit `agent` only when the spawn-policy default (`{{defaultAgent}}`) fits; otherwise pass the specialist explicitly. NEVER name the default explicitly.
-{{#if batchEnabled}}Specialist `agent` selectors belong inside each `tasks[]` item; NEVER put `agent` at the top level.
+- **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Use `scout` for read-only research.{{/if}} Omit `agent` when the spawn-policy default (`{{defaultAgent}}`) fits; otherwise pass an available specialist or role agent explicitly.
+{{#if batchEnabled}}`agent` selectors belong inside each `tasks[]` item; NEVER put `agent` at the top level.
+{{/if}}
+- **Role agents:** `agent: "default"` or `agent: "slow"` selects a general-purpose identity with its configured role model; use only names in Available Agents below. Available identities by Main tier: `smol` → `default` + `slow`; `default` → `slow`; `slow` → `default`; unclassified → neither. Choose the lowest suitable available identity; keep specialists for specialized work. Only a higher `default`/`slow` identity requires Main's session-scoped approval (`smol` < `default` < `slow`), never a specialist, `m<N>`, or an underlying model choice. Grant/denial persists across resume; cancellation is not denial. Children MUST ask Main rather than invoke a higher `default`/`slow` identity.
+{{#if delegation.role}}Current Main tier: `{{delegation.role}}`; higher role-agent approval: `{{delegation.approval}}`.{{#if delegation.subagent}} Need a higher `default`/`slow` identity? Report the blocker to Main.{{else}} Runtime asks once per session before a higher `default`/`slow` identity when approval is `ask`.{{/if}}
 {{/if}}
 - **Verification ownership:** State who verifies each assignment. In a shared working tree, defer builds, linters, and formatters until concurrent edits settle; the integration owner runs the required combined checks. Isolated assignments may run scoped checks when explicitly assigned and safe for shared resources.
 - **One-pass:** For implementation work, prefer an agent that investigates and edits its assigned scope.{{#if scoutAvailable}} Use a read-only scout for research or review that should not change files.{{/if}}
@@ -35,6 +38,6 @@
 
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.
-{{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it.
+{{else}}{{#if hasModelMentions}}`m<N>` = user-authorized exact model agent (`<model agent="m<N>" name="…"/>`), not a specialist or tier; spawn only when user names it.
 {{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (READ-ONLY; investigation only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
 {{/list}}{{/if}}

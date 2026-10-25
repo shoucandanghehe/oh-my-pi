@@ -170,6 +170,7 @@
 - ACP clients now receive each tool's name on `tool_call`, so tools without a specific ACP kind (`task`, `wait`, `ask`, …) show their own name instead of a generic "tool" label ([#17162](https://github.com/can1357/oh-my-pi/pull/17162) by [@epk](https://github.com/epk))
 - `/context` now opens an interactive, read-only viewer of the active prompt, tools, messages, and thinking with estimated token usage and per-tool output, instead of the static usage report ([#16160](https://github.com/can1357/oh-my-pi/pull/16160) by [@C-W-Z](https://github.com/C-W-Z)).
 - Nix builds cache Rust dependencies and the native addon in separate derivations, so Rust edits no longer recompile every dependency and TypeScript edits reuse the addon ([#13752](https://github.com/can1357/oh-my-pi/pull/13752) by [@n3oney](https://github.com/n3oney))
+- Task and eval select general-purpose identities through the available `default` and `slow` agents; only higher identities from a classified Main model require session-wide approval. Approval and denial persist across resume regardless of underlying models; specialists and user-authorized exact-model agents need no tier approval.
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 - Added `providers.openaiWebsockets: only` to keep Codex turns and streamed compaction on WebSockets without falling back to full-context SSE requests.
@@ -207,7 +208,7 @@
 - Fixed consecutive clipboard image pastes being dropped while an earlier paste was still loading.
 - Fixed typing and input-method commits appearing before clipboard text pasted just ahead of them.
 - The todo tool description now warns that phase-wide `done`/`drop` overwrite already-dropped, blocked, or completed tasks, and that progress `done` counts include dropped tasks.
-- The workflowz notice no longer advertises a per-call `model` option for `agent()`/`workpool()`, which Python rejected and JavaScript silently ignored.
+- The workflowz notice no longer advertises a per-call `model` option for either `agent()` or `workpool()`; both helpers select through agent names.
 - The read tool description no longer claims `ssh://` directories can be searched with `grep`.
 - Codex native web search now rejects responses without valid structured sources instead of treating answer links as search evidence.
 - Concurrent native agent panes in Tern no longer time out while waiting for other panes to be placed.

@@ -11,6 +11,8 @@
 
 The cell `timeout` counts only the cell's own work, not waits on `agent()`/`wait()`/`tool.task(…)`, so a subagent can outlast it.
 
+Select general-purpose identities with `agent="default"` or `agent="slow"` (JS: `{ agent: "default" }`); use only names in task's Available Agents list. Available identities by Main tier: `smol` → `default` + `slow`; `default` → `slow`; `slow` → `default`; unclassified → neither. Choose the lowest suitable available identity; keep specialists for specialized work. `m<N>` selects a user-authorized exact model, not a tier; spawn only when the user names it. Only a higher `default`/`slow` identity requires Main's session-scoped approval (`smol` < `default` < `slow`), never a specialist, `m<N>`, or an underlying model choice. Grant/denial persists across resume; cancellation is not denial. Children MUST ask Main rather than invoke a higher `default`/`slow` identity. `workpool()` uses the same agent-name selection.
+
 <dag>
 Acyclic waves of handles:
 - **Name nodes.** `h = {{#if py}}agent(…)`{{#if js}} (JS: `await agent(…)`){{/if}}{{else}}await agent(…)`{{/if}} returns at once; `h.handle` is `agent://<id>`.

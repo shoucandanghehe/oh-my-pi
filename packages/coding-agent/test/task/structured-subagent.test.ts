@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -18,6 +19,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
@@ -26,6 +28,8 @@ import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { extractSessionInit, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -44,6 +48,7 @@ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskAgentModelOverrides, cfgTaskEnableEffort } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -546,20 +551,16 @@ describe("structured subagent primitive", () => {
 		await fs.rm(evalLabeled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("derives modelRole from the raw selector source in request, override, definition order", async () => {
+	it("derives modelRole from the raw selector source in override, definition order", async () => {
 		const customAgent = { ...AGENT, model: ["@definition"] };
 		mockDiscovery(customAgent);
 		const roleSession = session({
 			modelRoles: {
-				request: "openai/gpt-4o",
 				override: "openai/gpt-4o",
 				definition: "openai/gpt-4o",
 			},
 		});
 		cfgTaskAgentModelOverrides.override(roleSession.settings, { worker: "@override" });
-
-		const requestPolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, model: "@request" }));
-		expect(requestPolicy.modelRole).toBe("request");
 
 		const overridePolicy = await resolveEffectiveSubagentPolicy(request({ session: roleSession }));
 		expect(overridePolicy.modelRole).toBe("override");
@@ -580,16 +581,6 @@ describe("structured subagent primitive", () => {
 			request({ session: session({ modelRoles: { definition: "openai/gpt-4o" } }) }),
 		);
 		expect(definitionPolicy.modelRole).toBe("definition");
-	});
-	it("falls through an empty request selector to the agent definition role", async () => {
-		const customAgent = { ...AGENT, model: ["@definition"] };
-		mockDiscovery(customAgent);
-		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
-
-		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "" }));
-
-		expect(policy.modelRole).toBe("definition");
-		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
 	});
 
 	it("falls through an empty configured override to the agent definition role", async () => {
@@ -664,7 +655,7 @@ describe("structured subagent primitive", () => {
 	});
 
 	it("does not assign a role when a child uses an explicit model selector", async () => {
-		mockDiscovery();
+		mockDiscovery({ ...AGENT, model: ["openai/gpt-4o"] });
 		const childSession = session({ modelRoles: { reviewer: "openai/gpt-4o" } });
 		const dispatched: executorModule.ExecutorOptions[] = [];
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -672,9 +663,7 @@ describe("structured subagent primitive", () => {
 			return result();
 		});
 
-		const settled = await runStructuredSubagent(
-			request({ session: childSession, model: "openai/gpt-4o", retainArtifacts: true }),
-		);
+		const settled = await runStructuredSubagent(request({ session: childSession, retainArtifacts: true }));
 
 		expect(settled.policy.modelRole).toBeUndefined();
 		expect(dispatched[0]?.modelRole).toBeUndefined();
@@ -1339,6 +1328,173 @@ describe("agent frontmatter structured opt-in", () => {
 		await removeWithRetries(root);
 	});
 
+	it("keeps a specialist authorized when authentication selects its fallback model", async () => {
+		const cwd = path.join(root, "home", "work");
+		await fs.mkdir(cwd, { recursive: true });
+		const small = createMockModel({ id: "auth-small", handler: () => ({ content: ["small"] }) });
+		const strong = createMockModel({ id: "auth-strong", handler: () => ({ content: ["strong"] }) });
+		const auth = createInMemoryAuthStorage();
+		auth.keys.setRuntime("mock", "test-key");
+		const registry = new ModelRegistry(auth);
+		vi.spyOn(registry, "getAvailable").mockReturnValue([small, strong]);
+		vi.spyOn(registry, "getApiKey").mockImplementation(async model =>
+			model.id === small.id ? undefined : "test-key",
+		);
+		mockDiscovery({ ...AGENT, model: ["@smol", "@slow"] });
+		const journal = SessionManager.inMemory(cwd);
+		journal.appendModelChange("mock/auth-small", "smol");
+		const select = vi.fn(async () => "Deny");
+		const parent: ToolSession = {
+			...session({
+				cwd,
+				modelRoles: { default: "mock/auth-small", smol: "mock/auth-small", slow: "mock/auth-strong" },
+			}),
+			hasUI: true,
+			sessionManager: journal,
+			modelRegistry: registry,
+			authStorage: auth,
+			getActiveModelString: () => "mock/auth-small",
+			getToolContext: () => ({ ui: { select } }) as unknown as AgentToolContext,
+		};
+		try {
+			const outcome = await runStructuredSubagent(request({ session: parent, structured: false, enableLsp: false }));
+			expect(strong.calls).toHaveLength(1);
+			expect(outcome.result.output).toBe("strong");
+			expect(select).not.toHaveBeenCalled();
+			expect(small.calls).toHaveLength(0);
+		} finally {
+			auth.close();
+		}
+	});
+
+	it("runs a user-tagged model matching slow without requesting an upgrade", async () => {
+		const cwd = path.join(root, "home", "work");
+		await fs.mkdir(cwd, { recursive: true });
+		const strong = createMockModel({
+			id: "tagged-strong",
+			handler: () => ({ content: ["user-selected model ran"] }),
+		});
+		const auth = createInMemoryAuthStorage();
+		auth.keys.setRuntime("mock", "test-key");
+		const registry = new ModelRegistry(auth);
+		vi.spyOn(registry, "getAvailable").mockReturnValue([strong]);
+		mockDiscovery();
+		const journal = SessionManager.inMemory(cwd);
+		journal.appendModelChange("mock/small", "smol");
+		const select = vi.fn(async () => "Deny");
+		const parent: ToolSession = {
+			...session({
+				cwd,
+				modelRoles: { smol: "mock/small", default: "mock/standard", slow: "mock/tagged-strong" },
+				sessionAgents: [{ ...AGENT, name: "m2", model: ["mock/tagged-strong"] }],
+			}),
+			hasUI: true,
+			sessionManager: journal,
+			modelRegistry: registry,
+			authStorage: auth,
+			getActiveModelString: () => "mock/small",
+			getToolContext: () => ({ ui: { select } }) as unknown as AgentToolContext,
+		};
+		try {
+			const outcome = await runStructuredSubagent(
+				request({ session: parent, agent: "m2", structured: false, enableLsp: false }),
+			);
+			expect(outcome.result.output).toBe("user-selected model ran");
+			expect(strong.calls).toHaveLength(1);
+			expect(select).not.toHaveBeenCalled();
+		} finally {
+			auth.close();
+		}
+	});
+
+	it("preserves an inherited smol tier through SDK startup and the cold-revive journal", async () => {
+		const cwd = path.join(root, "home", "work");
+		await fs.mkdir(cwd, { recursive: true });
+		const shared = createMockModel({
+			id: "shared-tier",
+			handler: context => {
+				const last = context.messages.at(-1);
+				if (last?.role === "toolResult") return { content: last.content.filter(part => part.type === "text") };
+				return {
+					content: [
+						{
+							type: "toolCall",
+							name: "task",
+							arguments: {
+								context: "Nested tier test",
+								tasks: [
+									{
+										agent: "default",
+										task: "Nested work",
+										solutionSpace: "one fixed answer",
+									},
+								],
+							},
+						},
+					],
+				};
+			},
+		});
+		const auth = createInMemoryAuthStorage();
+		auth.keys.setRuntime("mock", "test-key");
+		const registry = new ModelRegistry(auth);
+		vi.spyOn(registry, "getAvailable").mockReturnValue([shared]);
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [
+				{ ...AGENT, model: ["@task"], tools: ["task"], spawns: "*", output: undefined },
+				{ ...AGENT, name: "reviewer", model: ["@default"], output: undefined },
+			],
+			projectAgentsDir: null,
+		});
+		const journal = SessionManager.create(cwd, path.join(root, "sessions"), undefined, { suppressBreadcrumb: true });
+		journal.appendModelChange("mock/shared-tier", "smol");
+		const parent: ToolSession = {
+			...session({
+				cwd,
+				settings: Settings.isolated({
+					modelRoles: { default: "mock/shared-tier", smol: "mock/shared-tier", slow: "mock/shared-tier" },
+					"task.structured": false,
+					"async.enabled": false,
+					"task.agentIdleTtlMs": 0,
+					"task.completionProbe": false,
+					"compaction.enabled": false,
+					"retry.enabled": false,
+					"todo.enabled": false,
+					"advisor.enabled": false,
+				}),
+			}),
+			sessionManager: journal,
+			getSessionFile: () => journal.getSessionFile() ?? null,
+			getActiveModelString: () => "mock/shared-tier",
+			modelRegistry: registry,
+			authStorage: auth,
+			enableMCP: false,
+		};
+		try {
+			const outcome = await runStructuredSubagent(
+				request({
+					session: parent,
+					structured: false,
+					enableLsp: false,
+					enableIrc: false,
+					identity: { id: "InheritedTier" },
+				}),
+			);
+			expect(outcome.result.output).toContain('cannot invoke higher-tier agent "default" from smol');
+			const reopened = await SessionManager.open(
+				path.join(outcome.artifactsDir, "InheritedTier.jsonl"),
+				undefined,
+				undefined,
+				{ suppressBreadcrumb: true },
+			);
+			expect(extractSessionInit(reopened.getEntries())?.delegationRole).toBe("smol");
+			await reopened.close();
+		} finally {
+			await journal.close();
+			auth.close();
+		}
+	}, 30_000);
+
 	it.each([
 		{ setting: false, structured: { reporter: true, plain: false } },
 		{ setting: true, structured: { reporter: true, plain: true } },
@@ -1435,4 +1591,312 @@ describe("agent frontmatter structured opt-in", () => {
 		},
 		30_000,
 	);
+});
+
+describe("model tier delegation", () => {
+	const roles = { smol: "test/small", default: "test/standard", slow: "test/strong" };
+
+	function tierSession(
+		journal: SessionManager,
+		role: keyof typeof roles,
+		select: ExtensionUIContext["select"],
+	): ToolSession {
+		journal.appendModelChange(roles[role], role);
+		return {
+			...session({ modelRoles: roles }),
+			hasUI: true,
+			sessionManager: journal,
+			getSessionId: () => journal.getSessionId(),
+			getSessionFile: () => journal.getSessionFile() ?? null,
+			getActiveModelString: () => roles[role],
+			getToolContext: () => ({ hasUI: true, ui: { select } }) as unknown as AgentToolContext,
+		};
+	}
+
+	function observedWaiter() {
+		const controller = new AbortController();
+		const waiting = Promise.withResolvers<void>();
+		const addListener = controller.signal.addEventListener.bind(controller.signal);
+		vi.spyOn(controller.signal, "addEventListener").mockImplementation((...args) => {
+			addListener(...args);
+			waiting.resolve();
+		});
+		return { signal: controller.signal, waiting: waiting.promise };
+	}
+
+	it.each([
+		["smol", ["default", "slow"]],
+		["default", ["slow"]],
+		["slow", ["default"]],
+		["unclassified", []],
+	] as const)("advertises and dispatches the role agents for a %s main model", async (current, available) => {
+		mockDiscovery();
+		const select = vi.fn(async () => "Approve");
+		const parent = tierSession(SessionManager.inMemory(), current === "unclassified" ? "default" : current, select);
+		if (current === "unclassified") parent.getActiveModelString = () => "test/opus55";
+		const tool = await TaskTool.create(parent);
+		const advertised = [...tool.description.matchAll(/^- `(default|slow)`:/gm)].map(match => match[1]);
+		expect(advertised).toEqual([...available]);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		for (const agent of available) await runStructuredSubagent(request({ session: parent, agent }));
+		expect(run.mock.calls.map(([options]) => options.modelOverride)).toEqual(available.map(agent => [roles[agent]]));
+		expect(select).toHaveBeenCalledTimes(current === "smol" || current === "default" ? 1 : 0);
+		for (const agent of ["default", "slow"]) {
+			if (available.some(name => name === agent)) continue;
+			await expect(resolveEffectiveSubagentPolicy(request({ session: parent, agent }))).rejects.toThrow(
+				`Unknown agent "${agent}"`,
+			);
+		}
+	});
+
+	it("does not ask an unclassified main model to approve a specialist's configured role", async () => {
+		mockDiscovery({ ...AGENT, model: ["@slow"] });
+		const select = vi.fn(async () => "Deny");
+		const parent = tierSession(SessionManager.inMemory(), "default", select);
+		parent.getActiveModelString = () => "test/opus55";
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		await runStructuredSubagent(request({ session: parent }));
+		expect(run.mock.calls[0]?.[0].modelOverride).toEqual([roles.slow]);
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("does not require role-agent approval for a reviewer configured with slow", async () => {
+		mockDiscovery({ ...AGENT, name: "reviewer", model: ["@slow"] });
+		const select = vi.fn(async () => "Deny");
+		const parent = tierSession(SessionManager.inMemory(), "default", select);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		await expect(runStructuredSubagent(request({ session: parent, agent: "slow" }))).rejects.toThrow(
+			"denied for this main session",
+		);
+		expect(select).toHaveBeenCalledTimes(1);
+		await runStructuredSubagent(request({ session: parent, agent: "reviewer" }));
+		expect(run.mock.calls[0]?.[0].modelOverride).toEqual([roles.slow]);
+		expect(select).toHaveBeenCalledTimes(1);
+	});
+
+	it("lets slow delegate to default and smol without asking or changing the main model", async () => {
+		mockDiscovery({ ...AGENT, name: "sonic", model: ["@smol"] });
+		const select = vi.fn(async () => "Deny");
+		const parent = tierSession(SessionManager.inMemory(), "slow", select);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		await runStructuredSubagent(request({ session: parent, agent: "default" }));
+		await runStructuredSubagent(request({ session: parent, agent: "sonic" }));
+		expect(run.mock.calls.map(([options]) => options.modelOverride)).toEqual([[roles.default], [roles.smol]]);
+		expect(select).not.toHaveBeenCalled();
+		expect(parent.getActiveModelString?.()).toBe(roles.slow);
+	});
+
+	it("shares one pending approval across task and eval and remembers the grant", async () => {
+		mockDiscovery();
+		const entered = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<string>();
+		const select = vi.fn(async () => {
+			entered.resolve();
+			return answer.promise;
+		});
+		const parent = tierSession(SessionManager.inMemory(), "default", select);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		const first = runStructuredSubagent(request({ session: parent, agent: "slow" }));
+		await entered.promise;
+		const waiter = observedWaiter();
+		const second = runStructuredSubagent(
+			request({
+				session: parent,
+				agent: "slow",
+				invocationKind: "eval",
+				signal: waiter.signal,
+			}),
+		);
+		await waiter.waiting;
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(run).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+		answer.resolve("Approve");
+		await Promise.all([first, second]);
+		await runStructuredSubagent(request({ session: parent, agent: "slow" }));
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(run.mock.calls.map(([options]) => options.modelOverride)).toEqual([
+			[roles.slow],
+			[roles.slow],
+			[roles.slow],
+		]);
+	});
+
+	it.each(["Approve", "Deny"] as const)("persists %s across resume but not a copied new session", async answer => {
+		using directory = TempDir.createSync("@omp-model-upgrade-");
+		const original = SessionManager.create(directory.path(), path.join(directory.path(), "sessions"), undefined, {
+			suppressBreadcrumb: true,
+		});
+		const select = vi.fn(async () => answer);
+		const parent = tierSession(original, "default", select);
+		parent.getSessionId = () => "ephemeral-tool-view";
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		const spawn = (owner: ToolSession) => runStructuredSubagent(request({ session: owner, agent: "slow" }));
+		if (answer === "Approve") await spawn(parent);
+		else await expect(spawn(parent)).rejects.toThrow("denied for this main session");
+		const file = original.getSessionFile()!;
+		await original.close();
+
+		const restored = await SessionManager.open(file, undefined, undefined, { suppressBreadcrumb: true });
+		const restoredSelect = vi.fn(async () => (answer === "Approve" ? "Deny" : "Approve"));
+		const resumed = tierSession(restored, "default", restoredSelect);
+		if (answer === "Approve") await spawn(resumed);
+		else await expect(spawn(resumed)).rejects.toThrow("denied for this main session");
+		expect(restoredSelect).not.toHaveBeenCalled();
+		expect(run).toHaveBeenCalledTimes(answer === "Approve" ? 2 : 0);
+
+		const copied = await restored.persistCopy({
+			sessionDir: path.join(directory.path(), "copies"),
+			suppressBreadcrumb: true,
+		});
+		const copySelect = vi.fn(async () => "Approve");
+		await spawn(tierSession(copied, "default", copySelect));
+		expect(copySelect).toHaveBeenCalledTimes(1);
+		await copied.close();
+		await restored.close();
+	});
+
+	it("makes children ask Main even when an upgrade grant is available", async () => {
+		mockDiscovery();
+		const select = vi.fn(async () => "Approve");
+		const parent = tierSession(SessionManager.inMemory(), "default", select);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		await runStructuredSubagent(request({ session: parent, agent: "slow" }));
+		run.mockClear();
+		parent.taskDepth = 1;
+		await expect(
+			runStructuredSubagent(request({ session: parent, agent: "slow", invocationKind: "eval" })),
+		).rejects.toThrow("Report the blocker and evidence to Main");
+		expect(run).not.toHaveBeenCalled();
+		expect(select).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not require role-agent approval when an extension routes a specialist to slow", async () => {
+		mockDiscovery({ ...AGENT, model: ["@smol"] });
+		const select = vi.fn(async () => "Deny");
+		const parent = tierSession(SessionManager.inMemory(), "default", select);
+		parent.emitBeforeSubagentSpawn = async () => ({ model: "@slow" });
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		await runStructuredSubagent(request({ session: parent }));
+		expect(select).not.toHaveBeenCalled();
+		expect(run.mock.calls[0]?.[0].modelOverride).toEqual([roles.slow]);
+	});
+
+	it("still requires approval for the slow identity when an extension routes it to smol", async () => {
+		mockDiscovery({ ...AGENT, model: ["@smol"] });
+		const select = vi.fn(async () => "Deny");
+		const parent = tierSession(SessionManager.inMemory(), "smol", select);
+		parent.settings.setModelRole("slow", roles.smol);
+		parent.emitBeforeSubagentSpawn = async () => ({ model: "@smol" });
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		await expect(runStructuredSubagent(request({ session: parent, agent: "slow" }))).rejects.toThrow(
+			"denied for this main session",
+		);
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(run).not.toHaveBeenCalled();
+	});
+
+	it("waits for an atomic approval publish and forgets a failed publish", async () => {
+		const storage = new MemorySessionStorage();
+		using directory = TempDir.createSync("@omp-approval-publish-");
+		const journal = SessionManager.create(directory.path(), path.join(directory.path(), "sessions"), storage, {
+			suppressBreadcrumb: true,
+		});
+		const select = vi.fn(async () => "Approve");
+		const parent = tierSession(journal, "default", select);
+		await journal.ensureOnDisk();
+		await journal.flush();
+		const publishing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const writeAtomic = storage.writeTextAtomic.bind(storage);
+		let failNext = true;
+		vi.spyOn(storage, "writeTextAtomic").mockImplementation(async (...args) => {
+			if (failNext && args[1].includes('"task_model_upgrade"')) {
+				failNext = false;
+				publishing.resolve();
+				await release.promise;
+				throw new Error("approval publish failed");
+			}
+			return writeAtomic(...args);
+		});
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		const first = runStructuredSubagent(request({ session: parent, agent: "slow" })).catch((error: unknown) => error);
+		await publishing.promise;
+		const waiter = observedWaiter();
+		const second = runStructuredSubagent(request({ session: parent, agent: "slow", signal: waiter.signal })).catch(
+			(error: unknown) => error,
+		);
+		await waiter.waiting;
+		expect(run).not.toHaveBeenCalled();
+		release.resolve();
+		for (const error of await Promise.all([first, second])) {
+			expect(error).toBeInstanceOf(StructuredSubagentError);
+			expect((error as Error).message).toContain("approval publish failed");
+		}
+		await runStructuredSubagent(request({ session: parent, agent: "slow" }));
+		expect(select).toHaveBeenCalledTimes(2);
+		expect(run).toHaveBeenCalledTimes(1);
+		await journal.close();
+	});
+
+	it("does not persist a dismissed prompt as denial or execute a headless upgrade", async () => {
+		mockDiscovery();
+		const select = vi
+			.fn<ExtensionUIContext["select"]>()
+			.mockResolvedValueOnce(undefined)
+			.mockResolvedValue("Approve");
+		const parent = tierSession(SessionManager.inMemory(), "default", select);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		parent.hasUI = false;
+		await expect(runStructuredSubagent(request({ session: parent, agent: "slow" }))).rejects.toThrow(
+			"no interactive approval UI",
+		);
+		parent.hasUI = true;
+		await expect(runStructuredSubagent(request({ session: parent, agent: "slow" }))).rejects.toThrow(
+			"approval was dismissed",
+		);
+		expect(run).not.toHaveBeenCalled();
+		await runStructuredSubagent(request({ session: parent, agent: "slow" }));
+		expect(select).toHaveBeenCalledTimes(2);
+		expect(run).toHaveBeenCalledTimes(1);
+	});
+
+	it("cancels one waiter without cancelling another task's pending approval", async () => {
+		mockDiscovery();
+		const entered = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<string>();
+		let dialogSignal: AbortSignal | undefined;
+		const select = vi.fn<ExtensionUIContext["select"]>(async (_title, _choices, options) => {
+			dialogSignal = options?.signal;
+			entered.resolve();
+			return answer.promise;
+		});
+		const parent = tierSession(SessionManager.inMemory(), "default", select);
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		const controller = new AbortController();
+		const cancelled = runStructuredSubagent(
+			request({ session: parent, agent: "slow", signal: controller.signal }),
+		).catch((error: unknown) => error);
+		await entered.promise;
+		const waiter = observedWaiter();
+		const continuing = runStructuredSubagent(
+			request({
+				session: parent,
+				agent: "slow",
+				invocationKind: "eval",
+				signal: waiter.signal,
+			}),
+		);
+		await waiter.waiting;
+		controller.abort();
+		expect(await cancelled).toBeInstanceOf(StructuredSubagentError);
+		expect(dialogSignal?.aborted).toBe(false);
+		expect(run).not.toHaveBeenCalled();
+		answer.resolve("Approve");
+		await continuing;
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(run).toHaveBeenCalledTimes(1);
+	});
 });
