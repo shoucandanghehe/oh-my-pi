@@ -100,6 +100,7 @@ import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
 import type { CompletionJournal } from "../session/model-usage-journal";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import type { DelegationRole } from "./model-policy";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	AUTO_THINKING,
@@ -490,6 +491,7 @@ export interface ExecutorOptions {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	delegationRole?: DelegationRole;
 	/** Extension routing note for the chosen model; surfaced as `resolvedModelRoute`. */
 	modelRoute?: string;
 	/**
@@ -5177,6 +5179,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
+					delegationRole: options.delegationRole,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternParentFallback:
 						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
@@ -5438,6 +5441,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				mountedTools: session.getMountedXdevToolNames(),
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
+				delegationRole: options.delegationRole,
 				resolvedModel: progress.resolvedModel,
 				...(perCallModelGrants
 					? {
