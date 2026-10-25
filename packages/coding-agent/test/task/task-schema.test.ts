@@ -152,7 +152,7 @@ describe("task schema seance fields", () => {
 			}
 		}
 	});
-	it("omits seance fields when they are not enabled", () => {
+	it("omits historical source and model fields when seance is not enabled", () => {
 		for (const batchEnabled of [false, true]) {
 			for (const isolationEnabled of [false, true]) {
 				const schema = getTaskSchema({ batchEnabled, isolationEnabled });
@@ -337,7 +337,7 @@ describe("task spawn validation", () => {
 				},
 			}),
 		);
-		const text = tool.description;
+		const text = tool.description.split("\n").find(line => line.includes("`model`: one exact")) ?? "";
 		for (const advertised of ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) expect(text).toContain(advertised);
 		for (const omitted of ["hidden/image", "hidden/judge", "`@smol`", "`pi/slow`", "`*`", "`default`", "`inherit`"]) {
 			expect(text).not.toContain(omitted);

@@ -53,6 +53,7 @@ import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
+import { delegationAgents, delegationContext, type DelegationContext } from "./model-policy";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderStepsBrief } from "./steps";
@@ -163,6 +164,7 @@ interface TaskDescriptionOptions {
 	planMode: boolean;
 	asyncGuidance: string;
 	parentSpawns: string;
+	delegation: DelegationContext;
 }
 
 /** Plan mode hides seance; a `spawns` list led by it defaults to the next permitted agent. */
@@ -218,6 +220,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		seanceGuidance: seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskGuidance : "",
 		ircEnabled: options.ircEnabled,
 		asyncGuidance: options.asyncGuidance,
+		delegation: options.delegation,
 	});
 }
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
@@ -887,7 +890,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					)
 				: undefined);
 		return renderDescription({
-			agents,
+			agents: [
+				...agents,
+				...delegationAgents(this.session).filter(role => !agents.some(agent => agent.name === role.name)),
+			],
 			sessionAgents,
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
@@ -904,6 +910,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			planMode,
 			asyncGuidance: this.delegationGuidance,
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			delegation: delegationContext(this.session),
 		});
 	}
 	private constructor(

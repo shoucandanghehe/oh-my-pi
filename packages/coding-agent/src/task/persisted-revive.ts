@@ -442,6 +442,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			subagentEventBus: spec.subagentEventBus,
 			modelRegistry: spec.modelRegistry,
 			...(perCallModel ? { model: perCallModel, thinkingLevel: init.perCallThinkingLevel ?? undefined } : {}),
+			delegationRole: init.delegationRole,
 			...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 			modelPatternAuthFallback: restoredSeance || init.perCallModel ? undefined : init.resolvedModel,
 			settings: subagentSettings,

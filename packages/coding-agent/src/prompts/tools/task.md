@@ -24,14 +24,18 @@ Run one agent synchronously.
 {{asyncGuidance}}
 {{/if}}
 
+# Task Design
+- **Agent typing:** Pick each item's most specific available agent.{{#if scoutAvailable}} Use `scout` for read-only research.{{/if}} Omit `agent` when the spawn-policy default (`{{defaultAgent}}`) fits; otherwise pass an available specialist or role agent explicitly.
+{{#if batchEnabled}}`agent` selectors belong inside each `tasks[]` item; NEVER put `agent` at the top level.
+{{/if}}
+- **Role agents:** `agent: "default"` or `agent: "slow"` selects a general-purpose identity with its configured role model; use only names in Available Agents below. Available identities by Main tier: `smol` → `default` + `slow`; `default` → `slow`; `slow` → `default`; unclassified → neither. Choose the lowest suitable available identity; keep specialists for specialized work. Only a higher `default`/`slow` identity requires Main's session-scoped approval (`smol` < `default` < `slow`), never a specialist, `m<N>`, or an underlying model choice. Grant/denial persists across resume; cancellation is not denial. Children MUST ask Main rather than invoke a higher `default`/`slow` identity.
+{{#if delegation.role}}Current Main tier: `{{delegation.role}}`; higher role-agent approval: `{{delegation.approval}}`.{{#if delegation.subagent}} Need a higher `default`/`slow` identity? Report the blocker to Main.{{else}} Runtime asks once per session before a higher `default`/`slow` identity when approval is `ask`.{{/if}}
+{{/if}}
+- **Verification ownership:** State who verifies each assignment. In a shared working tree, defer builds, linters, and formatters until concurrent edits settle; the integration owner runs the required combined checks. Isolated assignments may run scoped checks when explicitly assigned and safe for shared resources.
+- **One-pass:** For implementation work, prefer an agent that investigates and edits its assigned scope.{{#if scoutAvailable}} Use a read-only scout for research or review that should not change files.{{/if}}
+- **Overlap:** Parallelize independent ownership. Same-file edits are not guaranteed to merge.{{#if ircEnabled}} Coordinate shared-file edits through `write agent://<id>`.{{/if}} Name one integration owner and state cross-task contracts in the {{#if batchEnabled}}batch `context`{{else}}task{{/if}} before dispatch. Sequence dependent mutations and follow the project's isolation rules.
 
 # Inputs
-- `agent`: most specific{{#if batchEnabled}}, inside each `tasks[]` item, NEVER at the top level{{/if}}.
-  - Omit only for the default (`{{defaultAgent}}`); NEVER name it.
-{{#if scoutAvailable}}
-  - Read-only research MUST use `scout` only when files unknown.
-{{/if}}
-  - Prefer one agent to investigate + edit.
 {{#if batchEnabled}}
 - `context`: shared (`# Goal`, `# Contract` interfaces); NEVER repeat per task.
 {{/if}}
@@ -79,7 +83,7 @@ Run one agent synchronously.
   - Every request requires an approved model; retry fallback, context promotion and prewalk are off.
 {{/if}}
 {{#if structured}}
-- `schemaMode`: default permissive warns after retries; strict fails.
+- `schemaMode`: inherits the parent session's mode when omitted (permissive if unset). Permissive warns after retries; strict fails.
 {{/if}}
 {{#if isolationEnabled}}
 {{#if applyIsolatedChanges}}
@@ -89,12 +93,10 @@ Run one agent synchronously.
 {{/if}}
 {{/if}}
 
-
-{{#if seanceGuidance}}{{seanceGuidance}}{{/if}}Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
-Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
+{{#if seanceGuidance}}{{seanceGuidance}}{{/if}}
 
 # Available Agents
 {{#if spawningDisabled}}Agent spawning is currently disabled.
-{{else}}{{#if hasModelMentions}}`m<N>` = user-tagged model (`<model agent="m<N>" name="…"/>`), not specialist; spawn only when user names it.
-{{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (read-only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
+{{else}}{{#if hasModelMentions}}`m<N>` = user-tagged exact model agent (`<model agent="m<N>" name="…"/>`), not a specialist or tier. A tag keeps that model available on this session branch; spawn it as many times as the work needs. Several tags form a pool to pick from per assignment; their count sets no number of tasks, no even split, and no duty to use each.
+{{/if}}{{#list agents join=""}}- `{{name}}`{{#if readOnly}} (READ-ONLY; investigation only, no edits){{/if}}{{#if blocking}} (BLOCKING; inline result){{/if}}{{#if structured}} (STRUCTURED; schema result){{/if}}: {{description}}
 {{/list}}{{/if}}
