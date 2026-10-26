@@ -1,16 +1,18 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { TspKind, TspSpan } from "@oh-my-pi/pi-wire";
 import { AssistantMessageComponent } from "../src/chat/assistant-message";
 import { BashExecutionComponent } from "../src/chat/bash-execution";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import { ToolExecutionComponent } from "../src/chat/tool-execution";
+import { getNativeBlob } from "../src/native/blobs";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { bashToolRenderer, formatExitCodeNotice, formatWallTimeNotice } from "../src/tools/bash";
 import { type EvalCellResult, evalToolRenderer } from "../src/tools/eval";
 import type { RenderResultOptions } from "../src/tools/renderer";
 import { getThemeByName, setThemeInstance } from "../src/theme";
 import type { TUI } from "../src/tui";
+import * as terminalCapabilities from "../src/terminal-capabilities";
 
 const done: RenderResultOptions = { expanded: false, isPartial: false };
 // 1×1 transparent PNG.
@@ -236,6 +238,13 @@ describe("bash native run box", () => {
 });
 
 describe("read image results", () => {
+	beforeEach(() => {
+		vi.spyOn(terminalCapabilities, "isWslInWindowsTern").mockReturnValue(false);
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
 	const readImage = () => {
 		const tool = new ToolExecutionComponent("read", { path: "logo.png" }, { showImages: true }, undefined, ui);
@@ -271,6 +280,22 @@ describe("read image results", () => {
 			const described = tool.describe(cx(["tool", "ansi", "code", "image"]));
 			expect(collect(described.c, "media")).toHaveLength(0);
 			expect(collect(described.c, "image")).toHaveLength(1);
+		} finally {
+			tool.dispose();
+		}
+	});
+
+	it("uploads image bytes instead of an inaccessible WSL media path in Windows Tern", () => {
+		vi.spyOn(terminalCapabilities, "isWslInWindowsTern").mockReturnValue(true);
+		const tool = readImage();
+		try {
+			const described = tool.describe(cx(["tool", "ansi", "code", "image", "media"]));
+			expect(collect(described.c, "media")).toHaveLength(0);
+			const images = collect(described.c, "image");
+			expect(images).toHaveLength(1);
+			const blob = getNativeBlob(props(images[0]).blob as string);
+			expect(blob?.mime).toBe("image/png");
+			expect(blob?.bytes).toEqual(Buffer.from(PNG, "base64"));
 		} finally {
 			tool.dispose();
 		}
@@ -345,6 +370,15 @@ describe("read image results", () => {
 				expect(collect(message.c, "media")).toHaveLength(0);
 				expect(collect(message.c, "image")).toHaveLength(1);
 			});
+
+			it("uploads the texture in Windows Tern without suppressing the model viewer", () => {
+				vi.spyOn(terminalCapabilities, "isWslInWindowsTern").mockReturnValue(true);
+				const message = assistant().describe(withMedia);
+				expect(collect(message.c, "media").map(n => props(n).path)).toEqual(["/repo/house.obj"]);
+				const images = collect(message.c, "image");
+				expect(images).toHaveLength(1);
+				expect(getNativeBlob(props(images[0]).blob as string)?.bytes).toEqual(Buffer.from(PNG, "base64"));
+			});
 		});
 
 		describe("one SVG read as `:img` and as source", () => {
@@ -394,6 +428,20 @@ describe("read image results", () => {
 				expect(collect(message.c, "media")).toHaveLength(0);
 				expect(collect(message.c, "image")).toHaveLength(1);
 				expect(collect(group().describe(withoutMedia).c, "image")).toHaveLength(0);
+			});
+
+			it("keeps one uploaded image when another WSL read names the same file without bytes", () => {
+				vi.spyOn(terminalCapabilities, "isWslInWindowsTern").mockReturnValue(true);
+				const component = assistant();
+				component.setToolResultImages("again", [image], svg);
+				const message = component.describe(withMedia);
+				expect(collect(message.c, "media")).toHaveLength(0);
+				const images = collect(message.c, "image");
+				expect(images).toHaveLength(1);
+				expect(getNativeBlob(props(images[0]).blob as string)?.bytes).toEqual(Buffer.from(PNG, "base64"));
+				const rows = group().describe(withMedia);
+				expect(collect(rows.c, "media")).toHaveLength(0);
+				expect(collect(rows.c, "image")).toHaveLength(0);
 			});
 		});
 	});

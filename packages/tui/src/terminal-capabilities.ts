@@ -648,6 +648,14 @@ const KNOWN_TERMINALS = Object.freeze({
 	monstar: new TerminalInfo("monstar", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, false, false, false, 2),
 });
 
+/** WSL process whose native Tern host owns a Windows named pipe, not its Linux filesystem. */
+export function isWslInWindowsTern(
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = process.env,
+): boolean {
+	return isWsl(platform, env) && env.TERN_PANE_SOCKET?.startsWith("\\\\.\\pipe\\") === true;
+}
+
 /** Resolve terminal identity from environment markers used by common emulators. */
 export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	function caseEq(a: string, b: string): boolean {

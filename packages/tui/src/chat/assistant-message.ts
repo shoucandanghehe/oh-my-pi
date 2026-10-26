@@ -2,7 +2,7 @@ import type { AssistantMessage, ImageContent, TextContent, ThinkingContent } fro
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
-import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
+import { ImageProtocol, isWslInWindowsTern, TERMINAL } from "../terminal-capabilities";
 import {
 	type DefaultTextStyle,
 	endsInsideOpenFence,
@@ -1093,27 +1093,28 @@ export class AssistantMessageComponent extends Container {
 				}
 			}
 			if (this.#showImages && this.#showToolResultImages) {
-				// Reads of files Tern's media viewer shows: the host loads each file once by path, no bytes uploaded.
+				// Windows Tern cannot load WSL paths; keep their available pixels on the blob transport.
+				const blobPaths =
+					media && isWslInWindowsTern()
+						? new Set([...this.#toolImagesByCallId.keys()].map(id => this.#toolMediaPathByCallId.get(id)))
+						: undefined;
 				const shownPaths = new Set<string>();
 				if (media) {
 					for (const [toolCallId, mediaPath] of this.#toolMediaPathByCallId) {
-						if (shownPaths.has(mediaPath)) continue;
+						if (shownPaths.has(mediaPath) || blobPaths?.has(mediaPath)) continue;
 						shownPaths.add(mediaPath);
 						children.push(nativeMediaNode(mediaPath, `r${toolCallId}`));
 					}
 				}
 				for (const [toolCallId, images] of this.#toolImagesByCallId) {
-					if (media && this.#toolMediaPathByCallId.has(toolCallId)) continue;
+					const mediaPath = this.#toolMediaPathByCallId.get(toolCallId);
+					if (mediaPath && shownPaths.has(mediaPath)) continue;
 					images.forEach((image, index) => {
 						children.push(
-							this.#nativeImages.get(
-								`r${toolCallId}:${index}`,
-								image.data,
-								image.mimeType,
-								this.#toolMediaPathByCallId.get(toolCallId),
-							),
+							this.#nativeImages.get(`r${toolCallId}:${index}`, image.data, image.mimeType, mediaPath),
 						);
 					});
+					if (media && mediaPath) shownPaths.add(mediaPath);
 				}
 			}
 			const errorNode = this.#describeError(message);
@@ -1723,9 +1724,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * A grouped read's result images, and `mediaPath`: the file it read that Tern's media viewer
-	 * shows (read details), which a native host supporting `media` shows by path instead of the
-	 * images. A media-only result (a model, a PDF) passes no images.
+	 * A grouped read's result images and source file (`mediaPath`), used by a native host's
+	 * media viewer when it shares the filesystem. A media-only result (a model, a PDF)
+	 * passes no images.
 	 */
 	setToolResultImages(toolCallId: string, images: ImageContent[], mediaPath?: string): void {
 		if (!toolCallId) return;

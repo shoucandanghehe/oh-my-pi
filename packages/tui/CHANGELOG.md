@@ -203,6 +203,7 @@
 - BTW cards now use prose text, compact tool activity and clickable actions; summary cards identify their source as `From BTW`.
 - Native transcripts now retain existing message cards while tool-call arguments stream.
 - File links from OMP running in WSL now open the corresponding files in Windows Tern, including native tool cards and file lists.
+- Fixed inline image previews failing in Windows Tern when OMP runs inside WSL, including resumed conversations.
 - Parent IRC steering messages now retain their sender and message body in live and replayed transcript cards.
 - Audio and video attachments now remain visible in native tool cards, including custom tools and mounted tool devices.
 - Fixed streamed SVG drawings staying hidden beneath write tool cards after their images finish rendering.

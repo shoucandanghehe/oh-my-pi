@@ -13,15 +13,18 @@
  * one-entry block).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type Component, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import * as terminalCapabilities from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { TspHarness } from "../../../../tui/test/native/tsp-harness";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 import { cfgDisplayShowTokenUsage, cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -44,6 +47,12 @@ afterEach(() => {
 });
 
 type Block = AssistantMessage["content"][number];
+
+const pngImage: ImageContent = {
+	type: "image",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+	mimeType: "image/png",
+};
 
 function read(path: string): Block {
 	return { type: "toolCall", id: `read-${path}`, name: "read", arguments: { path } } as Block;
@@ -244,11 +253,7 @@ describe("EventController read-group accretion", () => {
 		const { controller, chatContainer } = createFixture();
 		const toolCall = read("hidden.png");
 		await streamCompletion(controller, [toolCall]);
-		const image: ImageContent = {
-			type: "image",
-			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
-			mimeType: "image/png",
-		};
+		const image = pngImage;
 
 		await controller.handleEvent({
 			type: "tool_execution_end",
@@ -266,4 +271,57 @@ describe("EventController read-group accretion", () => {
 		assistant?.setImagesVisible(true);
 		expect(hasImageComponent(assistant!)).toBe(true);
 	});
+
+	for (const source of ["live", "replay"] as const) {
+		it(`uploads grouped WSL read image bytes to a media-capable Windows Tern during ${source}`, async () => {
+			vi.spyOn(terminalCapabilities, "isWslInWindowsTern").mockReturnValue(true);
+			cfgTerminalShowImages.override(Settings.instance, true);
+			const ctx = createInteractiveModeContext();
+			const imagePath = "/mnt/c/Users/test/preview.png";
+			const message = assistantMessage([read(imagePath)]);
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: `read-${imagePath}`,
+				toolName: "read",
+				content: [{ type: "text", text: "Read image" }, pngImage],
+				details: { resolvedPath: imagePath, mediaPath: imagePath },
+				isError: false,
+				timestamp: message.timestamp + 1,
+			};
+			if (source === "live") {
+				const controller = new EventController(ctx);
+				await streamCompletion(controller, message.content);
+				await controller.handleEvent({
+					type: "tool_execution_end",
+					toolCallId: result.toolCallId,
+					toolName: result.toolName,
+					result,
+					isError: false,
+				});
+			} else {
+				const helpers = new UiHelpers(ctx);
+				ctx.addMessageToChat = (entry, options) => helpers.addMessageToChat(entry, options);
+				helpers.renderSessionContext({
+					messages: [message, result],
+					models: {},
+					injectedTtsrRules: [],
+					mode: "none",
+				});
+			}
+			const harness = await TspHarness.start(tui => tui.addChild(ctx.chatContainer));
+			try {
+				expect(readGroups(ctx.chatContainer)).toHaveLength(1);
+				expect(harness.findAll(n => n.k === "media")).toHaveLength(0);
+				const images = harness.findAll(n => n.k === "image");
+				expect(images).toHaveLength(1);
+				const image = images[0];
+				const blob = image?.k === "image" ? image.p?.blob : undefined;
+				expect(harness.terminal.blobs.get(blob!)).toEqual(Buffer.from(pngImage.data, "base64"));
+				expect(harness.terminal.log.filter(m => m.verb === "b").map(m => m.body)).toEqual([pngImage.data]);
+				expect(harness.errors).toEqual([]);
+			} finally {
+				harness.stop();
+			}
+		});
+	}
 });

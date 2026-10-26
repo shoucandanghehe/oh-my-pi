@@ -22,6 +22,7 @@ import type { NativeChild, NativeNode } from "../native/node";
 import { fileHref, footnoteText, inlineErrorView, resultText } from "./native-view";
 import { numberedCode } from "./grouped-file-output";
 import { getLanguageFromPath } from "../lang-from-path";
+import { isWslInWindowsTern } from "../terminal-capabilities";
 import type { Theme } from "../theme/theme";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine } from "../render";
 import { markFramedBlockComponent } from "../render/output-block";
@@ -57,9 +58,9 @@ export interface ReadToolDetails {
 	isDirectory?: boolean;
 	resolvedPath?: string;
 	/**
-	 * Absolute path of the disk file whose image this read returned. A native TSP host that
-	 * supports `media` shows the file by path instead of the uploaded image bytes. Unset for
-	 * screenshots, URL reads and other images not backed by a file. Display-only.
+	 * Absolute path of the disk file whose image this read returned. A native TSP host can
+	 * show the file by path instead of uploading image bytes when it shares the filesystem.
+	 * Unset for screenshots, URL reads and other images not backed by a file. Display-only.
 	 */
 	mediaPath?: string;
 	suffixResolution?: { from: string; to: string; raw?: boolean };
@@ -786,10 +787,13 @@ export const readToolRenderer = {
 		);
 
 		const contentText = details?.displayContent?.text ?? stripOutputNotice(resultText(result), details?.meta);
-		// A file Tern's media viewer shows (image, model, PDF, video, audio): the host loads it by path.
-		const mediaPath = readMediaPath(options.renderContext?.rawDetails) ?? details?.mediaPath;
-		const media = options.media && mediaPath ? nativeMediaNode(mediaPath, "media") : undefined;
+		// A Windows Tern host cannot resolve paths in its nested WSL process; send available pixels instead.
 		const imageBlock = result.content?.find(isImageBlock);
+		const mediaPath = readMediaPath(options.renderContext?.rawDetails) ?? details?.mediaPath;
+		const media =
+			options.media && mediaPath && !(imageBlock && isWslInWindowsTern())
+				? nativeMediaNode(mediaPath, "media")
+				: undefined;
 		if (imageBlock) {
 			const detailText = contentText.trim();
 			return {

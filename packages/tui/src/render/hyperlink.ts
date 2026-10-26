@@ -10,9 +10,8 @@ import * as path from "node:path";
 import * as url from "node:url";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { isWsl } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
-import { setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
+import { isWslInWindowsTern, setTerminalHyperlinks, TERMINAL, type TerminalId } from "../terminal-capabilities";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";
@@ -138,7 +137,7 @@ export function fileUriForTerminal(
 	if (fileLinkTarget) return tryFileUri(filePath, opts);
 	if (terminalId !== "vscode") {
 		// A Windows Tern pane exposes a named pipe even when its program runs in WSL.
-		if (isWsl(platform, env) && env.WSL_DISTRO_NAME && env.TERN_PANE_SOCKET?.startsWith("\\\\.\\pipe\\")) {
+		if (isWslInWindowsTern(platform, env) && env.WSL_DISTRO_NAME) {
 			const windowsPath = `\\\\wsl.localhost\\${env.WSL_DISTRO_NAME}${path.posix.resolve(filePath).replaceAll("/", "\\")}`;
 			return url.pathToFileURL(windowsPath, { windows: true }).href;
 		}
