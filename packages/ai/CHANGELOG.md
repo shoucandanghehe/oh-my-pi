@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `preferWebsockets: "only"` for Codex requests and streamed compaction, keeping later turns on WebSockets after transport failures instead of falling back to SSE.
+
+### Fixed
+
+- WebSocket-only Codex requests now reject a busy shared connection without falling back to SSE or interrupting its owner.
+- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
+- Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
+- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
+- Image edits can upload reference files to proxy endpoints that require multipart requests.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
@@ -62,18 +75,6 @@
 - Updated Bun engine requirement to ≥1.4.4
 
 ## [18.13.2] - 2026-10-27
-### Added
-
-- Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
-- Added `preferWebsockets: "only"` for Codex requests and streamed compaction, keeping later turns on WebSockets after transport failures instead of falling back to SSE.
-
-### Fixed
-
-- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
-- Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
-- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
-- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
-- Image edits can upload reference files to proxy endpoints that require multipart requests.
 
 ### Fixed
 

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Fixed
+
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
+
 ## [18.14.1] - 2026-10-31
 
 ### Added
@@ -108,7 +120,6 @@
 - Fixed the built-in `ps` crashing the shell on a non-ASCII character in an option cluster such as `ps -é`; it now reports `unsupported option '-é'` like any other unknown option ([#17019](https://github.com/can1357/oh-my-pi/pull/17019) by [@sjawhar](https://github.com/sjawhar))
 - Fixed macOS `ax()` and `find()` leaving a text field with no label of its own, such as Reminders' Add Date and Add Location fields, unnamed; such a field is now named by its placeholder ([#16915](https://github.com/can1357/oh-my-pi/pull/16915) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed computer use on macOS being unable to finish renaming a file in Finder: keys, `el.type` and `el.press` sent to the rename field were refused, and so were clicks in its window while Finder was your frontmost app ([#16910](https://github.com/can1357/oh-my-pi/pull/16910) by [@will-bogusz](https://github.com/will-bogusz))
-- Ruff output summaries no longer count source-frame function calls as diagnostic filenames ([#16837](https://github.com/can1357/oh-my-pi/issues/16837)).
 - Fixed a UTF-8 char-boundary panic when parsing `stateDiagram-v2` lines where `>` follows a multibyte character ([#16749](https://github.com/can1357/oh-my-pi/pull/16749) by [@berney](https://github.com/berney))
 - Fixed the bash tool's `rg` and `fd` on macOS and Linux finding nothing under a path that is a symlink to a directory, such as `/tmp` or `/etc` on macOS or a symlinked skill folder; like ripgrep and fd, they now search the folder the link points to ([#16598](https://github.com/can1357/oh-my-pi/pull/16598) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed minimized `git diff`, `git show` and `diff -u` output dropping a hunk's changes and listing a made-up file when a changed line starts with `-- ` or `++ ` (SQL comments, Markdown `---` rules) ([#16588](https://github.com/can1357/oh-my-pi/pull/16588) by [@will-bogusz](https://github.com/will-bogusz))
@@ -121,17 +132,6 @@
 - Fixed a macOS background right or middle double click pressing again after you clicked or typed in its app between its presses; it now stops there with `UserIntervened`, as a left click does ([#16770](https://github.com/can1357/oh-my-pi/pull/16770) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background `axType`, `axKeyChord` and `axClick` sending input into an app you switched to while it was busy answering the element's window or bounds lookup; they now read your front app first and refuse with `UserIntervened`, as window input does. The refusal for an element that does not take focus now says no keys were sent, since the focus request reached the app ([#16769](https://github.com/can1357/oh-my-pi/pull/16769) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the shell output minimizer cutting short `git diff`, `git show`, `diff`, `jq` and `ssh` output that fits in 16 KB: it now arrives whole, and the patch summary, the 40-line `jq` cap and the remote head/tail cut apply only to larger output ([#16589](https://github.com/can1357/oh-my-pi/pull/16589) by [@will-bogusz](https://github.com/will-bogusz))
-### Breaking Changes
-
-- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
-
-### Added
-
-- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
-
-### Fixed
-
-- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
 
 ## [18.12.5] - 2026-10-21
 
