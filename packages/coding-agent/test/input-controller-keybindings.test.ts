@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { getEditorTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type Component, type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
@@ -172,7 +173,6 @@ async function createContext() {
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
 		syncIdleMaintenanceView: vi.fn(),
-		sessionManager: { getSessionId: () => "session" },
 		resetDisplayAfterAppearanceRefresh,
 		ui: {
 			requestRender,
@@ -202,6 +202,7 @@ async function createContext() {
 		} as InteractiveModeContext["keybindings"],
 		locallySubmittedUserSignatures: new Set<string>(),
 		isKnownSlashCommand: () => false,
+		hasPendingSubmission: () => false,
 		recordLocalSubmission(this: InteractiveModeContext, text: string, imageCount = 0) {
 			if (this.isKnownSlashCommand(text)) return () => {};
 			const sig = `${text}\u0000${imageCount}`;
@@ -339,7 +340,11 @@ function dispatchEnhancedImagePaste(
 }
 
 /** Replay a kitty OSC 5522 enhanced paste that offers and delivers plain `text`. */
-function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): void {
+function dispatchEnhancedTextPaste(
+	listeners: InputListener[],
+	text: string,
+	terminalWrite: Mock<(data: string) => void>,
+): void {
 	const packet = (metadata: string, payload?: string) =>
 		`\x1b]5522;${metadata}${payload === undefined ? "" : `;${payload}`}\x1b\\`;
 	const textMime = Buffer.from("text/plain").toString("base64");
@@ -347,9 +352,15 @@ function dispatchEnhancedTextPaste(listeners: InputListener[], text: string): vo
 		packet("type=read:status=OK:pw=secret"),
 		packet(`type=read:status=DATA:mime=${textMime}`),
 		packet("type=read:status=DONE"),
-		packet("type=read:status=OK"),
-		packet(`type=read:status=DATA:mime=${textMime}`, Buffer.from(text).toString("base64")),
-		packet("type=read:status=DONE"),
+	]) {
+		dispatchInput(listeners, input);
+	}
+	const id = /id=([^:;\x1b\x07]+)/.exec(terminalWrite.mock.calls.at(-1)?.[0] ?? "")?.[1];
+	if (!id) throw new Error("Expected an identified clipboard read request");
+	for (const input of [
+		packet(`type=read:id=${id}:status=OK`),
+		packet(`type=read:id=${id}:status=DATA:mime=${textMime}`, Buffer.from(text).toString("base64")),
+		packet(`type=read:id=${id}:status=DONE`),
 	]) {
 		dispatchInput(listeners, input);
 	}
@@ -628,24 +639,28 @@ describe("InputController keybinding setup", () => {
 		setFocused({ handleInput });
 		new InputController(ctx).setupKeyHandlers();
 
-		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), "sk-test-key");
+		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), "sk-test-key", spies.terminalWrite);
 
 		expect(await received).toBe("\x1b[200~sk-test-key\x1b[201~");
 		expect(editor.getText()).toBe("");
 	});
 
-	it("delivers an enhanced text paste to the main editor as a bracketed paste so image paths attach", async () => {
+	it("routes an enhanced image-path paste through the main editor's attachment handler", async () => {
+		await initTheme(false);
 		const { promise: received, resolve: resolveReceived } = Promise.withResolvers<string>();
-		const { InputController, ctx, editor, spies } = await createContext();
-		editor.handleInput = vi.fn((data: string) => {
-			resolveReceived(data);
-		});
+		const { InputController, ctx, setFocused, spies } = await createContext();
+		const editor = new CustomEditor(getEditorTheme());
+		ctx.editor = editor;
+		setFocused(editor);
 		new InputController(ctx).setupKeyHandlers();
+		editor.onPasteImagePath = async path => {
+			resolveReceived(path);
+		};
 
 		const path = "/tmp/Screenshot\\ 2026-10-19\\ at\\ 14.25.32.png";
-		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), path);
+		dispatchEnhancedTextPaste(registeredInputListeners(spies.addInputListener), path, spies.terminalWrite);
 
-		expect(await received).toBe(`\x1b[200~${path}\x1b[201~`);
+		expect(await received).toBe("/tmp/Screenshot 2026-10-19 at 14.25.32.png");
 		expect(editor.getText()).toBe("");
 	});
 

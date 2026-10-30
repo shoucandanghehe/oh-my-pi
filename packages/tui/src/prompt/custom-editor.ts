@@ -1654,7 +1654,7 @@ export class CustomEditor extends Editor {
 			if (!pending) return false;
 			pending = false;
 			try {
-				if (text !== undefined) this.pasteText(text);
+				if (text !== undefined) this.#applyPasteContent(text, "", false);
 			} finally {
 				this.#onPasteSettled();
 			}
@@ -1949,8 +1949,10 @@ export class CustomEditor extends Editor {
 		const paste = this.#pasteHandler.process(data);
 		if (!paste.handled) return false;
 		if (paste.pasteContent === undefined) return true; // still buffering — wait for end marker
-		const content = paste.pasteContent;
-		const remaining = paste.remaining;
+		return this.#applyPasteContent(paste.pasteContent, paste.remaining, draft);
+	}
+
+	#applyPasteContent(content: string, remaining: string, draft: boolean): boolean {
 		// Queue any trailing bytes from the same read (typically a follow-up keystroke such as
 		// Enter that the user pressed right after Cmd+V) so they only fire *after* the paste
 		// completes — fixes the race where submit runs against an empty `pendingImages`.
