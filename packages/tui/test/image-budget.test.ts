@@ -839,21 +839,21 @@ describe("TUI inline-image budget", () => {
 			writes.push(data);
 			realWrite(data);
 		});
-		const tui = new TUI(term);
+		const tui = createTui(term);
 		const root = new Container();
 		root.addChild(new Text("text-only", 0, 0));
 		tui.addChild(root);
 
 		try {
 			tui.start();
-			await settle(term);
+			await scheduler.settle(term);
 			expect(tui.imageBudget.quiescent).toBe(true);
 			writes.length = 0;
 
 			const image = makeImage(tui.imageBudget, "targeted-introduction");
 			root.addChild(image);
 			tui.requestComponentRender(image);
-			await settle(term);
+			await scheduler.settle(term);
 
 			expect(writes.join("")).toContain("a=t,f=100,q=2");
 			expect(tui.imageBudget.quiescent).toBe(false);
@@ -1853,7 +1853,7 @@ describe("TUI inline-image budget", () => {
 
 			writes.length = 0;
 			tui.requestRender();
-			await settle(term);
+			await scheduler.settle(term);
 			const replay = writes.join("");
 			expect(replay).toContain(`a=t,f=100,q=2,i=${firstId}`);
 			expect(replay).toContain(`a=t,f=100,q=2,i=${secondId}`);

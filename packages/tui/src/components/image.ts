@@ -1012,9 +1012,10 @@ export class Image implements Component {
 				this.#options.sourcePath,
 			),
 		);
-		if (this.#renderedGraphicRows <= 1) return [fallback];
+		const rows = Math.min(this.#renderedGraphicRows, this.#options.maxHeightCells ?? Infinity);
+		if (rows <= 1) return [fallback];
 		const lines: string[] = [];
-		for (let i = 0; i < this.#renderedGraphicRows - 1; i++) {
+		for (let i = 0; i < rows - 1; i++) {
 			lines.push(RESERVED_IMAGE_ROW);
 		}
 		lines.push(fallback);
