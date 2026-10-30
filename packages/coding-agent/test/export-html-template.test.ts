@@ -67,7 +67,12 @@ beforeAll(async () => {
 		entrypoints: [probePath],
 		target: "bun",
 		plugins: [focusedBundlePlugin],
-		define: { "process.env.PI_BUNDLED": '"true"' },
+		define: {
+			"process.env.PI_BUNDLED": '"true"',
+			"process.env.PI_EXPORT_VIEWER_EMBED": JSON.stringify(
+				await Bun.file(new URL(`../export-assets/${viewerAsset.file}`, import.meta.url)).text(),
+			),
+		},
 		compile: { outfile: compiledPath },
 	});
 	if (!compiled.success) throw new AggregateError(compiled.logs, "Compiled template probe failed");
@@ -137,9 +142,8 @@ describe("HTML export template", () => {
 		}
 	});
 
-	test("npm-style bundle and compiled binary export identical hosted HTML from an unrelated directory", async () => {
-		const expected = await runProbe([process.execPath, bundlePath]);
-		expect(await runProbe([compiledPath])).toBe(expected);
+	test("compiled binaries export the fork viewer from an unrelated directory without its source assets", async () => {
+		expect(await runProbe([compiledPath])).toBe(getTemplate());
 		expect(await fs.readdir(bundleDir)).toEqual([path.basename(bundlePath)]);
 	});
 

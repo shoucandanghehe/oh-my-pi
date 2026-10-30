@@ -17,7 +17,7 @@ export { type ExportThemeNames, parseExportArgs } from "./args";
 
 let cachedTemplate: string | undefined;
 
-/** Create an export document with a checkout viewer or an integrity-pinned release viewer. */
+/** Create an export document with a checkout, embedded, or integrity-pinned release viewer. */
 export function getTemplate(): string {
 	if (cachedTemplate) return cachedTemplate;
 	const sourceCheckout =
@@ -25,17 +25,20 @@ export function getTemplate(): string {
 		!process.env.PI_BUNDLED &&
 		!import.meta.dir.split(/[\\/]/).includes("node_modules") &&
 		fs.existsSync(path.join(import.meta.dir, "shell.html"));
+	const embeddedViewer = process.env.PI_EXPORT_VIEWER_EMBED;
 	let viewerScript: string;
-	if (sourceCheckout) {
-		const viewerPath = path.resolve(import.meta.dir, "../../../export-assets", viewerAsset.file);
-		let viewer: string;
-		try {
-			viewer = fs.readFileSync(viewerPath, "utf8");
-		} catch (err) {
-			if (isEnoent(err)) {
-				throw new Error(`Development export viewer not found: ${viewerPath}. Run bun gen:export-viewer.`);
+	if (embeddedViewer || sourceCheckout) {
+		let viewer = embeddedViewer;
+		if (!viewer) {
+			const viewerPath = path.resolve(import.meta.dir, "../../../export-assets", viewerAsset.file);
+			try {
+				viewer = fs.readFileSync(viewerPath, "utf8");
+			} catch (err) {
+				if (isEnoent(err)) {
+					throw new Error(`Development export viewer not found: ${viewerPath}. Run bun gen:export-viewer.`);
+				}
+				throw err;
 			}
-			throw err;
 		}
 		// Inline classic scripts run before deferred external scripts. Wait for
 		// both shared libraries, and prevent embedded text from closing the tag.
