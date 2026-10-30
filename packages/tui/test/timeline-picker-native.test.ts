@@ -170,6 +170,7 @@ describe("rewind page", () => {
 			onSelect: () => {},
 			onCancel: () => {},
 		});
+		selectors.push(selector);
 		const { main } = selector.describeScreen(pickerCx);
 		expect(marks(main)).toEqual(["-", "here:main:u2", "pick", "drop"]);
 		expect(captionText(main)).toContain("1 turn below dropped");
@@ -177,6 +178,56 @@ describe("rewind page", () => {
 		// Down has nothing that shows to step onto.
 		selector.handleInput("\x1b[B");
 		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:u2", "pick", "drop"]);
+		selector.handleInput("f");
+		selector.describeScreen(pickerCx);
+		selector.handleInput("\x1b[B");
+		expect(marks(selector.describeScreen(pickerCx).main)).toEqual(["-", "here:main:u2", "pick"]);
+		expect(JSON.stringify(selector.describe(pickerCx))).toContain("4/4");
+
+		// In a sibling, Down must skip an empty turn between two visible prompts,
+		// not select it and then snap back to the preceding prompt on description.
+		const selected: string[] = [];
+		const sibling = rewind({
+			selected,
+			siblings: [
+				{
+					rootId: "u3",
+					entries: [
+						entry("u3", "a2", user("another path")),
+						entry("a3", "u3", interrupted),
+						entry("u4", "a3", user("continue")),
+					],
+				},
+			],
+		});
+		sibling.describeScreen(pickerCx);
+		sibling.handleInput(RIGHT);
+		sibling.describeScreen(pickerCx);
+		sibling.handleInput("\x1b[B");
+		sibling.describeScreen(pickerCx);
+		sibling.handleInput("\r");
+		sibling.handleInput(UP);
+		sibling.describeScreen(pickerCx);
+		sibling.handleInput("\r");
+		expect(selected).toEqual(["u4", "u3"]);
+
+		const middle = new RewindSelectorComponent(
+			[...transcript(), entry("a3", "u2", interrupted), entry("u4", "a3", user("continue"))],
+			{ ui, cwd: "/tmp", requestRender() {}, onSelect: id => selected.push(id), onCancel() {} },
+		);
+		selectors.push(middle);
+		middle.describeScreen(pickerCx);
+		middle.handleInput(UP);
+		middle.handleInput("\r");
+		middle.handleInput("\x1b[B");
+		middle.handleInput("\r");
+		middle.handleInput("f");
+		middle.describeScreen(pickerCx);
+		middle.handleInput(UP);
+		middle.handleInput("\r");
+		middle.handleInput("\x1b[B");
+		middle.handleInput("\r");
+		expect(selected).toEqual(["u4", "u3", "u2", "u4", "u2", "u4"]);
 	});
 
 	test("stepping up moves the pick and drops everything below it", () => {

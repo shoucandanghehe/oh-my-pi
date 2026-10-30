@@ -3,9 +3,11 @@ import { Container, type Component, type VirtualViewportProvider } from "../tui"
 import { chatTranscriptDisplayPreferences as displayPreferences } from "../chat/display-preferences";
 import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "../chat/chat-transcript-builder";
+import type { DescribeContext } from "../native/node";
 import { TranscriptContainer } from "../chrome/transcript-container";
 import {
 	appendOutlineEntries,
+	describedVisibility,
 	isUserTurnEntry,
 	OutlineRowCache,
 	type OutlineTarget,
@@ -267,21 +269,25 @@ export class RewindHistory {
 		}
 	}
 
-	ensureVisible(width: number): void {
+	ensureVisible(layout: number | DescribeContext): void {
 		const point = this.point;
-		if (!point || this.#visible(point, width)) return;
-		if (!this.move(-1, false, width)) this.move(1, false, width);
+		if (!point || this.isVisible(point, layout)) return;
+		if (!this.move(-1, false, layout)) this.move(1, false, layout);
 	}
 
-	#visible(point: RewindPoint, width: number): boolean {
+	isVisible(point: RewindPoint, layout: number | DescribeContext): boolean {
 		const chunk = this.#chunks[point.chunk]!;
 		const target = chunk.targets[point.target]!;
+		if (typeof layout !== "number") {
+			const preview = this.preview(point);
+			return describedVisibility(preview, [{ ...target, start: 0, end: preview.length }], layout)[0]!;
+		}
 		return (
-			chunk.builder.container.getVirtualRowRange(Math.max(10, width - 4), target.start, target.end) !== undefined
+			chunk.builder.container.getVirtualRowRange(Math.max(10, layout - 4), target.start, target.end) !== undefined
 		);
 	}
 
-	move(delta: -1 | 1, userOnly: boolean, width?: number): boolean {
+	move(delta: -1 | 1, userOnly: boolean, layout?: number | DescribeContext): boolean {
 		const current = this.point;
 		if (!current) return false;
 		let target = current.target + delta;
@@ -290,9 +296,9 @@ export class RewindHistory {
 			if (chunk !== current.chunk) target = delta < 0 ? targets.length - 1 : 0;
 			for (; target >= 0 && target < targets.length; target += delta) {
 				const next = { chunk, target };
-				if ((!userOnly || targets[target]!.isUserTurn) && (width === undefined || this.#visible(next, width))) {
+				if ((!userOnly || targets[target]!.isUserTurn) && (layout === undefined || this.isVisible(next, layout))) {
 					this.#selected = next;
-					if (width === undefined && chunk < this.#nativeStart) this.loadAll();
+					if (typeof layout !== "number" && chunk < this.#nativeStart) this.loadAll();
 					return true;
 				}
 			}

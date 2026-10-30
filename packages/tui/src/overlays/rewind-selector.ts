@@ -55,7 +55,6 @@ import { ScrollView } from "../components/scroll-view";
 import { RewindHistory, type RewindHistoryItem, type RewindHistoryTarget } from "./rewind-history";
 import {
 	composeOutlineColumn,
-	describedVisibility,
 	type OutlineTarget,
 	type ViewportOutlineColumn,
 	positionRail,
@@ -160,6 +159,7 @@ export class RewindSelectorComponent implements Component {
 	});
 	#border = new DynamicBorder();
 	#scrollToSelection = true;
+	#describeContext: DescribeContext | undefined;
 	#expanded = false;
 	#width = 80;
 	#variantCache = new Map<string, SiblingColumn[]>();
@@ -202,6 +202,7 @@ export class RewindSelectorComponent implements Component {
 
 	invalidate(): void {
 		this.#bar = undefined;
+		this.#filterMemo = undefined;
 		this.#history.invalidate();
 		for (const columns of this.#variantCache.values()) for (const column of columns) column.history.invalidate();
 	}
@@ -268,7 +269,14 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#moveMain(delta: -1 | 1, userOnly: boolean): void {
-		if (!this.#history.move(delta, userOnly, isNativeRendering() ? undefined : Math.max(1, this.#width - 1))) return;
+		if (
+			!this.#history.move(
+				delta,
+				userOnly,
+				isNativeRendering() ? this.#describeContext : Math.max(1, this.#width - 1),
+			)
+		)
+			return;
 		this.#activeVariant = 0;
 		this.#stopSlide();
 		this.#scrollToSelection = true;
@@ -282,7 +290,7 @@ export class RewindSelectorComponent implements Component {
 		}
 		const history = this.#stripColumns()[this.#activeVariant - 1]?.history;
 		const width = Math.max(24, Math.floor((this.#width - 1 - STRIP_GAP) / 2));
-		if (history?.move(delta, false, isNativeRendering() ? undefined : width)) {
+		if (history?.move(delta, false, isNativeRendering() ? this.#describeContext : width)) {
 			this.#scrollToSelection = true;
 			this.deps.requestRender();
 		} else if (delta === -1) {
@@ -397,6 +405,7 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#toggleExpanded(): void {
+		this.#filterMemo = undefined;
 		this.#expanded = !this.#expanded;
 		this.#history.setExpanded(this.#expanded);
 		for (const columns of this.#variantCache.values())
@@ -467,7 +476,7 @@ export class RewindSelectorComponent implements Component {
 			matches.findLast(
 				item =>
 					item.point.chunk < point.chunk || (item.point.chunk === point.chunk && item.point.target < point.target),
-			) ?? matches.at(-1);
+			) ?? (isNativeRendering() ? matches[0] : matches.at(-1));
 		if (next) {
 			this.#history.select(next.point);
 			this.#scrollToSelection = true;
@@ -513,7 +522,8 @@ export class RewindSelectorComponent implements Component {
 		if (memo?.query === query && memo.items === items && memo.native === native) return memo.matches;
 		const patterns = this.#compileFilter(query);
 		const matches = native
-			? this.#history.targets.filter(({ target }) => {
+			? this.#history.targets.filter(({ point, target }) => {
+					if (this.#describeContext && !this.#history.isVisible(point, this.#describeContext)) return false;
 					let text = this.#nativeTexts.get(target);
 					if (text === undefined) {
 						const blocks = collectBlocks(target.entries);
@@ -559,7 +569,16 @@ export class RewindSelectorComponent implements Component {
 	 * own node, docked under the page, so the filter field keeps the caret.
 	 */
 	describeScreen(cx: DescribeContext): NativeScreen {
-		this.#adoptVisibility(describedVisibility(this.#builder.container.children, this.#targets, cx));
+		this.#describeContext = cx;
+		const before = this.#history.point;
+		this.#history.ensureVisible(cx);
+		if (before !== this.#history.point) {
+			this.#activeVariant = 0;
+			this.#stopSlide();
+		}
+		this.#filterMemo = undefined;
+		this.#bar = undefined;
+		if (this.#filter !== undefined) this.#refreshFilter();
 		return { role: "omp.rewind", main: this.#page(cx), dock: [this] };
 	}
 
@@ -604,7 +623,7 @@ export class RewindSelectorComponent implements Component {
 			const column = columns[index]!;
 			const active = this.#activeVariant === index + 1;
 			if (active) {
-				this.#siblingVisible = describedVisibility(column.builder.container.children, column.targets, cx);
+				column.history.ensureVisible(cx);
 			}
 			const children: NativeChild[] = [this.#columnHead(index + 1, count, column.label)];
 			this.#markRun(
