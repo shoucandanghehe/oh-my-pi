@@ -1,5 +1,5 @@
 import { SEANCE_SLASH_COMMAND } from "./seance";
-import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
@@ -282,11 +282,11 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
 			if (origin && !continuesConversation(ctx.sessionManager, origin)) {
 				// Input hooks ran while the conversation changed: never compact one it was not sent in.
-				restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				ctx.editor.restoreDetachedDraft(command.text, runtime.input?.images, runtime.input?.imageLinks);
 				ctx.showWarning("Conversation changed before /compact ran; returned it to the editor");
 				return;
 			}
-			if (origin && ctx.session.isStreaming) {
+			if (origin && (ctx.session.isStreaming || ctx.session.queuedMessageCount > 0 || ctx.hasPendingSubmission())) {
 				ctx.yieldCompaction = {
 					...origin,
 					text: command.text,

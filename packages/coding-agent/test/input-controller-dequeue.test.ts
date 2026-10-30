@@ -119,6 +119,28 @@ describe("InputController.handleDequeue (Alt+Up)", () => {
 		expect(getText()).toBe("first\n\nsecond");
 	});
 
+	test("dequeues held follow-ups, then the compact request, then older session input", () => {
+		const { ctx, queue, clearQueue, getText } = makeCtx({
+			queue: [{ text: "older input" }],
+			compaction: [{ text: "held follow-up", mode: "followUp" }],
+			draft: "draft",
+		});
+		ctx.yieldCompaction = { text: "/compact soft", mode: "soft", sessionId: "session", leafId: null };
+		const controller = new InputController(ctx);
+
+		controller.handleDequeue();
+		expect(getText()).toBe("held follow-up\n\ndraft");
+		expect(ctx.yieldCompaction?.text).toBe("/compact soft");
+		expect(queue).toEqual([{ text: "older input" }]);
+		controller.handleDequeue();
+		expect(getText()).toBe("/compact soft\n\nheld follow-up\n\ndraft");
+		expect(ctx.yieldCompaction).toBeUndefined();
+		expect(queue).toEqual([{ text: "older input" }]);
+		controller.handleDequeue();
+		expect(getText()).toBe("older input\n\n/compact soft\n\nheld follow-up\n\ndraft");
+		expect(clearQueue).not.toHaveBeenCalled();
+	});
+
 	test("empty queue reports nothing to restore", () => {
 		const { ctx, statuses, getText } = makeCtx();
 		new InputController(ctx).handleDequeue();

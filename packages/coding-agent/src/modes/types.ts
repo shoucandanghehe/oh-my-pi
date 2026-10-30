@@ -658,6 +658,7 @@ export interface InteractiveModeContext {
 	handleQueueCommand(
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void>;
 	/** `title` heads the side question instead of its text. */
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean>;

@@ -91,6 +91,10 @@ describe("queued message Edit", () => {
 			editing = input.handleQueuedMessageEdit(edit);
 			return editing;
 		};
+		ctx.restoreCompactionQueueToEditor = status => {
+			input.restoreCompactionQueueToEditor(status);
+			editing = Promise.resolve();
+		};
 		target.subscribe(event => {
 			if (event.type === "queue_update") void events.handleEvent(event);
 		});
@@ -269,6 +273,49 @@ describe("queued message Edit", () => {
 		expect(ui.ctx.editor.pendingImages).toEqual([draftImage, queuedImage]);
 		expect(ui.ctx.compactionQueuedMessages).toEqual([{ text: "keep compaction", mode: "steer" }]);
 		expect(target.isStreaming).toBe(false);
+	});
+
+	it("clicks the compact row directly, preserving row indices, older input, and the current draft without a stale-edit notice", async () => {
+		const streaming = Promise.withResolvers<void>();
+		const target = createSession(async (_model, _context, options) => {
+			const stream = new AssistantMessageEventStream();
+			options?.signal?.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
+			streaming.resolve();
+			return stream;
+		});
+		const running = target.prompt("start");
+		await streaming.promise;
+		try {
+			await target.followUp("older input");
+			const ui = createQueueUi(target);
+			ui.ctx.yieldCompaction = {
+				text: "/compact soft",
+				mode: "soft",
+				sessionId: target.sessionManager.getSessionId(),
+				leafId: target.sessionManager.getLeafId(),
+			};
+			ui.ctx.compactionQueuedMessages = [
+				{ text: "held [Image #1]", mode: "followUp", images: [queuedImage] },
+				{ text: "last input", mode: "followUp" },
+			];
+			ui.ctx.updatePendingMessagesDisplay();
+			await ui.click(ui.band()!, "After yield/3/edit");
+			expect(ui.getText()).toBe("last input\n\ndraft [Image #1]");
+			await ui.click(ui.band()!, "After yield/1/edit");
+
+			expect(ui.getText()).toBe("/compact soft\n\nheld [Image #2]\n\nlast input\n\ndraft [Image #1]");
+			expect(ui.ctx.editor.pendingImages).toEqual([draftImage, queuedImage]);
+			expect(ui.ctx.yieldCompaction).toBeUndefined();
+			expect(ui.ctx.compactionQueuedMessages).toEqual([]);
+			expect(target.getQueuedMessages().followUp).toEqual(["older input"]);
+			expect(target.isStreaming).toBe(true);
+			expect(ui.ctx.showStatus).not.toHaveBeenCalledWith("Queued message is no longer available to edit");
+			expect(ui.ctx.showError).not.toHaveBeenCalled();
+		} finally {
+			target.clearQueue({ forInterrupt: true });
+			await target.abort();
+			await running;
+		}
 	});
 
 	it("refreshes delivered chips on queue_update and refuses a stale Edit without modifying the draft", async () => {

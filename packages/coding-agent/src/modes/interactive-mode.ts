@@ -9613,8 +9613,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleQueueCommand(
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void> {
-		return this.#inputController.handleQueueCommand(message, detached);
+		return this.#inputController.handleQueueCommand(message, detached, origin);
 	}
 
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean> {

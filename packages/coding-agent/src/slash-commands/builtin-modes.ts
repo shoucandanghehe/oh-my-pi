@@ -434,6 +434,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.ctx.handleQueueCommand(
 				command.args,
 				runtime.draftDetached ? { ...runtime.input, text: command.text } : undefined,
+				runtime.followUp,
 			);
 		},
 	},
