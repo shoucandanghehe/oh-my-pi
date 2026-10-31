@@ -1,4 +1,5 @@
 import type {
+	AssistantMessage,
 	Context,
 	DeveloperMessage,
 	ImageContent,
@@ -280,7 +281,10 @@ function newestImageMessages(
  * `stringArguments` (the Responses and Chat Completions wires), each tool call's arguments as the JSON string that
  * wire sends, whose quotes and backslashes the body escapes again. The Anthropic and Gemini wires send an object.
  */
-function measuredContent<T extends { type: string }>(content: readonly T[], stringArguments: boolean): readonly T[] {
+function measuredContent(
+	content: readonly (AssistantMessage["content"][number] | MediaContent)[],
+	stringArguments: boolean,
+) {
 	if (!content.some(part => part.type === "image" || (stringArguments && part.type === "toolCall"))) return content;
 	return content.map(part => {
 		if (part.type === "image") return { ...part, data: "" };
