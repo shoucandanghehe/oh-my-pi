@@ -43,7 +43,7 @@ import {
 import { ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-tui/chat/stripped-tool-calls-placeholder";
-import { imageContent, textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { imageContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { messageBlock, PresentedBlock } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { ToolActivityContainer } from "@oh-my-pi/pi-tui/chrome/tool-activity";
 import {
@@ -1328,10 +1328,9 @@ export class UiHelpers {
 		];
 		if (!this.ctx.focusedAgentId) {
 			if (this.ctx.yieldCompaction) {
-				groups[1].messages.push(this.ctx.yieldCompaction.text);
-				groups[1].edits.push(async () => {
-					this.ctx.restoreCompactionQueueToEditor();
-					return undefined;
+				groups[1].messages.push(`Compaction queued · ${this.ctx.yieldCompaction.text}`);
+				groups[1].edits.push(() => {
+					this.ctx.restoreCompactionQueueToEditor("Restored queued compaction and held input to editor");
 				});
 			}
 			for (const entry of this.ctx.compactionQueuedMessages) {

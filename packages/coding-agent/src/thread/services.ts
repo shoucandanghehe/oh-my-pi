@@ -29,6 +29,8 @@ export interface ThreadService {
 	globals?(peer: WorkerPeer): unknown;
 	/** Main thread: the worker exited (crash or shutdown) and its link is closed. */
 	onWorkerExit?(peer: WorkerPeer, reason: string): void;
+	/** Main thread: bootstrap and warm-up completed; the worker may now receive runs. */
+	onWorkerReady?(peer: WorkerPeer): void;
 	/** Worker thread: register codecs, imported classes, and handlers before boot. */
 	installWorker?(link: WorkerThreadLink): void;
 	/** Worker thread: consume this service's globals and install remote implementations. */

@@ -20,11 +20,14 @@ import { IrcBus } from "../../src/irc/bus";
 import { InputController } from "../../src/modes/controllers/input-controller";
 import { SessionFocusController } from "../../src/modes/controllers/session-focus-controller";
 import { statusLineHost } from "../../src/modes/status-line-host";
+import { SessionPaneControls } from "../../src/modes/utils/pane-session-controls";
+import { preparePaneInput } from "../../src/modes/utils/prepare-pane-input";
 import type { InteractiveModeContext } from "../../src/modes/types";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSessionEvent } from "../../src/session/agent-session-events";
 import type { AgentViewSession } from "../../src/session/agent-session-handle";
+import type { BtwTurnCheckpoint } from "../../src/session/btw-turn";
 import { AuthStorage } from "../../src/session/auth-storage";
 import type { RestoredQueuedMessage } from "../../src/session/agent-session-types";
 import type { SessionEntriesDelta, SessionRestorableQueue } from "../../src/thread/session-mirror";
@@ -159,6 +162,7 @@ function focusHarness(): FocusHarness {
 				events.push(event);
 			},
 			resetTranscriptAnchors() {},
+			resetTerminalActivity() {},
 			restorePendingToolResults() {},
 			runSerialized: (run: () => Promise<void>) => run(),
 			markViewIdle() {},
@@ -242,6 +246,98 @@ function composerFor(view: AgentViewSession, focusedAgentId: string) {
 }
 
 describe("focused view of a worker-homed agent session", () => {
+	it("runs pane input hooks, submission and tree navigation on the worker session, not another pane", async () => {
+		const probe = await startWorker();
+		const registry = await mainRegistry();
+		await probe.open("W1", registry, {});
+		await probe.open("W2", registry, {});
+		const remote = mirrorOf("W1");
+		const restored: string[] = [];
+		const controls = new SessionPaneControls({
+			currentSession: () => remote,
+			ensureSession: async () => remote,
+			restore: input => restored.push(input.text),
+			changed: () => {},
+			error: message => {
+				throw new Error(message);
+			},
+			prepareInput: preparePaneInput,
+			knownCommand: () => false,
+			showTree: () => {},
+		});
+		cleanups.push(
+			() => controls.dispose(),
+			controls.subscribe(() => {}),
+		);
+		await waitFor(() => remote.getAvailableEffortSelectors().length > 0);
+		await controls.submit("[pane-input] from pane");
+		await remote.waitForIdle();
+		expect((await probe.report("W1")).userTexts).toEqual(["W1: from pane"]);
+		expect((await probe.report("W2")).userTexts).toEqual([]);
+		expect(
+			controls
+				.getMessages()
+				?.filter(message => message.role === "user")
+				.map(textOf),
+		).toEqual(["W1: from pane"]);
+		const entry = remote.sessionManager
+			.getEntries()
+			.find(entry => entry.type === "message" && entry.message.role === "user");
+		if (!entry) throw new Error("pane prompt was not persisted on its worker");
+		await remote.sessionManager.appendLabelChange(entry.id, "pane branch");
+		expect(remote.sessionManager.getTree().find(node => node.entry.id === entry.id)?.label).toBe("pane branch");
+		const result = await remote.navigateTree(entry.id, { requireIdle: true });
+		expect(result.editorText).toBe("W1: from pane");
+		expect(result.cancelled).toBe(false);
+		expect((await probe.report("W2")).userTexts).toEqual([]);
+		expect(restored).toEqual([]);
+	});
+
+	it("runs BTW on the focused worker and replays frozen native context instead of its newer transcript", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		await probe.open("W2", await mainRegistry(), {});
+		await probe.prompt("W1", "Worker base");
+		await probe.prompt("W2", "Other agent context");
+		const remote = mirrorOf("W1");
+		const view = focusHarness();
+		await view.controller.focusAgent("W1");
+		const checkpoints: BtwTurnCheckpoint[] = [];
+		const deltas: string[] = [];
+		const request = {
+			conversationKey: "btw:worker-regression:0",
+			source: { threadKey: "worker-regression", threadTitle: "Worker question" },
+			signal: new AbortController().signal,
+			onTextDelta: (delta: string) => {
+				deltas.push(delta);
+			},
+			onCheckpoint: async (checkpoint: BtwTurnCheckpoint) => {
+				checkpoints.push(checkpoint);
+			},
+		};
+		expect((await remote.runBtwTurn({ ...request, question: "BTW original" })).replyText).toBe("ok");
+		const checkpoint = checkpoints.at(-1)!;
+		expect(checkpoint.turns[0]?.assistantMessage.content).toContainEqual({
+			type: "thinking",
+			thinking: "native side reasoning",
+			thinkingSignature: "side-signature",
+		});
+		await probe.prompt("W1", "After frozen context");
+		await remote.runBtwTurn({ ...request, question: "Follow-up", checkpoint });
+		const report = await probe.report("W1");
+		const followUp = report.sideRequests.at(-1)!;
+		expect(followUp.sessionId).toBe(request.conversationKey);
+		const context = JSON.stringify(followUp.context.messages);
+		expect(context).toContain("Worker base");
+		expect(context).toContain("BTW original");
+		expect(context).toContain("side-signature");
+		expect(context).not.toContain("After frozen context");
+		expect(context).not.toContain("Other agent context");
+		expect(report.userTexts).toEqual(["Worker base", "After frozen context"]);
+		expect((await probe.report("W2")).sideRequests).toEqual([]);
+		expect(deltas.join("")).toBe("okok");
+	});
+
 	it("attaches, rebuilds the transcript, streams deltas in order, and steers from the composer", async () => {
 		const probe = await startWorker();
 		await probe.open("W1", await mainRegistry(), {});
@@ -405,6 +501,54 @@ describe("queued messages of a focused worker-homed session", () => {
 		if (!published) throw new Error("the follow-up never reached the mirror");
 		return { probe, remote, running, applyViewPatch, onViewPatch, published };
 	}
+
+	it("edits one duplicate by identity without stopping the worker and a stale edit never takes the other duplicate", async () => {
+		const { probe, remote, running } = await followUpBehindHeldTurn("duplicate");
+		await remote.prompt("duplicate", { streamingBehavior: "followUp" });
+		await waitFor(() => remote.getQueuedMessages().followUp.length === 2);
+		const edit = remote.getQueuedMessageEditAction("followUp", 0);
+		if (!edit) throw new Error("missing worker queue edit action");
+		expect((await edit())?.text).toBe("duplicate");
+		expect(remote.isStreaming).toBe(true);
+		expect(await edit()).toBeUndefined();
+		expect((await probe.report("W1")).followUp).toEqual(["duplicate"]);
+		await probe.release();
+		await running;
+		expect((await probe.report("W1")).userTexts).toEqual(["[hold] working", "duplicate"]);
+	});
+	it("edits live steering on its worker, pausing the composer before abort and preserving unrelated queued input", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		const remote = mirrorOf("W1");
+		cleanups.push(remote.subscribe(() => {}));
+		const running = probe.prompt("W1", "[live] working");
+		await waitFor(() => remote.isStreaming);
+		await remote.steer("edit this live steer");
+		await waitFor(() => remote.getQueuedMessages().liveSteered === 1);
+		await remote.prompt("keep queued", { streamingBehavior: "followUp" });
+		const edit = remote.getQueuedMessageEditAction("steering", 0);
+		if (!edit) throw new Error("missing live steering edit action");
+		let beforeInterrupt = false;
+		const endSawInterrupt: boolean[] = [];
+		cleanups.push(
+			remote.subscribe(event => {
+				if (event.type === "agent_end") endSawInterrupt.push(beforeInterrupt);
+			}),
+		);
+		expect(
+			(
+				await edit(() => {
+					beforeInterrupt = true;
+				})
+			)?.text,
+		).toBe("edit this live steer");
+		await running;
+		expect(endSawInterrupt).toEqual([true]);
+		expect(remote.isStreaming).toBe(false);
+		expect((await probe.report("W1")).userTexts).toEqual(["[live] working"]);
+		expect((await probe.report("W1")).followUp).toEqual(["keep queued"]);
+		expect(await edit()).toBeUndefined();
+	});
 
 	it("restores a follow-up popped as the held turn ends, and the worker never delivers it", async () => {
 		const { probe, remote, running } = await followUpBehindHeldTurn("take this back");

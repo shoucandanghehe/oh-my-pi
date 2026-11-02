@@ -658,12 +658,13 @@ describe("Factory Droid credits badge", () => {
 			const row = rows.find(line => line.includes("gpt-5.6-sol"));
 			expect(row).toContain("$1.25/10 1.6×");
 			expect(row).not.toContain("from 2099-11-22");
-			expect(rows.some(line => line.includes("reasoning · vision"))).toBe(true);
+			expect(rows.some(line => line.includes("reasoning"))).toBe(true);
 		}
 		const wide = makeBrowser([promoted], [])
 			.render(160)
 			.map(line => Bun.stripANSI(line));
 		expect(wide.some(line => line.includes("· 2× from 2099-11-22"))).toBe(true);
+		expect(wide.some(line => line.includes("user: text/image · tools: text"))).toBe(true);
 		const ended = {
 			...promoted,
 			factoryDroidCreditCards: [

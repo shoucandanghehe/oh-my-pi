@@ -97,15 +97,69 @@ describe("AgentSession.activeToolExecutionUpdates cache lifecycle", () => {
 		expect(session.activeToolExecutionUpdates().map(event => event.toolCallId)).toEqual(["task-1"]);
 	});
 
+	it("replays only the latest live streamed preview and removes it when its tool returns", async () => {
+		session = await makeSession();
+		const stream = (text: string): Extract<AgentEvent, { type: "tool_stream_update" }> => ({
+			type: "tool_stream_update",
+			toolCallId: "edit-1",
+			toolName: "edit",
+			update: { text },
+		});
+		session.agent.emitExternalEvent(stream("partial"));
+		session.agent.emitExternalEvent(stream("latest"));
+		session.agent.emitExternalEvent(taskUpdate("running"));
+
+		expect(session.activeToolStreamUpdates()).toEqual([stream("latest")]);
+		expect(session.activeToolExecutionUpdates().map(event => event.toolCallId)).toEqual(["task-1"]);
+
+		session.agent.emitExternalEvent({
+			type: "tool_execution_end",
+			toolCallId: "edit-1",
+			toolName: "edit",
+			result: { content: [{ type: "text", text: "Saved" }] },
+		});
+		expect(session.activeToolStreamUpdates()).toEqual([]);
+		expect(session.activeToolExecutionUpdates().map(event => event.toolCallId)).toEqual(["task-1"]);
+	});
+
+	it("drops a streamed preview when a terminal tool result arrives without an execution-end frame", async () => {
+		session = await makeSession();
+		session.agent.emitExternalEvent({
+			type: "tool_stream_update",
+			toolCallId: "cancelled-edit",
+			toolName: "edit",
+			update: { text: "Uncommitted edit" },
+		});
+		session.agent.emitExternalEvent({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolCallId: "cancelled-edit",
+				toolName: "edit",
+				content: [{ type: "text", text: "Cancelled" }],
+				isError: true,
+				timestamp: 1,
+			},
+		});
+		expect(session.activeToolStreamUpdates()).toEqual([]);
+	});
+
 	it("clears snapshots across a new session", async () => {
 		session = await makeSession();
 
 		session.agent.emitExternalEvent(taskUpdate("running", "cached-call"));
 		session.agent.emitExternalEvent(taskEnd("running", "returned-call"));
 		expect(session.activeToolExecutionUpdates()).toHaveLength(1);
+		session.agent.emitExternalEvent({
+			type: "tool_stream_update",
+			toolCallId: "old-edit",
+			toolName: "edit",
+			update: { text: "Old session preview" },
+		});
 
 		expect(await session.newSession()).toBe(true);
 		expect(session.activeToolExecutionUpdates()).toHaveLength(0);
+		expect(session.activeToolStreamUpdates()).toEqual([]);
 
 		session.agent.emitExternalEvent(taskUpdate("completed", "returned-call"));
 		expect(session.activeToolExecutionUpdates().map(event => event.toolCallId)).toEqual(["returned-call"]);

@@ -71,24 +71,9 @@ import type { ConversationPosition } from "./utils/conversation-position";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { NativeWorkspace } from "./native-workspace/workspace";
+import type { CompactionQueuedMessage, YieldCompaction } from "../session/session-command-queue";
 
-export type CompactionQueuedMessage = {
-	text: string;
-	mode: "steer" | "followUp";
-	images?: ImageContent[];
-};
-
-/**
- * `/compact` sent with the follow-up key during a run: it runs once the run settles, while the
- * session's branch still continues from the position it was queued at. A switch or tree
- * navigation hands it back to the editor instead.
- */
-export type YieldCompaction = ConversationPosition & {
-	/** The submitted command, restored to the editor when the request is dequeued. */
-	text: string;
-	instructions?: string;
-	mode?: CompactMode;
-};
+export type { CompactionQueuedMessage, YieldCompaction } from "../session/session-command-queue";
 
 export type SubmittedUserInput = {
 	text: string;

@@ -8,7 +8,7 @@ import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { EphemeralConversation } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
+import { TestEphemeralConversation as EphemeralConversation } from "../helpers/ephemeral-conversation";
 
 // Real SDK session and RPC dispatch with a persisted session; only the model is scripted.
 // A main prompt containing "slow main" streams until aborted. The side channel is scripted at

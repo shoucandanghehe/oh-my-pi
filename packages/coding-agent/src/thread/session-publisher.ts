@@ -81,6 +81,7 @@ import {
 export function captureSessionState(session: AgentSession): SessionMirrorState {
 	return {
 		isStreaming: read.isStreaming(session),
+		isCompacting: read.isCompacting(session),
 		runStartedAt: read.runStartedAt(session),
 		ircWakesPending: read.ircWakesPending(session),
 		ircQueuedFrom: session.queuedIrcSenders(),
@@ -137,7 +138,7 @@ function findQueuedMessage(messages: Iterable<AgentMessage>, id: string): AgentM
 
 /** View state without the event-maintained running tool updates, as diffed between flushes. */
 /** View state without the event-maintained running tool updates, as diffed between flushes. */
-type DiffedViewState = Omit<SessionViewState, "activeToolExecutionUpdates">;
+type DiffedViewState = Omit<SessionViewState, "activeToolExecutionUpdates" | "activeToolStreamUpdates">;
 
 /** Live objects behind the wire copies of the heavy view fields; an unchanged source reuses its copy. */
 interface ViewSources {
@@ -422,6 +423,7 @@ export class SessionPublisher {
 			const state: SessionViewState = {
 				...next,
 				activeToolExecutionUpdates: toWireData([...this.session.activeToolExecutionUpdates()]),
+				activeToolStreamUpdates: toWireData([...this.session.activeToolStreamUpdates()]),
 			};
 			this.#bridge.remote.notify("view", this.#key, state, this.#entriesDelta());
 			return;
@@ -489,7 +491,6 @@ export class SessionPublisher {
 			// Mid-run its transcript fallback rebuilds the display context on every flush; main reads it only idle.
 			hasAbortedToolCallTail: !session.isStreaming && session.hasAbortedToolCallTail,
 			isAutoThinking: session.isAutoThinking,
-			isCompacting: session.isCompacting,
 			compactionSpeculation: session.compactionSpeculation,
 			contextUsageRevision: session.contextUsageRevision,
 			contextUsage: toWireData(session.getContextUsage()),
@@ -498,6 +499,10 @@ export class SessionPublisher {
 			retryAttempt: session.retryAttempt,
 			isTtsrAbortPending: session.isTtsrAbortPending,
 			hasInterruptibleInput: session.hasInterruptibleInput,
+			isSessionTransitioning: session.isSessionTransitioning,
+			hasAdmittedSubmission: session.hasAdmittedSubmission,
+			queuedMessageCount: session.queuedMessageCount,
+			hasPendingAsyncWork: session.hasPendingAsyncWork(),
 			autoResolvedThinkingLevel: session.autoResolvedThinkingLevel(),
 			configuredThinkingLevel: session.configuredThinkingLevel(),
 			availableEffortSelectors: session.getAvailableEffortSelectors(),
@@ -511,6 +516,16 @@ export class SessionPublisher {
 			todoPhases: toWireData(session.getTodoPhases()),
 			queuedMessages: toWireData(session.getQueuedMessages()),
 			restorableQueue: toWireData({ steering: steering.map(queuedEntry), followUp: followUp.map(queuedEntry) }),
+			editableQueue: {
+				steering: [...session.agent.peekLiveSteeredMessages(), ...steering]
+					.filter(isUserAuthoredQueuedMessage)
+					.map(message => queuedEntry(message).id),
+				followUp: followUp.map(message => queuedEntry(message).id),
+			},
+			approvals: {
+				scopes: session.extensionRunner?.sessionApprovalKeys() ?? [],
+				grants: sessionApprovalGrantKeys(session.settings.getAgentDir(), session.sessionManager.getSessionId()),
+			},
 			ephemeralMaxTokensPreservesRequest: session.ephemeralMaxTokensPreservesRequest(),
 			settings: settingsSource(session.settings),
 		};
@@ -552,6 +567,7 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	steer: async (publisher, text, images, options) => settle(publisher, publisher.session.steer(text, images, options)),
 	abort: async (publisher, options) => settle(publisher, publisher.session.abort(options)),
 	dispose: async (publisher, options) => settle(publisher, publisher.session.dispose(options)),
+	continuePausedTurn: async publisher => settle(publisher, publisher.session.continuePausedTurn()),
 	deliverIrcMessage: async (publisher, msg) => settle(publisher, publisher.session.deliverIrcMessage(msg)),
 	waitForIrcReplies: async publisher => settle(publisher, publisher.session.waitForIrcReplies()),
 	setWorkPoolYieldItems: async (publisher, items) => settle(publisher, publisher.session.setWorkPoolYieldItems(items)),
@@ -559,6 +575,37 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	watch: (publisher, on) => publisher.watch(on),
 	settleInFlightMessagePersistence: async publisher =>
 		settle(publisher, publisher.session.settleInFlightMessagePersistence()),
+	prewarmModelConnection: publisher => publisher.session.prewarmModelConnection(),
+	emitInteractiveInput: async (publisher, text, images) =>
+		toWireData(await settle(publisher, publisher.session.emitInteractiveInput(text, images))),
+	waitForIdle: async publisher => settle(publisher, publisher.session.waitForIdle()),
+	waitForAdmittedSubmissions: async publisher => settle(publisher, publisher.session.waitForAdmittedSubmissions()),
+	waitForSessionTransition: async publisher => settle(publisher, publisher.session.waitForSessionTransition()),
+	settleAsyncWork: async publisher => settle(publisher, publisher.session.settleAsyncWork()),
+	compact: async (publisher, instructions, options) =>
+		toWireData(await settle(publisher, publisher.session.compact(instructions, options))),
+	navigateTree: async (publisher, id, options) =>
+		toWireData(await settle(publisher, publisher.session.navigateTree(id, options))),
+	appendLabelChange: (publisher, id, label) => {
+		const result = publisher.session.sessionManager.appendLabelChange(id, label);
+		publisher.flush();
+		return result;
+	},
+	continuePausedAgents: async publisher =>
+		toWireData(await settle(publisher, publisher.session.continuePausedAgents())),
+	editQueuedMessage: async (publisher, queue, id, beforeInterrupt) => {
+		const session = publisher.session;
+		const messages =
+			queue === "steering"
+				? [...session.agent.peekLiveSteeredMessages(), ...session.agent.peekSteeringQueue()]
+				: session.agent.peekFollowUpQueue();
+		const index = messages
+			.filter(isUserAuthoredQueuedMessage)
+			.findIndex(message => publishedQueuedMessageId(message) === id);
+		if (index < 0) return undefined;
+		const edit = session.getQueuedMessageEditAction(queue, index);
+		return toWireData(await settle(publisher, edit ? edit(beforeInterrupt) : Promise.resolve(undefined)));
+	},
 	setThinkingLevel: (publisher, level, persist) => {
 		publisher.session.setThinkingLevel(level, persist);
 		publisher.schedule();
@@ -617,6 +664,7 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 		),
 	fetchUsageReports: async (publisher, signal) => toWireData(await publisher.session.fetchUsageReports(signal)),
 	runEphemeralTurn: async (publisher, args) => toWireData(await publisher.session.runEphemeralTurn(args)),
+	runBtwTurn: async (publisher, args) => toWireData(await publisher.session.runBtwTurn(args)),
 	exportToHtml: async (publisher, outputPath, useUserThemes) =>
 		publisher.session.exportToHtml(outputPath, useUserThemes),
 	enableIdleMaintenance: (publisher, options) => publisher.session.enableIdleMaintenance(options),

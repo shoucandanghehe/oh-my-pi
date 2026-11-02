@@ -1,3 +1,6 @@
+import { sessionCommandQueue } from "../session/session-command-queue";
+import { openPaneSessionTree, SessionPaneControls } from "./utils/pane-session-controls";
+import { preparePaneInput } from "./utils/prepare-pane-input";
 /**
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
@@ -157,7 +160,7 @@ import {
 	type RestoredQueuedMessage,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
-import type { AgentViewSession } from "../session/agent-session-handle";
+import { type AgentViewSession, isAgentViewSession } from "../session/agent-session-handle";
 import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
@@ -166,7 +169,6 @@ import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveSessionMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
-import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { formatQueueShorthand } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
@@ -1545,9 +1547,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	proseOnlyThinking = true;
 	expandThinkingBlocks = false;
-	compactionQueuedMessages: CompactionQueuedMessage[] = [];
-	yieldCompaction: YieldCompaction | undefined = undefined;
-	compactionQueueOrigin: ConversationPosition | undefined = undefined;
+	get compactionQueuedMessages(): CompactionQueuedMessage[] {
+		return sessionCommandQueue(this.session).messages;
+	}
+	set compactionQueuedMessages(messages: CompactionQueuedMessage[]) {
+		sessionCommandQueue(this.session).messages = messages;
+	}
+	get yieldCompaction(): YieldCompaction | undefined {
+		return sessionCommandQueue(this.session).request;
+	}
+	set yieldCompaction(request: YieldCompaction | undefined) {
+		sessionCommandQueue(this.session).request = request;
+	}
+	get compactionQueueOrigin(): ConversationPosition | undefined {
+		return sessionCommandQueue(this.session).origin;
+	}
+	set compactionQueueOrigin(origin: ConversationPosition | undefined) {
+		sessionCommandQueue(this.session).origin = origin;
+	}
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 	pendingBashComponents: PresentedBlock<BashExecutionComponent>[] = [];
@@ -2374,7 +2391,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 
 		this.#uiHelpers = new UiHelpers(this);
-		this.#btwController = new BtwController(this);
+		this.#btwController = new BtwController(this, (editor, session, ui) =>
+			this.#inputController.setupPaneEditor({ editor, session, ui }),
+		);
 		this.#tanCommandController = new TanCommandController(this);
 		this.#omfgController = new OmfgController(this);
 		this.#cleanseController = new CleanseCommandController(this);
@@ -2532,42 +2551,84 @@ export class InteractiveMode implements InteractiveModeContext {
 	): AgentTranscriptViewer {
 		const remote = registryOverride ? undefined : this.collabGuest?.hubRemote;
 		const lifecycle = registryOverride || remote ? undefined : () => AgentLifecycleManager.global();
+		const registry = registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global();
+		const viewSession = (id: string = agentId): AgentViewSession | undefined => {
+			const session = registry.get(id)?.session;
+			return session && isAgentViewSession(session) ? session : undefined;
+		};
+		const ensureViewSession = async (): Promise<AgentViewSession> => {
+			if (!lifecycle) throw new Error(`Agent ${agentId} has no local lifecycle`);
+			const session = await lifecycle().ensureLive(agentId);
+			if (!isAgentViewSession(session)) throw new Error(`Agent ${agentId} has no main-thread session view`);
+			return session;
+		};
 		// Initial transcript loading may request a frame before construction returns.
 		// oxlint-disable-next-line prefer-const -- the callback must tolerate that unmounted state
 		let viewer: AgentTranscriptViewer | undefined;
+		const requestRender = () => {
+			if (viewer) ui.requestComponentRender(viewer);
+			else ui.requestRender();
+		};
+		const restore = (input: { text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] }) => {
+			viewer?.getPasteTarget()?.restoreDetachedDraft(input.text, input.images, input.imageLinks);
+			requestRender();
+		};
+		const sessionControls =
+			lifecycle && AgentRegistry.global().get(agentId)?.kind !== "advisor"
+				? new SessionPaneControls({
+						currentSession: viewSession,
+						ensureSession: ensureViewSession,
+						restore,
+						changed: requestRender,
+						error: message => viewer?.setNotice(message),
+						prepareInput: preparePaneInput,
+						knownCommand: text => this.isKnownSlashCommand(text),
+						showTree: (session, changed) => {
+							openPaneSessionTree(ui, session, {
+								restore,
+								changed,
+								error: message => viewer?.setNotice(message),
+								focus: () => {
+									if (viewer) ui.setFocus(viewer);
+								},
+							});
+						},
+					})
+				: undefined;
 		viewer = new AgentTranscriptViewer({
 			agentId,
-			registry: registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
+			registry,
 			transcript: agentTranscriptSource,
 			remote,
 			lifecycle,
+			sessionControls,
 			ui,
-			getTool: name => this.session.getToolByName(name),
-			getMessageRenderer: type => this.session.extensionRunner?.getMessageRenderer(type),
-			getAssistantThinkingRenderers: () => this.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
-			resolveLinks: (texts, cwd) =>
-				resolveAgentTranscriptLinks(
-					registryOverride ?? this.collabGuest?.agentRegistry ?? AgentRegistry.global(),
-					agentId,
-					texts,
-					cwd,
-				),
+			getTool: name => viewSession()?.getToolByName(name),
+			isBuiltInTool: name => viewSession()?.hasBuiltInTool(name) === true,
+			getMessageRenderer: type => viewSession()?.extensionRunner?.getMessageRenderer(type),
+			getAssistantThinkingRenderers: () => viewSession()?.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+			getAssistantTextRenderers: () => viewSession()?.extensionRunner?.getAssistantTextRenderers() ?? [],
+			configureEditor: editor => {
+				const session = viewSession();
+				if (session) this.#inputController.setupPaneEditor({ editor, session, ui });
+			},
+			resolveLinks: (texts, cwd) => resolveAgentTranscriptLinks(registry, agentId, texts, cwd),
 			cwd: this.sessionManager.getCwd(),
-			hideThinkingBlock: () => this.effectiveHideThinkingBlock,
+			hideThinkingBlock: () => this.hideThinkingBlock,
 			proseOnlyThinking: () => this.proseOnlyThinking,
 			expandKeys: this.keybindings.getKeys("app.tools.expand"),
 			hubKeys: [...this.keybindings.getKeys("app.agents.hub"), ...this.keybindings.getKeys("app.session.observe")],
 			createStatusLine: id => {
-				const session = (registryOverride ?? AgentRegistry.global()).get(id)?.session;
+				const session = viewSession(id);
 				return session ? this.statusLine.createPeer(session) : undefined;
 			},
 			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.settings),
-			getExtensionPresentation: id => (registryOverride ?? AgentRegistry.global()).get(id)?.session?.extensionRunner,
+			getExtensionPresentation: id => viewSession(id)?.extensionRunner,
 			transcriptActions: {
 				copy: copyToClipboard,
 				retry: lifecycle
 					? async () => {
-							const session = await lifecycle().ensureLive(agentId);
+							const session = await ensureViewSession();
 							await session.retry();
 						}
 					: undefined,
@@ -9379,7 +9440,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		return this.#uiHelpers.flushCompactionQueue(options);
+		return sessionCommandQueue(this.session).flush(() => this.#uiHelpers.flushCompactionQueue(options));
 	}
 
 	runYieldCompaction(): void {

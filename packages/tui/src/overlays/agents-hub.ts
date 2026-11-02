@@ -1309,7 +1309,7 @@ export class AgentsHubComponent implements Component {
 			return;
 		}
 		if (event.type === "toggle") {
-			if (target !== "prompt") return;
+			if (target !== "prompt" || event.collapsed === undefined) return;
 			this.#promptCollapsed = event.collapsed;
 		} else if (event.type === "select" || event.type === "activate") {
 			const activate = event.type === "activate";

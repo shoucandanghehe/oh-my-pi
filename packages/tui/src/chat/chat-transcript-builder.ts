@@ -56,11 +56,20 @@ import {
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
 import { isReplyWrite, ReplyWriteComponent, replyDisplayMessage, toolResultReplies } from "./reply-write";
 import { SkillMessageComponent } from "./skill-message";
-import { toolRenderName, ToolExecutionComponent, type ToolExecutionHandle } from "./tool-execution";
+import {
+	asyncJobState,
+	isSettledJobFrame,
+	parksAsBackground,
+	settleWithJobFrame,
+	ToolExecutionComponent,
+	type ToolExecutionHandle,
+	toolRenderName,
+} from "./tool-execution";
 import { TranscriptContainer } from "../chrome/transcript-container";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 import type { TranscriptActions } from "./transcript-actions";
+import type { PaneToolUpdate } from "./session-controls";
 
 /** A stream and its persisted entry identify the same provider response. */
 export function sameAssistantTurn(
@@ -79,6 +88,7 @@ export interface ChatTranscriptBuilderDeps {
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	getAssistantThinkingRenderers?: () => readonly AssistantThinkingRenderer[];
+	getAssistantTextRenderers?: () => readonly AssistantTextRenderer[];
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
@@ -87,17 +97,26 @@ export interface ChatTranscriptBuilderDeps {
 	linkTargets?: ReadonlyMap<string, string>;
 	/** Draw charts under numeric tables; false for transcripts that are not the main session's. Default: true. */
 	tableCharts?: boolean;
-	/** Extension assistant text renderers the replayed replies draw with, as the live transcript does. */
-	textRenderers?: readonly AssistantTextRenderer[];
 	resolveLinks?: (texts: readonly string[]) => Promise<ReadonlyMap<string, string>>;
 	requestRender: () => void;
 	onVirtualLayoutUpdate?: (component: Component) => void;
 	transcriptActions?: TranscriptActions;
 }
 
+export interface ChatTranscriptBuildOptions {
+	/** Only the last entry is an unpersisted assistant whose final content block may still grow. */
+	transientTail?: boolean;
+}
+
 export class ChatTranscriptBuilder {
 	readonly container: TranscriptContainer;
 	#pendingTools = new Map<string, ToolExecutionHandle>();
+	/** Rendered calls can still accept renderer-owned previews after their terminal result. */
+	#toolComponents = new Map<string, ToolExecutionHandle>();
+	#backgroundCallIds = new Set<string>();
+	#toolUpdates: readonly PaneToolUpdate[] = [];
+	#assistantComponents = new Set<AssistantMessageComponent>();
+	#assistantTextRenderers: readonly AssistantTextRenderer[];
 	#readArgs = new Map<string, Record<string, unknown>>();
 	#readGroup: ReadToolGroupComponent | null = null;
 	#pendingUsage: Usage | undefined;
@@ -119,7 +138,12 @@ export class ChatTranscriptBuilder {
 	#streamingAssistant:
 		| {
 				beforeTools: AssistantMessageComponent;
-				toolCalls: { id: string; name: string; afterTool?: AssistantMessageComponent }[];
+				toolCalls: {
+					id: string;
+					name: string;
+					contentOffset?: number;
+					afterTool?: AssistantMessageComponent;
+				}[];
 		  }
 		| undefined;
 	#liveAssistantComponent: AssistantMessageComponent | undefined;
@@ -134,6 +158,7 @@ export class ChatTranscriptBuilder {
 		this.#deps = deps;
 		this.#previousUsage = previousUsage;
 		this.#linkTargets = deps.linkTargets ?? new Map();
+		this.#assistantTextRenderers = [...(deps.getAssistantTextRenderers?.() ?? [])];
 		this.container = new TranscriptContainer(deps.onVirtualLayoutUpdate);
 		this.#lastAssistantUsage = previousUsage;
 		this.container.setToolActivityVisible(!displayPreferences.hideToolActivity);
@@ -162,30 +187,92 @@ export class ChatTranscriptBuilder {
 		}
 	}
 
+	/** Refresh display-only transforms without changing stored messages. */
+	refreshAssistantTextRenderers(): void {
+		const renderers = this.#deps.getAssistantTextRenderers?.() ?? [];
+		if (
+			renderers.length === this.#assistantTextRenderers.length &&
+			renderers.every((renderer, index) => renderer === this.#assistantTextRenderers[index])
+		) {
+			return;
+		}
+		this.#assistantTextRenderers = [...renderers];
+		for (const component of this.#assistantComponents) component.setTextRenderers(this.#assistantTextRenderers);
+	}
+
+	/** Apply the owning session's latest progress snapshots, including parked background calls. */
+	updateToolUpdates(updates: readonly PaneToolUpdate[]): void {
+		this.#toolUpdates = [...updates];
+		this.#applyToolUpdates();
+	}
+
+	#applyToolUpdates(): void {
+		for (const update of this.#toolUpdates) {
+			if (update.type === "tool_stream_update") {
+				const component = this.#toolComponents.get(update.toolCallId);
+				if (!component?.updateStreamPreview) continue;
+				// The renderer owns the payload and whether its final result supersedes this preview.
+				component.updateStreamPreview(update.update);
+				this.#deps.ui.requestComponentRender(component);
+				continue;
+			}
+			let component = this.#pendingTools.get(update.toolCallId);
+			if (!component) {
+				const args = this.#readArgs.get(update.toolCallId);
+				if (!args) continue;
+				const group = this.#ensureReadGroup();
+				group.updateArgs(args, update.toolCallId);
+				this.#pendingTools.set(update.toolCallId, group);
+				component = group;
+			}
+			component.setExecutionStarted(update.toolCallId);
+			const result = update.partialResult;
+			if (this.#backgroundCallIds.has(update.toolCallId) && isSettledJobFrame(result.details)) {
+				settleWithJobFrame(component, result, update.toolCallId);
+				this.#pendingTools.delete(update.toolCallId);
+				this.#backgroundCallIds.delete(update.toolCallId);
+			} else {
+				component.updateResult(
+					asyncJobState(result.details) === "failed" ? { ...result, isError: true } : result,
+					true,
+					update.toolCallId,
+				);
+			}
+			this.#deps.ui.requestComponentRender(component);
+		}
+	}
+
 	/** Whether the transcript currently holds any rendered rows. */
 	get isEmpty(): boolean {
 		return this.container.children.length === 0;
 	}
 
 	/** Discard all components and rebuild the whole transcript from `entries`. */
-	rebuild(entries: readonly TranscriptEntry[]): void {
+	rebuild(entries: readonly TranscriptEntry[], options?: ChatTranscriptBuildOptions): void {
 		const live = this.#liveAssistantComponent;
 		const message = this.#liveAssistantMessage;
+		const updates = this.#toolUpdates;
 		if (live) this.container.removeChild(live);
 		this.reset();
 		this.#liveAssistantComponent = live;
 		this.#liveAssistantMessage = message;
-		this.append(entries);
+		this.#toolUpdates = updates;
+		if (live) this.#assistantComponents.add(live);
+		this.append(entries, options);
 	}
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
-	append(entries: readonly TranscriptEntry[]): void {
+	append(entries: readonly TranscriptEntry[], options?: ChatTranscriptBuildOptions): void {
+		this.refreshAssistantTextRenderers();
 		// The unpersisted tail follows any newly read entries. If one is its
 		// persisted response, #appendAssistantMessage adopts the same component.
 		if (this.#liveAssistantComponent) this.container.removeChild(this.#liveAssistantComponent);
-		for (const entry of entries) this.#appendEntry(entry);
+		for (const [index, entry] of entries.entries()) {
+			this.#appendEntry(entry, options?.transientTail === true && index === entries.length - 1);
+		}
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 		if (this.#liveAssistantComponent) this.container.addChild(this.#liveAssistantComponent);
+		this.#applyToolUpdates();
 	}
 
 	/** Update the mutable assistant block at the transcript tail without rebuilding prior messages. */
@@ -208,6 +295,7 @@ export class ChatTranscriptBuilder {
 		message: Extract<AgentMessage, { role: "assistant" }>,
 		transient: boolean,
 	): AssistantMessageComponent | undefined {
+		this.refreshAssistantTextRenderers();
 		const rendered = this.#streamingAssistant;
 		if (!rendered) return undefined;
 		const timeline = splitAssistantMessageToolTimeline(message);
@@ -221,6 +309,7 @@ export class ChatTranscriptBuilder {
 				return (
 					call.id !== previous.id ||
 					call.name !== previous.name ||
+					timeline.contentOffsets.get(call.id) !== previous.contentOffset ||
 					!this.#pendingTools.has(call.id) ||
 					Boolean(previous.afterTool) !== Boolean(afterTool && assistantHasVisibleContent(afterTool))
 				);
@@ -228,7 +317,7 @@ export class ChatTranscriptBuilder {
 		) {
 			return undefined;
 		}
-		rendered.beforeTools.updateContent(timeline.beforeTools, { transient });
+		rendered.beforeTools.updateContent(timeline.beforeTools, { transient: transient && !timeline.hasToolCalls });
 		for (const [index, call] of calls.entries()) {
 			const tool = this.#pendingTools.get(call.id)!;
 			tool.updateArgs(displayArgsForToolCall(call), call.id);
@@ -236,7 +325,9 @@ export class ChatTranscriptBuilder {
 			this.#deps.ui.requestComponentRender(tool);
 			const afterTool = rendered.toolCalls[index]!.afterTool;
 			if (afterTool) {
-				afterTool.updateContent(timeline.afterToolCalls.get(call.id)!, { transient });
+				afterTool.updateContent(timeline.afterToolCalls.get(call.id)!, {
+					transient: transient && call.id === timeline.lastToolCallId,
+				});
 				if (!transient && !afterTool.isTranscriptBlockFinalized()) afterTool.markTranscriptBlockFinalized();
 			}
 		}
@@ -246,11 +337,13 @@ export class ChatTranscriptBuilder {
 	setLiveAssistant(
 		message: Extract<AgentMessage, { role: "assistant" }> | undefined,
 	): AssistantMessageComponent | undefined {
+		this.refreshAssistantTextRenderers();
 		if (!message) {
 			const component = this.#liveAssistantComponent;
 			if (component) {
 				this.container.removeChild(component);
 				component.dispose();
+				this.#assistantComponents.delete(component);
 				this.#liveAssistantComponent = undefined;
 				this.#liveAssistantMessage = undefined;
 			}
@@ -270,18 +363,7 @@ export class ChatTranscriptBuilder {
 			return this.#liveAssistantComponent;
 		}
 		this.setLiveAssistant(undefined);
-		const component = new AssistantMessageComponent(
-			undefined,
-			this.#deps.hideThinkingBlock?.() ?? false,
-			() => this.#deps.requestRender(),
-			this.#deps.getAssistantThinkingRenderers?.(),
-			this.#deps.ui.imageBudget,
-			this.#deps.proseOnlyThinking?.() ?? true,
-			this.#linkTargets,
-			this.#deps.expandThinkingBlocks?.() ?? false,
-			undefined,
-			this.#deps.transcriptActions,
-		);
+		const component = this.#createAssistantComponent();
 		component.setMidStreamPublication(false);
 		component.setImagesVisible(displayPreferences.showImages);
 		component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
@@ -343,6 +425,10 @@ export class ChatTranscriptBuilder {
 	reset(): void {
 		for (const pending of this.#pendingTools.values()) pending.seal();
 		this.#pendingTools.clear();
+		this.#toolComponents.clear();
+		this.#backgroundCallIds.clear();
+		this.#toolUpdates = [];
+		this.#assistantComponents.clear();
 		this.#readArgs.clear();
 		this.#readGroup = null;
 		this.#pendingUsage = undefined;
@@ -373,11 +459,11 @@ export class ChatTranscriptBuilder {
 		this.reset();
 	}
 
-	#appendEntry(entry: TranscriptEntry): void {
+	#appendEntry(entry: TranscriptEntry, transient: boolean): void {
 		const message = transcriptEntryMessage(entry);
 		if (!message) return;
 		const before = this.container.children.length;
-		this.#appendChatMessage(message);
+		this.#appendChatMessage(message, transient);
 		const components = this.container.children.slice(before);
 		if (components.length > 0) this.#entryComponents.set(entry.id, components);
 	}
@@ -385,6 +471,29 @@ export class ChatTranscriptBuilder {
 	#trackExpandable(component: { setExpanded(expanded: boolean): void }): void {
 		component.setExpanded(this.#expanded);
 		this.#expandables.push(component);
+	}
+
+	#createAssistantComponent(
+		message?: Extract<AgentMessage, { role: "assistant" }>,
+		contentOffset = 0,
+		transient = false,
+	): AssistantMessageComponent {
+		const component = new AssistantMessageComponent(
+			transient ? undefined : message,
+			this.#deps.hideThinkingBlock?.() ?? false,
+			() => this.#deps.requestRender(),
+			this.#deps.getAssistantThinkingRenderers?.(),
+			this.#deps.ui.imageBudget,
+			this.#deps.proseOnlyThinking?.() ?? true,
+			this.#linkTargets,
+			this.#deps.expandThinkingBlocks?.() ?? false,
+			{ renderers: this.#assistantTextRenderers, contentOffset },
+			this.#deps.transcriptActions,
+		);
+		if (transient) component.setMidStreamPublication(false);
+		if (transient && message) component.updateContent(message, { transient: true });
+		this.#assistantComponents.add(component);
+		return component;
 	}
 
 	/** Append assistant prose (a reply, a post-tool segment, or an `out://` reply write) with the transcript's display preferences. */
@@ -475,7 +584,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageElapsedMs = undefined;
 	}
 
-	#appendChatMessage(message: AgentMessage): void {
+	#appendChatMessage(message: AgentMessage, transient: boolean): void {
 		this.#streamingAssistant = undefined;
 		if (message.role !== "toolResult") this.#flushPendingUsage();
 		if (message.role !== "assistant" && message.role !== "toolResult") {
@@ -484,7 +593,7 @@ export class ChatTranscriptBuilder {
 		}
 		switch (message.role) {
 			case "assistant":
-				this.#appendAssistantMessage(message);
+				this.#appendAssistantMessage(message, transient);
 				break;
 			case "toolResult":
 				this.#appendToolResult(message);
@@ -606,32 +715,18 @@ export class ChatTranscriptBuilder {
 		return turnElapsedMs(this.#turnStartedAt, message);
 	}
 
-	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
-		const hideThinkingBlock = this.#deps.hideThinkingBlock?.() ?? false;
-		const proseOnlyThinking = this.#deps.proseOnlyThinking ? this.#deps.proseOnlyThinking() : true;
-		const expandThinkingBlocks = this.#deps.expandThinkingBlocks?.() ?? false;
+	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>, transient: boolean): void {
+		this.refreshAssistantTextRenderers();
 		const timeline = splitAssistantMessageToolTimeline(message);
 		const live =
 			this.#liveAssistantMessage && sameAssistantTurn(this.#liveAssistantMessage, message)
 				? this.#liveAssistantComponent
 				: undefined;
-		const assistantComponent =
-			live ??
-			new AssistantMessageComponent(
-				timeline.beforeTools,
-				hideThinkingBlock,
-				() => this.#deps.requestRender(),
-				this.#deps.getAssistantThinkingRenderers?.(),
-				this.#deps.ui.imageBudget,
-				proseOnlyThinking,
-				this.#linkTargets,
-				expandThinkingBlocks,
-				{ renderers: this.#deps.textRenderers ?? [], contentOffset: 0 },
-				this.#deps.transcriptActions,
-			);
+		const beforeToolsTransient = transient && !timeline.hasToolCalls;
+		const assistantComponent = live ?? this.#createAssistantComponent(timeline.beforeTools, 0, beforeToolsTransient);
 		if (live) {
-			this.#streamingAssistant = { beforeTools: live, toolCalls: [] };
-			this.finalizeStreamingAssistant(timeline.beforeTools);
+			live.updateContent(timeline.beforeTools, { transient: beforeToolsTransient });
+			if (!beforeToolsTransient) live.markTranscriptBlockFinalized();
 			this.#liveAssistantComponent = undefined;
 			this.#liveAssistantMessage = undefined;
 		}
@@ -639,7 +734,12 @@ export class ChatTranscriptBuilder {
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.#mountProse(assistantComponent);
 		let lastAssistantComponent = assistantComponent;
-		const streamingTools: { id: string; name: string; afterTool?: AssistantMessageComponent }[] = [];
+		const streamingTools: {
+			id: string;
+			name: string;
+			contentOffset?: number;
+			afterTool?: AssistantMessageComponent;
+		}[] = [];
 		this.#streamingAssistant = { beforeTools: assistantComponent, toolCalls: streamingTools };
 
 		if (displayPreferences.cacheMissMarker) {
@@ -662,21 +762,15 @@ export class ChatTranscriptBuilder {
 		const hasErrorStop = errorPresentation.kind === "full";
 		const errorMessage = hasErrorStop ? errorPresentation.text : null;
 		const appendAssistantSegment = (
-			toolCallId: string,
 			segment: Extract<AgentMessage, { role: "assistant" }> | undefined,
+			contentOffset: number | undefined,
+			toolCallId: string,
 		) => {
 			if (!segment || !assistantHasVisibleContent(segment)) return;
-			const component = new AssistantMessageComponent(
+			const component = this.#createAssistantComponent(
 				segment,
-				hideThinkingBlock,
-				() => this.#deps.requestRender(),
-				this.#deps.getAssistantThinkingRenderers?.(),
-				this.#deps.ui.imageBudget,
-				proseOnlyThinking,
-				this.#linkTargets,
-				expandThinkingBlocks,
-				{ renderers: this.#deps.textRenderers ?? [], contentOffset: timeline.contentOffsets.get(toolCallId) ?? 0 },
-				this.#deps.transcriptActions,
+				contentOffset,
+				transient && toolCallId === timeline.lastToolCallId,
 			);
 			this.#mountProse(component);
 			lastAssistantComponent = component;
@@ -714,7 +808,8 @@ export class ChatTranscriptBuilder {
 				streamingTools.push({
 					id: content.id,
 					name: content.name,
-					afterTool: appendAssistantSegment(content.id, afterToolSegment),
+					contentOffset: timeline.contentOffsets.get(content.id),
+					afterTool: appendAssistantSegment(afterToolSegment, timeline.contentOffsets.get(content.id), content.id),
 				});
 				continue;
 			}
@@ -754,6 +849,7 @@ export class ChatTranscriptBuilder {
 				this.container.addChild(card);
 				component = card;
 			}
+			this.#toolComponents.set(content.id, component);
 
 			if (hasErrorStop && errorMessage) {
 				component.updateResult(
@@ -767,7 +863,8 @@ export class ChatTranscriptBuilder {
 			streamingTools.push({
 				id: content.id,
 				name: content.name,
-				afterTool: appendAssistantSegment(content.id, afterToolSegment),
+				contentOffset: timeline.contentOffsets.get(content.id),
+				afterTool: appendAssistantSegment(afterToolSegment, timeline.contentOffsets.get(content.id), content.id),
 			});
 		}
 		const turnUsage = this.#turnUsage.add(message, this.#turnStartedAt);
@@ -804,21 +901,17 @@ export class ChatTranscriptBuilder {
 			return;
 		}
 		for (const reply of toolResultReplies(message.details)) {
-			this.#mountProse(
-				new AssistantMessageComponent(
-					replyDisplayMessage(reply),
-					false,
-					() => this.#deps.requestRender(),
-					[],
-					this.#deps.ui.imageBudget,
-					true,
-					this.#deps.linkTargets,
-				),
-			);
+			this.#mountProse(this.#createAssistantComponent(replyDisplayMessage(reply)));
 		}
 		if (!pending) return;
 		pending.updateResult(message, false, message.toolCallId);
-		this.#pendingTools.delete(message.toolCallId);
+		if (parksAsBackground(renderToolName, message.details)) {
+			pending.parkAsBackground();
+			this.#backgroundCallIds.add(message.toolCallId);
+		} else {
+			this.#pendingTools.delete(message.toolCallId);
+			this.#backgroundCallIds.delete(message.toolCallId);
+		}
 		if (renderToolName === "wait" && pending instanceof ToolExecutionComponent && pending.isDisplaceableBlock()) {
 			this.#waitingPoll = pending;
 		} else if (

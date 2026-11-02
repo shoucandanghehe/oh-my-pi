@@ -966,7 +966,7 @@ export class AssistantMessageComponent extends Container {
 			this.#handleAction(event.act);
 			return;
 		}
-		if (event.type !== "toggle" || !event.key.startsWith("k")) return;
+		if (event.type !== "toggle" || event.collapsed === undefined || !event.key.startsWith("k")) return;
 		const index = Number(event.key.slice(1));
 		if (!Number.isInteger(index)) return;
 		this.#thinkingCollapsed.set(index, event.collapsed);

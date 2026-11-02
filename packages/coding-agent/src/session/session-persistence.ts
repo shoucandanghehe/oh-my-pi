@@ -89,10 +89,10 @@ export function isMediaDataPayload(value: unknown): value is { data: string; mim
 /**
  * True when a media payload sits in a persistence position whose base64 is
  * externalized to the blob store instead of truncated as a generic string: a
- * `content` media block, an `images[]` entry, a file mention's legacy `image`
- * field, or a snapcompact frame under `frames[]`. The eager load path uses the
- * same position check but deliberately leaves snapcompact frames as references
- * for lazy context rebuilding.
+ * `content` media block, a frozen summary's `blocks` media block, an `images[]`
+ * entry, a file mention's legacy `image` field, or a snapcompact frame under
+ * `frames[]`. The eager load path uses the same position check but deliberately
+ * leaves snapcompact frames as references for lazy context rebuilding.
  */
 export function isExternalizableMediaPosition(
 	value: unknown,
@@ -100,7 +100,7 @@ export function isExternalizableMediaPosition(
 ): value is { data: string; mimeType?: string } {
 	if (!isMediaDataPayload(value)) return false;
 	return (
-		(key === TEXT_CONTENT_KEY && isMediaBlock(value)) ||
+		((key === TEXT_CONTENT_KEY || key === "blocks") && isMediaBlock(value)) ||
 		key === "image" ||
 		key === "images" ||
 		key === SNAPCOMPACT_FRAMES_KEY

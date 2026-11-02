@@ -1,21 +1,16 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwLatestTurn } from "@oh-my-pi/pi-tui/overlays/btw-history";
-import { acquireFileLock, type FileLockHandle, getBlobsDir, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
-import { writeFileAtomically } from "../utils/atomic-file";
 import {
-	BlobStore,
-	externalizeImageDataSync,
-	externalizeImageDataUrlSync,
-	isBlobRef,
-	isImageDataUrl,
-	resolveImageData,
-} from "./blob-store";
-import type { RestoredBtwThread } from "./btw-thread";
-import { resolveBlobRefsInEntries } from "./session-loader";
-import { isExternalizableMediaPosition } from "./session-persistence";
-import type { CustomEntry } from "./session-entries";
+	type BtwHistoryRecord,
+	type BtwHistoryTurn,
+	getBtwLatestTurn,
+	getBtwTurns,
+} from "@oh-my-pi/pi-tui/overlays/btw-history";
+import { acquireFileLock, type FileLockHandle, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+import { writeFileAtomically } from "../utils/atomic-file";
+import type { BtwTurnCheckpoint } from "./btw-turn";
+import { assistantMessageWithReplyText } from "./messages";
 
 export {
 	type BtwHistoryRecord,
@@ -28,17 +23,7 @@ export {
 } from "@oh-my-pi/pi-tui/overlays/btw-history";
 
 const imageSchema = type({ type: "'image'", data: "string", mimeType: "string" });
-/** Full isolated BTW runtime checkpoint, unlike the lightweight history-panel record. */
-export interface BtwThreadHistoryRecord extends Omit<RestoredBtwThread, "key" | "phase"> {
-	version: 1;
-	id: string;
-	phase: "ready" | "running" | "error";
-}
-
-type HistoryRecord = BtwHistoryRecord | BtwThreadHistoryRecord;
 const ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
-const INTERRUPTED_ERROR = "Reply interrupted before completion";
-const EXTERNALIZE_THRESHOLD = 1024;
 const turnFields = {
 	question: "string",
 	"images?": imageSchema.array(),
@@ -58,156 +43,44 @@ const recordSchema = type({
 	"+": "reject",
 });
 
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+const conversationSchema = type({
+	answers: "string[]",
+	baseMessages: "object[]",
+	"trailingMessages?": "object[] | undefined",
+	turns: type({
+		input: "string",
+		"images?": imageSchema.array().or("undefined"),
+		assistantMessage: "object",
+		"intermediateMessages?": "object[] | undefined",
+		"prefixMessages?": "object[] | undefined",
+		replyText: "string",
+		timestamp: "number",
+	}).array(),
+	sideSessionId: "string",
+	model: { provider: "string", id: "string" },
+});
+
+interface StoredBtwTurnCheckpoint extends BtwTurnCheckpoint {
+	/** Last saved display replies identify user edits without rewriting untouched native turns. */
+	answers: string[];
 }
 
-function isTimestamp(value: unknown): value is number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 8_640_000_000_000_000;
-}
-
-function isImages(value: unknown): boolean {
-	return (
-		Array.isArray(value) &&
-		value.every(
-			image =>
-				isObject(image) &&
-				image.type === "image" &&
-				typeof image.data === "string" &&
-				typeof image.mimeType === "string",
-		)
-	);
-}
-
-function isMessage(value: unknown): boolean {
-	return isObject(value) && typeof value.role === "string";
-}
-
-const RECORD_FIELDS: Record<string, true> = {
-	version: true,
-	id: true,
-	title: true,
-	titleExplicit: true,
-	createdAt: true,
-	anchorLeafId: true,
-	model: true,
-	sideSessionId: true,
-	baseMessages: true,
-	turns: true,
-	draft: true,
-	draftImages: true,
-	draftImageLinks: true,
-	readThrough: true,
-	phase: true,
-	error: true,
-	pausedRequest: true,
-};
-
-/** Preserve opaque provider/tool message fields, validating the checkpoint envelope only. */
-function parseThreadRecord(value: unknown): BtwThreadHistoryRecord {
-	if (!isObject(value)) throw new Error("Invalid BTW history record: expected an object");
-	const r = value;
-	if (
-		r.version !== 1 ||
-		typeof r.id !== "string" ||
-		!ID_PATTERN.test(r.id) ||
-		typeof r.title !== "string" ||
-		(r.titleExplicit !== undefined && typeof r.titleExplicit !== "boolean") ||
-		!isTimestamp(r.createdAt) ||
-		typeof r.anchorLeafId !== "string" ||
-		!r.anchorLeafId ||
-		!isObject(r.model) ||
-		typeof r.model.provider !== "string" ||
-		!r.model.provider ||
-		typeof r.model.id !== "string" ||
-		!r.model.id ||
-		typeof r.sideSessionId !== "string" ||
-		!r.sideSessionId ||
-		!Array.isArray(r.baseMessages) ||
-		!r.baseMessages.every(isMessage) ||
-		!Array.isArray(r.turns) ||
-		!r.turns.every(
-			turn =>
-				isObject(turn) &&
-				typeof turn.input === "string" &&
-				typeof turn.replyText === "string" &&
-				isTimestamp(turn.timestamp) &&
-				isObject(turn.assistantMessage) &&
-				turn.assistantMessage.role === "assistant" &&
-				(turn.images === undefined || isImages(turn.images)) &&
-				(turn.prefixMessages === undefined ||
-					(Array.isArray(turn.prefixMessages) && turn.prefixMessages.every(isMessage))) &&
-				(turn.intermediateMessages === undefined ||
-					(Array.isArray(turn.intermediateMessages) && turn.intermediateMessages.every(isMessage))),
-		) ||
-		typeof r.draft !== "string" ||
-		!isImages(r.draftImages) ||
-		!Array.isArray(r.draftImageLinks) ||
-		!r.draftImageLinks.every(link => link === null || link === undefined || typeof link === "string") ||
-		!Number.isInteger(r.readThrough) ||
-		(r.readThrough as number) < 0 ||
-		(r.readThrough as number) > r.turns.length ||
-		(r.phase !== "ready" && r.phase !== "running" && r.phase !== "error") ||
-		(r.error !== undefined && typeof r.error !== "string") ||
-		(r.pausedRequest !== undefined &&
-			(!isObject(r.pausedRequest) ||
-				typeof r.pausedRequest.input !== "string" ||
-				!isTimestamp(r.pausedRequest.timestamp) ||
-				(r.pausedRequest.images !== undefined && !isImages(r.pausedRequest.images)) ||
-				(!r.pausedRequest.input && !(Array.isArray(r.pausedRequest.images) && r.pausedRequest.images.length)))) ||
-		Object.keys(r).some(key => !RECORD_FIELDS[key])
-	) {
-		throw new Error("Invalid BTW history record");
-	}
-	// JSON encodes undefined array slots as null; restore draft link positions for the manager.
-	return {
-		...r,
-		draftImageLinks: r.draftImageLinks.map(link => (link === null ? undefined : link)),
-	} as unknown as BtwThreadHistoryRecord;
-}
-
-function parseRecord(value: unknown): HistoryRecord {
-	if (isObject(value) && value.version === 1) return parseThreadRecord(value);
+function parseRecord(value: unknown): BtwHistoryRecord {
 	const result = recordSchema(value);
 	if (result instanceof type.errors) throw new Error(`Invalid BTW history record: ${result.summary}`);
 	if (!ID_PATTERN.test(result.id)) throw new Error("Invalid BTW history record id");
 	return result;
 }
 
-function isThreadRecord(record: HistoryRecord): record is BtwThreadHistoryRecord {
-	return "version" in record;
-}
-
-function freezeRecord(record: BtwThreadHistoryRecord): BtwThreadHistoryRecord {
-	function freeze(value: unknown): void {
-		if (!value || typeof value !== "object" || Object.isFrozen(value)) return;
-		for (const child of Object.values(value)) freeze(child);
-		Object.freeze(value);
-	}
-	freeze(record);
-	return record;
-}
-
 /** Capture before yielding, so later streaming mutations cannot change a queued write. */
-function snapshotRecord<T extends HistoryRecord>(record: T, recover = false): T {
-	if (isThreadRecord(record)) {
-		const copy = parseThreadRecord(JSON.parse(JSON.stringify(record)));
-		if (recover && copy.phase === "running") {
-			if (copy.pausedRequest) copy.phase = "ready";
-			else {
-				copy.phase = "error";
-				copy.error = INTERRUPTED_ERROR;
-			}
-		}
-		return freezeRecord(copy) as T;
-	}
+function snapshotRecord(record: BtwHistoryRecord, recover = false): BtwHistoryRecord {
 	const snapshotTurn = (turn: BtwHistoryTurn): BtwHistoryTurn =>
 		Object.freeze({ ...turn, status: recover && turn.status === "running" ? "interrupted" : turn.status });
 	return Object.freeze({
 		...record,
 		status: recover && record.status === "running" ? "interrupted" : record.status,
 		...(record.followUps ? { followUps: Object.freeze(record.followUps.map(snapshotTurn)) } : {}),
-	}) as unknown as T;
+	}) as BtwHistoryRecord;
 }
 
 function recordFileName(id: string): string {
@@ -225,7 +98,7 @@ function hash(bytes: Uint8Array | string): string {
 }
 
 interface StoredRecord {
-	record: HistoryRecord;
+	record: BtwHistoryRecord;
 	revision: string;
 }
 
@@ -273,85 +146,26 @@ export class BtwHistoryConflictError extends Error {
 	}
 }
 
-/** Apply journal-compatible media rules without truncating BTW tool transcripts. */
-function externalizeMedia(value: unknown, blobs: BlobStore, key?: string): void {
-	if (Array.isArray(value)) {
-		for (const child of value) externalizeMedia(child, blobs, key);
-		return;
-	}
-	if (!isObject(value)) return;
-	const record = value;
-	if (
-		isExternalizableMediaPosition(value, key === "draftImages" ? "images" : key) &&
-		!isBlobRef(value.data) &&
-		value.data.length >= EXTERNALIZE_THRESHOLD
-	) {
-		value.data = externalizeImageDataSync(blobs, value.data, value.mimeType);
-		return;
-	}
-	if (
-		record.type === "image_generation_call" &&
-		typeof record.result === "string" &&
-		!isBlobRef(record.result) &&
-		record.result.length >= EXTERNALIZE_THRESHOLD
-	) {
-		record.result = externalizeImageDataSync(blobs, record.result);
-	}
-	if (
-		typeof record.image_url === "string" &&
-		isImageDataUrl(record.image_url) &&
-		record.image_url.length >= EXTERNALIZE_THRESHOLD
-	) {
-		record.image_url = externalizeImageDataUrlSync(blobs, record.image_url);
-	}
-	for (const [childKey, child] of Object.entries(record)) externalizeMedia(child, blobs, childKey);
-}
-
-/** One CAS/lease/queue implementation for history-panel entries and isolated runtime checkpoints. */
-export class BtwHistoryStore<T extends HistoryRecord = BtwHistoryRecord> {
+/** CAS, leases, and write queue for lightweight history-panel entries. */
+export class BtwHistoryStore {
 	readonly #directory: string | undefined;
-	readonly #blobs: BlobStore;
-	readonly #format: "history" | "thread";
-	readonly #records = new Map<string, T>();
+	readonly #records = new Map<string, BtwHistoryRecord>();
 	readonly #revisions = new Map<string, string>();
+	readonly #conversations = new Map<string, BtwTurnCheckpoint>();
+	readonly #conversationAnswers = new Map<string, string[]>();
 	readonly #leases = new Map<string, FileLockHandle>();
-	#snapshot: readonly T[] = Object.freeze([]);
+	#snapshot: readonly BtwHistoryRecord[] = Object.freeze([]);
 	#pending: Promise<void> = Promise.resolve();
 	#writeError: Error | undefined;
 
-	private constructor(directory: string | undefined, format: "history" | "thread", blobs: BlobStore) {
+	private constructor(directory: string | undefined) {
 		this.#directory = directory;
-		this.#format = format;
-		this.#blobs = blobs;
 	}
 
 	/** Focused sessions share parent artifacts; scope their lightweight history by session id. */
-	static open(artifactsDir: string | undefined, scope?: string): Promise<BtwHistoryStore<BtwHistoryRecord>> {
-		return BtwHistoryStore.#open<BtwHistoryRecord>(
-			artifactsDir === undefined ? undefined : historyDirectory(artifactsDir, scope),
-			"history",
-			new BlobStore(getBlobsDir()),
-		);
-	}
-
-	/** Runtime checkpoints share the root sidecar directory but never appear as history-panel entries. */
-	static openThreads(
-		artifactsDir: string | undefined,
-		blobs: BlobStore = new BlobStore(getBlobsDir()),
-	): Promise<BtwHistoryStore<BtwThreadHistoryRecord>> {
-		return BtwHistoryStore.#open<BtwThreadHistoryRecord>(
-			artifactsDir === undefined ? undefined : historyDirectory(artifactsDir, undefined),
-			"thread",
-			blobs,
-		);
-	}
-
-	static async #open<R extends HistoryRecord>(
-		directory: string | undefined,
-		format: "history" | "thread",
-		blobs: BlobStore,
-	): Promise<BtwHistoryStore<R>> {
-		const store = new BtwHistoryStore<R>(directory, format, blobs);
+	static async open(artifactsDir: string | undefined, scope?: string): Promise<BtwHistoryStore> {
+		const directory = artifactsDir === undefined ? undefined : historyDirectory(artifactsDir, scope);
+		const store = new BtwHistoryStore(directory);
 		if (directory === undefined) return store;
 		let names: string[];
 		try {
@@ -365,63 +179,74 @@ export class BtwHistoryStore<T extends HistoryRecord = BtwHistoryRecord> {
 		for (const name of names.sort()) {
 			if (!name.endsWith(".json")) continue;
 			const stored = await readRecord(path.join(directory, name));
-			if (!stored || isThreadRecord(stored.record) !== (format === "thread")) continue;
-			if (isThreadRecord(stored.record)) {
-				const entry: CustomEntry<BtwThreadHistoryRecord> = {
-					type: "custom",
-					customType: "btw-history",
-					data: stored.record,
-					id: stored.record.id,
-					parentId: null,
-					timestamp: new Date(stored.record.createdAt).toISOString(),
-				};
-				await resolveBlobRefsInEntries([entry], blobs);
-				await Promise.all(
-					stored.record.draftImages.map(async image => {
-						image.data = await resolveImageData(blobs, image.data);
-					}),
-				);
-			} else {
-				const titleName = titleFileName(stored.record.id);
-				const title = titleNames.has(titleName) ? await readTitle(path.join(directory, titleName)) : undefined;
-				if (title !== undefined) stored.record = { ...stored.record, title };
-			}
-			// Recovery/hydration are views. CAS still compares original on-disk bytes.
-			store.#records.set(stored.record.id, snapshotRecord(stored.record, true) as R);
+			if (!stored) continue;
+			const titleName = titleFileName(stored.record.id);
+			const title = titleNames.has(titleName) ? await readTitle(path.join(directory, titleName)) : undefined;
+			if (title !== undefined) stored.record = { ...stored.record, title };
+			// Recovery is a view. CAS still compares original on-disk bytes.
+			store.#records.set(stored.record.id, snapshotRecord(stored.record, true));
 			store.#revisions.set(stored.record.id, stored.revision);
 		}
 		store.#refreshSnapshot();
 		return store;
 	}
 
-	getRecords(): readonly T[] {
+	getRecords(): readonly BtwHistoryRecord[] {
 		return this.#snapshot;
 	}
 
-	upsert(record: T): Promise<void> {
+	/** Native context stays outside the lightweight UI/wire record and survives focus/process changes. */
+	async readConversation(recordId: string): Promise<BtwTurnCheckpoint | undefined> {
+		if (!ID_PATTERN.test(recordId)) throw new Error("Invalid BTW history record id");
+		await this.#pending;
+		return this.#loadConversation(recordId);
+	}
+
+	async #loadConversation(recordId: string): Promise<BtwTurnCheckpoint | undefined> {
+		const cached = this.#conversations.get(recordId);
+		if (cached || !this.#directory) return cached;
+		try {
+			const value: unknown = JSON.parse(
+				await Bun.file(path.join(this.#directory, `entry-${recordId}.conversation`)).text(),
+			);
+			const parsed = conversationSchema(value);
+			if (parsed instanceof type.errors) throw new Error(`Invalid BTW conversation: ${parsed.summary}`);
+			const { answers, ...checkpoint } = parsed as StoredBtwTurnCheckpoint;
+			this.#conversationAnswers.set(recordId, answers);
+			this.#conversations.set(recordId, checkpoint);
+			return checkpoint;
+		} catch (error) {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		}
+	}
+
+	stageConversation(recordId: string, checkpoint: BtwTurnCheckpoint): void {
+		if (!ID_PATTERN.test(recordId)) throw new Error("Invalid BTW history record id");
+		this.#conversations.set(recordId, structuredClone(checkpoint));
+	}
+
+	upsert(record: BtwHistoryRecord): Promise<void> {
 		return this.#upsert(record, false);
 	}
 
 	/** Retry against the original revision rather than silently rebasing onto disk changes. */
-	retry(record: T): Promise<void> {
+	retry(record: BtwHistoryRecord): Promise<void> {
 		return this.#upsert(record, true);
 	}
 
-	async #upsert(record: T, retry: boolean): Promise<void> {
+	async #upsert(record: BtwHistoryRecord, retry: boolean): Promise<void> {
 		if (this.#writeError && !retry) throw this.#writeError;
 		// Capture before yielding: callers may keep mutating their streaming record.
 		const { title, ...fields } = record;
-		const saved = snapshotRecord(parseRecord(isThreadRecord(record) ? record : fields) as T);
-		const snapshot: T = title === undefined ? saved : Object.freeze<T>({ ...saved, title });
-		if (isThreadRecord(snapshot) !== (this.#format === "thread")) throw new Error("Wrong BTW history record format");
+		const saved = snapshotRecord(parseRecord(fields));
+		const snapshot = title === undefined ? saved : Object.freeze({ ...saved, title });
 		if (this.#directory === undefined) {
 			this.#records.set(snapshot.id, snapshot);
 			this.#refreshSnapshot();
 			return;
 		}
-		const diskRecord = JSON.parse(JSON.stringify(saved)) as T;
-		if (isThreadRecord(diskRecord)) externalizeMedia(diskRecord, this.#blobs);
-		const content = `${JSON.stringify(diskRecord)}\n`;
+		const content = `${JSON.stringify(saved)}\n`;
 		const write = this.#pending.then(async () => {
 			if (retry) this.#writeError = undefined;
 			if (this.#writeError) throw this.#writeError;
@@ -438,21 +263,43 @@ export class BtwHistoryStore<T extends HistoryRecord = BtwHistoryRecord> {
 				if (stored?.revision !== this.#revisions.get(snapshot.id)) {
 					throw new BtwHistoryConflictError(snapshot.id);
 				}
-				if (!stored && !isThreadRecord(snapshot)) {
+				if (!stored) {
 					const titlePath = path.join(this.#directory, titleFileName(snapshot.id));
 					if (title === undefined) await fs.rm(titlePath, { force: true });
 					else await writeFileAtomically(titlePath, title);
 				}
+				let checkpoint = await this.#loadConversation(snapshot.id);
+				const completed = getBtwTurns(saved).filter(turn => turn.status === "complete");
+				const answers = completed.map(turn => turn.answer);
+				const previousAnswers = this.#conversationAnswers.get(snapshot.id);
+				if (checkpoint) {
+					checkpoint = {
+						...checkpoint,
+						turns: checkpoint.turns.map((turn, index) => {
+							const source = completed[index];
+							if (!source || previousAnswers?.[index] === undefined || previousAnswers[index] === source.answer)
+								return turn;
+							return {
+								...turn,
+								replyText: source.answer,
+								assistantMessage: assistantMessageWithReplyText(turn.assistantMessage, source.answer),
+							};
+						}),
+					};
+					this.#conversations.set(snapshot.id, checkpoint);
+					await writeFileAtomically(
+						path.join(this.#directory, `entry-${snapshot.id}.conversation`),
+						`${JSON.stringify({ ...checkpoint, answers })}\n`,
+					);
+				}
 				await writeFileAtomically(filePath, content);
 				this.#revisions.set(snapshot.id, hash(content));
+				this.#conversationAnswers.set(snapshot.id, answers);
 			}
 
 			this.#records.set(snapshot.id, snapshot);
 			this.#refreshSnapshot();
-			const running = isThreadRecord(snapshot)
-				? snapshot.phase === "running"
-				: getBtwLatestTurn(snapshot).status === "running";
-			if (!running) this.#release(snapshot.id);
+			if (getBtwLatestTurn(snapshot).status !== "running") this.#release(snapshot.id);
 		});
 		this.#track(write);
 		await write;
@@ -475,12 +322,13 @@ export class BtwHistoryStore<T extends HistoryRecord = BtwHistoryRecord> {
 				await fs.unlink(filePath).catch(error => {
 					if (!isEnoent(error)) throw error;
 				});
-				if (this.#format !== "thread") {
-					await fs.rm(path.join(this.#directory, titleFileName(id)), { force: true });
-				}
+				await fs.rm(path.join(this.#directory, titleFileName(id)), { force: true });
+				await fs.rm(path.join(this.#directory, `entry-${id}.conversation`), { force: true });
 			}
 			this.#revisions.delete(id);
 			this.#records.delete(id);
+			this.#conversations.delete(id);
+			this.#conversationAnswers.delete(id);
 			this.#refreshSnapshot();
 			this.#release(id);
 		});

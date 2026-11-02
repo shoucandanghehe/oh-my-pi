@@ -84,7 +84,16 @@ export interface AgentSessionDisposeOptions {
 	 * pause-shutdown reason so no aborted assistant turn is synthesized.
 	 */
 	pausedExit?: boolean;
+	/**
+	 * Synchronously transfer storage ownership after the manager is sealed and
+	 * closed, before retained entries are released. Called once; must not resume
+	 * this runtime or start asynchronous work on the closing manager.
+	 */
+	onSessionClosed?: (manager: SessionManager) => void;
 }
+
+/** Home-thread outcome of one durable paused-tail continuation; failures reject. */
+export type PausedTurnContinuation = "continued" | "busy" | "empty transcript" | "already idle";
 
 export interface ContinuePausedAgentsResult {
 	/** Number of recorded agents whose continuation turn completed. */

@@ -328,6 +328,179 @@ describe("native transcript", () => {
 		}
 	});
 
+	it("renders tool progress snapshots before completion and keeps finalized output through a rebuild", async () => {
+		let builder: ChatTranscriptBuilder | undefined;
+		const entries = toolTranscript();
+		const h = await startWith(h => {
+			builder = new ChatTranscriptBuilder({ ui: h.tui, cwd: "/tmp", requestRender: () => h.tui.requestRender() });
+			builder.append(entries.slice(0, 1));
+			h.tui.addChild(builder.container);
+		});
+		try {
+			builder!.updateToolUpdates([
+				{
+					type: "tool_execution_update",
+					toolCallId: "call-1",
+					toolName: "lookup_thing",
+					args: { q: "x" },
+					partialResult: { content: [{ type: "text", text: "in-flight-output" }] },
+				},
+			]);
+			await h.render();
+			expect(h.find(node => node.k === "tool" && node.p?.role === "omp.tool.lookup_thing")?.p).toMatchObject({
+				status: "running",
+			});
+			expect(JSON.stringify(h.doc())).toContain("in-flight-output");
+
+			builder!.append(entries.slice(1));
+			await h.render();
+			expect(JSON.stringify(h.doc())).toContain("row 29");
+			expect(JSON.stringify(h.doc())).not.toContain("in-flight-output");
+			builder!.rebuild(entries);
+			await h.render();
+			expect(h.find(node => node.k === "tool" && node.p?.role === "omp.tool.lookup_thing")?.p).toMatchObject({
+				status: "done",
+			});
+			expect(JSON.stringify(h.doc())).toContain("row 29");
+			expect(JSON.stringify(h.doc())).not.toContain("in-flight-output");
+			expect(h.errors).toEqual([]);
+		} finally {
+			builder?.dispose();
+		}
+	});
+
+	it("keeps grouped read snapshots on one card and does not lose a completed sibling", async () => {
+		let builder: ChatTranscriptBuilder | undefined;
+		const h = await startWith(h => {
+			builder = new ChatTranscriptBuilder({ ui: h.tui, cwd: "/tmp", requestRender: () => h.tui.requestRender() });
+			builder.append([
+				{
+					type: "message",
+					id: "reads",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00Z",
+					message: assistant([
+						{ type: "toolCall", id: "read-a", name: "read", arguments: { path: "/tmp/a.ts" } },
+						{ type: "toolCall", id: "read-b", name: "read", arguments: { path: "/tmp/b.ts" } },
+					]),
+				},
+			]);
+			h.tui.addChild(builder.container);
+		});
+		const snapshots = ["read-a", "read-b"].map(toolCallId => ({
+			type: "tool_execution_update" as const,
+			toolCallId,
+			toolName: "read",
+			args: {},
+			partialResult: { content: [{ type: "text", text: "loading" }] },
+		}));
+		try {
+			builder!.updateToolUpdates(snapshots);
+			await h.render();
+			expect(h.findAll(node => node.k === "tool" && node.p?.role === "omp.tool.read")).toHaveLength(1);
+			expect(JSON.stringify(h.doc())).toContain("a.ts");
+			expect(JSON.stringify(h.doc())).toContain("b.ts");
+			builder!.append([
+				{
+					type: "message",
+					id: "read-a-result",
+					parentId: "reads",
+					timestamp: "2026-01-01T00:00:01Z",
+					message: {
+						role: "toolResult",
+						toolCallId: "read-a",
+						toolName: "read",
+						content: [{ type: "text", text: "finished" }],
+						isError: false,
+						timestamp: 2,
+					},
+				},
+			]);
+			builder!.updateToolUpdates(snapshots);
+			await h.render();
+			expect(h.findAll(node => node.k === "tool" && node.p?.role === "omp.tool.read")).toHaveLength(1);
+			expect(JSON.stringify(h.doc())).toContain("a.ts");
+			expect(JSON.stringify(h.doc())).toContain("b.ts");
+			builder!.append([
+				{
+					type: "message",
+					id: "read-b-result",
+					parentId: "read-a-result",
+					timestamp: "2026-01-01T00:00:02Z",
+					message: {
+						role: "toolResult",
+						toolCallId: "read-b",
+						toolName: "read",
+						content: [{ type: "text", text: "finished too" }],
+						isError: false,
+						timestamp: 3,
+					},
+				},
+			]);
+			builder!.updateToolUpdates(snapshots);
+			await h.render();
+			expect(h.find(node => node.k === "tool" && node.p?.role === "omp.tool.read")?.p).toMatchObject({
+				status: "done",
+			});
+			expect(h.errors).toEqual([]);
+		} finally {
+			builder?.dispose();
+		}
+	});
+
+	it("routes native user and assistant copy actions through the pane-owned callbacks", async () => {
+		const copied: string[] = [];
+		let builder: ChatTranscriptBuilder | undefined;
+		const h = await startWith(h => {
+			builder = new ChatTranscriptBuilder({
+				ui: h.tui,
+				cwd: "/tmp",
+				requestRender: () => h.tui.requestRender(),
+				transcriptActions: {
+					copy: text => {
+						copied.push(text);
+					},
+				},
+			});
+			builder.append([
+				{
+					type: "message",
+					id: "prompt",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:00Z",
+					message: { role: "user", content: "User source", timestamp: 0 },
+				},
+				{
+					type: "message",
+					id: "answer",
+					parentId: "prompt",
+					timestamp: "2026-01-01T00:00:01Z",
+					message: assistant([{ type: "text", text: "Assistant source" }], {
+						...USAGE,
+						output: 1,
+						totalTokens: 1,
+					}),
+				},
+			]);
+			h.tui.addChild(builder.container);
+		});
+		try {
+			const userCopy = h.find(
+				node => node.k === "icon" && node.p?.role === "omp.user.tool" && node.p?.name === "copy",
+			)!;
+			const answerCopy = h.find(node => node.p?.role === "omp.turn.copy")!;
+			h.event({ ev: "action", sf: h.terminal.surface!, id: userCopy.id, act: "copy-message" });
+			h.event({ ev: "action", sf: h.terminal.surface!, id: answerCopy.id, act: "copy-answer" });
+			expect(copied).toEqual(["User source", "Assistant source"]);
+			expect(
+				h.find(node => node.k === "icon" && node.p?.role === "omp.user.tool" && node.p?.name === "rewind"),
+			).toBeUndefined();
+			expect(h.errors).toEqual([]);
+		} finally {
+			builder?.dispose();
+		}
+	});
+
 	it("hands the terminal session-resolved targets for relative links once the segment closes", async () => {
 		const component = new AssistantMessageComponent();
 		const h = await startWith(h => h.tui.addChild(component));

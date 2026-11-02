@@ -1,7 +1,4 @@
-/**
- * Headless `/btw` turn lifecycle shared by the TUI controller and RPC mode:
- * record bookkeeping for a new topic or follow-up, and the ephemeral model turn.
- */
+/** Headless `/btw` history turns; durable panes own their conversations separately. */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import btwConversationPrompt from "../prompts/system/btw-conversation.md" with { type: "text" };
@@ -9,14 +6,18 @@ import btwUserPrompt from "../prompts/system/btw-user.md" with { type: "text" };
 import type { AgentSession } from "./agent-session";
 import { type BtwHistoryRecord, type BtwHistoryTurn, getBtwTurns } from "./btw-history";
 import type { BtwSummarySource } from "./messages";
-import type { EphemeralConversationTurn, EphemeralTurnResult } from "./ephemeral-conversation";
+import type {
+	EphemeralConversationTurn,
+	EphemeralTurnResult,
+	FrozenEphemeralConversationCheckpoint,
+} from "./ephemeral-conversation";
 
 export interface BtwTurnStart {
 	/** The record with the new turn appended, status `running`. */
 	record: BtwHistoryRecord;
-	/** Earlier turns of a follow-up's topic, replayed as context. */
+	/** Earlier turns of a follow-up's topic, replayed only when importing legacy history. */
 	history?: readonly BtwHistoryTurn[];
-	/** Provider lineage key; successful follow-ups share one, a failed turn starts a fresh one. */
+	/** Provider lineage key; a failed transport starts a fresh lineage over the same frozen context. */
 	conversationKey: string;
 }
 
@@ -41,8 +42,6 @@ export function beginBtwTurn(
 		? { ...previous, followUps: [...(previous.followUps ?? []), turn] }
 		: { ...turn, id: Snowflake.next(), leafId, ...(title ? { title } : {}) };
 	const history = previous ? getBtwTurns(previous) : undefined;
-	// A cancelled/failed transport may still be unwinding. Start a fresh
-	// lineage after that boundary, while successful follow-ups share one.
 	const transportEpoch = (history?.findLastIndex(item => item.status !== "complete") ?? -1) + 1;
 	return { record, history, conversationKey: `btw:${record.id}:${transportEpoch}` };
 }
@@ -56,31 +55,43 @@ export function patchLatestBtwTurn(record: BtwHistoryRecord, patch: Partial<BtwH
 	return { ...record, ...patch };
 }
 
-/**
- * Run one `/btw` question as an ephemeral turn; earlier turns of its topic are replayed as context.
- * The turn has the same read-only tools and `xd://send_to_main_session` device as a durable BTW thread.
- * Not `async`: returns the session's own promise so callers settle on the same tick as the turn.
- */
-export function runBtwTurn(
-	session: Pick<AgentSession, "model" | "createEphemeralConversation" | "publishBtwSummary">,
-	args: {
-		question: string;
-		/** Images attached to this question; earlier turns replay their own. */
-		images?: ImageContent[];
-		history?: readonly BtwHistoryTurn[];
-		/** Ask for steering prompts in an `<inject>` block (the `btw.inject` setting). */
-		inject?: boolean;
-		conversationKey: string;
-		/** Topic identity attached to a summary sent to Main. */
-		source: BtwSummarySource;
-		onTextDelta: (delta: string) => void;
-		signal: AbortSignal;
-	},
+export interface BtwTurnCheckpoint extends FrozenEphemeralConversationCheckpoint {
+	model: { provider: string; id: string };
+}
+
+/** Only data and RPC-supported callbacks cross threads; the conversation stays on its owner's home thread. */
+export interface BtwTurnOptions {
+	question: string;
+	images?: ImageContent[];
+	/** Import only saved history turns that have no native checkpoint (legacy records or external additions). */
+	history?: readonly BtwHistoryTurn[];
+	checkpoint?: BtwTurnCheckpoint;
+	inject?: boolean;
+	conversationKey: string;
+	source: BtwSummarySource;
+	onTextDelta: (delta: string) => void;
+	/** Capture frozen context before dispatch and native messages at termination. */
+	onCheckpoint?: (checkpoint: BtwTurnCheckpoint, phase: "frozen" | "terminal") => Promise<void>;
+	signal: AbortSignal;
+}
+
+/** Run a history-panel turn on the owning session, never on the UI's Main session. */
+export async function runBtwTurn(
+	session: Pick<AgentSession, "model" | "findModel" | "createEphemeralConversation" | "publishBtwSummary">,
+	args: BtwTurnOptions,
 ): Promise<EphemeralTurnResult> {
-	const model = session.model;
+	const active = session.model;
+	const frozen = args.checkpoint?.model;
+	const model =
+		!frozen || (active?.provider === frozen.provider && active.id === frozen.id)
+			? active
+			: session.findModel(frozen.provider, frozen.id);
 	if (!model) throw new Error("No active model available for /btw.");
 	const history: EphemeralConversationTurn[] = [];
-	for (const turn of args.history ?? []) {
+	const legacyHistory = args.checkpoint
+		? args.history?.filter(turn => turn.status === "complete").slice(args.checkpoint.turns.length)
+		: args.history;
+	for (const turn of legacyHistory ?? []) {
 		if (!turn.answer) continue;
 		history.push({
 			input: turn.question,
@@ -106,21 +117,41 @@ export function runBtwTurn(
 			},
 		});
 	}
+	if (history[0] && args.checkpoint?.trailingMessages?.length) {
+		history[0].prefixMessages = args.checkpoint.trailingMessages;
+	}
 	const conversation = session.createEphemeralConversation(
 		btwConversationPrompt,
-		{ turns: history, sideSessionId: args.conversationKey },
+		{
+			...args.checkpoint,
+			turns: [...(args.checkpoint?.turns ?? []), ...history],
+			trailingMessages: history.length ? undefined : args.checkpoint?.trailingMessages,
+			sideSessionId: args.conversationKey,
+		},
 		model,
 		{ sendToMainSession: summary => session.publishBtwSummary({ ...args.source, summary }) },
 	);
-	const turn = conversation.prompt(args.inject ? prompt.render(btwUserPrompt, { question: args.question, inject: true }) : args.question, {
-		images: args.images,
-		// /btw answers are read in full and saved to history: keep the
-		// repeated-line collapse, but not the 4 KiB cap meant for one-liners.
-		replyMaxBytes: Number.POSITIVE_INFINITY,
-		onTextDelta: args.onTextDelta,
-		signal: args.signal,
-	});
-	const dispose = () => conversation.disposeExtensionRuntime();
-	void turn.then(dispose, dispose);
-	return turn;
+	try {
+		await args.onCheckpoint?.(
+			{ ...conversation.freeze(), model: { provider: model.provider, id: model.id } },
+			"frozen",
+		);
+		try {
+			return await conversation.prompt(
+				args.inject ? prompt.render(btwUserPrompt, { question: args.question, inject: true }) : args.question,
+				{
+					images: args.images,
+					replyMaxBytes: Number.POSITIVE_INFINITY,
+					onTextDelta: args.onTextDelta,
+					signal: args.signal,
+				},
+			);
+		} finally {
+			await conversation.session?.settleInFlightMessagePersistence();
+			const checkpoint = conversation.checkpoint();
+			await args.onCheckpoint?.({ ...checkpoint, model: { provider: model.provider, id: model.id } }, "terminal");
+		}
+	} finally {
+		await conversation.disposeExtensionRuntime();
+	}
 }

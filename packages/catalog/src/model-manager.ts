@@ -6,7 +6,7 @@ import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
 import { TimeBasedCostShape } from "./pricing";
-import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
+import { type Api, type InputModality, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;

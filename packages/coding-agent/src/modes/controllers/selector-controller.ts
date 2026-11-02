@@ -1,4 +1,5 @@
 import { AgentRegistry } from "../../registry/agent-registry";
+import { isAgentViewSession } from "../../session/agent-session-handle";
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
@@ -2691,10 +2692,13 @@ export class SelectorController {
 			expandThinkingBlocks: () => this.ctx.expandThinkingBlocks,
 			createStatusLine: id => {
 				const session = AgentRegistry.global().get(id)?.session;
-				return session ? this.ctx.statusLine.createPeer(session) : undefined;
+				return session && isAgentViewSession(session) ? this.ctx.statusLine.createPeer(session) : undefined;
 			},
 			getStatusLineTransparent: () => cfgStatusLineTransparent.get(this.ctx.settings),
-			getExtensionPresentation: id => AgentRegistry.global().get(id)?.session?.extensionRunner,
+			getExtensionPresentation: id => {
+				const session = AgentRegistry.global().get(id)?.session;
+				return session && isAgentViewSession(session) ? session.extensionRunner : undefined;
+			},
 			focusAgent: id => this.ctx.focusAgentSession(id),
 			openAgent:
 				this.ctx.workspaceEnabled || (this.ctx.ui.nativeRendering && this.ctx.nativeWorkspace)

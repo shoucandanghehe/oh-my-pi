@@ -5,7 +5,7 @@ import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { extractUriScheme, InternalUrlRouter, parseInternalUrl, type ResolveContext } from "./index";
 import { expandPath } from "../tools/path-utils";
-import type { AgentSession } from "../session/agent-session";
+import type { AgentViewSession } from "../session/agent-session-handle";
 
 /**
  * Resolve Markdown link destinations (as extracted by `getMarkdownLinkUrls`)
@@ -63,7 +63,7 @@ export async function resolveMarkdownLinkHrefs(
 
 export function resolveSessionMarkdownLinkHrefs(
 	hrefs: Iterable<string>,
-	session: AgentSession,
+	session: Pick<AgentViewSession, "sessionManager" | "sessionFile" | "settings" | "skills" | "ttsrManager">,
 ): Promise<ReadonlyMap<string, string>> {
 	return resolveMarkdownLinkHrefs(hrefs, {
 		cwd: session.sessionManager.getCwd(),

@@ -1,10 +1,13 @@
-import { describe, expect, it } from "bun:test";
-import * as fs from "node:fs/promises";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
-import { BlobStore, isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
-import { BtwHistoryStore, type BtwThreadHistoryRecord } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import type { RestoredBtwThread } from "@oh-my-pi/pi-coding-agent/session/btw-thread";
+import { BtwSessionStore } from "@oh-my-pi/pi-coding-agent/session/btw-session-store";
+import { readAgentsPaused } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
+import { convertToLlm, createCompactionSummaryMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { seedBtwConversation } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const usage: Usage = {
@@ -29,10 +32,9 @@ function assistant(text: string): AssistantMessage {
 	};
 }
 
-function record(id: string): BtwThreadHistoryRecord {
+function record(key: string): RestoredBtwThread {
 	return {
-		version: 1,
-		id,
+		key,
 		title: "Investigate image",
 		createdAt: 10,
 		anchorLeafId: "main-leaf",
@@ -52,140 +54,276 @@ function image(): ImageContent {
 	return { type: "image", data: Buffer.alloc(1500, 19).toString("base64"), mimeType: "image/png" };
 }
 
-describe("BtwHistoryStore", () => {
-	it("round-trips complete frozen context, tool turn, media, draft link positions and resumable request through disk", async () => {
-		using temp = TempDir.createSync("@btw-rich-sidecar-");
-		const blobs = new BlobStore(path.join(temp.path(), "blobs"));
-		const imageData = image();
-		const original = record("thread-a");
+function createThread(store: BtwSessionStore, thread: RestoredBtwThread): void {
+	seedBtwConversation(store.getSessionManager(thread.key), thread);
+	store.appendEvent({
+		version: 1,
+		key: thread.key,
+		op: "create",
+		title: thread.title,
+		createdAt: thread.createdAt,
+		anchorLeafId: thread.anchorLeafId,
+		model: thread.model,
+	});
+}
+
+describe("BtwSessionStore", () => {
+	it("opens standard journals without importing or modifying old JSON checkpoints", async () => {
+		using temp = TempDir.createSync("@btw-no-auto-migration-");
+		const sourcePath = path.join(temp.path(), "btw-history", "entry-old-thread.json");
+		const source = `${JSON.stringify({ version: 1, id: "old-thread", draft: "Unmigrated draft" })}\n`;
+		await Bun.write(sourcePath, source);
+		const store = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			expect(store.getRecords()).toEqual([]);
+			expect(await Bun.file(sourcePath).text()).toBe(source);
+			expect(await Bun.file(`${sourcePath}.legacy`).exists()).toBe(false);
+		} finally {
+			await store.close();
+		}
+	});
+
+	it("preserves oversized frozen summary images through reload and full journal rewrites", async () => {
+		using temp = TempDir.createSync("@btw-frozen-summary-image-");
+		const frame: ImageContent = {
+			type: "image",
+			data: Buffer.alloc(400_000, 23).toString("base64"),
+			mimeType: "image/png",
+		};
+		const original = record("thread-summary-image");
+		original.baseMessages = [
+			createCompactionSummaryMessage("Archived Main context", 1000, new Date(0).toISOString(), {
+				blocks: [{ type: "text", text: "Before frame" }, frame, { type: "text", text: "After frame" }],
+			}),
+			...original.baseMessages,
+		];
+		const initial = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			createThread(initial, original);
+			await initial.flush();
+		} finally {
+			await initial.close();
+		}
+
+		const reopened = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			await reopened.getSessionManager(original.key).rewriteEntries();
+		} finally {
+			await reopened.close();
+		}
+		const [restored] = await BtwSessionStore.readRecords(temp.path(), temp.path());
+		const images = convertToLlm([...restored!.baseMessages]).flatMap(message =>
+			typeof message.content === "string"
+				? []
+				: message.content.filter((block): block is ImageContent => block.type === "image"),
+		);
+		expect(images.map(image => new Bun.CryptoHasher("sha256").update(image.data).digest("hex"))).toEqual([
+			new Bun.CryptoHasher("sha256").update(frame.data).digest("hex"),
+		]);
+		expect(restored!.baseMessages).toEqual(original.baseMessages);
+	});
+
+	it("restores complete tool history and draft attachments through standard session readers", async () => {
+		using temp = TempDir.createSync("@btw-standard-history-");
+		const original = record("thread-standard");
+		const toolCall: AssistantMessage = {
+			...assistant("Inspecting"),
+			content: [{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "file.txt" } }],
+			stopReason: "toolUse",
+		};
 		const toolResult: AgentMessage = {
 			role: "toolResult",
-			toolCallId: "tool-1",
+			toolCallId: "read-1",
 			toolName: "read",
-			content: [{ type: "text", text: "tool output" }],
+			content: [{ type: "text", text: "original\ttool output" }],
+			details: { source: "file.txt", opaque: { cursor: "provider-cursor" } },
 			isError: false,
 			timestamp: 11,
 		};
-		original.baseMessages = [
-			{ role: "user", content: [{ type: "text", text: "Frozen Main" }, imageData], timestamp: 1 },
-		];
 		original.turns = [
 			{
-				input: "",
-				images: [imageData],
-				prefixMessages: [original.baseMessages[0]!],
-				intermediateMessages: [toolResult],
-				assistantMessage: assistant("Answer"),
-				replyText: "Answer",
-				timestamp: 12,
+				input: "Inspect file",
+				images: [image()],
+				prefixMessages: [{ role: "developer", content: "Image description", timestamp: 10 }],
+				intermediateMessages: [toolCall, toolResult],
+				assistantMessage: assistant("The file contains text."),
+				replyText: "The file contains text.",
+				timestamp: 10,
 			},
 		];
-		original.draft = "Follow-up";
-		original.draftImages = [imageData];
-		original.draftImageLinks = [undefined, "local://figure.png"];
+		original.draft = "Next question";
+		original.draftImages = [image()];
+		original.draftImageLinks = [undefined, "local://draft.png"];
 		original.readThrough = 1;
-		original.phase = "running";
-		original.pausedRequest = { input: "", images: [imageData], timestamp: 13 };
-		const store = await BtwHistoryStore.openThreads(temp.path(), blobs);
-		const pending = store.upsert(original);
-		// Mutating source while the write is queued cannot change the checkpoint.
-		original.draft = "later mutation";
-		(original.turns[0]!.intermediateMessages as AgentMessage[]).push(assistant("later output"));
-		imageData.data = "corrupted after upsert";
-		await pending;
-		await store.flush();
-		const filePath = path.join(temp.path(), "btw-history", "entry-thread-a.json");
-		const disk = (await Bun.file(filePath).json()) as Omit<BtwThreadHistoryRecord, "draftImageLinks"> & {
-			draftImageLinks: (string | null)[];
-		};
-		expect(isBlobRef(disk.draftImages[0]!.data)).toBe(true);
-		expect(isBlobRef(disk.turns[0]!.images![0]!.data)).toBe(true);
-		expect(disk.draftImageLinks).toEqual([null, "local://figure.png"]);
-		expect(disk.turns[0]!.intermediateMessages).toEqual([toolResult]);
-		if (process.platform !== "win32") {
-			expect((await fs.stat(filePath)).mode & 0o777).toBe(0o600);
-			expect((await fs.stat(path.dirname(filePath))).mode & 0o777).toBe(0o700);
-		}
-		const restored = await BtwHistoryStore.openThreads(temp.path(), blobs);
-		expect(restored.getRecords()).toEqual([
-			{
-				...record("thread-a"),
-				baseMessages: [{ role: "user", content: [{ type: "text", text: "Frozen Main" }, image()], timestamp: 1 }],
-				turns: [
-					{
-						input: "",
-						images: [image()],
-						prefixMessages: [
-							{ role: "user", content: [{ type: "text", text: "Frozen Main" }, image()], timestamp: 1 },
-						],
-						intermediateMessages: [toolResult],
-						assistantMessage: assistant("Answer"),
-						replyText: "Answer",
-						timestamp: 12,
-					},
-				],
-				draft: "Follow-up",
-				draftImages: [image()],
-				draftImageLinks: [undefined, "local://figure.png"],
+		const initial = await BtwSessionStore.open(temp.path(), temp.path());
+		createThread(initial, original);
+		initial.appendEvent({
+			version: 1,
+			key: original.key,
+			op: "draft",
+			text: original.draft,
+			images: original.draftImages,
+			imageLinks: original.draftImageLinks,
+		});
+		initial.appendEvent({ version: 1, key: original.key, op: "read", through: 1 });
+		await initial.flush();
+		await initial.close();
+
+		const store = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			const manager = store.getSessionManager(original.key);
+			await store.flush();
+			const restored = store.getRecords()[0]!;
+			expect(restored).toMatchObject({
+				key: original.key,
+				sideSessionId: original.sideSessionId,
+				baseMessages: original.baseMessages,
+				draft: original.draft,
+				draftImages: original.draftImages,
+				draftImageLinks: original.draftImageLinks,
 				readThrough: 1,
-				phase: "ready",
-				pausedRequest: { input: "", images: [image()], timestamp: 13 },
-			},
-		]);
-		await store.upsert({ ...store.getRecords()[0]!, phase: "ready", pausedRequest: undefined });
+			});
+			expect(restored.turns[0]).toMatchObject(original.turns[0]!);
+			const persistedPath = manager.getSessionFile()!;
+			const normalReader = await SessionManager.open(persistedPath, undefined, undefined, {
+				suppressBreadcrumb: true,
+				throwIfMissing: true,
+			});
+			try {
+				const messages = normalReader.buildSessionContext().messages;
+				expect(messages).toContainEqual(toolCall);
+				expect(messages).toContainEqual(toolResult);
+				expect(messages).toContainEqual(original.turns[0]!.assistantMessage);
+				const messageEntries = normalReader.getEntries().filter(entry => entry.type === "message");
+				const callEntry = messageEntries.find(
+					entry =>
+						entry.message.role === "assistant" &&
+						entry.message.content.some(part => part.type === "toolCall" && part.id === "read-1"),
+				);
+				const resultEntry = messageEntries.find(
+					entry => entry.message.role === "toolResult" && entry.message.toolCallId === "read-1",
+				);
+				expect(resultEntry?.parentId).toBe(callEntry?.id);
+				expect(callEntry?.message).toEqual(toolCall);
+			} finally {
+				await normalReader.close();
+			}
+		} finally {
+			await store.close();
+		}
+
+		const reopened = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			expect(reopened.getRecords()).toHaveLength(1);
+			expect(reopened.getRecords()[0]!.turns[0]!.intermediateMessages).toEqual([toolCall, toolResult]);
+			reopened.appendEvent({ version: 1, key: original.key, op: "remove", reason: "deleted" });
+			await reopened.flush();
+			const canonicalFile = reopened.getSessionManager(original.key).getSessionFile()!;
+			const failDeletion = spyOn(reopened.getSessionManager(original.key), "dropSession").mockRejectedValue(
+				new Error("Deletion failed"),
+			);
+			try {
+				await expect(reopened.removeSession(original.key)).rejects.toThrow("Deletion failed");
+				expect(reopened.getRecords().map(thread => thread.key)).toEqual([original.key]);
+			} finally {
+				failDeletion.mockRestore();
+			}
+			await reopened.removeSession(original.key);
+			expect(await Bun.file(canonicalFile).exists()).toBe(false);
+		} finally {
+			await reopened.close();
+		}
+		const deleted = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			expect(deleted.getRecords()).toEqual([]);
+		} finally {
+			await deleted.close();
+		}
 	});
 
-	it("rejects concurrent revisions, including deletion, without losing the committed record", async () => {
-		using temp = TempDir.createSync("@btw-history-cas-");
-		const owner = await BtwHistoryStore.openThreads(temp.path());
-		await owner.upsert(record("thread-a"));
-		const stale = await BtwHistoryStore.openThreads(temp.path());
-		const staleWriter = await BtwHistoryStore.openThreads(temp.path());
-		await owner.upsert({ ...record("thread-a"), draft: "owner's latest checkpoint" });
-		await expect(staleWriter.upsert({ ...record("thread-a"), draft: "stale overwrite" })).rejects.toThrow("conflict");
-		await expect(stale.remove("thread-a")).rejects.toThrow("conflict");
-		await expect(stale.flush()).rejects.toThrow("conflict");
-		const disk = await BtwHistoryStore.openThreads(temp.path());
-		expect(disk.getRecords()[0]?.draft).toBe("owner's latest checkpoint");
-		await owner.remove("thread-a");
-		expect((await BtwHistoryStore.openThreads(temp.path())).getRecords()).toEqual([]);
-	});
-
-	it("latches a failed write until a fresh store is opened", async () => {
-		using temp = TempDir.createSync("@btw-history-retry-");
-		const store = await BtwHistoryStore.openThreads(temp.path());
-		const directory = path.join(temp.path(), "btw-history");
-		await Bun.write(directory, "blocks directory creation");
-		await expect(store.upsert(record("thread-retry"))).rejects.toThrow();
-		await expect(store.flush()).rejects.toThrow();
-		await expect(store.upsert(record("other-thread"))).rejects.toThrow();
-		await fs.rm(directory);
-		const reopened = await BtwHistoryStore.openThreads(temp.path());
-		await reopened.upsert(record("thread-retry"));
-		expect((await BtwHistoryStore.openThreads(temp.path())).getRecords().map(item => item.id)).toEqual([
-			"thread-retry",
-		]);
-	});
-
-	it("recovers running without a request as interrupted, preserving the original disk revision for CAS", async () => {
-		using temp = TempDir.createSync("@btw-history-recovery-");
-		const initial = await BtwHistoryStore.openThreads(temp.path());
-		await initial.upsert({ ...record("thread-b"), phase: "running" });
-		// A process crash releases its lease; this test releases it by finishing the original writer.
-		await initial.upsert({ ...record("thread-b"), phase: "ready" });
-		const filePath = path.join(temp.path(), "btw-history", "entry-thread-b.json");
-		await Bun.write(filePath, `${JSON.stringify({ ...record("thread-b"), phase: "running" })}\n`);
-		const resumed = await BtwHistoryStore.openThreads(temp.path());
-		expect(resumed.getRecords()[0]).toMatchObject({ phase: "error", error: "Reply interrupted before completion" });
-		await resumed.upsert({ ...resumed.getRecords()[0]!, phase: "ready", error: undefined });
-		expect((await BtwHistoryStore.openThreads(temp.path())).getRecords()[0]).toMatchObject({ phase: "ready" });
-	});
-
-	it("keeps undefined-artifacts sessions wholly in memory, including deletion", async () => {
-		const store = await BtwHistoryStore.openThreads(undefined);
-		await store.upsert(record("memory-only"));
-		await store.remove("memory-only");
+	it("persists an unprompted thread and its draft even when the inherited context has no assistant", async () => {
+		using temp = TempDir.createSync("@btw-standard-blank-");
+		const original = record("thread-blank");
+		const store = await BtwSessionStore.open(temp.path(), temp.path());
+		const manager = store.getSessionManager(original.key);
+		createThread(store, original);
+		store.appendEvent({ version: 1, key: original.key, op: "draft", text: "Unsent question", images: [image()] });
 		await store.flush();
-		expect(store.getRecords()).toEqual([]);
+		expect(await Bun.file(manager.getSessionFile()!).exists()).toBe(true);
+		await store.close();
+		const restored = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			expect(restored.getRecords()).toMatchObject([
+				{
+					key: original.key,
+					draft: "Unsent question",
+					draftImages: [image()],
+					turns: [],
+				},
+			]);
+		} finally {
+			await restored.close();
+		}
+	});
+
+	it("refuses a second writer while allowing read-only history snapshots", async () => {
+		using temp = TempDir.createSync("@btw-standard-owner-");
+		const original = record("thread-owner");
+		const store = await BtwSessionStore.open(temp.path(), temp.path());
+		createThread(store, original);
+		await store.flush();
+		try {
+			await expect(BtwSessionStore.open(temp.path(), temp.path())).rejects.toThrow("already open");
+			expect((await BtwSessionStore.readRecords(temp.path(), temp.path())).map(thread => thread.key)).toEqual([
+				original.key,
+			]);
+		} finally {
+			await store.close();
+		}
+		const replacement = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			expect(replacement.getRecords().map(thread => thread.key)).toEqual([original.key]);
+		} finally {
+			await replacement.close();
+		}
+	});
+
+	it("recovers an input lost before dispatch but never resurrects it across an explicit clear", async () => {
+		using temp = TempDir.createSync("@btw-interrupted-admission-");
+		const original = record("thread-pending");
+		const store = await BtwSessionStore.open(temp.path(), temp.path());
+		createThread(store, original);
+		store.appendEvent({
+			version: 1,
+			key: original.key,
+			op: "request",
+			input: "Prepared before crash",
+			images: [image()],
+			timestamp: 13,
+		});
+		await store.flush();
+		await store.close();
+
+		const recovered = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			const manager = recovered.getSessionManager(original.key);
+			expect(manager.buildSessionContext().messages).toEqual([...original.baseMessages]);
+			expect(readAgentsPaused(manager.getBranch())).toMatchObject({
+				pendingPrompt: { text: "Prepared before crash", images: [image()] },
+			});
+			manager.appendResetBoundary();
+			expect(readAgentsPaused(manager.getBranch())).toBeUndefined();
+			await recovered.flush();
+		} finally {
+			await recovered.close();
+		}
+		const cleared = await BtwSessionStore.open(temp.path(), temp.path());
+		try {
+			const manager = cleared.getSessionManager(original.key);
+			expect(manager.buildSessionContext().messages).toEqual([]);
+			expect(readAgentsPaused(manager.getBranch())).toBeUndefined();
+		} finally {
+			await cleared.close();
+		}
 	});
 });

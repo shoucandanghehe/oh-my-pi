@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
@@ -24,6 +24,7 @@ import { AgentStorage } from "../../src/session/agent-storage";
 import type { AuthStorage } from "../../src/session/auth-storage";
 import { CostGate } from "../../src/session/cost-gate";
 import { convertToLlm } from "../../src/session/messages";
+import { readAgentsPaused, SESSION_EXIT_CUSTOM_TYPE } from "../../src/session/exit-diagnostics";
 import { SessionManager } from "../../src/session/session-manager";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
@@ -45,6 +46,7 @@ const TEST_TIMEOUT_MS = 120_000;
 const SCRIPT_ID = Bun.randomUUIDv7("hex");
 const HANG_TASK = `omp-test-scripted-hang-${SCRIPT_ID}`;
 const BG_JOB_TASK = `omp-test-scripted-bg-job-${SCRIPT_ID}`;
+const PAUSE_TASK = `omp-test-scripted-pause-${SCRIPT_ID}`;
 /** In the routed agent's system prompt only, so a request without it is never the run's own turn. */
 const AGENT_MARKER = `omp-test-agent-${SCRIPT_ID}`;
 
@@ -102,6 +104,17 @@ class FakeModelServer {
 	readonly #server: Bun.Server<undefined>;
 	readonly #hangs: Array<() => void> = [];
 	#hungRequest = Promise.withResolvers<void>();
+	#pauseReply = Promise.withResolvers<void>();
+	#pauseRequest = Promise.withResolvers<void>();
+	turnRequests = 0;
+
+	pauseRequested(): Promise<void> {
+		return this.#pauseRequest.promise;
+	}
+
+	finishPauseReply(): void {
+		this.#pauseReply.resolve();
+	}
 
 	constructor() {
 		this.#server = Bun.serve({
@@ -143,6 +156,7 @@ class FakeModelServer {
 
 	stop(): void {
 		for (const release of this.#hangs.splice(0)) release();
+		this.#pauseReply.resolve();
 		this.#server.stop(true);
 	}
 
@@ -164,11 +178,16 @@ class FakeModelServer {
 			.map(message => messageText(message.content))
 			.join("\n");
 		const runTurn = systemText.includes(AGENT_MARKER);
+		if (runTurn) this.turnRequests++;
 		let reply: Reply = { text: "pong" };
 		if (runTurn && last?.role === "tool") {
 			reply = { text: `tool said: ${messageText(last.content)}` };
 		} else if (runTurn && userText.includes(BG_JOB_TASK)) {
 			reply = { tool: "bash", args: { command: "echo bg-done", async: true } };
+		} else if (runTurn && userText.includes(PAUSE_TASK)) {
+			this.#pauseRequest.resolve();
+			await this.#pauseReply.promise;
+			reply = { tool: "read", args: { path: path.join(cwd, "pause.txt") } };
 		} else if (runTurn && userText.includes(HANG_TASK)) {
 			const held = Promise.withResolvers<void>();
 			this.#hangs.push(held.resolve);
@@ -283,6 +302,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	agentPauseGate.resume();
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	await AgentLifecycleManager.global().dispose();
 	setSubagentWorkerPoolForTests(undefined);
@@ -325,13 +345,13 @@ function runOptions(id: string, task: string, extra: Partial<ExecutorOptions> = 
 }
 
 /** A real main-thread root session, as main.ts hands the persisted reviver factory. */
-function rootSession(): AgentSession {
+function rootSession(sessionManager = SessionManager.inMemory(cwd)): AgentSession {
 	const model = modelRegistry.find("fake", "fake-model");
 	if (!model) throw new Error("fake model missing from the main registry");
 	const agent = new Agent({ initialState: { model, systemPrompt: ["root"], tools: [] }, convertToLlm });
 	const session = new AgentSession({
 		agent,
-		sessionManager: SessionManager.inMemory(cwd),
+		sessionManager,
 		settings,
 		modelRegistry,
 		agentId: MAIN_AGENT_ID,
@@ -341,6 +361,99 @@ function rootSession(): AgentSession {
 }
 
 describe("subagent runs routed into pooled workers", () => {
+	it(
+		"parks a child on a newly starting worker until the process gate resumes",
+		async () => {
+			agentPauseGate.pause();
+			const running = runSubprocess(runOptions("PausedStart", "ping"));
+			await waitFor(
+				() => Boolean(AgentRegistry.global().get("PausedStart")?.session?.isStreaming) && agentPauseGate.ready,
+			);
+			expect(server.turnRequests).toBe(0);
+			agentPauseGate.resume();
+			expect((await running).output).toBe("pong");
+			expect(server.turnRequests).toBe(1);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"durably exits a worker parked after a tool without an aborted tail and continues it on a new home worker",
+		async () => {
+			await Bun.write(path.join(cwd, "pause.txt"), "durable payload");
+			const sessionDir = path.join(root, "sessions");
+			const main = rootSession(SessionManager.create(cwd, sessionDir));
+			const mainFile = main.sessionFile;
+			if (!mainFile) throw new Error("Missing main transcript");
+			const running = runSubprocess(
+				runOptions("PausedWorker", PAUSE_TASK, {
+					sessionFile: mainFile,
+					artifactsDir: mainFile.slice(0, -".jsonl".length),
+				}),
+			);
+			await server.pauseRequested();
+			const child = mirrorOf(AgentRegistry.global().get("PausedWorker")?.session);
+			const childFile = child.sessionFile;
+			if (!childFile) throw new Error("Missing worker transcript");
+			const home = pool.forThread(child.home);
+			if (!home) throw new Error("Missing home worker");
+			agentPauseGate.pause();
+			await home.link.call("ping", 1);
+			expect(agentPauseGate.ready).toBe(false);
+			server.finishPauseReply();
+			await waitFor(() => child.messages.some(message => message.role === "toolResult") && agentPauseGate.ready);
+			await main.disposeForPausedExit();
+			await running;
+			expect(server.turnRequests).toBe(1);
+
+			const reopened = await SessionManager.open(mainFile, sessionDir, undefined, { suppressBreadcrumb: true });
+			expect(readAgentsPaused(reopened.getBranch())?.agentIds).toEqual(["PausedWorker"]);
+			const childManager = await SessionManager.open(childFile, undefined, undefined, { suppressBreadcrumb: true });
+			try {
+				const messages = childManager
+					.getBranch()
+					.flatMap(entry => (entry.type === "message" ? [entry.message] : []));
+				expect(messages.at(-1)?.role).toBe("toolResult");
+				expect(messages.some(message => message.role === "assistant" && message.stopReason === "aborted")).toBe(
+					false,
+				);
+				const exit = childManager
+					.getEntries()
+					.findLast(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+				expect(exit?.type === "custom" && exit.data).toMatchObject({ kind: "paused" });
+			} finally {
+				await childManager.close();
+			}
+
+			pool.dispose();
+			agentPauseGate.resume();
+			pool = new SubagentWorkerPool({ maxWorkers: () => 1, hostsOnMain: false, idleMs: 600_000 });
+			setSubagentWorkerPoolForTests(pool);
+			const resumed = rootSession(reopened);
+			AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+				createPersistedSubagentReviverFactory({
+					session: resumed,
+					authStorage,
+					modelRegistry,
+					settings,
+					enableLsp: false,
+					eventBus,
+				}),
+				() => 0,
+			);
+			const result = await resumed.continuePausedAgents();
+			expect(result).toEqual({ continued: 1, skipped: [], complete: true });
+			const revived = mirrorOf(AgentRegistry.global().get("PausedWorker")?.session);
+			expect(revived.home).not.toBe(child.home);
+			expect(revived.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: expect.stringContaining("durable payload") }],
+			});
+			expect(server.turnRequests).toBe(2);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	it(
 		"warms a worker with a throwaway session sealed off from main, then runs subagents there",
 		async () => {

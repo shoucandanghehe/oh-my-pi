@@ -58,6 +58,16 @@ export function findLocalSession(key: string): AgentSession | undefined {
 	return localSessions.get(key)?.deref();
 }
 
+/** Live, undisposed sessions homed here, including sessions not yet attached to the registry. */
+export function localAgentSessions(): AgentSession[] {
+	const sessions: AgentSession[] = [];
+	for (const ref of localSessions.values()) {
+		const session = ref.deref();
+		if (session && !session.isDisposed) sessions.push(session);
+	}
+	return sessions;
+}
+
 /** Whether `value` is a session registered on this thread (identity, not shape). */
 export function isRegisteredLocalSession(value: unknown): value is AgentSession {
 	if (typeof value !== "object" || value === null) return false;

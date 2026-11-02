@@ -15,6 +15,7 @@ import {
 	parseSgrMouse,
 	type PasteOptions,
 	type SlashCommand,
+	type TUI,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -52,6 +53,8 @@ import { openLocalFileInEditor } from "../local-file-editor";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { AgentRegistry } from "../../registry/agent-registry";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
+import type { AgentViewSession, AgentViewSessionManager } from "../../session/agent-session-handle";
+import { preparePaneInput } from "../utils/prepare-pane-input";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { PINNED_HUD_TOGGLE_ID } from "../../task/output-manager";
 import { pickRecentFocusableAgentId } from "./session-focus-controller";
@@ -147,8 +150,23 @@ interface PasteTarget {
 	attachImage?(image: ImageContent, dims?: { width: number; height: number }): string | undefined;
 }
 
+/** The draft, session, and terminal owning a local pane's editor operations. */
+export interface PaneEditorTarget {
+	editor: CustomEditor;
+	session: Pick<AgentViewSession, "sessionManager">;
+	ui: TUI;
+}
+
+interface EditorPasteContext {
+	sessionManager: AgentViewSessionManager;
+	ui: TUI;
+	/** Bound pane sessions must not receive an old paste after a session transition. */
+	isCurrent(): boolean;
+}
+
 /** Where a pasted image lands: the main editor's attachments, or a prompt that opted into images. */
 interface ImagePasteSink {
+	sessionManager: AgentViewSessionManager;
 	attach(image: ImageContent, unsupportedMessage: string, sourcePath?: string): Promise<boolean>;
 	pasteText(text: string): void;
 	/** Main editor only; without it a video path lands as text. */
@@ -305,11 +323,13 @@ export class InputController {
 		if (modelKey) tinyTitleClient.prewarm(modelKey);
 	}
 
-	#enhancedPaste?: EnhancedPasteController;
+	#enhancedPastes = new WeakMap<TUI, EnhancedPasteController>();
 	#draftText: string | undefined;
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
 	#pasteEditors = new WeakSet<CustomEditor>();
+	#paneEditors = new WeakMap<CustomEditor, PaneEditorTarget>();
+	#paneUis = new WeakSet<TUI>();
 	#btwOpenThreadListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
@@ -348,15 +368,33 @@ export class InputController {
 	// submission disarms it; a session switch invalidates it, so a word armed in
 	// one session can never run on a single Enter in another.
 	#armedBareCommand: { text: string; sessionId: string } | undefined;
-	#editorImageSink(editor: CustomEditor): ImagePasteSink {
+	#captureEditorPasteContext(editor: CustomEditor): EditorPasteContext {
+		const target = this.#paneEditors.get(editor);
+		const sessionManager = target?.session.sessionManager ?? this.ctx.sessionManager;
+		const sessionId = target?.session.sessionManager.getSessionId();
 		return {
+			sessionManager,
+			ui: target?.ui ?? this.ctx.ui,
+			isCurrent: () =>
+				!target ||
+				(this.#paneEditors.get(editor)?.session === target.session && sessionManager.getSessionId() === sessionId),
+		};
+	}
+
+	#editorImageSink(
+		editor: CustomEditor,
+		context: EditorPasteContext = this.#captureEditorPasteContext(editor),
+	): ImagePasteSink {
+		return {
+			sessionManager: context.sessionManager,
 			attach: (image, unsupportedMessage, sourcePath) =>
-				this.#normalizeAndInsertPastedImage(editor, image, unsupportedMessage, sourcePath),
+				this.#normalizeAndInsertPastedImage(editor, image, unsupportedMessage, sourcePath, context),
 			pasteText: text => {
+				if (!context.isCurrent()) return;
 				editor.pasteText(text);
-				this.ctx.ui.requestRender();
+				context.ui.requestRender();
 			},
-			attachVideo: path => this.#insertPendingVideoPreview(editor, path),
+			attachVideo: path => this.#insertPendingVideoPreview(editor, path, context),
 		};
 	}
 
@@ -438,6 +476,7 @@ export class InputController {
 			// These actions target the main transcript/editor rather than the
 			// focused prompt. Keep focused components' own bindings authoritative.
 			this.ctx.ui.addInputListener(data => {
+				if (this.ctx.workspaceEnabled && !this.ctx.isMainWorkspacePaneFocused()) return undefined;
 				if (this.ctx.keybindings.matches(data, "app.thinking.toggle")) {
 					if (this.ctx.ui.hasOverlay()) return undefined;
 					this.ctx.toggleThinkingBlockVisibility();
@@ -1068,24 +1107,42 @@ export class InputController {
 		return false;
 	}
 
-	#setupEnhancedPaste(): void {
-		if (this.#enhancedPaste) return;
-
-		this.#enhancedPaste = new EnhancedPasteController({
-			write: data => this.ctx.ui.terminal.write(data),
+	#setupEnhancedPaste(ui: TUI = this.ctx.ui): void {
+		if (this.#enhancedPastes.has(ui)) return;
+		const enhancedPaste = new EnhancedPasteController({
+			write: data => ui.terminal.write(data),
 			beginPaste: () => {
-				const target = this.#resolvePasteTarget();
-				if (!(target instanceof CustomEditor)) return undefined;
-				const finish = target.beginPaste();
-				return text => {
-					const accepted = finish(text);
-					this.ctx.ui.requestRender();
-					return accepted;
+				const target = this.#resolvePasteTarget(ui);
+				const editor = target instanceof CustomEditor ? target : undefined;
+				const context = editor ? this.#captureEditorPasteContext(editor) : undefined;
+				const finish = target?.beginPaste?.();
+				const imageEditor = this.#imagePasteEditor(target);
+				return {
+					finish: text => {
+						if (context && !context.isCurrent()) text = undefined;
+						let accepted = false;
+						if (finish) accepted = finish(text);
+						else if (text !== undefined && this.#resolvePasteTarget(ui) === target) {
+							target?.pasteText(text);
+							accepted = target !== undefined;
+						}
+						ui.requestRender();
+						return accepted;
+					},
+					pasteImage: async image => {
+						const message = `Unsupported pasted image format: ${image.mimeType}`;
+						if (!target) {
+							this.ctx.showStatus("Paste is not supported in this pane");
+							return;
+						}
+						if (imageEditor) await this.#editorImageSink(imageEditor, context).attach(image, message);
+						else await this.#pasteImageIntoFocus(sink => sink.attach(image, message), target);
+					},
 				};
 			},
 			pasteText: text => {
-				const target = this.#resolvePasteTarget();
-				const focused = this.ctx.ui.getFocused();
+				const target = this.#resolvePasteTarget(ui);
+				const focused = ui.getFocused();
 				if (target instanceof CustomEditor) {
 					target.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
 				} else if (target) {
@@ -1096,10 +1153,13 @@ export class InputController {
 					this.ctx.showStatus("Paste is not supported in this pane");
 					return;
 				}
-				this.ctx.ui.requestRender();
+				ui.requestRender();
 			},
 			pasteImage: image =>
-				this.#pasteImageIntoFocus(sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`)),
+				this.#pasteImageIntoFocus(
+					sink => sink.attach(image, `Unsupported pasted image format: ${image.mimeType}`),
+					this.#resolvePasteTarget(ui),
+				),
 			showStatus: message => this.ctx.showStatus(message),
 			pasteNative: () => {
 				if (!this.#clipboardIsTerminalLocal()) return false;
@@ -1107,12 +1167,13 @@ export class InputController {
 				return true;
 			},
 		});
-		this.ctx.ui.addInputListener(data => {
-			if (this.#enhancedPaste?.handleInput(data)) return { consume: true };
-			if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) this.#enhancedPaste?.cancel();
+		this.#enhancedPastes.set(ui, enhancedPaste);
+		ui.addInputListener(data => {
+			if (enhancedPaste.handleInput(data)) return { consume: true };
+			if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) enhancedPaste.cancel();
 			return undefined;
 		});
-		this.ctx.ui.addStartListener(() => this.#enhancedPaste?.enable());
+		ui.addStartListener(() => enhancedPaste.enable());
 	}
 
 	/** Enforce the deleted-chip contract at submit time: images whose inline token was removed
@@ -1140,22 +1201,6 @@ export class InputController {
 		editor.imageLinks = editor.pendingImageLinks.length > 0 ? editor.pendingImageLinks : undefined;
 		const renumbered = shiftImageMarkers(newerDraft, -images.length);
 		if (renumbered !== newerDraft) editor.setCollapsedText(renumbered);
-	}
-
-	async #runInputHandlers(
-		text: string,
-		images?: ImageContent[],
-		imageLinks?: (string | undefined)[],
-	): Promise<{ text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] } | undefined> {
-		const result = await this.ctx.session.extensionRunner?.emitInput(text, images, "interactive");
-		if (result?.handled) return undefined;
-		if (result?.text !== undefined) text = result.text.trim();
-		if (result?.images !== undefined) {
-			images = result.images;
-			imageLinks = await materializeImageChipLinks(images, this.ctx.sessionManager);
-		}
-		if (!text && !images?.length) return undefined;
-		return { text, images, imageLinks };
 	}
 
 	setupEditorSubmitHandler(): void {
@@ -1233,7 +1278,11 @@ export class InputController {
 				// A startup-deferred extension's input hook must see the first submission.
 				if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
 				if (runner?.hasHandlers("input")) {
-					const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
+					const input = await preparePaneInput(this.ctx.session, {
+						text,
+						images: inputImages,
+						imageLinks: inputImageLinks,
+					});
 					if (!input) {
 						// The handler consumed the submission. The editor text was reset
 						// before this callback ran, so anything in it now is a newer draft;
@@ -2244,7 +2293,7 @@ export class InputController {
 				if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
 				if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
 					try {
-						const input = await this.#runInputHandlers(text, images, imageLinks);
+						const input = await preparePaneInput(this.ctx.session, { text, images, imageLinks });
 						if (!input) return;
 						({ text, images, imageLinks } = input);
 					} catch (error) {
@@ -2509,9 +2558,10 @@ export class InputController {
 		return entries.length;
 	}
 
-	#resolvePasteTarget(): PasteTarget | undefined {
-		const focused = this.ctx.ui.getFocused();
-		if (!focused || focused === this.ctx.editor) return this.ctx.editor;
+	#resolvePasteTarget(ui: TUI = this.ctx.ui): PasteTarget | undefined {
+		const focused = ui.getFocused();
+		if (!focused) return ui === this.ctx.ui ? this.ctx.editor : undefined;
+		if (focused === this.ctx.editor) return this.ctx.editor;
 		if ("getPasteTarget" in focused && typeof focused.getPasteTarget === "function") {
 			const target: unknown = focused.getPasteTarget();
 			return hasPasteText(target) ? target : undefined;
@@ -2534,18 +2584,78 @@ export class InputController {
 		editor.onPasteTextRaw = () => this.handleClipboardTextRawPaste(editor);
 	}
 
+	/** Wire only local draft operations, never Main's session or management actions. */
+	setupPaneEditor(target: PaneEditorTarget): void {
+		const { editor, ui } = target;
+		const configured = this.#paneEditors.has(editor);
+		this.#paneEditors.set(editor, target);
+		this.#configurePasteEditor(editor);
+		if (!configured) {
+			editor.draftImageLinkMaterializer = async images => {
+				const context = this.#captureEditorPasteContext(editor);
+				const links = await materializeImageChipLinks(images, context.sessionManager);
+				return context.isCurrent() ? links : undefined;
+			};
+			const images = editor.pendingImages;
+			if (images.some((_, index) => editor.pendingImageLinks[index] === undefined)) {
+				void editor
+					.draftImageLinkMaterializer(images)
+					.then(links => {
+						if (!links || editor.pendingImages !== images) return;
+						editor.pendingImageLinks = links;
+						editor.imageLinks = links;
+						ui.requestRender();
+					})
+					.catch(error => {
+						this.ctx.showError(`Failed to prepare draft image links: ${String(error)}`);
+					});
+			}
+			editor.setActionKeys("app.clipboard.copyPrompt", this.ctx.keybindings.getKeys("app.clipboard.copyPrompt"));
+			editor.onCopyPrompt = () => this.handleCopyPrompt(editor);
+			for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
+				editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine(editor));
+			}
+			for (const key of this.ctx.keybindings.getKeys("app.editor.external")) {
+				editor.setCustomKeyHandler(key, () => void this.openExternalEditor(editor));
+			}
+			// CustomEditor already owns undo, movement, and text-paste collapsing.
+		}
+		// Shared-TUI routing remains owned by Main and resolves its focused editor.
+		this.#setupEnhancedPaste(ui);
+		if (ui === this.ctx.ui || this.#paneUis.has(ui)) return;
+		this.#paneUis.add(ui);
+		ui.onAppViewportPasteRequest = async () => {
+			const focused = this.#resolvePasteTarget(ui);
+			if (focused instanceof CustomEditor) {
+				this.#configurePasteEditor(focused);
+				await focused.pasteFromClipboard();
+			} else if (focused) {
+				await this.handleImagePaste(focused);
+			}
+		};
+		ui.onAppViewportSelectionCopy = text => {
+			void copyToClipboard(text).then(
+				() => this.ctx.showStatus("Copied selection to clipboard"),
+				error => this.ctx.showError(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
+			);
+		};
+	}
+
 	async #insertPendingImage(
 		editor: CustomEditor,
 		imageData: ImageContent,
 		source?: ImageAttachmentSource,
-	): Promise<void> {
+		context: EditorPasteContext = this.#captureEditorPasteContext(editor),
+	): Promise<boolean> {
+		if (!context.isCurrent()) return false;
 		const image: ImageContent = source
 			? tagImageAttachmentSource(imageData, source.path, source.kind)
 			: { type: "image", data: imageData.data, mimeType: imageData.mimeType };
 		// The source URL stays on the image for the model; the chip opens the file itself,
 		// or a stable blob copy of the original bytes behind an internal URL (else the payload).
-		const [imageLink] = await materializeImageChipLinks([image], this.ctx.sessionManager);
+		const [imageLink] = await materializeImageChipLinks([image], context.sessionManager);
 		const dims = await this.#imageDimensions(imageData);
+		if (!context.isCurrent()) return false;
 		editor.pendingImages.push(image);
 		editor.pendingImageLinks.push(imageLink);
 		editor.imageLinks = editor.pendingImageLinks;
@@ -2555,7 +2665,8 @@ export class InputController {
 		// The buffer holds the compact chip token; the atom table expands it to the bracketed
 		// marker (the wire/transcript format) on submit.
 		editor.insertAtom(chipLabel(kind, imageNum), formatVisionMarker(kind, imageNum, dims));
-		this.ctx.ui.requestRender();
+		context.ui.requestRender();
+		return true;
 	}
 
 	/** Probe pixel dimensions for the marker label (`[Image #N, WxH]`). Returns undefined when the
@@ -2622,10 +2733,11 @@ export class InputController {
 		image: ImageContent,
 		unsupportedMessage: string,
 		sourcePath?: string,
+		context?: EditorPasteContext,
 	): Promise<{ image: ImageContent; source: ImageAttachmentSource | undefined } | null> {
 		const normalized = await this.#normalizePastedImage(image, unsupportedMessage);
-		if (!normalized) return null;
-		const path = sourcePath ?? (await this.#persistPastedImage(image));
+		if (!normalized || (context && !context.isCurrent())) return null;
+		const path = sourcePath ?? (await this.#persistPastedImage(image, context?.sessionManager));
 		return { image: normalized, source: path ? { path, kind: "image" } : undefined };
 	}
 
@@ -2634,11 +2746,12 @@ export class InputController {
 		image: ImageContent,
 		unsupportedMessage: string,
 		sourcePath?: string,
+		context: EditorPasteContext = this.#captureEditorPasteContext(editor),
 	): Promise<boolean> {
-		const prepared = await this.#preparePastedImage(image, unsupportedMessage, sourcePath);
+		if (!context.isCurrent()) return false;
+		const prepared = await this.#preparePastedImage(image, unsupportedMessage, sourcePath, context);
 		if (!prepared) return false;
-		await this.#insertPendingImage(editor, prepared.image, prepared.source);
-		return true;
+		return this.#insertPendingImage(editor, prepared.image, prepared.source, context);
 	}
 
 	/**
@@ -2649,15 +2762,18 @@ export class InputController {
 	 * directory, and the URL resolves against the session's current root. Returns
 	 * undefined when the write fails; the image still attaches, just without a reference.
 	 */
-	async #persistPastedImage(image: ImageContent): Promise<string | undefined> {
+	async #persistPastedImage(
+		image: ImageContent,
+		sessionManager: AgentViewSessionManager = this.ctx.sessionManager,
+	): Promise<string | undefined> {
 		const bytes = Buffer.from(image.data, "base64");
 		const extension = blobExtensionForImageMimeType(image.mimeType) ?? "png";
 		const url = `local://pasted-image-${Bun.hash(bytes).toString(16)}.${extension}`;
 		try {
 			const filePath = InternalUrlRouter.instance().locateSync(url, {
 				localProtocolOptions: {
-					getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
-					getSessionId: () => this.ctx.sessionManager.getSessionId(),
+					getArtifactsDir: () => sessionManager.getArtifactsDir(),
+					getSessionId: () => sessionManager.getSessionId(),
 				},
 			});
 			if (filePath === undefined) throw new Error(`No local file backs ${url}`);
@@ -2690,20 +2806,26 @@ export class InputController {
 	 * paste with an actionable status; ENOENT propagates to the caller's
 	 * clipboard-fallback handling.
 	 */
-	async #insertPendingVideoPreview(editor: CustomEditor, pastedPath: string): Promise<void> {
+	async #insertPendingVideoPreview(
+		editor: CustomEditor,
+		pastedPath: string,
+		context: EditorPasteContext,
+	): Promise<void> {
+		if (!context.isCurrent()) return;
 		try {
-			const absolutePath = resolveReadPath(pastedPath, this.ctx.sessionManager.getCwd());
+			const absolutePath = resolveReadPath(pastedPath, context.sessionManager.getCwd());
 			const meta = await probeVideo(absolutePath);
 			const sheet = await buildVideoContactSheetPng(absolutePath, meta);
 			const preview = await this.#normalizePastedImage(
 				{ type: "image", data: sheet.png.data, mimeType: sheet.png.mimeType },
 				"Unsupported pasted video preview format",
 			);
-			if (preview) await this.#insertPendingImage(editor, preview, { path: absolutePath, kind: "video" });
+			if (preview) await this.#insertPendingImage(editor, preview, { path: absolutePath, kind: "video" }, context);
 		} catch (error) {
 			if (error instanceof VideoError) {
+				if (!context.isCurrent()) return;
 				editor.pasteText(pastedPath);
-				this.ctx.ui.requestRender();
+				context.ui.requestRender();
 				this.ctx.showStatus(error.message);
 				return;
 			}
@@ -2745,6 +2867,7 @@ export class InputController {
 		const pasted: string[] = [];
 		return {
 			sink: {
+				sessionManager: this.ctx.sessionManager,
 				attach: async (image, unsupportedMessage, sourcePath) => {
 					const marker = await this.#attachPromptImage(target, image, unsupportedMessage, sourcePath);
 					if (marker === undefined) return false;
@@ -2806,7 +2929,7 @@ export class InputController {
 			}
 			const image = await loadImageInput({
 				path,
-				cwd: this.ctx.sessionManager.getCwd(),
+				cwd: sink.sessionManager.getCwd(),
 				autoResize: false,
 			});
 			if (!image) {
@@ -2872,6 +2995,7 @@ export class InputController {
 			return false;
 		}
 		const editor = this.#imagePasteEditor(target);
+		const editorContext = target instanceof CustomEditor ? this.#captureEditorPasteContext(target) : undefined;
 		const promptTarget = target instanceof CustomEditor ? null : target;
 		let finishPaste: ((text: string | undefined) => boolean) | undefined;
 		let promptPaste: PromptImagePaste | undefined;
@@ -2958,6 +3082,7 @@ export class InputController {
 			}
 			// Keep the initiating prompt as the only possible modal destination.
 			if (promptTarget && this.#resolvePasteTarget() !== promptTarget) return false;
+			if (editorContext && !editorContext.isCurrent()) return false;
 			if (finishPaste) {
 				const accepted = finishPaste(text);
 				finishPaste = undefined;
@@ -2968,7 +3093,7 @@ export class InputController {
 				if (promptPaste) promptPaste.sink.pasteText(text);
 				else target.pasteText(text);
 			}
-			this.ctx.ui.requestRender();
+			(editorContext?.ui ?? this.ctx.ui).requestRender();
 			return true;
 		} catch {
 			this.ctx.showStatus("Failed to read clipboard");
@@ -2988,13 +3113,15 @@ export class InputController {
 			this.ctx.showStatus("Paste is not supported in this pane");
 			return;
 		}
+		const context = target instanceof CustomEditor ? this.#captureEditorPasteContext(target) : undefined;
 		try {
 			const text = await this.clipboard.readText();
+			if (context && !context.isCurrent()) return;
 			if (text) {
 				if (target === this.ctx.editor) this.ctx.editor.insertText(text);
 				else if (target instanceof CustomEditor) target.insertText(text);
 				else target.pasteText(text);
-				this.ctx.ui.requestRender();
+				(context?.ui ?? this.ctx.ui).requestRender();
 			} else {
 				this.ctx.showStatus("No text in clipboard to paste raw");
 			}
@@ -3153,9 +3280,9 @@ export class InputController {
 	}
 
 	/** Copy the current editor line to the system clipboard. */
-	handleCopyCurrentLine(): void {
-		const { line } = this.ctx.editor.getCursor();
-		const text = this.ctx.editor.getLines()[line] || "";
+	handleCopyCurrentLine(editor: CustomEditor = this.ctx.editor): void {
+		const { line } = editor.getCursor();
+		const text = editor.getLines()[line] || "";
 		if (!text) {
 			this.ctx.showStatus("Nothing to copy");
 			return;
@@ -3171,8 +3298,8 @@ export class InputController {
 	}
 
 	/** Copy current prompt text to system clipboard. */
-	handleCopyPrompt(): void {
-		const text = this.ctx.editor.getText();
+	handleCopyPrompt(editor: CustomEditor = this.ctx.editor): void {
+		const text = editor.getText();
 		if (!text) {
 			this.ctx.showStatus("Nothing to copy");
 			return;
@@ -3265,7 +3392,7 @@ export class InputController {
 		this.ctx.chatContainer.setExpanded(expanded);
 		// Queued shell runs have not joined the transcript yet.
 		for (const child of this.ctx.pendingShellContainer.children) {
-			if (isExpandable(child)) child.setExpanded(expanded);
+			if ("setExpanded" in child && typeof child.setExpanded === "function") child.setExpanded(expanded);
 		}
 		this.ctx.ui.requestRender(true);
 	}
@@ -3308,28 +3435,38 @@ export class InputController {
 		this.ctx.showStatus(`Thinking blocks: ${this.ctx.hideThinkingBlock ? "hidden" : "visible"}`);
 	}
 
-	async openExternalEditor(): Promise<void> {
+	async openExternalEditor(editor: CustomEditor = this.ctx.editor): Promise<void> {
+		const context = this.#captureEditorPasteContext(editor);
+		if (context.ui !== this.ctx.ui) {
+			this.ctx.showWarning("This pane has no external-editor terminal channel");
+			return;
+		}
 		const editorCmd = getEditorCommand();
 		if (!editorCmd) {
 			this.ctx.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
 			return;
 		}
 
-		const currentText = this.ctx.editor.getExpandedText?.() ?? this.ctx.editor.getText();
-
+		const currentText = editor.getExpandedText();
+		const images = [...editor.pendingImages];
+		const links = [...editor.pendingImageLinks];
+		let editedText = currentText;
+		let detached = false;
 		try {
-			this.ctx.ui.stop();
+			context.ui.stop();
+			// Return to this exact editor, merging rather than replacing any newer draft.
+			editor.clearDraft();
+			detached = true;
 			const result = await openInEditor(editorCmd, currentText, { extension: ".omp.md" });
-			if (result !== null) {
-				this.ctx.editor.setText(result);
-			}
+			if (result !== null) editedText = result;
 		} catch (error) {
 			this.ctx.showWarning(
 				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		} finally {
-			this.ctx.ui.start();
-			this.ctx.ui.requestRender();
+			if (detached && context.isCurrent()) editor.restoreDetachedDraft(editedText, images, links);
+			context.ui.start();
+			context.ui.requestRender();
 		}
 	}
 

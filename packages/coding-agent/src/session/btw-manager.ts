@@ -1,8 +1,12 @@
 import { type AgentMessage, PAUSE_SHUTDOWN_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { AgentSession } from "./agent-session";
+import { AGENTS_PAUSED_CUSTOM_TYPE, readAgentsPaused } from "./exit-diagnostics";
 import type { ContinuePausedAgentsResult } from "./agent-session-types";
-import type { BtwPausedRequest, BtwThreadEvent, BtwThreadModelRef, RestoredBtwThread } from "./btw-thread";
+import { USER_INTERRUPT_LABEL } from "./messages";
+import type { BtwThreadEvent, BtwThreadModelRef, RestoredBtwThread } from "./btw-thread";
 import type {
 	EphemeralConversation,
 	EphemeralConversationCheckpoint,
@@ -18,6 +22,9 @@ export interface BtwThreadRequest {
 	messages: AgentMessage[];
 	streamMessage: Extract<AgentMessage, { role: "assistant" }> | undefined;
 	timestamp: number;
+	admission: PromiseWithResolvers<void>;
+	settled: PromiseWithResolvers<void>;
+	userMessage?: Extract<AgentMessage, { role: "user" }>;
 }
 
 export interface BtwManagerOptions {
@@ -25,6 +32,7 @@ export interface BtwManagerOptions {
 	appendEvent: (event: BtwThreadEvent) => void;
 	flushEvents?: () => Promise<void>;
 	closeEvents?: () => Promise<void>;
+	removeSession?: (key: string) => Promise<void>;
 	createConversation: (
 		model: BtwThreadModelRef,
 		checkpoint: EphemeralConversationCheckpoint | undefined,
@@ -53,7 +61,6 @@ interface BtwThreadOptions {
 	draftImages?: ImageContent[];
 	draftImageLinks?: (string | undefined)[];
 	readThrough?: number;
-	pausedRequest?: BtwPausedRequest;
 }
 
 export class BtwThread {
@@ -72,7 +79,6 @@ export class BtwThread {
 	readThrough: number;
 	request: BtwThreadRequest | undefined;
 	abortController: AbortController | undefined;
-	pausedRequest: BtwPausedRequest | undefined;
 
 	constructor(options: BtwThreadOptions) {
 		this.key = options.key;
@@ -88,7 +94,6 @@ export class BtwThread {
 		this.draftImages = options.draftImages ?? [];
 		this.draftImageLinks = options.draftImageLinks ?? [];
 		this.readThrough = Math.min(options.readThrough ?? 0, options.conversation.turns.length);
-		this.pausedRequest = options.pausedRequest;
 	}
 
 	get turns() {
@@ -105,6 +110,7 @@ export class BtwManager {
 	readonly #appendEvent: BtwManagerOptions["appendEvent"];
 	readonly #flushEvents: BtwManagerOptions["flushEvents"];
 	readonly #closeEvents: BtwManagerOptions["closeEvents"];
+	readonly #removeSession: BtwManagerOptions["removeSession"];
 	readonly #createConversation: BtwManagerOptions["createConversation"];
 	readonly #createSideOptions: BtwManagerOptions["createSideOptions"];
 	readonly #generateTitle: BtwManagerOptions["generateTitle"];
@@ -116,11 +122,13 @@ export class BtwManager {
 	readonly #preparedPromotions = new Set<string>();
 	readonly #dirtyDrafts = new Set<string>();
 	#activeKey: string | undefined;
+	readonly #subscriptions = new Map<string, () => void>();
 
 	constructor(options: BtwManagerOptions) {
 		this.#appendEvent = options.appendEvent;
 		this.#flushEvents = options.flushEvents;
 		this.#closeEvents = options.closeEvents;
+		this.#removeSession = options.removeSession;
 		this.#createConversation = options.createConversation;
 		this.#createSideOptions = options.createSideOptions;
 		this.#generateTitle = options.generateTitle;
@@ -144,6 +152,41 @@ export class BtwManager {
 
 	thread(key: string): BtwThread | undefined {
 		return this.#threads.get(key);
+	}
+
+	async session(key: string): Promise<AgentSession> {
+		const thread = this.#threads.get(key);
+		if (!thread) throw new Error(`Unknown BTW thread: ${key}`);
+		await thread.conversation.initializeExtensionRuntime();
+		const session = thread.conversation.session;
+		if (!session) throw new Error(`BTW thread has no initialized session: ${key}`);
+		if (!this.#subscriptions.has(key)) {
+			const unsubscribe = session.subscribe(event => {
+				if (this.#threads.get(key) !== thread || thread.conversation.session !== session) return;
+				if (event.type === "message_end" && event.message.role === "user" && thread.request) {
+					thread.request.userMessage ??= event.message;
+				}
+				if (event.type === "agent_start") {
+					thread.phase = "running";
+					thread.error = undefined;
+				} else if (event.type === "agent_end") {
+					thread.error = session.agent.state.error;
+					thread.phase = thread.error ? "error" : "ready";
+					if (!thread.request) {
+						this.#appendEvent({ version: 1, key, op: "terminal", error: thread.error });
+					}
+				}
+				this.#onChange?.();
+			});
+			const detachEntries = session.sessionManager.subscribeToEntries(() => {
+				if (this.#threads.get(key) === thread && thread.conversation.session === session) this.#onChange?.();
+			});
+			this.#subscriptions.set(key, () => {
+				unsubscribe();
+				detachEntries();
+			});
+		}
+		return session;
 	}
 
 	/**
@@ -248,7 +291,10 @@ export class BtwManager {
 
 	async completePromotion(key: string): Promise<boolean> {
 		if (!this.#preparedPromotions.delete(key)) return false;
+		this.#subscriptions.get(key)?.();
+		this.#subscriptions.delete(key);
 		await this.#threads.get(key)?.conversation.disposeExtensionRuntime();
+		await this.#removeSession?.(key);
 		return this.#forget(key);
 	}
 
@@ -263,9 +309,35 @@ export class BtwManager {
 			this.#appendEvent({ version: 1, op: "remove", key, reason });
 		}
 		await this.#flushEvents?.();
-		await thread.conversation.disposeExtensionRuntime();
+		this.#subscriptions.get(key)?.();
+		this.#subscriptions.delete(key);
+		try {
+			await thread.conversation.disposeExtensionRuntime();
+			await this.#removeSession?.(key);
+		} catch (error) {
+			thread.conversation = this.#createConversation(thread.model, undefined, this.#createSideOptions?.(key));
+			thread.conversation.freeze();
+			thread.phase = "ready";
+			thread.error = undefined;
+			this.#onChange?.();
+			throw error;
+		}
 		this.#preparedPromotions.delete(key);
 		return this.#forget(key);
+	}
+
+	/** Stop only this thread's current work, without creating or disposing its runtime. */
+	async abort(key: string): Promise<void> {
+		const thread = this.#threads.get(key);
+		if (!thread) throw new Error(`Unknown BTW thread: ${key}`);
+		const request = thread.request;
+		if (request && thread.abortController) {
+			thread.abortController.abort(USER_INTERRUPT_LABEL);
+			await request.settled.promise;
+		} else {
+			await thread.conversation.session?.abort({ reason: USER_INTERRUPT_LABEL });
+		}
+		this.#onChange?.();
 	}
 
 	async prompt(
@@ -274,25 +346,47 @@ export class BtwManager {
 		onTextDelta?: (delta: string) => void,
 		onThinkingDelta?: (delta: string) => void,
 		images?: ImageContent[],
-	): Promise<EphemeralTurnResult> {
+		streamingBehavior: "steer" | "followUp" = "steer",
+		onPromptAdmitted?: () => void,
+	): Promise<EphemeralTurnResult | undefined> {
 		const thread = this.#threads.get(key);
 		if (!thread) throw new Error(`Unknown BTW thread: ${key}`);
-		if (thread.pausedRequest) throw new Error("BTW thread is paused; run /continue before sending another message");
-		if (thread.phase === "running") throw new Error("BTW thread already has a reply in progress");
+		if (readAgentsPaused(thread.conversation.sessionManager.getBranch())) {
+			throw new Error("BTW thread is paused; run /continue before sending another message");
+		}
+		if (thread.phase === "running" || thread.conversation.isRunning) {
+			await thread.request?.admission.promise;
+			const session = await this.session(key);
+			await session.prompt(input, {
+				images,
+				streamingBehavior,
+				expandPromptTemplates: true,
+				runCommands: false,
+				onPromptAdmitted,
+			});
+			this.setDraft(key, "");
+			this.persistDraft(key);
+			this.#onChange?.();
+			return undefined;
+		}
 		const trimmed = input.trim();
 		if (!trimmed && !images?.length) throw new Error("BTW input must not be empty");
 		const requestImages = images?.length ? [...images] : undefined;
 		if (!thread.titleExplicit && thread.turns.length === 0 && trimmed) void this.#nameThread(thread, trimmed);
 		this.setDraft(key, "");
 		this.persistDraft(key);
+		const admission = Promise.withResolvers<void>();
+		void admission.promise.catch(() => {});
 		const request: BtwThreadRequest = {
 			input: trimmed,
 			images: requestImages,
 			messages: [],
 			streamMessage: undefined,
 			timestamp: this.#now(),
+			admission,
+			settled: Promise.withResolvers<void>(),
 		};
-		return this.#runRequest(thread, request, onTextDelta, onThinkingDelta);
+		return this.#runRequest(thread, request, onTextDelta, onThinkingDelta, onPromptAdmitted);
 	}
 
 	async #runRequest(
@@ -300,7 +394,8 @@ export class BtwManager {
 		request: BtwThreadRequest,
 		onTextDelta?: (delta: string) => void,
 		onThinkingDelta?: (delta: string) => void,
-	): Promise<EphemeralTurnResult> {
+		onPromptAdmitted?: () => void,
+	): Promise<EphemeralTurnResult | undefined> {
 		const key = thread.key;
 		const abortController = new AbortController();
 		thread.request = request;
@@ -318,11 +413,16 @@ export class BtwManager {
 		this.#onChange?.();
 		try {
 			await this.#flushEvents?.();
-			await thread.conversation.initializeExtensionRuntime();
+			await this.session(key);
 			const result = await thread.conversation.prompt(request.input, {
 				images: request.images,
 				dedupeReply: false,
 				signal: abortController.signal,
+				expandPromptTemplates: true,
+				onPromptAdmitted: () => {
+					request.admission.resolve();
+					onPromptAdmitted?.();
+				},
 				onTextDelta: delta => {
 					if (thread.request !== request) return;
 					onTextDelta?.(delta);
@@ -345,11 +445,12 @@ export class BtwManager {
 			if (thread.request !== request) return result;
 			thread.phase = "ready";
 			thread.error = undefined;
-			const turn = thread.turns.at(-1);
-			if (turn) this.#appendEvent({ version: 1, op: "turn", key, turn });
+			if (thread.turns.at(-1)) this.#appendEvent({ version: 1, op: "terminal", key });
 			await this.#flushEvents?.();
 			return result;
 		} catch (error) {
+			request.admission.reject(error);
+			if (abortController.signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) return undefined;
 			if (thread.request !== request) throw error;
 			const aborted = abortController.signal.aborted;
 			thread.phase = aborted ? "ready" : "error";
@@ -363,6 +464,7 @@ export class BtwManager {
 				thread.abortController = undefined;
 				this.#onChange?.();
 			}
+			request.settled.resolve();
 		}
 	}
 
@@ -381,61 +483,59 @@ export class BtwManager {
 	}
 
 	prepareForPausedExit(): void {
-		let changed = false;
 		for (const thread of this.#threads.values()) {
 			this.persistDraft(thread.key);
-			if (!thread.request) continue;
-			thread.pausedRequest = {
-				input: thread.request.input,
-				images: thread.request.images,
-				timestamp: thread.request.timestamp,
-			};
-			const abortController = thread.abortController;
+			if (thread.phase !== "running") continue;
+			const session = thread.conversation.session;
+			const request = thread.request;
+			const pendingPrompt =
+				request && (!request.userMessage || !session?.isMessageRecorded(request.userMessage))
+					? { text: request.input, images: request.images, attribution: "agent" as const }
+					: undefined;
+			if (session) {
+				session.recordAgentsPaused([MAIN_AGENT_ID], pendingPrompt);
+			} else {
+				const manager = thread.conversation.sessionManager;
+				manager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, {
+					pausedAt: new Date().toISOString(),
+					agentIds: [MAIN_AGENT_ID],
+					pendingPrompt,
+				});
+				manager.flushSync();
+			}
+			request?.admission.reject(PAUSE_SHUTDOWN_ABORT_REASON);
 			thread.request = undefined;
+			thread.abortController?.abort(PAUSE_SHUTDOWN_ABORT_REASON);
 			thread.abortController = undefined;
 			thread.phase = "ready";
-			abortController?.abort(PAUSE_SHUTDOWN_ABORT_REASON);
-			this.#appendEvent({
-				version: 1,
-				op: "request",
-				key: thread.key,
-				...thread.pausedRequest,
-			});
-			changed = true;
 		}
-		if (changed) this.#onChange?.();
+		this.#onChange?.();
 	}
 
 	async continuePaused(): Promise<ContinuePausedAgentsResult> {
-		const paused = this.children.filter(thread => thread.pausedRequest !== undefined);
 		const skipped: string[] = [];
 		let continued = 0;
+		let complete = true;
 		await Promise.all(
-			paused.map(async thread => {
-				const request = thread.pausedRequest;
-				if (!request) return;
-				thread.pausedRequest = undefined;
+			this.children.map(async thread => {
 				try {
-					await this.#runRequest(thread, { ...request, messages: [], streamMessage: undefined });
-					continued++;
+					const session = await this.session(thread.key);
+					if (!session.hasPausedAgents()) return;
+					const result = await session.continuePausedAgents();
+					continued += result.continued;
+					skipped.push(...result.skipped.map(detail => `${thread.title}: ${detail}`));
+					complete &&= result.complete;
 				} catch (error) {
-					thread.pausedRequest = request;
-					thread.phase = "ready";
+					thread.phase = "error";
 					thread.error = error instanceof Error ? error.message : String(error);
-					this.#appendEvent({
-						version: 1,
-						op: "request",
-						key: thread.key,
-						input: request.input,
-						images: request.images,
-						timestamp: request.timestamp,
-					});
 					skipped.push(`${thread.title}: ${thread.error}`);
+					complete = false;
+				} finally {
 					this.#onChange?.();
 				}
 			}),
 		);
-		return { continued, skipped, complete: skipped.length === 0 };
+		return { continued, skipped, complete };
 	}
 
 	flushEvents(): Promise<void> {
@@ -449,6 +549,8 @@ export class BtwManager {
 			await this.#flushEvents?.();
 		} finally {
 			try {
+				for (const unsubscribe of this.#subscriptions.values()) unsubscribe();
+				this.#subscriptions.clear();
 				await Promise.all([...this.#threads.values()].map(thread => thread.conversation.disposeExtensionRuntime()));
 			} finally {
 				await this.#closeEvents?.();
@@ -458,7 +560,10 @@ export class BtwManager {
 
 	/** Stop old-session work after a successful session transition without writing into the new session. */
 	async abandon(): Promise<void> {
+		this.prepareForPausedExit();
 		const threads = [...this.#threads.values()];
+		for (const unsubscribe of this.#subscriptions.values()) unsubscribe();
+		this.#subscriptions.clear();
 		for (const thread of threads) {
 			thread.request = undefined;
 			thread.abortController?.abort();
@@ -477,7 +582,6 @@ export class BtwManager {
 	}
 
 	#createEvent(thread: BtwThread): Extract<BtwThreadEvent, { op: "create" }> {
-		const checkpoint = thread.conversation.checkpoint();
 		return {
 			version: 1,
 			op: "create",
@@ -487,14 +591,13 @@ export class BtwManager {
 			createdAt: thread.createdAt,
 			anchorLeafId: thread.anchorLeafId,
 			model: thread.model,
-			sideSessionId: checkpoint.sideSessionId,
-			baseMessages: checkpoint.baseMessages,
-			turns: checkpoint.turns,
 		};
 	}
 
 	#forget(key: string): boolean {
 		if (!this.#threads.delete(key)) return false;
+		this.#subscriptions.get(key)?.();
+		this.#subscriptions.delete(key);
 		this.#dirtyDrafts.delete(key);
 		const childIndex = this.#childKeys.indexOf(key);
 		if (childIndex >= 0) this.#childKeys.splice(childIndex, 1);
@@ -524,7 +627,6 @@ export class BtwManager {
 			draft: restored.draft,
 			draftImages: restored.draftImages,
 			draftImageLinks: restored.draftImageLinks,
-			pausedRequest: restored.pausedRequest,
 			readThrough: restored.readThrough,
 		});
 		this.#threads.set(thread.key, thread);

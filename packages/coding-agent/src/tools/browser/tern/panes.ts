@@ -17,6 +17,12 @@ export interface TernPanePlacement {
 	dir: "right" | "down";
 }
 
+export interface TernPaneMove {
+	block: number;
+	target: number;
+	dir: "above" | "below" | "left-of" | "right-of";
+}
+
 export interface TernSplitPane {
 	block: number;
 	columns: number;
@@ -99,6 +105,16 @@ export class TernPaneClient {
 			throw new Error(result.stderr.toString().trim() || "Tern could not focus the workspace pane");
 	}
 
+	async move({ block, target, dir }: TernPaneMove): Promise<void> {
+		const executable = await this.#executable();
+		const result = await $`${executable} move ${String(block)} ${dir} ${String(target)} < ${new Uint8Array()}`
+			.cwd(this.cwd)
+			.quiet()
+			.nothrow();
+		if (result.exitCode !== 0)
+			throw new Error(result.stderr.toString().trim() || "Tern could not move the workspace pane");
+	}
+
 	async focused(): Promise<number | undefined> {
 		const listing = await this.#listing();
 		return listing.sessions
@@ -110,16 +126,18 @@ export class TernPaneClient {
 	async splitPanes(): Promise<TernSplitPane[]> {
 		const listing = await this.#listing();
 		return listing.sessions.flatMap(session =>
-			session.tabs.flatMap(tab =>
-				tab.blocks
-					.filter(block => block.pip === undefined)
-					.map(block => ({
-						block: block.id,
-						columns: block.cols,
-						rows: block.rows,
-						shown: session.shown && tab.shown,
-					})),
-			),
+			session.tabs
+				.filter(tab => tab.blocks.some(block => block.id === this.pane.pane))
+				.flatMap(tab =>
+					tab.blocks
+						.filter(block => block.pip === undefined)
+						.map(block => ({
+							block: block.id,
+							columns: block.cols,
+							rows: block.rows,
+							shown: session.shown && tab.shown,
+						})),
+				),
 		);
 	}
 

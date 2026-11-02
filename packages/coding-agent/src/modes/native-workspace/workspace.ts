@@ -4,7 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { node } from "@oh-my-pi/pi-tui/native/describe";
 import { getCellDimensions } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { resolveTernPane } from "../../tools/browser/tern/kind";
-import { TernPaneClient, type TernSplitPane } from "../../tools/browser/tern/panes";
+import { TernPaneClient, type TernPanePlacement, type TernSplitPane } from "../../tools/browser/tern/panes";
 import type { NativePaneToHost } from "./protocol";
 import { RemoteTerminal } from "./remote-terminal";
 import { SplitLayout } from "./split-layout";
@@ -36,7 +36,7 @@ export class NativeWorkspace {
 	#balanceScheduled = false;
 
 	constructor(
-		readonly client: Pick<TernPaneClient, "open" | "focus" | "focused" | "splitPanes" | "close" | "balance">,
+		readonly client: Pick<TernPaneClient, "open" | "move" | "focus" | "focused" | "splitPanes" | "close" | "balance">,
 		readonly main: number,
 	) {}
 
@@ -83,8 +83,10 @@ export class NativeWorkspace {
 		try {
 			await this.#mutate(entry, async () => {
 				const previousFocus = preserveFocus ? await this.client.focused() : undefined;
-				const layout = this.#layoutFor(await this.client.splitPanes());
-				const placement = layout.next();
+				const listed = await this.client.splitPanes();
+				const layout = this.#layoutFor(listed);
+				const aboveMain = key === "btw" && listed.filter(pane => pane.block !== this.main).length >= 2;
+				const placement: TernPanePlacement = aboveMain ? { block: this.main, dir: "down" } : layout.next();
 				if (this.#panes.get(key) !== entry) throw new Error("Native workspace view was closed while opening");
 				// Queueing and placement queries are not part of this relay's connection budget.
 				timer = setTimeout(
@@ -94,7 +96,11 @@ export class NativeWorkspace {
 				timer.unref();
 				const result = await this.client.open(`ws://127.0.0.1:${server.port}/${entry.token}`, placement);
 				entry.block = result.block;
-				layout.add(placement, result.block);
+				if (aboveMain) {
+					await this.client.move({ block: result.block, target: this.main, dir: "above" });
+				} else {
+					for (const move of layout.add(placement, result.block)) await this.client.move(move);
+				}
 				if (this.#panes.get(key) !== entry) {
 					throw new Error("Native workspace view was closed while opening");
 				}
@@ -107,12 +113,17 @@ export class NativeWorkspace {
 			const ui = new TUI(terminal, undefined, { debugServer: false });
 			const component = create(ui, () => this.close(key));
 			entry.view = { ui, component };
-			const focused: Component = preserveFocus
+			const focused: Component & { getPasteTarget?: () => unknown } = preserveFocus
 				? {
 						render: width => component.render(width),
 						describe: () => node("col", { grow: 1 }, [component]),
 						describeSurface: cx => component.describeSurface?.(cx) ?? { main: [component], dock: [] },
 						handleInput: data => component.handleInput?.(data),
+						getPasteTarget: () => {
+							if ("getPasteTarget" in component && typeof component.getPasteTarget === "function")
+								return component.getPasteTarget();
+							return undefined;
+						},
 					}
 				: component;
 			ui.addChild(focused);
@@ -170,13 +181,14 @@ export class NativeWorkspace {
 		for (const key of this.#panes.keys()) this.close(key);
 	}
 
-	/** Hidden tabs retain old split sizes; re-measure empty layouts only while Main is shown. */
+	/** Re-measure visible Main only after every attached workspace pane has closed. */
 	#layoutFor(listed: readonly TernSplitPane[]): SplitLayout {
 		const present = new Set(listed.map(pane => pane.block));
 		for (const block of this.#layout?.agents ?? []) {
 			if (!present.has(block)) this.#layout?.remove(block);
 		}
-		if (this.#layout?.agents.length) return this.#layout;
+		const btw = this.#panes.get("btw")?.block;
+		if (this.#layout && (this.#layout.agents.length || (btw !== undefined && present.has(btw)))) return this.#layout;
 		const main = listed.find(pane => pane.block === this.main);
 		if (!main) throw new Error("Tern did not list the Main pane");
 		if (!this.#layout || main.shown) {

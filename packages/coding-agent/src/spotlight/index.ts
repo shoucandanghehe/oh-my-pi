@@ -11,7 +11,7 @@
  * trace sizes the plain result (`plainChars`, `plainTokens`); savings count against it.
  */
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import {
 	encodeHeat,
 	keptRanges,
@@ -456,7 +456,7 @@ async function plainResult<TDetails>(
 
 /** `result` with its text blocks replaced by one block of `text`, its other blocks after it. */
 function withShapedText<TDetails>(result: AgentToolResult<TDetails>, text: string): AgentToolResult<TDetails> {
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+	const content: (TextContent | MediaContent)[] = [{ type: "text", text }];
 	for (const block of result.content) {
 		if (block.type !== "text") content.push(block);
 	}
@@ -532,8 +532,8 @@ export async function shapeCalledTool(session: ToolSession, call: CalledToolResu
 }
 
 /** `content` with its text blocks replaced by one block of `text`, where the first was; other blocks stay in order. */
-function withText(content: readonly (TextContent | ImageContent)[], text: string): (TextContent | ImageContent)[] {
-	const out: (TextContent | ImageContent)[] = [];
+function withText(content: readonly (TextContent | MediaContent)[], text: string): (TextContent | MediaContent)[] {
+	const out: (TextContent | MediaContent)[] = [];
 	let placed = false;
 	for (const block of content) {
 		if (block.type !== "text") out.push(block);

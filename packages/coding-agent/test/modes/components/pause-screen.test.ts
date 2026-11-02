@@ -541,6 +541,31 @@ describe("pause screen", () => {
 	});
 
 	describe("runPauseScreen", () => {
+		it("keeps both layouts pausing and refuses durable exit until the worker barrier acknowledges", async () => {
+			const participant = agentPauseGate.registerParticipant();
+			const { host, shown, pausedExitCount } = makeHost();
+			const run = runPauseScreen(host);
+			const component = shown[0];
+			if (!(component instanceof PauseScreenComponent)) throw new Error("expected PauseScreenComponent");
+			try {
+				expect(component.nativeOverlay.head).toBe("Pausing");
+				expect(component.render(80).map(stripAnsi).join("\n")).toContain("Pausing — waiting for work to settle");
+				expect(JSON.stringify(component.describe())).not.toContain('"click":"exit"');
+				component.handleInput("q");
+				expect(pausedExitCount()).toBe(0);
+				participant.setReady(true);
+				expect(component.nativeOverlay.head).toBe("Paused");
+				expect(JSON.stringify(component.describe())).toContain('"click":"exit"');
+				component.handleInput("q");
+				expect(await run).toBe("exited");
+				expect(pausedExitCount()).toBe(1);
+			} finally {
+				participant.dispose();
+				component.handleInput("\r");
+				await run;
+			}
+		});
+
 		it("engages the gate for the screen's lifetime and releases it on escape", async () => {
 			const { host, shown, statuses, hiddenCount } = makeHost();
 			expect(agentPauseGate.paused).toBe(false);

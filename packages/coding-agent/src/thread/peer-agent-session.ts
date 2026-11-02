@@ -24,6 +24,7 @@ import type { AgentSessionEvent, AgentSessionEventListener } from "../session/ag
 import type {
 	AgentSessionDisposeOptions,
 	PromptOptions,
+	PausedTurnContinuation,
 	SessionStats,
 	SteerOptions,
 } from "../session/agent-session-types";
@@ -110,6 +111,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 
 	get isStreaming(): boolean {
 		return this.#field("isStreaming");
+	}
+
+	get isCompacting(): boolean {
+		return this.#field("isCompacting");
 	}
 
 	get runStartedAt(): number | undefined {
@@ -219,6 +224,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 
 	abort(options?: SessionAbortOptions): Promise<void> {
 		return mainBridge().remote.call("abort", this, options);
+	}
+
+	continuePausedTurn(): Promise<PausedTurnContinuation> {
+		return mainBridge().remote.call("continuePausedTurn", this);
 	}
 
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void> {

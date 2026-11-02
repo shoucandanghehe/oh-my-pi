@@ -282,11 +282,27 @@ a new one.
 
 ## BTW threads
 
-BTW threads are stored in the session's `btw-history/` sidecar directory,
-independent of Main's journal and model conversation. Inline questions are durable
-from creation; opening the workspace changes only their presentation. See the
+BTW threads use independent standard session journals under Main's
+`btw-history/threads/` artifacts directory. They share session execution, queueing,
+compaction, and tree navigation machinery without sharing Main's mutable history
+or tool permissions. Inline questions are durable from creation; opening the
+workspace changes only their presentation. See the
 [BTW command reference](slash-command-internals.md#11-built-in-command-note-btw)
 for follow-ups, persistence, and promotion.
+
+Local subagent panes operate their existing session. Enter steers it; the follow-up
+shortcut or `/queue` queues input, and dequeue restores the selected input with its
+attachments. `/stop` and the composer Stop button stop only that session;
+`/retry` retries its failed turn. Tool output updates while it runs and remains
+visible after reopening the pane. Clipboard attachments and draft operations use
+the pane's own editor and session. External terminal editors are available only
+when the pane shares the host terminal, not through an independent native pane.
+
+`/compact`, `/queue /compact`, `/tree`, and `/continue` target that subagent rather
+than Main. `/clear`, model selection, and effort controls are not available in
+BTW or subagent panes. Closing the pane detaches the view without stopping the
+session. Advisor and remote panes retain their existing access limits.
+
 
 ## Fork
 
