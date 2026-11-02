@@ -14,7 +14,7 @@
  * the Tern SDK's Surface Protocol reference (`docs/sdk/src/protocol` in the
  * Stencil repository, https://docs.stencil.so/tern/protocol/) for the spec.
  */
-import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan, TspToggle } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
 
 /** A described node: a wire node minus its id, with components allowed as children. */
@@ -118,7 +118,7 @@ export interface NativeScreen extends NativeSurface {
  * component's root node, `"body/3"` for a nested keyed child).
  */
 export type NativeUiEvent =
-	| { readonly type: "toggle"; readonly key: string; readonly collapsed: boolean }
+	| ({ readonly type: "toggle"; readonly key: string } & TspToggle)
 	| { readonly type: "select"; readonly key: string; readonly item: string }
 	| { readonly type: "activate"; readonly key: string; readonly item: string }
 	| {
@@ -236,7 +236,7 @@ export function resolveTextEdit(
 
 /** The expanded state a `toggle` on the component's root node asks for, else undefined. */
 export function rootToggleExpanded(event: NativeUiEvent): boolean | undefined {
-	return event.type === "toggle" && event.key === "" ? !event.collapsed : undefined;
+	return event.type === "toggle" && event.key === "" && event.collapsed !== undefined ? !event.collapsed : undefined;
 }
 
 /** The last segment of an event keypath (`"split/sidebar/toc"` → `"toc"`). */

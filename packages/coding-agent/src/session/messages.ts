@@ -142,6 +142,32 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 	}
 	return { ...message, content, providerPayload: undefined };
 }
+/** Replace a displayed reply without retaining replay-bound payloads or reasoning signatures. */
+export function assistantMessageWithReplyText(assistantMessage: AssistantMessage, replyText: string): AssistantMessage {
+	const content: AssistantMessage["content"] = [];
+	let replacedText = false;
+	for (const part of assistantMessage.content) {
+		if (part.type === "thinking") {
+			content.push({
+				type: "thinking",
+				thinking: part.thinking,
+				...(part.summary !== undefined && { summary: part.summary }),
+				...(part.narration && { narration: true }),
+			});
+			continue;
+		}
+		if (part.type === "redactedThinking") continue;
+		if (part.type !== "text") {
+			content.push(part);
+			continue;
+		}
+		if (replacedText) continue;
+		content.push({ type: "text", text: replyText });
+		replacedText = true;
+	}
+	if (!replacedText) content.push({ type: "text", text: replyText });
+	return { ...assistantMessage, content, providerPayload: undefined };
+}
 /** Promote the visible ephemeral reply without replay-bound provider metadata. */
 export function sanitizeEphemeralAssistantForPromotion(message: AssistantMessage, replyText: string): AssistantMessage {
 	const sanitized = sanitizeAssistantForReparentedHistory(message);

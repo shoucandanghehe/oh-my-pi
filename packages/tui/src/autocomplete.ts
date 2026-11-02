@@ -694,6 +694,29 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			hasPromptTextBeforeSlash(lines, cursorLine, textBeforeCursor, trailingSlashStart);
 		const hasPromptTextBeforeLeadingSlash =
 			leadingSlashStart !== null && hasPromptTextBeforeSlash(lines, cursorLine, textBeforeCursor, leadingSlashStart);
+		if (leadingSlashStart !== null && !hasPromptTextBeforeLeadingSlash) {
+			const commandText = textBeforeCursor.slice(leadingSlashStart);
+			const spaceIndex = commandText.indexOf(" ");
+			if (spaceIndex !== -1) {
+				const commandName = commandText.slice(1, spaceIndex);
+				const argumentText = commandText.slice(spaceIndex + 1);
+				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+				if (command && "allowArgs" in command && command.allowArgs === false && !/\S/.test(argumentText)) {
+					return null;
+				}
+				if (
+					command &&
+					(!("allowArgs" in command) || command.allowArgs !== false) &&
+					"getArgumentCompletions" in command &&
+					command.getArgumentCompletions
+				) {
+					const argumentSuggestions = await command.getArgumentCompletions(argumentText);
+					if (Array.isArray(argumentSuggestions) && argumentSuggestions.length > 0) {
+						return { items: argumentSuggestions, prefix: argumentText };
+					}
+				}
+			}
+		}
 		const slashStart = hasPromptTextBeforeTrailingSlash
 			? trailingSlashStart
 			: hasPromptTextBeforeLeadingSlash
@@ -734,31 +757,6 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				// A slash token with no matching command may still be an absolute
 				// path (`/tmp/fo` at prompt start, `see /tmp` mid-prompt); fall
 				// through to file-path completion.
-			} else if (!isMidPromptSkillLookup) {
-				// Give matched commands first chance to complete arguments, then
-				// fall through to prompt-composer file completion when they have
-				// no argument provider or it has no matches.
-				const commandName = commandText.slice(1, spaceIndex); // Command without "/"
-				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
-
-				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
-				if (command && "allowArgs" in command && command.allowArgs === false && !/\S/.test(argumentText)) {
-					return null;
-				}
-				if (
-					command &&
-					(!("allowArgs" in command) || command.allowArgs !== false) &&
-					"getArgumentCompletions" in command &&
-					command.getArgumentCompletions
-				) {
-					const argumentSuggestions = await command.getArgumentCompletions(argumentText);
-					if (Array.isArray(argumentSuggestions) && argumentSuggestions.length > 0) {
-						return {
-							items: argumentSuggestions,
-							prefix: argumentText,
-						};
-					}
-				}
 			}
 		}
 

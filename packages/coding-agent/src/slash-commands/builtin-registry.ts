@@ -98,6 +98,25 @@ function materializeTuiBuiltinSlashCommand(
 			materialized.getArgumentCompletions = buildArgumentCompletions(subcommands, options);
 			materialized.getInlineHint = buildSubcommandInlineHint(subcommands, options);
 		}
+	} else if (cmd.name === "queue") {
+		const compact = materializeTuiBuiltinSlashCommand(
+			BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "compact")!,
+			runtime,
+		);
+		materialized.getArgumentCompletions = async prefix => {
+			if (prefix.startsWith("/") && "/compact".startsWith(prefix)) {
+				return [{ value: "/compact ", label: "/compact", description: compact.description }];
+			}
+			if (!prefix.startsWith("/compact ")) return null;
+			const matches = await compact.getArgumentCompletions?.(prefix.slice("/compact ".length));
+			return matches?.map(item => ({ ...item, value: `/compact ${item.value}` })) ?? null;
+		};
+		materialized.getInlineHint = argumentText =>
+			argumentText.startsWith("/compact ")
+				? (compact.getInlineHint?.(argumentText.slice("/compact ".length)) ?? null)
+				: argumentText
+					? null
+					: (cmd.inlineHint ?? null);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);

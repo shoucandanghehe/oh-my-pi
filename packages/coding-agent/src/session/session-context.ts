@@ -169,6 +169,10 @@ export interface BuildSessionContextOptions {
 	transcript?: boolean;
 	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
+	/** Preserve native interrupted turns for a side-conversation checkpoint; not a provider replay policy. */
+	preserveInterruptedMessages?: boolean;
+	/** Source entries omitted from this projection without changing the journal. */
+	excludeEntryIds?: ReadonlySet<string>;
 	/**
 	 * Tool calls the live agent loop is still executing. They count as paired, so a
 	 * mid-turn rebuild keeps the in-flight assistant turn; the loop appends their results.
@@ -182,7 +186,10 @@ export interface BuildSessionContextOptions {
 }
 
 /** Options for `AgentSession.buildTranscriptSessionContext` (via `SessionProviderBoundary`). */
-export interface TranscriptSessionContextOptions extends Pick<BuildSessionContextOptions, "collapseCompactedHistory"> {
+export interface TranscriptSessionContextOptions extends Pick<
+	BuildSessionContextOptions,
+	"collapseCompactedHistory" | "excludeEntryIds"
+> {
 	/**
 	 * Keep the unpaired tool calls of the turn the agent loop is still executing,
 	 * so a mid-turn rebuild keeps them routable. Calls left unpaired by earlier
@@ -287,7 +294,7 @@ export function buildSessionContext(
 	let current: SessionEntry | undefined = leaf;
 	while (current && !seenPathIds.has(current.id)) {
 		seenPathIds.add(current.id);
-		path.push(current);
+		if (!options?.excludeEntryIds?.has(current.id)) path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
 	path.reverse();
@@ -758,7 +765,7 @@ export function buildSessionContext(
 	// Keep the interrupted-thinking continuity pair: convertToLlm strips the
 	// unsafe trailing thinking from that assistant and sends the hidden
 	// continuity note instead.
-	if (!options?.transcript) {
+	if (!options?.transcript && !options?.preserveInterruptedMessages) {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
 			if (message?.role !== "assistant") continue;

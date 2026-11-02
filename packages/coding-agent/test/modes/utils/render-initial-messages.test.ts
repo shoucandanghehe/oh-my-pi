@@ -245,7 +245,7 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 		const { ctx, chatContainer } = makeRenderCtx(transcript);
 		const transcriptSpy = vi.spyOn(ctx.viewSession, "buildTranscriptSessionContext");
 		const llmContextSpy = vi.fn(() => makeEmptyContext());
-		ctx.viewSession.sessionManager.buildSessionContext = llmContextSpy;
+		Object.assign(ctx.viewSession.sessionManager, { buildSessionContext: llmContextSpy });
 
 		await new UiHelpers(ctx).renderInitialMessages();
 

@@ -238,6 +238,7 @@ function serveBridge(): RpcServe<MainSessionBridge, SessionBridgeProtocol> {
 		steer: (_bridge, session, text, images, options) => session.steer(text, images, options),
 		abort: (_bridge, session, options) => session.abort(options),
 		dispose: (_bridge, session, options) => session.dispose(options),
+		continuePausedTurn: (_bridge, session) => session.continuePausedTurn(),
 		deliverIrcMessage: (_bridge, session, msg) => session.deliverIrcMessage(msg),
 		waitForIrcReplies: (_bridge, session) => session.waitForIrcReplies(),
 		setWorkPoolYieldItems: (_bridge, session, items) => session.setWorkPoolYieldItems(items),

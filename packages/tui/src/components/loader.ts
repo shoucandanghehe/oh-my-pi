@@ -426,7 +426,7 @@ export class Loader extends Text {
 			}
 			this.#ui.requestComponentRender(target);
 			this.#scheduleAdditionalRepaint();
-		}, SPINNER_ADVANCE_MS);
+		}, spinnerTickDelay(this.#tickIntervalMs()));
 		this.#additionalRepaintTimer = timer;
 	}
 

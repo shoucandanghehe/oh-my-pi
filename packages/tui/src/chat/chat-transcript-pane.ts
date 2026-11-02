@@ -29,8 +29,13 @@ import { replaceTabs, shortenPath, truncateToWidth } from "../render/render-util
 import { compactImageMarkers } from "../prompt/composer-attachments";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectPageDown, matchesSelectPageUp, matchesSelectUp } from "../keybinding-matchers";
-import { ChatTranscriptBuilder, type ChatTranscriptBuilderDeps } from "./chat-transcript-builder";
+import {
+	ChatTranscriptBuilder,
+	type ChatTranscriptBuildOptions,
+	type ChatTranscriptBuilderDeps,
+} from "./chat-transcript-builder";
 import { CustomEditor } from "../prompt/custom-editor";
+import type { PaneToolUpdate } from "./session-controls";
 
 export type ChatTranscriptPaneEditorOptions =
 	| {
@@ -42,8 +47,10 @@ export type ChatTranscriptPaneEditorOptions =
 				images?: ImageContent[],
 				key?: string,
 				imageLinks?: (string | undefined)[],
+				streamingBehavior?: "steer" | "followUp",
 			) => boolean;
 			images?: boolean;
+			followUpKeys?: readonly KeyId[];
 			autocompleteProvider?: AutocompleteProvider;
 	  }
 	| {
@@ -70,6 +77,8 @@ export interface ChatTranscriptPaneOptions {
 	getNotice?: () => string | undefined;
 	onInput?: (data: string, editorEmpty: boolean) => boolean;
 	onEditorChange?: (text: string, images: ImageContent[], imageLinks: (string | undefined)[], key?: string) => void;
+	/** Bind host-owned capabilities after the pane's ordinary editor callbacks are installed. */
+	configureEditor?: (editor: CustomEditor, key?: string) => void;
 	onClose: () => void;
 }
 
@@ -157,10 +166,32 @@ export class ChatTranscriptPane
 		};
 		if (!editor.disableSubmit) editor.onSubmit = text => this.#submit(editor, text, key);
 		this.#editors.set(key, editor);
+		options.configureEditor?.(editor, key);
 		return editor;
 	}
 	getPasteTarget(): CustomEditor | undefined {
 		return this.options.editor?.readOnly ? undefined : this.#editor;
+	}
+
+	/** Submit the selected editor with its attachments through the same path as Enter. */
+	submit(streamingBehavior: "steer" | "followUp"): void {
+		const editor = this.#editor;
+		if (!editor || this.options.editor?.readOnly) return;
+		const key = [...this.#editors].find(([, candidate]) => candidate === editor)?.[0];
+		this.#submit(editor, editor.getExpandedText(), key, streamingBehavior);
+	}
+
+	/** Restore to the original editor, preserving both a later draft and its attachments. */
+	restoreDraft(
+		key: string | undefined,
+		text: string,
+		images?: readonly ImageContent[],
+		links?: readonly (string | undefined)[],
+	): void {
+		const editor = this.#editors.get(key);
+		if (!editor) return;
+		editor.restoreDetachedDraft(text, images, links);
+		this.options.builder.requestRender();
 	}
 
 	/** Each thread keeps its own editor while clipboard reads are in flight. */
@@ -275,34 +306,34 @@ export class ChatTranscriptPane
 		this.options.builder.requestRender();
 	}
 
-	rebuild(messages: readonly AgentMessage[]): void {
+	rebuild(messages: readonly AgentMessage[], options?: ChatTranscriptBuildOptions): void {
 		this.#linkEpoch++;
 		this.#nextEntryIndex = 0;
 		this.#lastEntryId = null;
-		this.#builder.rebuild(this.#messageEntries(messages));
+		this.#builder.rebuild(this.#messageEntries(messages), options);
 		this.#resolveAssistantLinks(messages);
 		this.options.builder.requestRender();
 	}
 
-	append(messages: readonly AgentMessage[]): void {
-		this.#builder.append(this.#messageEntries(messages));
+	append(messages: readonly AgentMessage[], options?: ChatTranscriptBuildOptions): void {
+		this.#builder.append(this.#messageEntries(messages), options);
 		this.#resolveAssistantLinks(messages);
 		this.options.builder.requestRender();
 	}
 
-	rebuildEntries(entries: readonly TranscriptEntryLike[]): void {
+	rebuildEntries(entries: readonly TranscriptEntryLike[], options?: ChatTranscriptBuildOptions): void {
 		this.#linkEpoch++;
 		this.#nextEntryIndex = entries.length;
 		this.#lastEntryId = entries.at(-1)?.id ?? null;
-		this.#builder.rebuild(entries);
+		this.#builder.rebuild(entries, options);
 		this.#resolveAssistantLinks(entries.flatMap(entry => (entry.type === "message" ? [entry.message] : [])));
 		this.options.builder.requestRender();
 	}
 
-	appendEntries(entries: readonly TranscriptEntryLike[]): void {
+	appendEntries(entries: readonly TranscriptEntryLike[], options?: ChatTranscriptBuildOptions): void {
 		this.#nextEntryIndex += entries.length;
 		this.#lastEntryId = entries.at(-1)?.id ?? this.#lastEntryId;
-		this.#builder.append(entries);
+		this.#builder.append(entries, options);
 		this.#resolveAssistantLinks(entries.flatMap(entry => (entry.type === "message" ? [entry.message] : [])));
 		this.options.builder.requestRender();
 	}
@@ -367,6 +398,11 @@ export class ChatTranscriptPane
 		this.#resolveAssistantLinks([message]);
 		this.options.builder.ui.requestComponentRender(component);
 		return true;
+	}
+
+	updateToolUpdates(updates: readonly PaneToolUpdate[]): void {
+		this.#builder.updateToolUpdates(updates);
+		this.options.builder.requestRender();
 	}
 
 	getTextSelection(selection: TextSelectionRange): string | undefined {
@@ -483,6 +519,16 @@ export class ChatTranscriptPane
 		}
 		const editorEmpty = !this.#editor || this.#editor.getText().trim() === "";
 		if (this.options.onInput?.(data, editorEmpty)) return;
+		const editorOptions = this.options.editor;
+		if (
+			editorOptions &&
+			!editorOptions.readOnly &&
+			editorOptions.followUpKeys?.some(key => matchesKey(data, key)) &&
+			!(this.options.builder.ui.nativeRendering && matchesKey(data, "ctrl+enter"))
+		) {
+			this.submit("followUp");
+			return;
+		}
 		if (matchesKey(data, "escape") && this.#editor?.hasAutocomplete()) {
 			this.#editor.handleInput(data);
 			this.options.builder.requestRender();
@@ -564,7 +610,7 @@ export class ChatTranscriptPane
 						"placeholder",
 					),
 				]
-			: [...this.#builder.container.nativeBlocks()];
+			: [...this.#builder.container.nativeBlocks(cx)];
 		const notice = this.#notice ?? this.options.getNotice?.();
 		if (notice) {
 			children.push(
@@ -767,6 +813,7 @@ export class ChatTranscriptPane
 	}
 	invalidate(): void {
 		this.#hasFullFrame = false;
+		this.#builder.refreshAssistantTextRenderers();
 		this.#builder.container.invalidate();
 		this.#editor?.invalidate?.();
 		this.#scrollView.invalidate?.();
@@ -782,7 +829,7 @@ export class ChatTranscriptPane
 		this.#builder.dispose();
 	}
 
-	#submit(editor: CustomEditor, text: string, key?: string): void {
+	#submit(editor: CustomEditor, text: string, key?: string, streamingBehavior: "steer" | "followUp" = "steer"): void {
 		if (this.options.editor?.readOnly === true) return;
 		const compacted = compactImageMarkers(text.trim(), editor.pendingImages.length);
 		const trimmed = compacted?.text ?? text.trim();
@@ -791,7 +838,9 @@ export class ChatTranscriptPane
 			? compacted.keep.map(index => editor.pendingImageLinks[index])
 			: [...editor.pendingImageLinks];
 		if (!trimmed && images.length === 0) return;
-		if (!this.options.editor?.onSubmit(trimmed, images.length ? images : undefined, key, imageLinks)) {
+		if (
+			!this.options.editor?.onSubmit(trimmed, images.length ? images : undefined, key, imageLinks, streamingBehavior)
+		) {
 			editor.setDraft(trimmed, images);
 			return;
 		}

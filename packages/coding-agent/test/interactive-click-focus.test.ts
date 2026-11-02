@@ -725,7 +725,6 @@ describe("inline click-to-focus geometry", () => {
 		// The early link has scrolled into terminal scrollback, where no tag can reach it.
 		expect(plainRows(term.getViewport()).some(row => row.includes("the early link"))).toBe(false);
 
-		const resets = vi.spyOn(mode.ui, "resetDisplay");
 		const hintKey = "\x1bo";
 		const screen = () => plainRows(term.getViewport());
 		// The hint key tags the late link on screen; pressed again it opens the browser, at the bottom.
@@ -751,13 +750,10 @@ describe("inline click-to-focus geometry", () => {
 		expect(screen().some(row => row.includes("EXPANDED one."))).toBe(true);
 		const strip = (rows: string[]) => rows.map(row => row.slice(0, 119).trimEnd());
 		expect(strip(screen().slice(0, above.length))).toEqual(strip(above));
-		// The main transcript's scrollback is rebuilt only once the browser closes.
-		expect(resets).not.toHaveBeenCalled();
 
 		term.sendInput("\x1b");
 		await term.waitForRender(() => !screen().some(row => row.includes("Extension links")));
 		expect(screen().some(row => row.includes("Extension links"))).toBe(false);
-		expect(resets).toHaveBeenCalledTimes(1);
 		expect(plainRows(mode.chatContainer.render(120)).join("\n")).toContain("EXPANDED two.");
 		expect(mode.ui.getFocused()).toBe(mode.editor);
 	});

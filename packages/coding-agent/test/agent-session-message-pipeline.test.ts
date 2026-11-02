@@ -1482,10 +1482,9 @@ describe("AgentSession message pipeline", () => {
 			restoredMessages.findIndex(message => message.role === "user" && getConvertedUserText(message) === text);
 		const firstUserIndex = userIndex("Question?");
 		const restoredUserIndex = userIndex("Follow up?");
-		expect(reminderIndexes).toHaveLength(2);
+		expect(reminderIndexes).toHaveLength(1);
 		expect(reminderIndexes[0]).toBeLessThan(firstUserIndex);
-		expect(reminderIndexes[1]).toBeGreaterThan(firstUserIndex);
-		expect(reminderIndexes[1]).toBeLessThan(restoredUserIndex);
+		expect(reminderIndexes[0]).toBeLessThan(restoredUserIndex);
 	});
 
 	it("prompts for a durable BTW summary without waiting for Main's transcript preview", async () => {
@@ -1690,7 +1689,7 @@ describe("AgentSession message pipeline", () => {
 		const result = await manager.prompt(threadKey, "Share the conclusion with Main.");
 		await session.waitForIdle();
 
-		expect(result.replyText).toBe("Summary shared.");
+		expect(result?.replyText).toBe("Summary shared.");
 		expect(select).toHaveBeenCalledTimes(1);
 		expect(select.mock.calls[0]?.[0]).toContain("Allow tool: send_to_main_session");
 		expect(select.mock.calls[0]?.[0]).toContain(summary);
@@ -1855,13 +1854,19 @@ describe("AgentSession message pipeline", () => {
 		const checkpoint = original.checkpoint();
 		const firstTurn = checkpoint.turns[0];
 		if (!firstTurn) throw new Error("Expected one side-conversation turn");
-		const { prefixMessages, ...legacyTurn } = firstTurn;
-		if (!prefixMessages?.length) throw new Error("Expected a per-turn capability reminder");
-		// Legacy checkpoints stored the capability reminder once in the frozen base instead of per turn.
+		expect(firstTurn.prefixMessages).toBeUndefined();
+		// Legacy checkpoints stored the capability reminder in the frozen base.
 		const legacyCheckpoint = {
 			...checkpoint,
-			baseMessages: [...checkpoint.baseMessages, ...prefixMessages],
-			turns: [legacyTurn],
+			baseMessages: [
+				...checkpoint.baseMessages,
+				{
+					role: "developer" as const,
+					content: [{ type: "text" as const, text: sideChannelReadonlyReminder }],
+					timestamp: 1,
+				},
+			],
+			turns: [firstTurn],
 		};
 		session.agent.appendMessage({ role: "user", content: "late main turn", timestamp: Date.now() });
 		const restored = session.createEphemeralConversation("side instructions", legacyCheckpoint);
@@ -1878,7 +1883,7 @@ describe("AgentSession message pipeline", () => {
 					JSON.stringify(message.content) ===
 						JSON.stringify([{ type: "text", text: sideChannelReadonlyReminder }]),
 			),
-		).toHaveLength(2);
+		).toHaveLength(1);
 		expect(restored.turns.map(turn => turn.input)).toEqual(["Question 1?", "Question 2?"]);
 		expect(capturedOptions[1]?.sessionId).toBe(capturedOptions[0]?.sessionId);
 		expect(capturedContexts[1]?.messages.some(message => JSON.stringify(message).includes("late main turn"))).toBe(
@@ -2654,7 +2659,11 @@ describe("AgentSession message pipeline", () => {
 		registerCustomApi(api, (_model, context, _options) => {
 			capturedContext = context;
 			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
+			queueMicrotask(async () => {
+				if (holdConversion) {
+					conversionStarted.resolve();
+					await continueConversion.promise;
+				}
 				const message = createAssistantMessage(responseText);
 				stream.push({ type: "text_delta", contentIndex: 0, delta: responseText, partial: message });
 				stream.push({ type: "done", reason: "stop", message });
@@ -2688,13 +2697,6 @@ describe("AgentSession message pipeline", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: createModelRegistryStub() as never,
 			obfuscator,
-			transformContext: async messages => {
-				if (holdConversion) {
-					conversionStarted.resolve();
-					await continueConversion.promise;
-				}
-				return messages;
-			},
 		});
 		sessions.push(session);
 

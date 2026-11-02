@@ -44,11 +44,11 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import type { ExtensionRunner } from "../extensibility/extensions";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, InputEventResult } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { AgentSession } from "../session/agent-session";
+import type { AgentSession, NavigateTreeResult } from "../session/agent-session";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import {
 	type AgentSessionAdvisorOverview,
@@ -59,14 +59,17 @@ import {
 	type AgentViewState,
 	isLocalAgentSession,
 	type ToolExecutionUpdateEvent,
+	type ToolStreamUpdateEvent,
 } from "../session/agent-session-handle";
 import type {
 	AgentSessionDisposeOptions,
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
+	ContinuePausedAgentsResult,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
+	PausedTurnContinuation,
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
@@ -76,6 +79,8 @@ import type {
 	SessionStats,
 	SteerOptions,
 } from "../session/agent-session-types";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import { readAgentsPaused } from "../session/exit-diagnostics";
 import {
 	asyncJobSnapshot,
 	asyncJobTree,
@@ -85,6 +90,7 @@ import {
 	runningJobWidgets,
 } from "../session/async-job-views";
 import { BlobStore, type BlobPutOptions, type BlobPutResult, lazyImageDataSync } from "../session/blob-store";
+import type { BtwTurnOptions } from "../session/btw-turn";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import { resolveRoleModelCycle, roleThinkingLevelForModel, serviceTierForModel } from "../session/model-controls";
@@ -125,6 +131,7 @@ export class SessionHostClient {
 export function emptyMirrorState(): SessionMirrorState {
 	return {
 		isStreaming: false,
+		isCompacting: false,
 		runStartedAt: undefined,
 		ircWakesPending: false,
 		ircQueuedFrom: [],
@@ -188,7 +195,6 @@ function emptyViewState(): SessionViewState {
 		rules: null,
 		hasAbortedToolCallTail: false,
 		isAutoThinking: false,
-		isCompacting: false,
 		compactionSpeculation: "idle",
 		contextUsageRevision: 0,
 		contextUsage: undefined,
@@ -197,6 +203,10 @@ function emptyViewState(): SessionViewState {
 		retryAttempt: 0,
 		isTtsrAbortPending: false,
 		hasInterruptibleInput: false,
+		isSessionTransitioning: false,
+		hasAdmittedSubmission: false,
+		queuedMessageCount: 0,
+		hasPendingAsyncWork: false,
 		autoResolvedThinkingLevel: undefined,
 		configuredThinkingLevel: undefined,
 		availableEffortSelectors: [],
@@ -210,10 +220,12 @@ function emptyViewState(): SessionViewState {
 		todoPhases: [],
 		queuedMessages: { steering: [], followUp: [], liveSteered: 0 },
 		restorableQueue: { steering: [], followUp: [] },
+		editableQueue: { steering: [], followUp: [] },
 		approvals: { scopes: [], grants: [] },
 		ephemeralMaxTokensPreservesRequest: false,
 		settings: { base: null, layers: [] },
 		activeToolExecutionUpdates: [],
+		activeToolStreamUpdates: [],
 	};
 }
 
@@ -273,6 +285,8 @@ export class RemoteAgentSession implements AgentViewSession {
 	#builtInTools = new Set<string>();
 	#runToolCallIds = new Set<string>();
 	readonly #activeUpdates = new Map<string, ToolExecutionUpdateEvent>();
+	readonly #activeStreamUpdates = new Map<string, ToolStreamUpdateEvent>();
+	readonly #entryObservers = new Set<(entry: SessionEntry) => void>();
 	#entries: SessionEntry[] = [];
 	readonly #entryIndex = new SessionEntryIndex();
 	/** Custom entries appended here and not yet echoed back by the home worker. */
@@ -342,6 +356,12 @@ export class RemoteAgentSession implements AgentViewSession {
 			getEntries: () => [...this.#entries],
 			getBranch: fromId => this.#entryIndex.pathTo(fromId),
 			getLeafId: () => this.#entryIndex.leafId(),
+			getTree: () => this.#entryIndex.tree(this.#entries),
+			appendLabelChange: (id, label) => this.#command("appendLabelChange", id, label),
+			subscribeToEntries: observer => {
+				this.#entryObservers.add(observer);
+				return () => this.#entryObservers.delete(observer);
+			},
 			getConversationTip: () => conversationTip(this.#entries, this.#entryIndex.branchView()),
 			getSeanceSourceArtifactsDir: () => this.#view.seanceSourceArtifactsDir,
 			appendCustomEntry: (customType, data) => this.#appendCustomEntry(customType, data),
@@ -463,7 +483,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	}
 
 	get isCompacting(): boolean {
-		return this.#view.isCompacting;
+		return this.#state.isCompacting;
 	}
 
 	get compactionSpeculation(): "idle" | "running" | "armed" {
@@ -527,6 +547,69 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[] {
 		return [...this.#activeUpdates.values()];
+	}
+
+	activeToolStreamUpdates(): readonly ToolStreamUpdateEvent[] {
+		return [...this.#activeStreamUpdates.values()];
+	}
+
+	get isSessionTransitioning(): boolean {
+		return this.#view.isSessionTransitioning;
+	}
+
+	get hasAdmittedSubmission(): boolean {
+		return this.#view.hasAdmittedSubmission;
+	}
+
+	get queuedMessageCount(): number {
+		return this.#view.queuedMessageCount;
+	}
+
+	hasPendingAsyncWork(): boolean {
+		return this.#view.hasPendingAsyncWork;
+	}
+
+	waitForIdle(): Promise<void> {
+		return this.#command("waitForIdle");
+	}
+
+	waitForAdmittedSubmissions(): Promise<void> {
+		return this.#command("waitForAdmittedSubmissions");
+	}
+
+	waitForSessionTransition(): Promise<void> {
+		return this.#command("waitForSessionTransition");
+	}
+
+	settleAsyncWork(): Promise<void> {
+		return this.#command("settleAsyncWork");
+	}
+
+	emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined> {
+		return this.#command("emitInteractiveInput", text, images);
+	}
+
+	prewarmModelConnection(): void {
+		this.#notify("prewarmModelConnection");
+	}
+
+	compact(instructions?: string, options?: CompactOptions): Promise<CompactionResult> {
+		return this.#command("compact", instructions, options);
+	}
+
+	navigateTree(
+		targetId: string,
+		options?: { summarize?: boolean; requireIdle?: boolean },
+	): Promise<NavigateTreeResult> {
+		return this.#command("navigateTree", targetId, options);
+	}
+
+	hasPausedAgents(): boolean {
+		return readAgentsPaused(this.sessionManager.getBranch()) !== undefined;
+	}
+
+	continuePausedAgents(): Promise<ContinuePausedAgentsResult> {
+		return this.#command("continuePausedAgents");
 	}
 
 	settleInFlightMessagePersistence(): Promise<void> {
@@ -707,6 +790,16 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#view.queuedMessages;
 	}
 
+	getQueuedMessageEditAction(
+		queue: "steering" | "followUp",
+		index: number,
+	): ((beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>) | undefined {
+		const id = this.#view.editableQueue[queue][index];
+		if (id === undefined) return undefined;
+		return beforeInterrupt =>
+			this.#command("editQueuedMessage", queue, id, beforeInterrupt && rpcSync(beforeInterrupt));
+	}
+
 	/**
 	 * Restore the newest user-authored queued message (steering first) the home
 	 * has not claimed for delivery, drop it from the mirror, and have the home
@@ -793,6 +886,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("runEphemeralTurn", args);
 	}
 
+	runBtwTurn(args: BtwTurnOptions): Promise<EphemeralTurnResult> {
+		return this.#command("runBtwTurn", args);
+	}
+
 	ephemeralMaxTokensPreservesRequest(): boolean {
 		return this.#view.ephemeralMaxTokensPreservesRequest;
 	}
@@ -845,6 +942,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("prompt", text, options);
 	}
 
+	continuePausedTurn(): Promise<PausedTurnContinuation> {
+		return this.#command("continuePausedTurn");
+	}
+
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
 		return this.#command("steer", text, images, options);
 	}
@@ -892,6 +993,8 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#pruneSettled(state.restorableQueue);
 		this.#activeUpdates.clear();
 		for (const update of state.activeToolExecutionUpdates) this.#activeUpdates.set(update.toolCallId, update);
+		this.#activeStreamUpdates.clear();
+		for (const update of state.activeToolStreamUpdates) this.#activeStreamUpdates.set(update.toolCallId, update);
 		if (entries) this.applyEntries(entries);
 		this.#entryIndex.setLeaf(state.leafId);
 		this.#syncViewDerived(state);
@@ -915,6 +1018,7 @@ export class RemoteAgentSession implements AgentViewSession {
 				this.#entries.push(entry);
 				this.#entryIndex.insert(entry);
 			}
+			for (const entry of delta.entries) for (const observer of this.#entryObservers) observer(entry);
 			return;
 		}
 		const kept = delta.kind === "replace" ? [] : this.#entries.filter(entry => !this.#provisional.has(entry));
@@ -922,6 +1026,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#entries = [...kept, ...delta.entries];
 		this.#entryIndex.rebuild(this.#entries);
 		this.#entryIndex.setLeaf(this.#view.leafId);
+		for (const entry of delta.entries) for (const observer of this.#entryObservers) observer(entry);
 	}
 
 	/** Bridge only: dispatch one forwarded event to subscribers. */
@@ -969,6 +1074,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#settledQueued.clear();
 		this.#withdrawnQueued.clear();
 		this.#listeners.clear();
+		this.#entryObservers.clear();
 		this.#runStateListeners.clear();
 	}
 
@@ -991,6 +1097,7 @@ export class RemoteAgentSession implements AgentViewSession {
 			}
 			case "message_end":
 				this.#state = { ...this.#state, streamMessage: null };
+				if (event.message.role === "toolResult") this.#activeStreamUpdates.delete(event.message.toolCallId);
 				if (event.message.role === "assistant") {
 					const message = event.message;
 					this.tokenRate.end(
@@ -1002,8 +1109,12 @@ export class RemoteAgentSession implements AgentViewSession {
 			case "tool_execution_update":
 				this.#activeUpdates.set(event.toolCallId, event);
 				return;
+			case "tool_stream_update":
+				this.#activeStreamUpdates.set(event.toolCallId, event);
+				return;
 			case "tool_execution_end":
 				this.#activeUpdates.delete(event.toolCallId);
+				this.#activeStreamUpdates.delete(event.toolCallId);
 				return;
 		}
 	}

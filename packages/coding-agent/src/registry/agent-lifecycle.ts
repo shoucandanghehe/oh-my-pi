@@ -91,6 +91,7 @@ interface AdoptedAgent {
 	onRelease?: () => Promise<void>;
 	onReviverDropped?: () => void;
 	timer?: NodeJS.Timeout;
+	unsubscribeSession?: () => void;
 }
 
 /** Fire (at most once) the adoption's reviver-dropped hook. */
@@ -199,6 +200,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		this.#unsubscribe = undefined;
 		for (const adopted of this.#adopted.values()) {
 			clearTimeout(adopted.timer);
+			adopted.unsubscribeSession?.();
 		}
 		this.#adopted.clear();
 		this.#revivals.clear();
@@ -262,6 +264,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
+		existing?.unsubscribeSession?.();
 		const adopted: AdoptedAgent = {
 			ref,
 			idleTtlMs: opts.idleTtlMs,
@@ -271,6 +274,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		};
 		dropReviver(existing);
 		this.#adopted.set(id, adopted);
+		this.#observeSession(id, adopted);
 		this.#armTimer(id, adopted);
 	}
 
@@ -375,6 +379,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		if (!ref || adopted.ref !== ref) return;
 		const session = ref.session;
 		if (!session) return;
+		if (session.isCompacting) return;
 
 		if (adopted.timer) {
 			clearTimeout(adopted.timer);
@@ -407,7 +412,11 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				// Re-check liveness: release/unregister/replace may have raced us.
 				const live = this.#registry.get(id);
 				if (live !== ref || !live.session || live.session !== session) return;
-				if (this.#adopted.get(id)?.ref !== ref) return;
+				const currentAdoption = this.#adopted.get(id);
+				if (currentAdoption?.ref !== ref) return;
+				// Manual maintenance starts before its public start event. It can
+				// acquire the session during this park's pre-detach cancel window.
+				if (session.isCompacting) return;
 
 				// Preserve cost before detaching the only live source. The session usage
 				// index includes off-transcript model calls; remove completed task-result
@@ -425,6 +434,10 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 				// Commit: detach + parked *before* dispose so callers never see a
 				// dying session via ref.session / idle status.
 				park.detached = true;
+				clearTimeout(currentAdoption.timer);
+				currentAdoption.timer = undefined;
+				currentAdoption.unsubscribeSession?.();
+				currentAdoption.unsubscribeSession = undefined;
 				this.#registry.detachSession(id, ref);
 				this.#registry.setStatus(id, "parked", ref);
 
@@ -630,6 +643,7 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		if (!ref) return false;
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
+			adopted.unsubscribeSession?.();
 			this.#adopted.delete(id);
 			dropReviver(adopted);
 		}
@@ -746,12 +760,39 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 			throw new Error(`Agent "${id}" was replaced or became terminal while its persisted session was reviving.`);
 		}
 		adopted.ref = liveRef;
+		this.#observeSession(id, adopted);
 		// Emits status_changed → "idle", which re-arms the TTL timer below.
 		if (!this.#registry.setStatus(id, "idle", liveRef)) {
 			await session.dispose();
 			throw new Error(`Agent "${id}" changed before its persisted session became idle.`);
 		}
 		return session;
+	}
+
+	#observeSession(id: string, adopted: AdoptedAgent): void {
+		adopted.unsubscribeSession?.();
+		adopted.unsubscribeSession = undefined;
+		const session = adopted.ref.session;
+		if (!session || adopted.idleTtlMs <= 0 || this.#adopted.get(id) !== adopted) return;
+		adopted.unsubscribeSession = session.subscribe(event => {
+			if (
+				this.#adopted.get(id) !== adopted ||
+				this.#registry.get(id) !== adopted.ref ||
+				adopted.ref.session !== session
+			) {
+				return;
+			}
+			// Manual compaction is maintenance, not a model run: it leaves the
+			// registry idle and publishes its own lifecycle instead.
+			if (event.type === "manual_compaction_start") {
+				clearTimeout(adopted.timer);
+				adopted.timer = undefined;
+			} else if (event.type === "manual_compaction_end" && adopted.ref.status === "idle") {
+				// The outcome precedes clearing isCompacting; park checks the real
+				// busy flag again when this fresh TTL expires.
+				this.#armTimer(id, adopted);
+			}
+		});
 	}
 
 	#armTimer(id: string, adopted: AdoptedAgent): void {
@@ -774,9 +815,11 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 
 	#onRegistryEvent(event: RegistryEvent): void {
 		const adopted = this.#adopted.get(event.ref.id);
-		if (!adopted || adopted.ref !== event.ref) return;
-		if (event.type === "removed") {
+		if (!adopted) return;
+		if (adopted.ref !== event.ref && event.type !== "registered") return;
+		if (event.type === "removed" || adopted.ref !== event.ref) {
 			clearTimeout(adopted.timer);
+			adopted.unsubscribeSession?.();
 			this.#adopted.delete(event.ref.id);
 			dropReviver(adopted);
 			return;

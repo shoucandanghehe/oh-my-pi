@@ -328,7 +328,7 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 			role: "omp.overlay.pause",
 			size: "md",
 			anchor: "center",
-			head: agentPauseGate.activeLoopCount === agentPauseGate.modelWaiterCount ? "Paused" : "Pausing",
+			head: agentPauseGate.allLoopsParked ? "Paused" : "Pausing",
 		} as const;
 	}
 
@@ -341,7 +341,7 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 		if (this.#native) return this.#native;
 		const snapshot = this.#workSnapshot;
 		const hasOutstandingWork = snapshot.unsettledTurns > 0 || snapshot.unfinishedJobs > 0;
-		const outstanding = agentPauseGate.activeLoopCount !== agentPauseGate.modelWaiterCount || hasOutstandingWork;
+		const outstanding = !agentPauseGate.allLoopsParked || hasOutstandingWork;
 		const status = col(
 			[
 				keyed(
@@ -437,7 +437,7 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 							agentPauseGate.ready ? "success" : "warning",
 						),
 						span(
-							` · ${agentPauseGate.modelWaiterCount}/${agentPauseGate.activeLoopCount} agent loops parked`,
+							` · ${agentPauseGate.modelWaiterCount}/${agentPauseGate.activeLoopCount} local agent loops parked`,
 							"dim",
 						),
 					],
@@ -481,7 +481,7 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 			elapsed,
 			this.host.sessionName,
 			this.#workSnapshot,
-			agentPauseGate.activeLoopCount === agentPauseGate.modelWaiterCount,
+			agentPauseGate.allLoopsParked,
 		);
 	}
 }

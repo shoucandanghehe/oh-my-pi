@@ -1,7 +1,7 @@
 <system-notice>
-{{#if multiple}}{{jobs.length}} background jobs have completed; results below.
+{{#if multiple}}{{jobs.length}} background jobs have completed. Results below.
 
-{{else}}Background job {{jobs.[0].jobId}}{{#if jobs.[0].namedByCommand}} ({{jobs.[0].headerLabel}}){{/if}} has completed; result below.
+{{else}}Background job {{jobs.[0].jobId}}{{#if jobs.[0].namedByCommand}} ({{jobs.[0].headerLabel}}){{/if}} has completed. Result below.
 {{/if}}{{#each jobs}}{{#if @root.multiple}}── Job {{this.jobId}}{{#if this.headerLabel}} ({{this.headerLabel}}){{/if}} ──
 {{/if}}{{this.result}}{{#if this.showAgentUrl}}
 

@@ -833,13 +833,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider, A
 		this.#lastViewportRows = visible;
 		this.#lastViewportWidth = width;
 		this.#syncLinkHints(visible, width);
+		const painted = roots.some(root => "setHoveredClickId" in root)
+			? visible
+			: this.#paintHoverBand(visible, this.#lastClickSpans);
 		return {
-			viewport: this.#paintLinkHints(
-				roots.some(root => "setHoveredClickId" in root)
-					? visible
-					: this.#paintHoverBand(visible, this.#lastClickSpans),
-				width,
-			),
+			viewport: this.#linkHints?.hints.paint(painted, width) ?? painted,
 			estimatedTotalRows: rendered.length,
 			offset,
 			stickyRows: 0,

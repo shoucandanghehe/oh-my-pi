@@ -14,6 +14,7 @@ import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } fr
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries, visitEntriesFromFileStream } from "../session/session-loader";
 import { resolveMarkdownLinkHrefs, resolveSessionMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
+import { isAgentViewSession } from "../session/agent-session-handle";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
@@ -47,7 +48,7 @@ export function resolveAgentTranscriptLinks(
 ): Promise<ReadonlyMap<string, string>> {
 	const ref = registry.get(id);
 	const hrefs = texts.flatMap(getMarkdownLinkUrls);
-	if (ref?.session) return resolveSessionMarkdownLinkHrefs(hrefs, ref.session);
+	if (ref?.session && isAgentViewSession(ref.session)) return resolveSessionMarkdownLinkHrefs(hrefs, ref.session);
 	return resolveMarkdownLinkHrefs(hrefs, { cwd }, { resolveInternalUrls: false });
 }
 

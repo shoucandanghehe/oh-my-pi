@@ -3427,6 +3427,13 @@ export class TurnRecovery {
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
 	async retry(): Promise<boolean> {
+		if (!(await this.prepareRetry())) return false;
+		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
+		return true;
+	}
+
+	/** Ready the standard failed-tail replay without scheduling a run. */
+	async prepareRetry(): Promise<boolean> {
 		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return false;
 
 		const messages = this.#host.agent.state.messages;
@@ -3458,9 +3465,6 @@ export class TurnRecovery {
 
 		// Reset retry budget for a fresh attempt
 		this.#retryAttempt = 0;
-
-		// Re-attempt the turn
-		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });
 
 		return true;
 	}

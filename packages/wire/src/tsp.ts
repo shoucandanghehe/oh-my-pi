@@ -70,6 +70,7 @@ export const TSP_KINDS = [
 	"editor",
 	"input",
 	"button",
+	"menu",
 	"status",
 	"seg",
 	"overlay",
@@ -458,6 +459,35 @@ export interface TspButtonProps {
 	disabled?: boolean | string;
 	/** A spinner in the icon's place; inert. */
 	busy?: boolean;
+}
+
+export type TspMenuEntry = string | { header: string } | TspMenuItem;
+
+export interface TspMenuItem {
+	id: string;
+	label?: string;
+	icon?: string;
+	keys?: string | readonly string[];
+	detail?: string;
+	checked?: boolean;
+	radio?: string;
+	disabled?: boolean | string;
+	danger?: boolean;
+	items?: readonly TspMenuEntry[];
+}
+
+export interface TspMenuProps {
+	items: readonly TspMenuEntry[];
+	text?: string;
+	icon?: string;
+	trigger?: "default" | "quiet" | "primary";
+	caret?: boolean;
+	size?: "md" | "sm";
+	variant?: "default" | "dense";
+	open?: boolean;
+	active?: string;
+	align?: "start" | "end";
+	disabled?: boolean | string;
 }
 export interface TspEditorDecoration {
 	from: number;
@@ -993,6 +1023,7 @@ export interface TspPropsByKind {
 	editor: TspEditorProps;
 	input: TspInputProps;
 	button: TspButtonProps;
+	menu: TspMenuProps;
 	status: TspStatusProps;
 	seg: TspSegProps;
 	overlay: TspOverlayProps;
@@ -1112,6 +1143,11 @@ export type TspReply =
 	  }
 	| { r: "blobs"; have: readonly string[] };
 
+/** Disclosures report collapse; menus report whether their popup is open. */
+export type TspToggle =
+	| { readonly collapsed: boolean; readonly open?: never }
+	| { readonly open: boolean; readonly collapsed?: never };
+
 /** Verb `e`: terminal → program events. */
 export type TspEvent =
 	| { ev: "ack"; sf: string; s: number }
@@ -1119,7 +1155,7 @@ export type TspEvent =
 	| { ev: "theme"; dark: boolean }
 	| { ev: "motion"; reduce: boolean }
 	| { ev: "visible"; sf?: string; visible: boolean }
-	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
+	| ({ ev: "toggle"; sf: string; id: string; key?: string } & TspToggle)
 	| { ev: "select"; sf: string; id: string; item: string }
 	| { ev: "activate"; sf: string; id: string; item: string }
 	| { ev: "action"; sf: string; id: string; act: string; value?: string; mods?: readonly string[] }

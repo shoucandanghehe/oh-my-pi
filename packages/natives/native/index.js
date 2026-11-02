@@ -42,6 +42,7 @@ export const PipeStreams = nativeBindings.PipeStreams ?? missingNativeClass("Pip
 export const PowerAssertion = nativeBindings.PowerAssertion ?? missingNativeClass("PowerAssertion");
 export const Process = nativeBindings.Process ?? missingNativeClass("Process");
 export const PtySession = nativeBindings.PtySession ?? missingNativeClass("PtySession");
+export const RowMeasurement = nativeBindings.RowMeasurement ?? missingNativeClass("RowMeasurement");
 export const RunTrace = nativeBindings.RunTrace ?? missingNativeClass("RunTrace");
 export const Shell = nativeBindings.Shell ?? missingNativeClass("Shell");
 export const ShellVisualization = nativeBindings.ShellVisualization ?? missingNativeClass("ShellVisualization");
@@ -50,6 +51,7 @@ export const TtyWriter = nativeBindings.TtyWriter ?? missingNativeClass("TtyWrit
 export const VcsGitRepo = nativeBindings.VcsGitRepo ?? missingNativeClass("VcsGitRepo");
 export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace ?? missingNativeClass("VcsJjWorkspace");
 export const VcsRepo = nativeBindings.VcsRepo ?? missingNativeClass("VcsRepo");
+export const WrappedText = nativeBindings.WrappedText ?? missingNativeClass("WrappedText");
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime ?? missingNativeExport("__ompInstallTokioRuntime");

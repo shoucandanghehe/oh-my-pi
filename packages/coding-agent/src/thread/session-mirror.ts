@@ -29,20 +29,25 @@ import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { OverlayLayers, Settings } from "../config/settings";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, InputEventResult } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
+import type { NavigateTreeResult } from "../session/agent-session";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AgentSessionAdvisorOverview,
 	AgentSessionHandle,
 	AgentViewToolSchema,
 	ToolExecutionUpdateEvent,
+	ToolStreamUpdateEvent,
 } from "../session/agent-session-handle";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import type {
 	AgentSessionDisposeOptions,
+	PausedTurnContinuation,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
+	ContinuePausedAgentsResult,
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
@@ -52,6 +57,7 @@ import type {
 	SteerOptions,
 } from "../session/agent-session-types";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
+import type { BtwTurnOptions } from "../session/btw-turn";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
 import type { ModelUsageEntry, SessionEntry, UsageStatistics } from "../session/session-entries";
@@ -62,6 +68,7 @@ import type { RemoteObject, RpcMethod } from "./rpc";
 /** Data a session homed on another thread exposes synchronously. */
 export interface SessionMirrorState {
 	isStreaming: boolean;
+	isCompacting: boolean;
 	runStartedAt: number | undefined;
 	ircWakesPending: boolean;
 	/** Senders with a message still queued for a turn of its own (backs `hasQueuedIrcFrom`). */
@@ -171,7 +178,6 @@ export interface SessionViewState {
 	/** Published only while idle (false mid-run), the one time the retry hint reads it. */
 	hasAbortedToolCallTail: boolean;
 	isAutoThinking: boolean;
-	isCompacting: boolean;
 	compactionSpeculation: "idle" | "running" | "armed";
 	contextUsageRevision: number;
 	contextUsage: ContextUsage | undefined;
@@ -180,6 +186,10 @@ export interface SessionViewState {
 	retryAttempt: number;
 	isTtsrAbortPending: boolean;
 	hasInterruptibleInput: boolean;
+	isSessionTransitioning: boolean;
+	hasAdmittedSubmission: boolean;
+	queuedMessageCount: number;
+	hasPendingAsyncWork: boolean;
 	autoResolvedThinkingLevel: Effort | undefined;
 	configuredThinkingLevel: ConfiguredThinkingLevel | undefined;
 	availableEffortSelectors: ConfiguredThinkingLevel[];
@@ -193,6 +203,8 @@ export interface SessionViewState {
 	todoPhases: TodoPhase[];
 	queuedMessages: SessionQueuedMessages;
 	restorableQueue: SessionRestorableQueue;
+	/** Ids in displayed chip order, including live steering; edits resolve by identity on home. */
+	editableQueue: { steering: string[]; followUp: string[] };
 	approvals: SessionApprovalState;
 	ephemeralMaxTokensPreservesRequest: boolean;
 	settings: SessionSettingsSource;
@@ -201,6 +213,7 @@ export interface SessionViewState {
 	 * starts a watch; main keeps it current from the forwarded event stream.
 	 */
 	activeToolExecutionUpdates: ToolExecutionUpdateEvent[];
+	activeToolStreamUpdates: ToolStreamUpdateEvent[];
 }
 
 /** One field of {@link SessionViewState}. */
@@ -239,6 +252,7 @@ export type SessionHostProtocol = {
 	steer: RpcMethod<[text: string, images?: ImageContent[], options?: SteerOptions], void>;
 	abort: RpcMethod<[options?: SessionAbortOptions], void>;
 	dispose: RpcMethod<[options?: AgentSessionDisposeOptions], void>;
+	continuePausedTurn: RpcMethod<[], PausedTurnContinuation>;
 	deliverIrcMessage: RpcMethod<[msg: IrcMessage], "injected" | "woken">;
 	waitForIrcReplies: RpcMethod<[], void>;
 	setWorkPoolYieldItems: RpcMethod<[items: readonly WorkPoolYieldItem[]], void>;
@@ -246,6 +260,23 @@ export type SessionHostProtocol = {
 	/** Start (true) or stop (false) forwarding the full event stream and the view state. */
 	watch: RpcMethod<[on: boolean], void>;
 	settleInFlightMessagePersistence: RpcMethod<[], void>;
+	prewarmModelConnection: RpcMethod<[], void>;
+	emitInteractiveInput: RpcMethod<[text: string, images?: ImageContent[]], InputEventResult | undefined>;
+	waitForIdle: RpcMethod<[], void>;
+	waitForAdmittedSubmissions: RpcMethod<[], void>;
+	waitForSessionTransition: RpcMethod<[], void>;
+	settleAsyncWork: RpcMethod<[], void>;
+	compact: RpcMethod<[instructions?: string, options?: CompactOptions], CompactionResult>;
+	navigateTree: RpcMethod<
+		[targetId: string, options?: { summarize?: boolean; requireIdle?: boolean }],
+		NavigateTreeResult
+	>;
+	appendLabelChange: RpcMethod<[targetId: string, label: string | undefined], string>;
+	continuePausedAgents: RpcMethod<[], ContinuePausedAgentsResult>;
+	editQueuedMessage: RpcMethod<
+		[queue: "steering" | "followUp", id: string, beforeInterrupt?: () => void],
+		RestoredQueuedMessage | undefined
+	>;
 	setThinkingLevel: RpcMethod<[level: ConfiguredThinkingLevel | undefined, persist?: boolean], void>;
 	/**
 	 * Retire queued message `id` (main restored it): take it out of its queue,
@@ -285,6 +316,7 @@ export type SessionHostProtocol = {
 	applyRoleModel: RpcMethod<[entry: ResolvedRoleModel], void>;
 	fetchUsageReports: RpcMethod<[signal?: AbortSignal], UsageReport[] | null>;
 	runEphemeralTurn: RpcMethod<[args: EphemeralTurnOptions], EphemeralTurnResult>;
+	runBtwTurn: RpcMethod<[args: BtwTurnOptions], EphemeralTurnResult>;
 	exportToHtml: RpcMethod<[outputPath?: string, useUserThemes?: boolean], string>;
 	enableIdleMaintenance: RpcMethod<[options: IdleMaintenanceOptions], void>;
 	refreshIdleMaintenance: RpcMethod<[], void>;
@@ -325,6 +357,7 @@ export type SessionBridgeProtocol = {
 	steer: RpcMethod<[session: AgentSessionHandle, text: string, images?: ImageContent[], options?: SteerOptions], void>;
 	abort: RpcMethod<[session: AgentSessionHandle, options?: SessionAbortOptions], void>;
 	dispose: RpcMethod<[session: AgentSessionHandle, options?: AgentSessionDisposeOptions], void>;
+	continuePausedTurn: RpcMethod<[session: AgentSessionHandle], PausedTurnContinuation>;
 	deliverIrcMessage: RpcMethod<[session: AgentSessionHandle, msg: IrcMessage], "injected" | "woken">;
 	waitForIrcReplies: RpcMethod<[session: AgentSessionHandle], void>;
 	setWorkPoolYieldItems: RpcMethod<[session: AgentSessionHandle, items: readonly WorkPoolYieldItem[]], void>;
@@ -341,6 +374,7 @@ export const SESSION_STATE_READERS: {
 	readonly [K in PeerStateField]: (session: AgentSessionHandle) => SessionMirrorState[K];
 } = {
 	isStreaming: session => session.isStreaming,
+	isCompacting: session => session.isCompacting,
 	runStartedAt: session => session.runStartedAt,
 	ircWakesPending: session => session.ircWakesPending,
 	isPaused: session => session.agent.isPaused,

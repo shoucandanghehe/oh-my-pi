@@ -66,7 +66,8 @@ export class SkillMessageComponent extends Container {
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "toggle" && event.key === "prompt") this.setExpanded(!event.collapsed);
+		if (event.type === "toggle" && event.collapsed !== undefined && event.key === "prompt")
+			this.setExpanded(!event.collapsed);
 	}
 
 	/**

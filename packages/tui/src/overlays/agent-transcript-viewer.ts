@@ -13,14 +13,19 @@
  * Collab guests read the host's byte-capped transcript instead.
  */
 import type * as fs from "node:fs";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { formatNumber, logger } from "@oh-my-pi/pi-utils";
 import { componentContains, renderTargeted, type TargetedRender } from "../tui";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { VirtualRowAnchor } from "../tui";
 import type { KeyId } from "../app-keybindings";
-import type { AssistantThinkingRenderer, ExtensionPresentationSource, MessageRenderer } from "../chat/extension-types";
+import type {
+	AssistantThinkingRenderer,
+	AssistantTextRenderer,
+	ExtensionPresentationSource,
+	MessageRenderer,
+} from "../chat/extension-types";
 import type { SessionMessageEntryLike } from "../chat/transcript-entry";
 import { sameAssistantTurn } from "../chat/chat-transcript-builder";
 import { renderWorkspacePaneHeader } from "../chrome/shared";
@@ -48,6 +53,9 @@ import { ExtensionWidgets } from "../chrome/extension-widgets";
 import { getKeybindings } from "../keybindings";
 import { QueuedMessagesBand } from "../prompt/queued-messages";
 import type { TranscriptActions } from "../chat/transcript-actions";
+import type { PaneRestorableMessage, PaneSessionControls } from "../chat/session-controls";
+import { PANE_SESSION_SLASH_COMMANDS } from "../chat/session-controls";
+import { CombinedAutocompleteProvider } from "../autocomplete";
 
 type PaneStatusLine = Pick<StatusLineComponent, "getTopBorder" | "dispose"> &
 	Partial<Pick<StatusLineComponent, "setHookStatus" | "render">>;
@@ -87,12 +95,16 @@ export interface AgentTranscriptViewerDeps {
 	remote?: AgentHubRemote;
 	/** Revive+prompt path for messageable local agents. Lazy to avoid touching the global. */
 	lifecycle?: () => Pick<AgentLifecycleLike, "ensureLive">;
+	/** Standard prompt, queue, and committed-context controls for a local messageable session. */
+	sessionControls?: PaneSessionControls;
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Whether the active registry entry came from a built-in factory. */
 	isBuiltInTool?: (name: string) => boolean;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	getAssistantThinkingRenderers?: () => readonly AssistantThinkingRenderer[];
+	getAssistantTextRenderers?: () => readonly AssistantTextRenderer[];
+	configureEditor?: (editor: CustomEditor) => void;
 	resolveLinks?: (texts: readonly string[], cwd: string) => Promise<ReadonlyMap<string, string>>;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
@@ -369,6 +381,8 @@ export class AgentTranscriptViewer
 	readonly #aboveEditor = new Container();
 	readonly #pendingMessages = new Container();
 	#detachQueue: (() => void) | undefined;
+	#detachControls: (() => void) | undefined;
+	#messages: readonly AgentMessage[] | undefined;
 	readonly #belowEditor = new Container();
 	#extensionPresentation: ExtensionPresentationSource | undefined;
 	#detachPresentation: (() => void) | undefined;
@@ -411,7 +425,8 @@ export class AgentTranscriptViewer
 		const actions: TranscriptActions = {};
 		const copy = deps.transcriptActions?.copy;
 		if (copy) actions.copy = text => void this.#runTranscriptAction(() => copy(text));
-		const retry = deps.transcriptActions?.retry;
+		const controls = this.#controls;
+		const retry = controls ? () => controls.retry() : deps.transcriptActions?.retry;
 		if (retry && this.#sendable) actions.retry = () => void this.#runTranscriptAction(retry);
 		this.#belowEditor.addChild({ render: width => this.#statusLine?.render?.(width) ?? [] });
 		const resolveLinks = deps.resolveLinks;
@@ -422,6 +437,7 @@ export class AgentTranscriptViewer
 				isBuiltInTool: deps.isBuiltInTool,
 				getMessageRenderer: deps.getMessageRenderer,
 				getAssistantThinkingRenderers: deps.getAssistantThinkingRenderers,
+				getAssistantTextRenderers: deps.getAssistantTextRenderers,
 				resolveLinks:
 					!deps.remote && resolveLinks ? texts => resolveLinks(texts, this.#sourceCwd ?? deps.cwd) : undefined,
 				cwd: deps.cwd,
@@ -439,8 +455,12 @@ export class AgentTranscriptViewer
 						label: `Message ${displayId}`,
 						placeholder: `Message ${displayId}…`,
 						images: !deps.remote,
-						onSubmit: (text, images, _key, imageLinks) => {
-							this.#submit(text, images, imageLinks);
+						followUpKeys: this.#controls ? getKeybindings().getKeys("app.message.followUp") : undefined,
+						autocompleteProvider: this.#controls
+							? new CombinedAutocompleteProvider([...PANE_SESSION_SLASH_COMMANDS], deps.cwd)
+							: undefined,
+						onSubmit: (text, images, _key, imageLinks, mode) => {
+							this.#submit(text, images, imageLinks, mode);
 							return true;
 						},
 					}
@@ -456,6 +476,9 @@ export class AgentTranscriptViewer
 			getEditorTopBorder: availableWidth => this.#getEditorTopBorder(availableWidth),
 			getPlaceholder: () => this.#placeholder(),
 			getNotice: () => (!this.#pane.isEmpty ? this.#localError || this.#remoteError || undefined : undefined),
+			configureEditor: editor => {
+				if (this.#controls) deps.configureEditor?.(editor);
+			},
 			onInput: data => {
 				for (const key of deps.hubKeys) {
 					if (!matchesKey(data, key)) continue;
@@ -471,6 +494,11 @@ export class AgentTranscriptViewer
 			const keys = getKeybindings().getKeys("app.message.dequeue");
 			if (keys.length > 0) editor.setActionKeys("app.message.dequeue", keys);
 			editor.onDequeue = () => {
+				const controls = this.#controls;
+				if (controls) {
+					void this.#editQueuedMessage(() => controls.dequeue());
+					return;
+				}
 				const session = deps.registry.get(deps.agentId)?.session;
 				const queued = session?.getQueuedMessages?.();
 				if (!queued) return;
@@ -489,6 +517,7 @@ export class AgentTranscriptViewer
 				editor.onRetry = actions.retry;
 			}
 		}
+		this.#configureEditor();
 		// Native pointer focus must keep input and auto-close protection on the viewer.
 		const viewer = this;
 		this.#nativeComposer = {
@@ -506,9 +535,14 @@ export class AgentTranscriptViewer
 			containsComponent: component => componentContains(this.#pane, component),
 			invalidate: () => this.#pane.invalidate(),
 		};
+		this.#detachControls = this.#controls?.subscribe(() => {
+			this.#refresh(false);
+			this.#updatePendingMessages(this.#deps.registry.get(this.#deps.agentId)?.session ?? null);
+		});
 		// First paint loads synchronously so the initial entry can be revealed
 		// immediately; later full reloads from the poll may go async.
 		this.#refresh(false);
+		if (this.#controls) this.#updatePendingMessages(deps.registry.get(deps.agentId)?.session ?? null);
 		this.#pollTimer = setInterval(() => this.#refresh(true), POLL_MS);
 		this.#pollTimer.unref?.();
 	}
@@ -517,7 +551,12 @@ export class AgentTranscriptViewer
 	get #sendable(): boolean {
 		const ref = this.#deps.registry.get(this.#deps.agentId);
 		if (!ref || ref.kind === "advisor") return false;
-		return Boolean(this.#deps.remote || this.#deps.lifecycle);
+		return Boolean(this.#deps.remote || this.#deps.lifecycle || this.#deps.sessionControls);
+	}
+
+	/** Never grant local session controls to guest or advisor viewers. */
+	get #controls(): PaneSessionControls | undefined {
+		return !this.#deps.remote && this.#sendable ? this.#deps.sessionControls : undefined;
 	}
 
 	get focused(): boolean {
@@ -532,6 +571,11 @@ export class AgentTranscriptViewer
 
 	getPasteTarget(): CustomEditor | undefined {
 		return this.#sendable ? this.#pane.getPasteTarget() : undefined;
+	}
+
+	/** Host-side asynchronous command failures belong to this pane, not Main. */
+	setNotice(message: string | undefined): void {
+		this.#pane.setNotice(message);
 	}
 
 	setUseTerminalCursor(useTerminalCursor: boolean): void {
@@ -621,6 +665,8 @@ export class AgentTranscriptViewer
 		this.#detachPresentation = undefined;
 		this.#detachQueue?.();
 		this.#detachQueue = undefined;
+		this.#detachControls?.();
+		this.#detachControls = undefined;
 		this.#widgets.clear();
 		this.#statusLine?.dispose();
 		this.#pane.dispose();
@@ -644,8 +690,39 @@ export class AgentTranscriptViewer
 			this.#fetchRemote();
 			return;
 		}
-		this.#refreshLocalTranscript(allowAsync);
+		if (!this.#syncControlledMessages()) this.#refreshLocalTranscript(allowAsync);
 		this.#syncLiveAssistant();
+	}
+
+	#syncControlledMessages(): boolean {
+		const messages = this.#controls?.getMessages();
+		if (!messages) {
+			if (this.#messages) {
+				this.#messages = undefined;
+				this.#localState = undefined;
+				this.#localUnavailable = "";
+			}
+			return false;
+		}
+		if (messages === this.#messages) return true;
+		const previous = this.#messages;
+		this.#messages = messages;
+		this.#localLoadToken++;
+		this.#localLoading = undefined;
+		this.#localState = undefined;
+		this.#localUnavailable = "";
+		this.#localError = "";
+		this.#model = messages.findLast(message => message.role === "assistant")?.model;
+		if (
+			previous &&
+			previous.length <= messages.length &&
+			previous.every((message, index) => message === messages[index])
+		) {
+			this.#pane.append(messages.slice(previous.length));
+		} else {
+			this.#pane.rebuild(messages);
+		}
+		return true;
 	}
 
 	#refreshLocalTranscript(allowAsync: boolean): void {
@@ -694,14 +771,16 @@ export class AgentTranscriptViewer
 		const state = this.#deps.registry.get(this.#deps.agentId)?.session?.agent?.state;
 		const streamMessage = state?.streamMessage;
 		let assistant = streamMessage?.role === "assistant" ? streamMessage : undefined;
-		if (!assistant && state && this.#liveAssistant) {
+		if (!assistant && state && this.#liveAssistant && !this.#messages) {
 			const last = state.messages.at(-1);
 			assistant =
 				last?.role === "assistant" && sameAssistantTurn(this.#liveAssistant, last) ? last : this.#liveAssistant;
 		}
-		if (assistant === this.#liveAssistant) return;
-		this.#liveAssistant = assistant;
-		this.#pane.setLiveAssistant(assistant);
+		if (assistant !== this.#liveAssistant) {
+			this.#liveAssistant = assistant;
+			this.#pane.setLiveAssistant(assistant);
+		}
+		this.#pane.updateToolUpdates(this.#controls?.getToolUpdates() ?? []);
 	}
 
 	#clearLocal(reason: string): void {
@@ -1024,7 +1103,12 @@ export class AgentTranscriptViewer
 		}
 	}
 
-	#submit(trimmed: string, images?: ImageContent[], imageLinks?: (string | undefined)[]): void {
+	#submit(
+		trimmed: string,
+		images?: ImageContent[],
+		imageLinks?: (string | undefined)[],
+		mode: "steer" | "followUp" = "steer",
+	): void {
 		this.#pane.setNotice(undefined);
 		const id = this.#deps.agentId;
 		if (this.#deps.remote) {
@@ -1032,18 +1116,22 @@ export class AgentTranscriptViewer
 			this.#deps.requestRender();
 			return;
 		}
+		const controls = this.#controls;
 		const lifecycle = this.#deps.lifecycle;
-		if (!lifecycle) return;
+		if (!controls && !lifecycle) return;
 		const editor = this.getPasteTarget();
 		void (async () => {
 			// The pane detaches the draft after onSubmit returns, even if revival throws synchronously.
 			await Promise.resolve();
 			try {
-				// Revives a parked agent; returns the live session for running/idle.
-				const session = await lifecycle().ensureLive(id);
-				this.#syncSessionPresentation();
-				// Steers a mid-turn agent; sends a normal prompt to an idle one.
-				await session.prompt(trimmed, { streamingBehavior: "steer", images });
+				if (controls) {
+					await controls.submit(trimmed, images, mode, imageLinks);
+				} else if (lifecycle) {
+					// Legacy hosts keep their original revive-and-steer path.
+					const session = await lifecycle().ensureLive(id);
+					this.#syncSessionPresentation();
+					await session.prompt(trimmed, { streamingBehavior: "steer", images });
+				}
 			} catch (error) {
 				editor?.restoreDetachedDraft(trimmed, images, imageLinks);
 				this.#pane.setNotice(error instanceof Error ? error.message : String(error));
@@ -1209,6 +1297,19 @@ export class AgentTranscriptViewer
 		clearInterval(this.#autoCloseTimer);
 		this.#autoCloseTimer = undefined;
 	}
+	#configureEditor(): void {
+		const editor = this.getPasteTarget();
+		const controls = this.#controls;
+		if (!editor || !controls) return;
+		this.#deps.configureEditor?.(editor);
+		editor.setActionKeys("app.interrupt", getKeybindings().getKeys("app.clear"));
+		editor.onEscape = () => {
+			if (controls.isRunning()) void this.#runTranscriptAction(() => controls.abort());
+			else editor.clearDraft();
+		};
+		editor.composerState = () => ({ running: controls.isRunning() });
+	}
+
 	#syncSessionPresentation(): void {
 		if (this.#disposed) return;
 		const session = this.#deps.registry.get(this.#deps.agentId)?.session ?? null;
@@ -1222,12 +1323,13 @@ export class AgentTranscriptViewer
 		if (sessionChanged) {
 			this.#detachQueue?.();
 			this.#detachQueue = undefined;
-			if (!this.#deps.remote) {
+			if (!this.#deps.remote && !this.#controls) {
 				this.#detachQueue = session?.subscribe?.(event => {
 					if (event.type === "queue_update") this.#updatePendingMessages(session);
 				});
 			}
 			this.#updatePendingMessages(this.#deps.remote ? null : session);
+			this.#configureEditor();
 		}
 		if (sessionChanged && this.#liveAssistant) {
 			this.#pane.setLiveAssistant(undefined);
@@ -1266,6 +1368,21 @@ export class AgentTranscriptViewer
 
 	#updatePendingMessages(session: AgentHubSession | null): void {
 		this.#pendingMessages.disposeChildren();
+		const controls = this.#controls;
+		if (controls) {
+			const groups = controls.getPending().filter(group => group.messages.length > 0);
+			if (groups.length > 0) {
+				this.#pendingMessages.addChild(
+					new QueuedMessagesBand(
+						groups,
+						getKeybindings().getKeys("app.message.dequeue")[0] ?? "alt+up",
+						(group, index) => void this.#editQueuedMessage(groups[group]?.edits[index]),
+					),
+				);
+			}
+			this.#deps.requestRender();
+			return;
+		}
 		const queued = session?.getQueuedMessages?.();
 		if (queued) {
 			const groups = [
@@ -1294,16 +1411,13 @@ export class AgentTranscriptViewer
 		this.#deps.requestRender();
 	}
 
-	async #editQueuedMessage(
-		edit: (() => Promise<{ text: string; images?: ImageContent[] } | undefined>) | undefined,
-	): Promise<void> {
+	async #editQueuedMessage(edit: (() => Promise<PaneRestorableMessage | undefined>) | undefined): Promise<void> {
 		if (!edit) return;
+		const editor = this.getPasteTarget();
 		try {
 			const restored = await edit();
-			if (!restored || this.#disposed) return;
-			const editor = this.getPasteTarget();
-			if (!editor) return;
-			editor.restoreDetachedDraft(restored.text, restored.images);
+			if (!restored || !editor) return;
+			editor.restoreDetachedDraft(restored.text, restored.images, restored.imageLinks);
 		} catch (error) {
 			this.#pane.setNotice(error instanceof Error ? error.message : String(error));
 		}
@@ -1326,6 +1440,7 @@ export class AgentTranscriptViewer
 			if (this.#remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.#hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
+		if (this.#messages) return "No messages yet.";
 		if (this.#localError) return this.#localError;
 		if (this.#localLoading) return "Loading transcript…";
 		if (!this.#deps.registry.get(this.#deps.agentId)?.sessionFile) return "No session file available yet.";

@@ -10,10 +10,13 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { EphemeralConversationCheckpoint } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
+import { replayInterruptedBtwText } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import {
-	EphemeralConversation,
-	type EphemeralConversationCheckpoint,
-} from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
+	disposeTestEphemeralConversations,
+	TestEphemeralConversation as EphemeralConversation,
+} from "./helpers/ephemeral-conversation";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
@@ -39,6 +42,8 @@ interface PendingTurn {
 	args: TurnArgs;
 	resolve: (result: TurnResult) => void;
 	reject: (error: Error) => void;
+	completed: Promise<void>;
+	settled: () => Promise<void>;
 }
 
 const usage: Usage = {
@@ -66,11 +71,6 @@ function answer(text: string): TurnResult {
 	};
 }
 
-async function drain(): Promise<void> {
-	await Promise.resolve();
-	await Promise.resolve();
-}
-
 const cleanups: Array<() => Promise<void>> = [];
 
 beforeAll(async () => {
@@ -78,8 +78,12 @@ beforeAll(async () => {
 });
 
 afterEach(async () => {
-	vi.restoreAllMocks();
-	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	try {
+		for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+	} finally {
+		await disposeTestEphemeralConversations();
+		vi.restoreAllMocks();
+	}
 });
 
 async function records(manager: SessionManager): Promise<readonly BtwHistoryRecord[]> {
@@ -93,9 +97,49 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 	const manager = SessionManager.create(directory, directory);
 	const managers = [manager];
 	const requests: PendingTurn[] = [];
+	const starts: PromiseWithResolvers<PendingTurn>[] = [];
+	const owners = new Map<
+		object,
+		{ started: PromiseWithResolvers<PendingTurn>; completed: PromiseWithResolvers<void> }
+	>();
+	let latestOwner: { started: PromiseWithResolvers<PendingTurn>; completed: PromiseWithResolvers<void> } | undefined;
+	const renderObservers = new Set<() => void>();
+	const requestRender = vi.fn(() => {
+		for (const observe of renderObservers) observe();
+	});
+	function rendered(predicate?: () => boolean): Promise<void> {
+		const ready = Promise.withResolvers<void>();
+		const observe = (): void => {
+			if (predicate && !predicate()) return;
+			renderObservers.delete(observe);
+			ready.resolve();
+		};
+		renderObservers.add(observe);
+		if (predicate) observe();
+		return ready.promise;
+	}
+	function requestStarted(index: number): Promise<PendingTurn> {
+		return (starts[index] ??= Promise.withResolvers<PendingTurn>()).promise;
+	}
 	const runSideTurn = vi.fn((args: TurnArgs) => {
+		const owner = latestOwner;
+		if (!owner) throw new Error("Expected a BTW activity owner before model dispatch");
 		const pending = Promise.withResolvers<TurnResult>();
-		requests.push({ args, resolve: pending.resolve, reject: pending.reject });
+		const request: PendingTurn = {
+			args,
+			resolve: pending.resolve,
+			reject: pending.reject,
+			completed: owner.completed.promise,
+			settled: () =>
+				pending.promise.then(
+					() => undefined,
+					() => undefined,
+				),
+		};
+		const index = requests.length;
+		requests.push(request);
+		(starts[index] ??= Promise.withResolvers<PendingTurn>()).resolve(request);
+		owner.started.resolve(request);
 		return pending.promise;
 	});
 	const createEphemeralConversation = vi.fn(
@@ -127,17 +171,24 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 		model: { api: "anthropic-messages", provider: "anthropic", id: "claude-sonnet-4-5" },
 		isStreaming: false,
 		createEphemeralConversation,
+		runBtwTurn: AgentSession.prototype.runBtwTurn,
 	} as unknown as InteractiveModeContext["session"];
 	const ctx = {
 		ui: {
-			requestRender: vi.fn(),
-			requestComponentRender: vi.fn(),
+			requestRender,
+			requestComponentRender: requestRender,
 			showOverlay: vi.fn(() => ({ hide: vi.fn() })),
 			setFocus: vi.fn(),
 			terminal: { rows: 30 },
 		} as unknown as TUI,
 		btwContainer: new Container(),
-		terminalActivity: { set: vi.fn(), release: vi.fn() },
+		terminalActivity: {
+			set: vi.fn((owner: object) => {
+				latestOwner = { started: Promise.withResolvers<PendingTurn>(), completed: Promise.withResolvers<void>() };
+				owners.set(owner, latestOwner);
+			}),
+			release: vi.fn((owner: object) => owners.get(owner)?.completed.resolve()),
+		},
 		session,
 		settings: Settings.isolated(),
 		keybindings: {
@@ -168,10 +219,11 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 	await manager.ensureOnDisk();
 
 	async function complete(text: string): Promise<void> {
-		const request = requests.at(-1);
-		if (!request) throw new Error("Expected a pending BTW turn");
+		const owner = latestOwner;
+		if (!owner) throw new Error("Expected an accepted BTW activity owner");
+		const request = await owner.started.promise;
 		request.resolve(answer(text));
-		await drain();
+		await request.completed;
 		await controller.flush();
 	}
 
@@ -191,6 +243,8 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 		controller,
 		requests,
 		runSideTurn,
+		requestStarted,
+		rendered,
 		complete,
 		root,
 		dictationTargets,
@@ -199,6 +253,25 @@ async function harness(spaceHoldKeys: readonly KeyId[] = ["space"]) {
 }
 
 describe("BTW follow-up lifecycle", () => {
+	it("replays only unsigned interrupted text without changing stored signed or tool-bearing messages", () => {
+		const plain = answer("partial").assistantMessage;
+		plain.stopReason = "aborted";
+		const signed = answer("signed partial").assistantMessage;
+		signed.stopReason = "aborted";
+		signed.content = [{ type: "text", text: "signed partial", textSignature: "native-signature" }];
+		const tool = answer("tool partial").assistantMessage;
+		tool.stopReason = "aborted";
+		tool.content.push({ type: "toolCall", id: "read-1", name: "read", arguments: { path: "notes.txt" } });
+		const projected = replayInterruptedBtwText([plain, signed, tool]);
+		expect(projected.map(message => (message.role === "assistant" ? message.stopReason : undefined))).toEqual([
+			"stop",
+			"aborted",
+			"aborted",
+		]);
+		expect(plain.stopReason).toBe("aborted");
+		expect(signed.content).toEqual([{ type: "text", text: "signed partial", textSignature: "native-signature" }]);
+	});
+
 	it("keeps a question's images in BTW history and sends them again with every follow-up", async () => {
 		const h = await harness();
 		const screenshot: ImageContent = { type: "image", data: "c2NyZWVuc2hvdA==", mimeType: "image/png" };
@@ -209,7 +282,7 @@ describe("BTW follow-up lifecycle", () => {
 
 		expect(await h.controller.startFollowUp(topic.id, "How do I fix it?")).toBe(true);
 
-		const priorQuestion = h.requests.at(-1)?.args.history?.[0];
+		const priorQuestion = (await h.requestStarted(1)).args.history?.[0];
 		if (priorQuestion?.role !== "user") throw new Error("Expected the historical BTW question");
 		expect(priorQuestion.content).toContainEqual(screenshot);
 	});
@@ -217,6 +290,7 @@ describe("BTW follow-up lifecycle", () => {
 	it("blocks flushing, relocation, branching and disposal after a terminal CAS failure without losing the answer", async () => {
 		const h = await harness();
 		await h.controller.start("Keep the final answer");
+		const request = await h.requestStarted(0);
 		const topic = (await records(h.manager))[0]!;
 		const recordPath = path.join(h.manager.getArtifactsDir()!, "btw-history", `entry-${topic.id}.json`);
 		const originalBytes = await Bun.file(recordPath).text();
@@ -225,7 +299,7 @@ describe("BTW follow-up lifecycle", () => {
 		try {
 			const externalBytes = JSON.stringify({ ...JSON.parse(originalBytes), answer: "External content" });
 			await Bun.write(recordPath, externalBytes);
-			h.requests.at(-1)!.resolve(answer("Unsaved final answer"));
+			request.resolve(answer("Unsaved final answer"));
 			await failed.promise;
 			await expect(h.controller.flush()).rejects.toThrow("BTW history could not be saved");
 			await expect(h.controller.flush()).rejects.toThrow("BTW history could not be saved");
@@ -260,6 +334,7 @@ describe("BTW follow-up lifecycle", () => {
 	it("retries a failed terminal I/O checkpoint after storage recovers before allowing a move", async () => {
 		const h = await harness();
 		await h.controller.start("Survive a storage error");
+		const request = await h.requestStarted(0);
 		const failed = Promise.withResolvers<void>();
 		const writeFileAtomically = atomicFile.writeFileAtomically;
 		const storageError = new Error(
@@ -275,7 +350,7 @@ describe("BTW follow-up lifecycle", () => {
 			return writeFileAtomically(file, content, mode);
 		});
 		try {
-			h.requests.at(-1)!.resolve(answer("Retained answer"));
+			request.resolve(answer("Retained answer"));
 			await failed.promise;
 			const failure = await h.controller.flush().then(
 				() => undefined,
@@ -311,9 +386,10 @@ describe("BTW follow-up lifecycle", () => {
 	it("renders safe provider errors inline and from durable history while preserving raw diagnostics", async () => {
 		const h = await harness();
 		await h.controller.start("Provider failure");
+		const request = await h.requestStarted(0);
 		const error = new Error(`\x1b[2JEACCES: open '${os.homedir()}/private/file'\r\n\t${"detail ".repeat(100)}`);
-		h.requests.at(-1)!.reject(error);
-		await drain();
+		request.reject(error);
+		await request.completed;
 		await h.controller.flush();
 
 		const inline = h.ctx.btwContainer.render(160).join("\n");
@@ -369,7 +445,7 @@ describe("BTW follow-up lifecycle", () => {
 		panel.handleInput("\r");
 		if (!accepted) throw new Error("Expected follow-up submission");
 		expect(await accepted).toBe(true);
-		expect(JSON.stringify(h.requests.at(-1)?.args.history)).toContain("Other process answer");
+		expect(JSON.stringify((await h.requestStarted(1)).args.history)).toContain("Other process answer");
 		await h.complete("Retried answer");
 	});
 
@@ -377,23 +453,25 @@ describe("BTW follow-up lifecycle", () => {
 		const h = await harness();
 		const topic = await h.root("Original question", "Useful original answer");
 		expect(await h.controller.startFollowUp(topic.id, "Fail without output")).toBe(true);
-		h.requests.at(-1)!.reject(new Error("Provider unavailable"));
-		await drain();
+		const request = await h.requestStarted(1);
+		request.reject(new Error("Provider unavailable"));
+		await request.completed;
 		await h.controller.flush();
 		const overlay = vi.spyOn(h.ctx.ui, "showOverlay");
-		const copy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const copied = Promise.withResolvers<void>();
+		const copy = vi.spyOn(clipboard, "copyToClipboard").mockImplementation(async () => copied.resolve());
 		await h.controller.start("");
 		const panel = overlay.mock.calls.at(-1)?.[0];
 		if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW history");
 		panel.handleInput("c");
-		await drain();
+		await copied.promise;
 		expect(copy).toHaveBeenCalledWith("Useful original answer");
 	});
 
 	it("refuses a busy move without cancellation and clears BTW only after successful relocation", async () => {
 		const h = await harness();
 		await h.controller.start("Keep working");
-		const running = h.requests.at(-1)!;
+		const running = await h.requestStarted(0);
 		const refused = vi.fn(async () => true);
 		expect(await h.controller.withSessionMove(refused)).toBe(false);
 		expect(refused).not.toHaveBeenCalled();
@@ -420,6 +498,7 @@ describe("BTW follow-up lifecycle", () => {
 	it("refuses relocation on a stalled write without executing it later after timeout", async () => {
 		const h = await harness();
 		await h.controller.start("Save before moving");
+		const request = await h.requestStarted(0);
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const writeFileAtomically = atomicFile.writeFileAtomically;
@@ -435,7 +514,7 @@ describe("BTW follow-up lifecycle", () => {
 		const flush = h.controller.flush.bind(h.controller);
 		vi.spyOn(h.controller, "flush").mockImplementation(() => flush(25));
 		try {
-			h.requests.at(-1)!.resolve(answer("Unsaved until the gate opens"));
+			request.resolve(answer("Unsaved until the gate opens"));
 			await entered.promise;
 			const operation = vi.fn(async () => true);
 			expect(await h.controller.withSessionMove(operation)).toBe(false);
@@ -455,8 +534,11 @@ describe("BTW follow-up lifecycle", () => {
 		const h = await harness();
 		const overlay = vi.spyOn(h.ctx.ui, "showOverlay");
 		await h.controller.start("Cancelable question");
-		const running = h.requests.at(-1)!;
+		const running = await h.requestStarted(0);
 		running.args.onTextDelta?.("Retained partial answer");
+		await h.rendered(() =>
+			Bun.stripANSI(h.ctx.btwContainer.render(100).join("\n")).includes("Retained partial answer"),
+		);
 		await h.controller.start("");
 		const panel = overlay.mock.calls.at(-1)?.[0];
 		if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW history");
@@ -469,6 +551,7 @@ describe("BTW follow-up lifecycle", () => {
 		expect(running.args.signal?.aborted).toBe(true);
 		expect(handle.hide).not.toHaveBeenCalled();
 		expect(Bun.stripANSI(panel.render(100).join("\n"))).toContain("Retained partial answer");
+		await running.completed;
 		await h.controller.flush();
 		expect((await records(h.manager))[0]).toMatchObject({
 			answer: "Retained partial answer",
@@ -477,7 +560,7 @@ describe("BTW follow-up lifecycle", () => {
 		panel.handleInput("\x1b");
 		expect(handle.hide).toHaveBeenCalledTimes(1);
 		running.resolve(answer("Late final answer"));
-		await drain();
+		await running.settled();
 		await h.controller.flush();
 		expect((await records(h.manager))[0]?.answer).toBe("Retained partial answer");
 	});
@@ -494,8 +577,10 @@ describe("BTW follow-up lifecycle", () => {
 		expect(panel.openFollowUp(completedTopic.id)).toBe(true);
 		panel.handleInput("\x1b");
 		expect(await h.controller.startFollowUp(activeTopic.id, "Keep this visible")).toBe(true);
-		const running = h.requests.at(-1)!;
+		const running = await h.requestStarted(2);
+		const partialRendered = h.rendered();
 		running.args.onTextDelta?.("Visible partial follow-up");
+		await partialRendered;
 
 		panel.handleInput("\x1b");
 		expect(running.args.signal?.aborted).toBe(false);
@@ -505,7 +590,8 @@ describe("BTW follow-up lifecycle", () => {
 		expect(running.args.signal?.aborted).toBe(true);
 		expect(h.controller.hasActiveRequest()).toBe(true);
 		running.resolve(answer("Ignored late answer"));
-		await drain();
+		await running.settled();
+		await running.completed;
 		await h.controller.flush();
 		expect((await records(h.manager)).find(record => record.id === activeTopic.id)?.followUps?.[0]).toMatchObject({
 			answer: "Visible partial follow-up",
@@ -576,14 +662,14 @@ describe("BTW follow-up lifecycle", () => {
 				}
 
 				// A fresh composer must not inherit cancellation or a stranded topic lease.
-				await drain();
 				settled = Promise.withResolvers<boolean>();
 				expect(panel.openFollowUp(topic.id)).toBe(true);
 				panel.pasteText("Accepted follow-up");
 				panel.handleInput("\r");
 				expect(await settled.promise).toBe(true);
+				const running = await h.requestStarted(1);
 				expect(h.runSideTurn).toHaveBeenCalledTimes(2);
-				expect(h.requests.at(-1)!.args.signal?.aborted).toBe(false);
+				expect(running.args.signal?.aborted).toBe(false);
 				await h.complete("Accepted answer");
 				expect((await records(h.manager))[0]!.followUps?.at(-1)).toMatchObject({
 					question: "Accepted follow-up",
@@ -644,8 +730,8 @@ describe("BTW follow-up lifecycle", () => {
 		panel.pasteText("Continue this topic");
 		panel.handleInput("\r");
 		expect(await started.promise).toBe(true);
+		const request = (await h.requestStarted(2)).args;
 		expect(h.runSideTurn).toHaveBeenCalledTimes(3);
-		const request = h.requests.at(-1)!.args;
 		expect(JSON.stringify(request.history)).toContain("Current answer");
 		expect(JSON.stringify(request.history)).not.toContain("Earlier answer");
 		await h.complete("Continued answer");
@@ -685,7 +771,7 @@ describe("BTW follow-up lifecycle", () => {
 		});
 		panel.handleInput("\r");
 		expect(await started.promise).toBe(true);
-		expect(h.requests.at(-1)!.args.promptText).toContain("Spoken follow-up");
+		expect((await h.requestStarted(1)).args.promptText).toContain("Spoken follow-up");
 	});
 
 	it("keeps repeated input as text in the BTW composer when PTT has no bindings", async () => {
@@ -726,17 +812,25 @@ describe("BTW follow-up lifecycle", () => {
 		expect(h.requests.at(-1)!.args.conversationKey).not.toBe(originalConversationKey);
 
 		expect(await h.controller.startFollowUp(root.id, "First follow-up question")).toBe(true);
-		expect(h.requests.at(-1)!.args.conversationKey).toBe(originalConversationKey);
+		expect((await h.requestStarted(2)).args.conversationKey).toBe(originalConversationKey);
 		await h.complete("First follow-up answer");
 		expect(await h.controller.startFollowUp(root.id, "Cancelled follow-up question")).toBe(true);
-		const cancelled = h.requests.at(-1)!;
+		const cancelled = await h.requestStarted(3);
 		cancelled.args.onTextDelta?.("Cancelled partial answer");
+		await h.rendered(() =>
+			Bun.stripANSI(h.ctx.btwContainer.render(100).join("\n")).includes("Cancelled partial answer"),
+		);
 		expect(h.controller.handleCancel()).toBe(true);
 		expect(cancelled.args.signal?.aborted).toBe(true);
 		cancelled.resolve(answer("Ignored cancellation result"));
-		await drain();
+		await cancelled.settled();
+		await cancelled.completed;
 		await h.controller.flush();
 		const beforeReopen = (await records(h.manager)).find(item => item.id === root.id)!;
+		const nativeStore = await BtwHistoryStore.open(h.manager.getArtifactsDir()!);
+		const native = await nativeStore.readConversation(root.id);
+		expect(native?.trailingMessages?.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+		await nativeStore.close();
 		expect(getBtwTurns(beforeReopen).map(turn => [turn.question, turn.answer, turn.status])).toEqual([
 			["Selected root question", "Selected root answer", "complete"],
 			["First follow-up question", "First follow-up answer", "complete"],
@@ -748,7 +842,7 @@ describe("BTW follow-up lifecycle", () => {
 		h.managers.push(reopened);
 		h.ctx.sessionManager = reopened;
 		expect(await h.controller.startFollowUp(root.id, "Continue after cancellation")).toBe(true);
-		const request = h.requests.at(-1)!.args;
+		const request = (await h.requestStarted(4)).args;
 		expect(request.conversationKey).not.toBe(originalConversationKey);
 		expect(request.history?.map(message => message.role)).toEqual([
 			"user",
@@ -795,10 +889,69 @@ describe("BTW follow-up lifecycle", () => {
 		expect(JSON.stringify(reopened.buildSessionContext())).toBe(context);
 	});
 
+	it("replays edited history text without stale native payloads while retaining untouched native turns", async () => {
+		const h = await harness();
+		await h.controller.start("Original question");
+		const first = await h.requestStarted(0);
+		const original = answer("Original answer");
+		original.assistantMessage.content.unshift({
+			type: "thinking",
+			thinking: "first reasoning",
+			thinkingSignature: "first-signature",
+		});
+		original.assistantMessage.providerPayload = {
+			type: "openaiResponsesHistory",
+			provider: "openai-codex",
+			dt: true,
+			items: [{ type: "reasoning", encrypted_content: "first-native-payload" }],
+		};
+		first.resolve(original);
+		await first.completed;
+		await h.controller.flush();
+		const topic = (await records(h.manager))[0]!;
+		expect(await h.controller.startFollowUp(topic.id, "Second question")).toBe(true);
+		const second = await h.requestStarted(1);
+		expect(JSON.stringify(second.args.history)).toContain("first-signature");
+		const untouched = answer("Untouched answer");
+		untouched.assistantMessage.content.unshift({
+			type: "thinking",
+			thinking: "second reasoning",
+			thinkingSignature: "second-signature",
+		});
+		untouched.assistantMessage.providerPayload = {
+			type: "openaiResponsesHistory",
+			provider: "openai-codex",
+			dt: true,
+			items: [{ type: "reasoning", encrypted_content: "second-native-payload" }],
+		};
+		second.resolve(untouched);
+		await second.completed;
+		await h.controller.flush();
+		await h.controller.dispose();
+		const external = await BtwHistoryStore.open(h.manager.getArtifactsDir()!);
+		const saved = external.getRecords()[0]!;
+		await external.upsert({ ...saved, answer: "Operator-edited answer" });
+		await external.close();
+		const reopened = await SessionManager.open(h.manager.getSessionFile()!);
+		h.managers.push(reopened);
+		h.ctx.sessionManager = reopened;
+		expect(await h.controller.startFollowUp(topic.id, "After edit")).toBe(true);
+		const continued = await h.requestStarted(2);
+		const context = JSON.stringify(continued.args.history);
+		expect(context).toContain("Operator-edited answer");
+		expect(context).not.toContain("Original answer");
+		expect(context).not.toContain("first-signature");
+		expect(context).not.toContain("first-native-payload");
+		expect(context).toContain("second-signature");
+		expect(context).toContain("second-native-payload");
+		await h.complete("Continued answer");
+	});
+
 	it("keeps earlier answers after a streamed follow-up errors and copies the latest completed answer", async () => {
 		const h = await harness();
 		const root = await h.root("Original question", "Original answer");
 		expect(await h.controller.startFollowUp(root.id, "Successful continuation")).toBe(true);
+		const completed = await h.requestStarted(1);
 		const result = answer("Latest complete answer");
 		result.assistantMessage.providerPayload = {
 			type: "openaiResponsesHistory",
@@ -806,22 +959,26 @@ describe("BTW follow-up lifecycle", () => {
 			dt: true,
 			items: [{ type: "reasoning", encrypted_content: "private-provider-payload" }],
 		};
-		h.requests.at(-1)!.resolve(result);
-		await drain();
+		completed.resolve(result);
+		await completed.completed;
 		await h.controller.flush();
-		const copy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const copied = Promise.withResolvers<void>();
+		const copy = vi.spyOn(clipboard, "copyToClipboard").mockImplementation(async () => copied.resolve());
 		const overlay = vi.spyOn(h.ctx.ui, "showOverlay");
 		await h.controller.start("");
 		const panel = overlay.mock.calls.at(-1)?.[0];
 		if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW history panel");
 		panel.handleInput("c");
-		await drain();
+		await copied.promise;
 		expect(copy).toHaveBeenCalledWith("Latest complete answer");
 
 		expect(await h.controller.startFollowUp(root.id, "Failing continuation")).toBe(true);
-		h.requests.at(-1)!.args.onTextDelta?.("Partial failing answer");
-		h.requests.at(-1)!.reject(new Error("Provider disconnected"));
-		await drain();
+		const failed = await h.requestStarted(2);
+		const partialRendered = h.rendered();
+		failed.args.onTextDelta?.("Partial failing answer");
+		await partialRendered;
+		failed.reject(new Error("Provider disconnected"));
+		await failed.completed;
 		await h.controller.flush();
 		const saved = (await records(h.manager))[0]!;
 		expect(getBtwTurns(saved).map(turn => [turn.answer, turn.status, turn.error])).toEqual([
@@ -853,8 +1010,9 @@ describe("BTW follow-up lifecycle", () => {
 		expect(await starting).toBe(true);
 		await h.controller.start("Overlapping new root");
 		expect(await h.controller.startFollowUp(root.id, "Overlapping running turn")).toBe(false);
+		const running = await h.requestStarted(1);
 		expect(h.runSideTurn).toHaveBeenCalledTimes(2);
-		expect(h.requests.at(-1)!.args.signal?.aborted).toBe(false);
+		expect(running.args.signal?.aborted).toBe(false);
 		await h.complete("Accepted answer");
 		const saved = await records(h.manager);
 		expect(saved).toHaveLength(1);
@@ -865,14 +1023,16 @@ describe("BTW follow-up lifecycle", () => {
 		const h = await harness();
 		const root = await h.root("Topic", "Original answer");
 		expect(await h.controller.startFollowUp(root.id, "Cancelled request")).toBe(true);
-		const cancelled = h.requests.at(-1)!;
+		const cancelled = await h.requestStarted(1);
 		cancelled.args.onTextDelta?.("Partial answer");
+		await h.rendered(() => Bun.stripANSI(h.ctx.btwContainer.render(100).join("\n")).includes("Partial answer"));
 		expect(h.controller.handleCancel()).toBe(true);
 		expect(await h.controller.startFollowUp(root.id, "New request")).toBe(true);
-		const current = h.requests.at(-1)!;
+		const current = await h.requestStarted(2);
 		expect(current.args.conversationKey).not.toBe(cancelled.args.conversationKey);
 		cancelled.args.onTextDelta?.("Stale output");
 		cancelled.resolve(answer("Stale final answer"));
+		await cancelled.settled();
 		await h.complete("Current answer");
 		const saved = (await records(h.manager))[0]!;
 		expect(getBtwTurns(saved).map(turn => [turn.answer, turn.status])).toEqual([
@@ -881,7 +1041,7 @@ describe("BTW follow-up lifecycle", () => {
 			["Current answer", "complete"],
 		]);
 		expect(await h.controller.startFollowUp(root.id, "Continue successfully")).toBe(true);
-		expect(h.requests.at(-1)!.args.conversationKey).toBe(current.args.conversationKey);
+		expect((await h.requestStarted(3)).args.conversationKey).toBe(current.args.conversationKey);
 		await h.complete("Continued answer");
 	});
 
@@ -889,8 +1049,9 @@ describe("BTW follow-up lifecycle", () => {
 		const h = await harness();
 		const oldRoot = await h.root("Old root", "Old answer");
 		expect(await h.controller.startFollowUp(oldRoot.id, "Old follow-up")).toBe(true);
-		const oldRequest = h.requests.at(-1)!;
+		const oldRequest = await h.requestStarted(1);
 		oldRequest.args.onTextDelta?.("Old partial answer");
+		await h.rendered(() => Bun.stripANSI(h.ctx.btwContainer.render(100).join("\n")).includes("Old partial answer"));
 		await h.controller.dispose();
 		expect(oldRequest.args.signal?.aborted).toBe(true);
 
@@ -899,9 +1060,10 @@ describe("BTW follow-up lifecycle", () => {
 		h.ctx.sessionManager = next;
 		const newRoot = await h.root("New root", "New answer");
 		expect(await h.controller.startFollowUp(newRoot.id, "New follow-up")).toBe(true);
+		await h.requestStarted(3);
 		oldRequest.args.onTextDelta?.("Leaked late delta");
 		oldRequest.resolve(answer("Leaked late result"));
-		await drain();
+		await oldRequest.settled();
 		await h.complete("New follow-up answer");
 		await h.controller.dispose();
 		const oldSaved = (await records(h.manager))[0]!;
@@ -984,7 +1146,7 @@ describe("BTW follow-up composer", () => {
 		expect(followUp).not.toHaveBeenCalled();
 		h.panel.pasteText("A follow-up");
 		h.panel.handleInput("\r");
-		await drain();
+		await followUp.mock.results[0]!.value;
 		expect(followUp).toHaveBeenCalledTimes(1);
 	});
 
@@ -1067,11 +1229,11 @@ describe("BTW follow-up composer", () => {
 		h.panel.handleInput("\r");
 		expect(followUp).toHaveBeenCalledTimes(1);
 		pending.resolve(false);
-		await drain();
+		await pending.promise;
 		expect(Bun.stripANSI(h.panel.render(100).join("\n"))).toContain("fcx");
 		followUp.mockResolvedValue(true);
 		h.panel.handleInput("\r");
-		await drain();
+		await followUp.mock.results[1]!.value;
 		h.panel.render(100);
 		expect(followUp).toHaveBeenCalledTimes(2);
 		h.panel.handleInput("c");

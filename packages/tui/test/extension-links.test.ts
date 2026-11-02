@@ -273,18 +273,22 @@ describe("extension link hints", () => {
 		return composer;
 	}
 
-	it("tags each label once, a wrapped one at its first row, and the typed tag picks that label", () => {
+	it.each(["classic", "app-viewport"] as const)("%s tags wrapped labels once and selects the typed tag", backend => {
 		setExtensionLinks(["demo"]);
 		const block = new StaticBlock(
 			render("Some words [the much longer link label](demo:open/8) and [again](demo:open/8) end", 30),
 		);
 		const composer = composerShowing(block);
+		const renderViewport = () =>
+			backend === "app-viewport"
+				? composer.renderAppViewportFrame(SIZE, []).viewport
+				: composer.renderFrame(SIZE).viewport;
 		try {
-			const before = composer.renderFrame(SIZE).viewport.map(plain);
+			const before = renderViewport().map(plain);
 			expect(composer.viewportLinkCount()).toBe(2);
 			let ended = 0;
 			composer.startLinkHints(() => ended++);
-			const painted = composer.renderFrame(SIZE).viewport;
+			const painted = renderViewport();
 			const first = before.findIndex(line => line.includes("the much"));
 			const second = before.findIndex(line => line.includes("again"));
 			expect(second).toBe(first + 1);
@@ -301,7 +305,7 @@ describe("extension link hints", () => {
 			});
 			expect(ended).toBe(1);
 			expect(composer.linkHintsActive).toBe(false);
-			expect(composer.renderFrame(SIZE).viewport.map(plain)).toEqual(before);
+			expect(renderViewport().map(plain)).toEqual(before);
 		} finally {
 			composer.stop();
 		}

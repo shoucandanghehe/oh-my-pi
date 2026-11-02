@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
 	MediaContent,
@@ -1003,6 +1004,15 @@ export class SessionManager {
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
+	readonly #entryObservers = new Set<(entry: SessionEntry) => void>();
+
+	/** Queue observations of committed entries without re-entering an append. */
+	subscribeToEntries(observer: (entry: SessionEntry) => void): () => void {
+		this.#entryObservers.add(observer);
+		return () => {
+			this.#entryObservers.delete(observer);
+		};
+	}
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -2058,14 +2068,23 @@ export class SessionManager {
 	}
 
 	#notifyEntryAppended(entry: SessionEntry): void {
-		const callback = this.onEntryAppended;
-		if (callback) {
-			try {
-				callback(entry);
-			} catch (err) {
-				logger.warn("collab entry hook failed", { error: String(err) });
-			}
+		try {
+			this.onEntryAppended?.(entry);
+		} catch (err) {
+			logger.warn("session entry hook failed", { error: String(err) });
 		}
+		const observers = [...this.#entryObservers];
+		if (observers.length)
+			queueMicrotask(() => {
+				for (const observer of observers) {
+					if (!this.#entryObservers.has(observer)) continue;
+					try {
+						observer(entry);
+					} catch (err) {
+						logger.warn("session entry hook failed", { error: String(err) });
+					}
+				}
+			});
 	}
 
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
@@ -2325,6 +2344,8 @@ export class SessionManager {
 		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
 		clone.restoreState(this.captureState());
+		clone.#inMemoryArtifacts = this.#inMemoryArtifacts ? new Map(this.#inMemoryArtifacts) : null;
+		clone.#inMemoryArtifactCounter = this.#inMemoryArtifactCounter;
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#expectedDiskSize = null;
@@ -3094,6 +3115,7 @@ export class SessionManager {
 		this.#entries = [];
 		this.#index.clear();
 		this.#inMemoryArtifacts = null;
+		this.#entryObservers.clear();
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
 	}
@@ -3605,6 +3627,18 @@ export class SessionManager {
 			| PythonExecutionMessage
 			| FileMentionMessage,
 	): string {
+		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/**
+	 * Import one message from an already-materialized, frozen context.
+	 * Derived summaries retain their provider payload and replay metadata as
+	 * messages; they must not enact a new compaction/branch operation here.
+	 * Live turns use appendMessage/appendCompaction instead.
+	 */
+	appendMaterializedContextMessage(message: AgentMessage): string {
 		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
 		this.#recordEntry(entry);
 		return entry.id;

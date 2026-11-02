@@ -15,8 +15,9 @@ import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import { ExtensionRuntime } from "../../src/extensibility/extensions/loader";
+import { ExtensionRuntime, loadExtensionFromFactory } from "../../src/extensibility/extensions/loader";
 import { ExtensionRunner } from "../../src/extensibility/extensions/runner";
+import type { ExtensionFactory } from "../../src/extensibility/extensions/types";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentSession } from "../../src/session/agent-session";
 import { convertToLlm } from "../../src/session/messages";
@@ -29,6 +30,7 @@ import { agentsThreadService } from "../../src/thread/services/agents";
 import { authService } from "../../src/thread/services/auth";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { getApprovalGrants } from "../../src/tools/approval-cache";
+import { EventBus } from "../../src/utils/event-bus";
 
 /** What the worker-side session reports about itself. */
 export interface FocusSessionReport {
@@ -38,6 +40,7 @@ export interface FocusSessionReport {
 	customEntries: Array<{ customType: string; data: unknown }>;
 	userTexts: string[];
 	todoPhases: TodoPhase[];
+	sideRequests: Array<{ context: Context; sessionId: string | undefined }>;
 }
 
 /** Operations the test drives on the worker. */
@@ -67,6 +70,7 @@ if (!port) throw new Error("fixture must run in a worker");
 
 const sessions = new Map<string, AgentSession>();
 let gate = Promise.withResolvers<void>();
+const sideRequests = new Map<string, FocusSessionReport["sideRequests"]>();
 
 function zeroUsage(): AssistantMessage["usage"] {
 	return {
@@ -80,10 +84,23 @@ function zeroUsage(): AssistantMessage["usage"] {
 }
 
 /** A turn whose newest user message says `[hold]` streams "Hel", holds for the gate, then "lo"; others answer "ok". */
-function heldStream(model: Model<Api>, context: Context, _options?: SimpleStreamOptions): AssistantMessageEventStream {
+function heldStream(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	const lastUser = context.messages.findLast(message => message.role === "user");
 	const hold = textOf(lastUser?.content).includes("[hold]");
+	if (textOf(lastUser?.content).includes("[live]")) {
+		const live = options?.liveSteering;
+		const signal = options?.signal;
+		if (!live || !signal) throw new Error("live steering was not offered");
+		signal.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
+		void (async () => {
+			await live.wait(signal);
+			await live.claim(signal);
+		})().catch(error => {
+			if (!signal.aborted) stream.fail(error);
+		});
+		return stream;
+	}
 	void (async () => {
 		const text: TextContent = { type: "text", text: "" };
 		const partial: AssistantMessage = {
@@ -96,6 +113,13 @@ function heldStream(model: Model<Api>, context: Context, _options?: SimpleStream
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
+		if (textOf(lastUser?.content).includes("BTW original")) {
+			partial.content.push({
+				type: "thinking",
+				thinking: "native side reasoning",
+				thinkingSignature: "side-signature",
+			});
+		}
 		stream.push({ type: "start", partial });
 		partial.content.push(text);
 		stream.push({ type: "text_start", contentIndex: 0, partial });
@@ -143,13 +167,29 @@ const probe: FocusProbe = {
 			streamFn: heldStream,
 		});
 		const sessionManager = SessionManager.inMemory();
+		const runtime = new ExtensionRuntime();
+		const factory: ExtensionFactory = api => {
+			api.on("input", event =>
+				event.text.startsWith("[pane-input]")
+					? { text: `${id}: ${event.text.slice("[pane-input]".length).trim()}` }
+					: undefined,
+			);
+		};
+		const extension = await loadExtensionFromFactory(factory, process.cwd(), new EventBus(), runtime);
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated(overrides),
 			modelRegistry: registry,
-			extensionRunner: new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), sessionManager, registry),
+			extensionRunner: new ExtensionRunner([extension], runtime, process.cwd(), sessionManager, registry),
+			preparedExtensions: [{ path: extension.path, resolvedPath: extension.resolvedPath, factory, error: null }],
 			agentId: id,
+			sideStreamFn: (model, context, options) => {
+				const requests = sideRequests.get(id) ?? [];
+				requests.push({ context: structuredClone(context), sessionId: options?.sessionId });
+				sideRequests.set(id, requests);
+				return heldStream(model, context, options);
+			},
 		});
 		sessions.set(id, session);
 		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session, sessionFile: null, status: "idle" });
@@ -174,6 +214,7 @@ const probe: FocusProbe = {
 				.flatMap(entry => (entry.type === "custom" ? [{ customType: entry.customType, data: entry.data }] : [])),
 			userTexts: session.messages.flatMap(message => (message.role === "user" ? [textOf(message.content)] : [])),
 			todoPhases: session.getTodoPhases(),
+			sideRequests: sideRequests.get(id) ?? [],
 		};
 	},
 	dropFollowUps: async id => {

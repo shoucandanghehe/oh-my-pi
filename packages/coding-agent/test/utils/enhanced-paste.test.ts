@@ -340,6 +340,52 @@ describe("EnhancedPasteController", () => {
 		expect(editor.getText()).toBe("image abc");
 	});
 
+	it("keeps queued image responses with each notification's captured editor after focus changes", async () => {
+		const first = new CustomEditor(defaultEditorTheme);
+		const second = new CustomEditor(defaultEditorTheme);
+		let focused = first;
+		const completions = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+		let nextCompletion = 0;
+		const controller = new EnhancedPasteController({
+			write: () => {},
+			beginPaste: () => {
+				const target = focused;
+				const finish = target.beginPaste();
+				const completion = completions[nextCompletion++]!;
+				return {
+					finish: text => {
+						const accepted = finish(text);
+						completion.resolve();
+						return accepted;
+					},
+					pasteImage: image => target.pasteText(Buffer.from(image.data, "base64").toString()),
+				};
+			},
+			pasteText: text => focused.pasteText(text),
+			pasteImage: image => focused.pasteText(Buffer.from(image.data, "base64").toString()),
+			showStatus: () => {},
+		});
+		const mime = Buffer.from("image/png").toString("base64");
+		for (const target of [first, second]) {
+			focused = target;
+			controller.handleInput(packet("type=read:status=OK"));
+			controller.handleInput(packet(`type=read:status=DATA:mime=${mime}`));
+			controller.handleInput(packet("type=read:status=DONE"));
+		}
+		first.handleInput(" first tail");
+		second.handleInput(" second tail");
+		controller.handleInput(readReply(`type=read:status=DATA:mime=${mime}`, Buffer.from("one").toString("base64")));
+		controller.handleInput(readReply("type=read:status=DONE"));
+		await completions[0]!.promise;
+		focused = first;
+		controller.handleInput(readReply(`type=read:status=DATA:mime=${mime}`, Buffer.from("two").toString("base64"), 2));
+		controller.handleInput(readReply("type=read:status=DONE", undefined, 2));
+		await completions[1]!.promise;
+
+		expect(first.getText()).toBe("one first tail");
+		expect(second.getText()).toBe("two second tail");
+	});
+
 	it("releases later keys when disabled with an active read, queued paste and unfinished notification", () => {
 		const editor = new CustomEditor(defaultEditorTheme);
 		const controller = new EnhancedPasteController({

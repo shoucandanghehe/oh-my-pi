@@ -6,13 +6,18 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
-	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
+	type EphemeralConversationSideOptions,
 	type EphemeralTurnResult,
 } from "@oh-my-pi/pi-coding-agent/session/ephemeral-conversation";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { Container, Loader } from "@oh-my-pi/pi-tui";
 import { createAssistantMessage } from "../../helpers/agent-session-setup";
+import {
+	TestEphemeralConversation as EphemeralConversation,
+	disposeTestEphemeralConversations,
+} from "../../helpers/ephemeral-conversation";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -67,11 +72,18 @@ function createContext(options: LoaderRecoveryContextOptions = {}) {
 			},
 			getToolByName: () => undefined,
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
-			createEphemeralConversation: (_instructions: string, checkpoint?: EphemeralConversationCheckpoint) =>
+			createEphemeralConversation: (
+				_instructions: string,
+				checkpoint?: EphemeralConversationCheckpoint,
+				_model?: Model,
+				sideOptions?: EphemeralConversationSideOptions,
+			) =>
 				new EphemeralConversation({
 					snapshotBaseMessages: () => [],
 					sideSessionId: "side-activity",
 					checkpoint,
+					sessionManager: sideOptions?.sessionManager,
+					onSessionClosed: sideOptions?.onSessionClosed,
 					runTurn: options.runSideTurn ?? (() => Promise.withResolvers<never>().promise),
 				}),
 		},
@@ -156,9 +168,10 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		vi.useFakeTimers();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		setSystemTime();
 		vi.useRealTimers();
+		await disposeTestEphemeralConversations();
 		vi.restoreAllMocks();
 		resetSettingsForTest();
 	});
@@ -389,6 +402,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 	});
 
 	it("keeps terminal progress and title active when the main turn ends while /btw is still running", async () => {
+		vi.useRealTimers();
 		const sideRequest = Promise.withResolvers<never>();
 		const { ctx, streamState, setProgress, setTitleState } = createContext({
 			terminalProgress: true,
@@ -411,17 +425,27 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working", "idle"]);
 	});
 	it("keeps terminal activity when /btw finishes during a scheduled main continuation", async () => {
+		vi.useRealTimers();
 		const sideRequest = Promise.withResolvers<EphemeralTurnResult>();
 		const { ctx, streamState, setProgress, setTitleState } = createContext({
 			terminalProgress: true,
 			runSideTurn: () => sideRequest.promise,
 		});
 		const eventController = new EventController(ctx);
+		const sideSettled = Promise.withResolvers<void>();
+		const setActivity = vi.spyOn(ctx.terminalActivity, "set");
 		const btwController = new BtwController(ctx);
 
 		streamState.isStreaming = true;
 		await eventController.handleEvent(AGENT_START);
 		await btwController.start("Will the main turn keep working?");
+		const sideOwner = setActivity.mock.calls.at(-1)?.[0];
+		expect(sideOwner).toBeDefined();
+		const releaseActivity = ctx.terminalActivity.release.bind(ctx.terminalActivity);
+		vi.spyOn(ctx.terminalActivity, "release").mockImplementation(owner => {
+			releaseActivity(owner);
+			if (owner === sideOwner) sideSettled.resolve();
+		});
 
 		streamState.isStreaming = false;
 		const continuation = Promise.withResolvers<void>();
@@ -431,7 +455,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 			replyText: "Yes",
 			assistantMessage: createAssistantMessage("Yes"),
 		});
-		for (let i = 0; i < 10; i++) await Promise.resolve();
+		await sideSettled.promise;
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true]);
 		expect(setTitleState.mock.calls.map(call => call[0])).toEqual(["working"]);
 

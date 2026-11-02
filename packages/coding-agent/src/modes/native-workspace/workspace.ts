@@ -107,12 +107,17 @@ export class NativeWorkspace {
 			const ui = new TUI(terminal, undefined, { debugServer: false });
 			const component = create(ui, () => this.close(key));
 			entry.view = { ui, component };
-			const focused: Component = preserveFocus
+			const focused: Component & { getPasteTarget?: () => unknown } = preserveFocus
 				? {
 						render: width => component.render(width),
 						describe: () => node("col", { grow: 1 }, [component]),
 						describeSurface: cx => component.describeSurface?.(cx) ?? { main: [component], dock: [] },
 						handleInput: data => component.handleInput?.(data),
+						getPasteTarget: () => {
+							if ("getPasteTarget" in component && typeof component.getPasteTarget === "function")
+								return component.getPasteTarget();
+							return undefined;
+						},
 					}
 				: component;
 			ui.addChild(focused);

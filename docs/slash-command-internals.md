@@ -317,8 +317,8 @@ The interrupt key (Esc by default), Enter, Space, or Ctrl+C resumes; Ctrl+C does
 
 In the Main workspace, `/btw <question>` creates an independent, durable side
 thread and displays its first reply inline. The thread's Main snapshot is frozen
-and saved in its sidecar before the first model request. Later Main messages do
-not enter an existing BTW thread automatically.
+and saved in its own standard session journal before the first model request.
+Later Main messages do not enter an existing BTW thread automatically.
 
 In the app-viewport workspace, `Enter` opens the same inline thread in the BTW pane,
 even while its reply is running. Opening the pane does not recreate the conversation,
@@ -333,14 +333,23 @@ subagent's `/btw` uses its own scoped history rather than the Main workspace.
 - `c` copies a completed nonempty inline answer. `b` promotes its completed thread
   into Main when the originating session and frozen anchor remain valid and Main
   is idle.
-- In the workspace, type a follow-up into the selected thread's composer. Different
-  threads may run concurrently; a running thread rejects another submission without
-  discarding the draft.
+- In the workspace, `Enter` steers the selected thread while it runs. `/queue`
+  and the normal follow-up shortcuts queue messages for that thread; dequeue
+  restores them to its composer. Different threads may run concurrently.
+- `/stop`, the composer Stop button, or `Ctrl+C` stops the selected thread's run
+  without deleting the thread or clearing its draft. `/retry` retries its failed turn.
+- `/compact [mode] [focus]` compacts the selected thread. `/queue /compact`
+  waits for its current run to finish; input after that request waits for compaction.
+- `/tree` navigates the selected thread's history. `/clear` is not available in
+  BTW; use `/new` to start another thread.
 - `/new [question]` creates a new thread. `/handoff [direction]` sends its visible
   context to Main as a follow-up; `/promote` branches Main from its frozen anchor.
   `/delete` explicitly deletes the selected thread.
 - Closing the workspace keeps its threads and drafts, including empty threads.
   Reopening does not dispatch another model request.
+- Separate native panes support their own clipboard attachments and raw text paste.
+  External terminal editors require the shared host terminal and are unavailable
+  in independent native panes. Model and effort controls remain unavailable.
 
 Every BTW conversation, inline `/btw` answers and workspace threads alike, has the
 same side capabilities from its first turn: read-only investigation tools and the
@@ -359,17 +368,23 @@ fail without executing. A tool's `read` approval tier alone is not sufficient to
 grant BTW access. `xd://send_to_main_session` is mounted only inside BTW and
 always asks the user to approve the exact summary.
 
-BTW checkpoints live under the session's `btw-history/` artifacts directory, not
-in Main's journal. They retain frozen context, complete turn messages, provider
-lineage, drafts, and read state. Restoring a thread preserves its native
-reasoning/replay metadata subject to the provider's protocol; actual provider
-cache reuse is not guaranteed.
+Each durable BTW owns an independent `AgentSession` and `SessionManager`. Its
+standard JSONL journal lives under Main's `btw-history/threads/` artifacts directory,
+not in Main's journal. Frozen context, messages, compaction, branches, and pause
+boundaries use the same persistence and replay machinery as ordinary sessions.
+Thread metadata retains titles, drafts, and read state. Provider-native reasoning
+and replay metadata are preserved subject to the provider's protocol; actual
+provider cache reuse is not guaranteed.
 
-Requests are checkpointed before inference and completed turns on success.
-Interrupted requests retain their input for explicit `/continue`; disposing a
-manager releases its history leases so the same process can reopen the session.
-Partial output from failed or cancelled turns is not committed as a completed
-turn. `--no-session` keeps checkpoints in memory.
+Messages are persisted as the standard session processes them, including tool
+calls and results. A paused exit retains the transcript for explicit `/continue`
+instead of submitting the original question again. Failed or cancelled output
+remains subject to the standard session's recovery rules. `--no-session` keeps
+the journals in memory.
+
+Version-1 thread JSON checkpoints require a separate, manually run migration
+script outside the repository. OMP does not import, rewrite, or archive these
+files when opening a workspace.
 
 Legacy `btw-thread` journal records require the separate one-time migration.
 Opening legacy history without its `.migrated-v1` marker is rejected; there is no

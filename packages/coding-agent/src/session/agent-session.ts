@@ -175,7 +175,7 @@ import { cloneMessageNotification, extensionEventFromSessionEvent } from "../ext
 import { BtwExtensionRuntime } from "./btw-extension-runtime";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, InputEventResult } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
@@ -198,7 +198,6 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { MEMORY_RECALL_CHANGES_MESSAGE_TYPE } from "../memory-backend/recall-entry";
-import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
@@ -293,7 +292,7 @@ import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
-import { prewarmSubagentWorker } from "../thread/subagent-worker";
+import { existingSubagentWorkerPool, prewarmSubagentWorker } from "../thread/subagent-worker";
 import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
@@ -317,6 +316,8 @@ import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import { type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
+import type { AgentSessionHandle } from "./agent-session-handle";
+import { type BtwTurnOptions, runBtwTurn } from "./btw-turn";
 import {
 	asyncJobSnapshot,
 	asyncJobTree,
@@ -342,6 +343,7 @@ import type {
 	HandoffResult,
 	ModelCycleResult,
 	PausedExitParticipant,
+	PausedTurnContinuation,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -411,14 +413,15 @@ import {
 	EphemeralConversation,
 	type EphemeralConversationCheckpoint,
 	type EphemeralConversationSideOptions,
-	type EphemeralTurnOptions as EphemeralConversationTurnOptions,
-	type EphemeralTurnResult as EphemeralConversationTurnResult,
+	projectBtwConversation,
+	replayInterruptedBtwText,
 } from "./ephemeral-conversation";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
 	AGENTS_CONTINUED_CUSTOM_TYPE,
 	AGENTS_PAUSED_CUSTOM_TYPE,
 	type AgentsPausedData,
+	type PausedPendingPrompt,
 	collectPendingToolCalls,
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
@@ -472,6 +475,7 @@ import {
 	sanitizeAssistantForReparentedHistory,
 	USER_INTERRUPT_LABEL,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+	wrapSteeringForModel,
 } from "./messages";
 import { ModelControls, type ModelControlsHost } from "./model-controls";
 import {
@@ -537,7 +541,7 @@ import {
 	copySessionArtifacts,
 	extractSessionInit,
 	type PersistedSessionInit,
-	type SessionManager,
+	SessionManager,
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
@@ -1206,6 +1210,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
+	#activeToolStreamUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_stream_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
 	#runStartedAt: number | undefined;
@@ -1553,6 +1558,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#yieldTerminationPending = false;
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
+	/** Prepared submission identities, not a second transcript or raw-input journal. */
+	#preparedSubmission: { message: Extract<AgentMessage, { role: "user" }>; generation: number } | undefined;
+	#pausedPromptCommit: { message: Extract<AgentMessage, { role: "user" }>; markerId: string } | undefined;
 	readonly #cacheWarmer: CacheWarmer | undefined;
 	/** Transcript the warmer was last armed for: its confirmed entry describes no other transcript. */
 	#promptCacheArmSessionId: string | undefined;
@@ -2457,7 +2465,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			waitForSessionMessagePersistence: message => this.#waitForSessionMessagePersistence(message),
 			appendSessionMessage: message => this.#appendSessionMessage(message),
 			persistedAssistantEntryId: message => (message as PersistedAssistantMessage)[kPersistedSessionEntryId],
-			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
+			sessionMessageAlreadyPersisted: message => this.isMessageRecorded(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: (previousEditMode, options) =>
@@ -4064,18 +4072,45 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * paused process exit. No-op when the branch already ends with an active
 	 * {@link AGENTS_PAUSED_CUSTOM_TYPE} entry.
 	 */
-	recordAgentsPaused(agentIds: string[]): void {
+	recordAgentsPaused(agentIds: string[], pendingPrompt?: PausedPendingPrompt): void {
 		const branch = this.sessionManager.getBranch();
-		if (readAgentsPaused(branch)) return;
+		if (readAgentsPaused(branch) && pendingPrompt === undefined) return;
+		const submission = this.#preparedSubmission;
+		const source = submission?.generation === this.#promptGeneration ? submission.message : undefined;
 		const data: AgentsPausedData = {
 			pausedAt: new Date().toISOString(),
 			agentIds: [...new Set(agentIds.filter(id => id.length > 0))],
+			...(pendingPrompt === undefined || (source && this.isMessageRecorded(source))
+				? {}
+				: { pendingPrompt: structuredClone(pendingPrompt) }),
 		};
-		this.sessionManager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, data);
+		const markerId = this.sessionManager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, data);
+		this.#pausedPromptCommit = data.pendingPrompt && source ? { message: source, markerId } : undefined;
 		this.sessionManager.flushSync();
 	}
 
-	#abortForPausedExit(): void {
+	/** Consume only the pending intent associated with this exact committed submission. */
+	#consumePausedPrompt(message: AgentMessage): void {
+		const commit = this.#pausedPromptCommit;
+		if (!commit || commit.message !== message || !this.isMessageRecorded(message)) return;
+		this.#pausedPromptCommit = undefined;
+		const branch = this.sessionManager.getBranch();
+		const marker = branch.findLast(
+			entry =>
+				entry.type === "custom" &&
+				(entry.customType === AGENTS_PAUSED_CUSTOM_TYPE || entry.customType === AGENTS_CONTINUED_CUSTOM_TYPE),
+		);
+		if (marker?.id !== commit.markerId) return;
+		const paused = readAgentsPaused(branch);
+		if (!paused?.pendingPrompt) return;
+		this.sessionManager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, {
+			pausedAt: paused.pausedAt,
+			agentIds: paused.agentIds,
+		});
+		this.sessionManager.flushSync();
+	}
+
+	abortForPausedExit(): void {
 		this.agent.abort(PAUSE_SHUTDOWN_ABORT_REASON);
 		this.#advisors.abort(PAUSE_SHUTDOWN_ABORT_REASON);
 	}
@@ -4095,19 +4130,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 		for (const participant of participants) participant.prepareForPausedExit();
 
-		const pausedAgentIds = new Set<string>();
+		const pool = existingSubagentWorkerPool();
+		const pausedAgentIds = new Set(await pool?.preparePausedExit());
 		const liveSessions = new Set<AgentSession>([this]);
 		if (this.isStreaming) pausedAgentIds.add(this.#agentId ?? MAIN_AGENT_ID);
 		for (const ref of AgentRegistry.global().list()) {
 			if (ref.kind === "advisor" || !ref.session) continue;
-			liveSessions.add(ref.session);
+			if (isLocalAgentSession(ref.session)) liveSessions.add(ref.session);
 			if (ref.session.isStreaming) pausedAgentIds.add(ref.id);
 		}
 
 		await this.sessionManager.ensureOnDisk();
 		this.recordAgentsPaused([...pausedAgentIds]);
-		for (const session of liveSessions) session.#abortForPausedExit();
-		await this.dispose({ pausedExit: true });
+		for (const session of liveSessions) session.abortForPausedExit();
+		await Promise.all([
+			pool?.disposePausedExit(),
+			...[...liveSessions].map(session => session.dispose({ pausedExit: true })),
+		]);
 	}
 
 	/** True when the current branch is waiting on an explicit `/continue`. */
@@ -4149,8 +4188,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// terminal frame. Keep the latest update for future focus rebuilds;
 			// logical session transitions clear the cache.
 			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
+		} else if (event.type === "tool_stream_update") {
+			this.#activeToolStreamUpdates.set(event.toolCallId, event);
 		} else if (event.type === "tool_execution_end") {
 			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			this.#activeToolStreamUpdates.delete(event.toolCallId);
+		} else if (event.type === "message_end" && event.message.role === "toolResult") {
+			this.#activeToolStreamUpdates.delete(event.message.toolCallId);
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -4419,7 +4463,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * supersedes, and the session journal silently loses the record of why the
 	 * run stopped. The failure text is the only thing that distinguishes them.
 	 */
-	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
+	isMessageRecorded(message: AgentMessage): boolean {
 		const key = sessionMessagePersistenceKey(message);
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
@@ -4464,6 +4508,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			cache.keys.add(key);
 			cache.anchor = this.#persistedMessageKeysAnchor();
 		}
+		this.#consumePausedPrompt(message);
 		return entryId;
 	}
 
@@ -4477,7 +4522,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		) {
 			return;
 		}
-		if (this.#sessionMessageAlreadyPersisted(message)) return;
+		if (this.isMessageRecorded(message)) return;
 		if (message.role === "assistant") {
 			const assistantMsg = message as AssistantMessage;
 			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
@@ -6168,6 +6213,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return [...this.#activeToolExecutionUpdates.values()];
 	}
 
+	/** Latest unpersisted tool preview, removed when the execution produces its result. */
+	activeToolStreamUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_stream_update" }>[] {
+		return [...this.#activeToolStreamUpdates.values()];
+	}
+
 	/**
 	 * Observe authoritative run-state transitions before public `agent_end`
 	 * deferral, for lifecycle owners that must not remain stale while prompts unwind.
@@ -6808,18 +6858,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	async #disposeMnemopi(
-		state: MnemopiSessionState | undefined,
-		consolidateTimeoutMs: number | undefined,
-	): Promise<void> {
-		try {
-			await state?.dispose({ timeoutMs: consolidateTimeoutMs });
-		} finally {
-			// Consolidation may embed final memories, so drop the embedding-server connection only afterward.
-			await shutdownMnemopiEmbedClient();
-		}
-	}
-
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
 		// Stop cache warming before the drain windows below: an armed tick firing
@@ -6858,7 +6896,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.abortCompaction();
 		const postPromptDrain = this.#cancelPostPromptTasks();
 		if (options.pausedExit === true) {
-			this.#abortForPausedExit();
+			this.abortForPausedExit();
 		} else {
 			this.agent.abort();
 		}
@@ -6894,7 +6932,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
 			hindsightState?.flushRetainQueue() ?? Promise.resolve(),
-			this.#disposeMnemopi(mnemopiState, options.mnemopiConsolidateTimeoutMs),
+			mnemopiState?.dispose({ timeoutMs: options.mnemopiConsolidateTimeoutMs }),
 			sharpshooterFlushed,
 		]);
 		for (const result of results) {
@@ -6958,6 +6996,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// closes the writer.
 		this.sessionManager.seal();
 		await this.sessionManager.close();
+		try {
+			options.onSessionClosed?.(this.sessionManager);
+		} catch (error) {
+			logger.warn("Session storage ownership handoff failed", { error: String(error) });
+		}
 
 		// Release retained conversation memory. dispose() is terminal, and every
 		// revival path reopens the transcript from disk (AgentLifecycleManager
@@ -6995,6 +7038,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Drop the in-memory conversation state after the terminal dispose flush. */
 	#releaseRetainedSessionMemory(): void {
 		this.#releaseQueuedTtsrReservations();
+		this.#preparedSubmission = undefined;
+		this.#pausedPromptCommit = undefined;
 		this.agent.reset();
 		this.#tools.releaseRestoredTranscript();
 		this.agent.setAppendOnlyContext(undefined);
@@ -7333,6 +7378,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	suppressAutoResumeUntilPrompt(): void {
 		this.#advisors.autoResumeSuppressed = true;
 		this.#turnSettledSinceUserInterrupt = false;
+	}
+
+	/** Interactive input hooks must execute on the session's home thread. */
+	async emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined> {
+		return this.extensionRunner?.emitInput(text, images, "interactive");
 	}
 
 	/**
@@ -8200,6 +8250,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
+		this.#activeToolStreamUpdates.clear();
 	}
 
 	/**
@@ -9641,6 +9692,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			const submission = message.role === "user" ? { message, generation } : undefined;
+			this.#preparedSubmission = submission;
 			try {
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
@@ -9653,6 +9706,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await run;
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
+				if (this.#preparedSubmission === submission) this.#preparedSubmission = undefined;
 			}
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
@@ -13289,6 +13343,63 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.retry();
 	}
 
+	/** Continue exactly one durable paused tail on its home thread, retaining private recovery state here. */
+	async continuePausedTurn(): Promise<PausedTurnContinuation> {
+		if (this.isStreaming || this.isCompacting || this.isRetrying) return "busy";
+		const last = this.agent.state.messages.at(-1);
+		const ownPause = readAgentsPaused(this.sessionManager.getBranch());
+		const pendingPrompt = ownPause?.pendingPrompt;
+		if (!last && !pendingPrompt) return "empty transcript";
+		if (
+			!pendingPrompt &&
+			last?.role === "assistant" &&
+			last.stopReason !== "error" &&
+			last.stopReason !== "aborted" &&
+			last.stopDetails?.type !== "pause_turn" &&
+			!this.agent.hasQueuedMessages()
+		) {
+			return "already idle";
+		}
+		if (pendingPrompt && ownPause) {
+			const markerId = this.sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "custom" && entry.customType === AGENTS_PAUSED_CUSTOM_TYPE)?.id;
+			let recorded: Promise<void> | undefined;
+			const unsubscribe = this.subscribe(event => {
+				if (event.type !== "message_end" || event.message.role !== "user" || recorded) return;
+				if (markerId) this.#pausedPromptCommit = { message: event.message, markerId };
+				recorded = this.#waitForSessionMessagePersistence(event.message).then(() => {
+					if (!this.isMessageRecorded(event.message)) throw new Error("Paused prompt was not persisted");
+					this.#consumePausedPrompt(event.message);
+				});
+			});
+			try {
+				await this.prompt(pendingPrompt.text, {
+					images: pendingPrompt.images,
+					attribution: pendingPrompt.attribution,
+					expandPromptTemplates: false,
+					runCommands: false,
+					throwOnDrop: true,
+				});
+			} finally {
+				unsubscribe();
+				await recorded;
+			}
+			if (!recorded) throw new Error("Paused prompt was not recorded");
+		} else {
+			if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+				if (!(await this.#recovery.prepareRetry())) throw new Error("Failed continuation is not retryable");
+			}
+			await this.agent.continue();
+		}
+		if (this.agent.state.error) throw new Error(this.agent.state.error);
+		const tail = this.agent.state.messages.at(-1);
+		if (tail?.role === "assistant" && (tail.stopReason === "error" || tail.stopReason === "aborted")) {
+			throw new Error(tail.errorMessage || `Continuation ${tail.stopReason}`);
+		}
+		return "continued";
+	}
+
 	/**
 	 * Explicitly resume agent loops after opening a session that exited at a
 	 * durable pause barrier. Does not inject user-visible text; starts from the
@@ -13308,31 +13419,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let continued = 0;
 		let unresolved = 0;
 
-		const tryContinue = async (session: AgentSession, id: string): Promise<void> => {
-			if (session.isStreaming || session.isCompacting || session.isRetrying) {
-				skipped.push(`${id}: busy`);
-				return;
-			}
-			const messages = session.agent.state.messages;
-			const last = messages[messages.length - 1];
-			if (!last) {
-				skipped.push(`${id}: empty transcript`);
-				unresolved++;
-				return;
-			}
-			// A terminal assistant tail is idle; `pause_turn` explicitly requests
-			// another provider sample and remains continuable without queued input.
-			if (
-				last.role === "assistant" &&
-				last.stopDetails?.type !== "pause_turn" &&
-				!session.agent.hasQueuedMessages()
-			) {
-				skipped.push(`${id}: already idle`);
-				return;
-			}
+		const tryContinue = async (session: AgentSessionHandle, id: string): Promise<void> => {
 			try {
-				await session.agent.continue();
-				continued++;
+				const result = await session.continuePausedTurn();
+				if (result === "continued") continued++;
+				else {
+					skipped.push(`${id}: ${result}`);
+					if (result === "empty transcript") unresolved++;
+				}
 			} catch (error) {
 				skipped.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
 				unresolved++;
@@ -13838,6 +13932,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return prepared;
 	}
 
+	/** A focused view sends only turn data; its conversation and tools stay on this home thread. */
+	runBtwTurn(args: BtwTurnOptions): Promise<EphemeralTurnResult> {
+		return runBtwTurn(this, args);
+	}
+
 	/**
 	 * Create an independent multi-turn conversation whose main-session context
 	 * is snapshotted on its first prompt. Provider routing remains stable while
@@ -13853,60 +13952,46 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!model) {
 			throw new Error("No active model on session");
 		}
-		const sendToMainSession = options?.sendToMainSession;
-		const sendToMainSessionTool = sendToMainSession
-			? this.#tools.wrapRuntimeTool(createSendToMainSessionTool(sendToMainSession))
-			: undefined;
 		const cacheSessionId = this.sessionId;
 		const sideSessionId = checkpoint?.sideSessionId ?? `${cacheSessionId}:side:${Snowflake.next()}`;
 		const mainTools = [...this.agent.state.tools];
-		let sideRuntime: BtwExtensionRuntime | undefined;
-		const child = this.agent.createChild({
-			// Execution starts empty and is filled by the side runtime; the provider
-			// sees Main's tool catalog so the side request reuses Main's cached prefix.
-			initialState: {
-				model,
-				messages: [],
-				tools: [],
-			},
-			advertiseParentTools: true,
-			sessionId: sideSessionId,
-			promptCacheKey: this.agent.promptCacheKey ?? cacheSessionId,
-			streamFn: this.#sideStreamFn,
-			convertToLlm: this.#convertToLlm,
-			transformContext: async (messages, signal) => this.#transformContext(messages, signal),
-			// Side tools must never inherit Main's tool execution context. The
-			// explicit runtime supplies its own manager, restricted registry and UI.
-			transformToolContext: (_context, toolCall) => sideRuntime?.createToolContext(toolCall),
-			resolveFallbackTool: null,
-			providerSessionState: this.#providerSessionState,
-			getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
-			onPayload: this.#onPayload,
-			onResponse: this.#onResponse,
-			onSseEvent: this.#onSseEvent,
-			preferWebsockets: this.preferWebsockets,
-			serviceTier: this.#models.effectiveServiceTier(model),
-			beforeToolCall: ctx =>
-				sideRuntime?.permits(ctx.tool, ctx.args) ? undefined : { block: true, reason: sideChannelToolDenied },
-			transformAssistantMessage: message => {
-				if (!this.#obfuscator?.hasSecrets()) return;
-				message.content = deobfuscateAssistantContent(this.#obfuscator, message.content);
-			},
-		});
+		const sendToMainSessionTool = options?.sendToMainSession
+			? createSendToMainSessionTool(options.sendToMainSession)
+			: undefined;
+		const settings = this.settings.overlay({}, { derived: true });
+		const sideInstructions: AgentMessage = {
+			role: "developer",
+			content: [{ type: "text", text: instructions }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		const readonlyInstructions = createSideChannelReadonlyMessage();
+		const convertToLlm = (messages: AgentMessage[]) => this.#convertToLlm(replayInterruptedBtwText(messages));
 		const conversation = new EphemeralConversation({
-			snapshotBaseMessages: () => {
-				const baseMessages = this.#buildEphemeralBaseSnapshot().map(cloneMessageNotification);
-				baseMessages.push({
-					role: "developer",
-					content: [{ type: "text", text: instructions }],
-					attribution: "agent",
-					timestamp: Date.now(),
-				});
-				return baseMessages;
-			},
+			snapshotBaseMessages: () => [
+				...this.#buildEphemeralBaseSnapshot().map(cloneMessageNotification),
+				cloneMessageNotification(sideInstructions),
+			],
 			checkpoint,
-			getTool: name => child.state.tools.find(tool => tool.name === name),
-			createExtensionRuntime: async () => {
+			onSessionClosed: options?.onSessionClosed,
+			sideSessionId,
+			sessionManager: options?.sessionManager ?? SessionManager.inMemory(this.sessionManager.getCwd()),
+			createSession: async sessionManager => {
+				if (!sessionManager.getBranch().some(entry => entry.type === "model_change")) {
+					sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				}
+				const providerSessionId = projectBtwConversation(sessionManager).sideSessionId;
+				const context = sessionManager.buildSessionContext({ preserveInterruptedMessages: true });
+				const savedModels = getRestorableSessionModels(context.models, sessionManager.getLastModelChangeRole());
+				const sideModel =
+					savedModels[0] === `${model.provider}/${model.id}`
+						? model
+						: await this.#resolveSessionModel(savedModels);
+				if (!sideModel) throw new Error(`Could not restore model ${savedModels[0]}`);
+				const thinkingLevel =
+					context.configuredThinkingLevel === AUTO_THINKING
+						? AUTO_THINKING
+						: ((context.thinkingLevel as ThinkingLevel | undefined) ?? this.thinkingLevel);
 				if (
 					!this.#preparedExtensions &&
 					((this.#extensionPaths?.length ?? 0) > 0 ||
@@ -13914,9 +13999,73 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				) {
 					throw new Error("BTW cannot bind Main extensions without prepared factories");
 				}
+				let sideRuntime: BtwExtensionRuntime | undefined;
+				const transformContext = async (
+					messages: AgentMessage[],
+					signal?: AbortSignal,
+				): Promise<AgentMessage[]> => {
+					const transformed = [
+						...(sideRuntime ? await sideRuntime.runner.emitContext(messages, signal) : messages),
+					];
+					let instructionIndex = transformed.findIndex(
+						message =>
+							message.role === "developer" &&
+							Array.isArray(message.content) &&
+							message.content.some(block => block.type === "text" && block.text === instructions),
+					);
+					if (instructionIndex < 0) {
+						const firstUser = transformed.findIndex(message => message.role === "user");
+						instructionIndex = firstUser < 0 ? transformed.length : firstUser;
+						transformed.splice(instructionIndex, 0, cloneMessageNotification(sideInstructions));
+					}
+					if (
+						!transformed.some(
+							message =>
+								message.role === "developer" &&
+								Array.isArray(message.content) &&
+								message.content.some(
+									block => block.type === "text" && block.text === sideChannelReadonlyReminder,
+								),
+						)
+					) {
+						transformed.splice(instructionIndex + 1, 0, cloneMessageNotification(readonlyInstructions));
+					}
+					return wrapSteeringForModel(transformed);
+				};
+				const child = this.agent.createChild({
+					initialState: {
+						model: sideModel,
+						messages: context.messages.map(cloneMessageNotification),
+						tools: [],
+					},
+					advertiseParentTools: true,
+					sessionId: providerSessionId,
+					promptCacheKey: this.agent.promptCacheKey ?? cacheSessionId,
+					streamFn: this.#sideStreamFn,
+					convertToLlm,
+					// Main's SDK closures bind Main's runner. Rebind context and payload
+					// hooks to the child runner, rather than invoking Main extensions.
+					transformContext,
+					onPayload: (payload, requestModel, signal) =>
+						sideRuntime?.runner.emitBeforeProviderRequest(payload, requestModel, signal),
+					onResponse: (response, requestModel, signal) =>
+						sideRuntime?.runner.emitAfterProviderResponse(response, requestModel, signal),
+					transformToolContext: (_context, toolCall) => sideRuntime?.createToolContext(toolCall),
+					resolveFallbackTool: null,
+					getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
+					preferWebsockets: this.preferWebsockets,
+					serviceTier: this.#models.effectiveServiceTier(model),
+					transformAssistantMessage: message => {
+						if (this.#obfuscator?.hasSecrets()) {
+							message.content = deobfuscateAssistantContent(this.#obfuscator, message.content);
+						}
+					},
+				});
 				const toolInfos = this.getAllToolInfos();
 				const runtime = await BtwExtensionRuntime.create({
 					agent: child,
+					onSessionClosed: options?.onSessionClosed,
+					sessionManager,
 					mainTools,
 					availableTools: toolInfos
 						.map(info => this.#tools.getToolByName(info.name))
@@ -13924,123 +14073,58 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					mountedNames: this.#tools.getMountedXdevToolNames(),
 					preparedExtensions: this.#preparedExtensions ?? [],
 					modelRegistry: this.#modelRegistry,
-					settings: this.settings,
-					cwd: this.sessionManager.getCwd(),
+					settings,
+					cwd: sessionManager.getCwd(),
 					toolInfos,
 					isReadOnlyToolCall: (tool, args) => this.#tools.isReadOnlySideToolCall(tool, args),
 					sendToMainSessionTool,
 					approveSummary: options?.approveSummary,
 					approvalUI: this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
+					createSession: binding => {
+						sideRuntime = binding;
+						child.setTools(binding.tools);
+						const session = new AgentSession({
+							agent: child,
+							sessionManager,
+							settings,
+							modelRegistry: this.#modelRegistry,
+							extensionRunner: binding.runner,
+							toolRegistry: new Map(binding.tools.map(tool => [tool.name, tool])),
+							builtInToolNames: binding.tools.map(tool => tool.name),
+							memoryEnabled: false,
+							agentKind: "sub",
+							providerSessionId,
+							providerPromptCacheKeySource: "fork",
+							thinkingLevel,
+							obfuscator: this.#obfuscator,
+							convertToLlm,
+							transformContext,
+							onPayload: (payload, requestModel, signal) =>
+								binding.runner.emitBeforeProviderRequest(payload, requestModel, signal),
+							onResponse: (response, requestModel, signal) =>
+								binding.runner.emitAfterProviderResponse(response, requestModel, signal),
+							sideStreamFn: this.#sideStreamFn,
+						});
+						// BTW streams to its caller and pane instead of buffering a Task yield.
+						session.setTextOutputCommitted(true);
+						// AgentSession installs its own pre-call hook. Apply the side policy
+						// after it so extension-revised arguments are checked before scheduling.
+						const beforeToolCall = child.beforeToolCall;
+						child.beforeToolCall = async (ctx, signal) => {
+							const result = await beforeToolCall?.(ctx, signal);
+							if (result?.block) return result;
+							return binding.permits(ctx.tool, result?.args ?? ctx.args)
+								? result
+								: { block: true, reason: sideChannelToolDenied };
+						};
+						return session;
+					},
 				});
-				child.setTools(runtime.tools);
-				sideRuntime = runtime;
-				return runtime;
+				return { session: runtime.session, runtime };
 			},
-			prepareTurn: async (turn, signal) => {
-				const images = await this.#normalizeImagesForModel(turn.images, model);
-				const prefixMessages = turn.prefixMessages
-					? [...turn.prefixMessages]
-					: [createSideChannelReadonlyMessage()];
-				if (
-					images?.length &&
-					!prefixMessages.some(
-						message => message.role === "custom" && message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
-					)
-				) {
-					const notice = await this.#buildImageDescriptionNotice(images, signal, model);
-					if (notice) prefixMessages.push(notice);
-				}
-				return { images, prefixMessages };
-			},
-			getRuntimeState: () => ({
-				model: child.state.model,
-				thinkingLevel: child.state.thinkingLevel,
-				isStreaming: child.state.isStreaming,
-				streamMessage: child.state.streamMessage?.role === "assistant" ? child.state.streamMessage : null,
-			}),
-			runTurn: async (messages, turnOptions) => {
-				await conversation.initializeExtensionRuntime();
-				try {
-					return await this.#runEphemeralConversationTurn(child, messages, turnOptions);
-				} finally {
-					await sideRuntime?.settleEvents();
-				}
-			},
-			sideSessionId,
+			textReadyForDelta: text => this.#deobfuscatedProviderTextReadyForDelta(text),
 		});
 		return conversation;
-	}
-
-	async #runEphemeralConversationTurn(
-		child: Agent,
-		messages: AgentMessage[],
-		args: Omit<EphemeralConversationTurnOptions, "promptText">,
-	): Promise<EphemeralConversationTurnResult> {
-		args.signal?.throwIfAborted();
-		const input = messages.at(-1);
-		if (input?.role !== "user") {
-			throw new Error("Ephemeral conversation turn must end with a user message");
-		}
-		const priorMessages = messages.slice(0, -1);
-		child.replaceMessages(priorMessages);
-		const abortChild = (): void => child.abort(args.signal?.reason);
-		args.signal?.addEventListener("abort", abortChild, { once: true });
-
-		let providerReplyText = "";
-		let emittedReplyText = "";
-		const unsubscribe = child.subscribe(event => {
-			if (event.type === "message_end") {
-				if (event.message.role !== "user") args.onMessage?.({ type: "end", message: event.message });
-				return;
-			}
-			if (event.type !== "message_update" || event.message.role !== "assistant") return;
-			args.onMessage?.({ type: "update", message: event.message });
-			const assistantEvent = event.assistantMessageEvent;
-			if (assistantEvent.type === "thinking_delta") {
-				args.onThinkingDelta?.(assistantEvent.delta);
-				return;
-			}
-			if (assistantEvent.type !== "text_delta") return;
-			providerReplyText += assistantEvent.delta;
-			if (!args.onTextDelta) return;
-			const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
-			if (readyText.length <= emittedReplyText.length) return;
-			const delta = readyText.slice(emittedReplyText.length);
-			emittedReplyText = readyText;
-			args.onTextDelta(delta);
-		});
-
-		try {
-			await child.prompt(input);
-			if (child.state.error) throw new Error(child.state.error);
-			const turnMessages = child.state.messages.slice(priorMessages.length + 1);
-			const finalIndex = turnMessages.findLastIndex(message => message.role === "assistant");
-			const assistantMessage = turnMessages[finalIndex];
-			if (assistantMessage?.role !== "assistant") {
-				throw new Error("Ephemeral conversation turn ended without a final assistant message");
-			}
-			const replyText = turnMessages
-				.filter((message): message is AssistantMessage => message.role === "assistant")
-				.flatMap(message => message.content)
-				.filter(block => block.type === "text")
-				.map(block => block.text)
-				.join("")
-				.trim();
-			if (args.onTextDelta && replyText.length > emittedReplyText.length) {
-				args.onTextDelta(replyText.slice(emittedReplyText.length));
-			}
-			return {
-				replyText: args.dedupeReply === false ? replyText : dedupeEphemeralReply(replyText, args.replyMaxBytes),
-				assistantMessage,
-				intermediateMessages: turnMessages.slice(0, finalIndex),
-			};
-		} catch (error) {
-			child.replaceMessages(priorMessages);
-			throw error;
-		} finally {
-			unsubscribe();
-			args.signal?.removeEventListener("abort", abortChild);
-		}
 	}
 
 	/**
@@ -14705,14 +14789,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
-	/** Promotes completed BTW turns from a frozen anchor in the explicitly authorized session. */
+	/** Promotes a standard BTW transcript (or legacy completed turns) from its frozen anchor. */
 	async branchFromBtw(
-		request: BtwPromotionRequest,
+		request: BtwPromotionRequest & { messages?: readonly AgentMessage[] },
 		lifecycle?: BtwPromotionLifecycle,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
 		using _transition = this.#beginSessionTransition();
-		const { anchorLeafId, sessionId, turns } = request;
-		if (turns.length === 0) {
+		const { anchorLeafId, sessionId, turns, messages } = request;
+		if (messages ? messages.length === 0 : turns.length === 0) {
 			throw new Error("Cannot promote BTW: no completed turns");
 		}
 		const previousSessionFile = this.sessionFile;
@@ -14745,15 +14829,37 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			throw new Error("Cannot promote BTW: session or frozen anchor changed");
 		}
 
-		// Prepare every promoted turn before changing the session. Vision descriptions
-		// become durable companions, just as they do for an ordinary Main prompt.
-		const promotedTurns = await Promise.all(
-			turns.map(async turn => {
-				const images = await this.#normalizeImagesForModel(turn.images);
-				const notice = images?.length ? await this.#buildImageDescriptionNotice(images) : undefined;
-				return { turn, images, notice };
-			}),
-		);
+		// Reparent the standard transcript as materialized context. Legacy turns
+		// still need destination-model image normalization and durable companions.
+		const promotedMessages = messages
+			?.filter(
+				message =>
+					!(
+						message.role === "developer" &&
+						Array.isArray(message.content) &&
+						message.content.length === 1 &&
+						message.content[0]?.type === "text" &&
+						message.content[0].text === sideChannelReadonlyReminder
+					),
+			)
+			.map(message => {
+				const copied = cloneMessageNotification(message);
+				if (copied.role === "assistant") return sanitizeAssistantForReparentedHistory(copied);
+				if (copied.role === "compactionSummary") {
+					// Native replay binds the source conversation, not this destination prefix.
+					return { ...copied, providerPayload: undefined, historyRewriteAt: undefined };
+				}
+				return copied;
+			});
+		const promotedTurns = messages
+			? []
+			: await Promise.all(
+					turns.map(async turn => {
+						const images = await this.#normalizeImagesForModel(turn.images);
+						const notice = images?.length ? await this.#buildImageDescriptionNotice(images) : undefined;
+						return { turn, images, notice };
+					}),
+				);
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
@@ -14807,6 +14913,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#clearSessionScopedToolState();
 
 			this.#rehydrateCheckpointRewindState();
+			for (const message of promotedMessages ?? []) {
+				this.sessionManager.appendMaterializedContextMessage(message);
+			}
 			for (const { turn, images, notice } of promotedTurns) {
 				if (notice) this.sessionManager.appendMessage(notice);
 				this.sessionManager.appendMessage({

@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { setTranscriptActionHandler, type TranscriptAction } from "@oh-my-pi/pi-tui/chat/transcript-actions";
+import { setTranscriptActions } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { setTranscriptPresenters } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { hasSpotlightOriginal, SpotlightSheet } from "@oh-my-pi/pi-tui/overlays/spotlight-sheet";
@@ -24,7 +24,7 @@ beforeAll(async () => {
 
 let harness: TspHarness | undefined;
 afterEach(() => {
-	setTranscriptActionHandler(undefined);
+	setTranscriptActions(undefined);
 	harness?.stop();
 	harness = undefined;
 	stopSharedSpinnerTicker();
@@ -202,20 +202,22 @@ async function openSheet(
 	reduced: string,
 	wouldBe?: string,
 	card: (id: string, output: string, spotlight: SpotlightDetails) => ToolExecutionComponent = bashCard,
-): Promise<TranscriptAction[]> {
-	const actions: TranscriptAction[] = [];
-	setTranscriptActionHandler(action => {
-		actions.push(action);
-		if (action.act !== "spotlight" || !hasSpotlightOriginal(action.spotlight)) return;
-		const tui = harness!.tui;
-		const sheet = new SpotlightSheet({
-			spotlight: action.spotlight,
-			original,
-			reduced: wouldBe ?? action.reduced,
-			close: () => handle.hide(),
-		});
-		const handle = tui.showOverlay(sheet, { anchor: "center" });
-		tui.setFocus(sheet);
+): Promise<Array<{ spotlight: SpotlightDetails; reduced: string }>> {
+	const actions: Array<{ spotlight: SpotlightDetails; reduced: string }> = [];
+	setTranscriptActions({
+		spotlight: (spotlight, reduced) => {
+			actions.push({ spotlight, reduced });
+			if (!hasSpotlightOriginal(spotlight)) return;
+			const tui = harness!.tui;
+			const sheet = new SpotlightSheet({
+				spotlight,
+				original,
+				reduced: wouldBe ?? reduced,
+				close: () => handle.hide(),
+			});
+			const handle = tui.showOverlay(sheet, { anchor: "center" });
+			tui.setFocus(sheet);
+		},
 	});
 	const transcript = new TranscriptContainer();
 	transcript.addChild(card("c1", reduced, spotlight));
@@ -246,7 +248,7 @@ function blocks(h: TspHarness): readonly TspNode[] {
 
 describe("spotlight notice", () => {
 	it("follows a collapsed card as its own block: bright and clickable when shaping saved, dim when it passed", async () => {
-		setTranscriptActionHandler(() => {});
+		setTranscriptActions({ spotlight: () => {} });
 		const transcript = new TranscriptContainer();
 		transcript.addChild(bashCard("c1", REDUCED, SAVED));
 		transcript.addChild(bashCard("c2", "done", PASSTHROUGH));
@@ -277,7 +279,7 @@ describe("spotlight notice", () => {
 	});
 
 	it("follows the card of any tool, with a renderer of its own or the default one", async () => {
-		setTranscriptActionHandler(() => {});
+		setTranscriptActions({ spotlight: () => {} });
 		const transcript = new TranscriptContainer();
 		transcript.addChild(toolCard("grep", { pattern: "refused", path: "src" }, "c1", REDUCED, GREP_SAVED));
 		transcript.addChild(
@@ -295,7 +297,7 @@ describe("spotlight notice", () => {
 	});
 
 	it("follows a group of reads with one notice per read", async () => {
-		setTranscriptActionHandler(() => {});
+		setTranscriptActions({ spotlight: () => {} });
 		const group = new ReadToolGroupComponent();
 		for (const id of ["r1", "r2"]) {
 			group.updateArgs({ path: `src/${id}.ts` }, id);
@@ -317,7 +319,7 @@ describe("spotlight notice", () => {
 
 	it("leaves no notice behind for a call or read a presenter hides", async () => {
 		// Regression guard: a hidden call's notice showing alone in Tern.
-		setTranscriptActionHandler(() => {});
+		setTranscriptActions({ spotlight: () => {} });
 		setTranscriptPresenters([block => (block.type === "toolCall" && block.id !== "r2" ? "hidden" : undefined)]);
 		try {
 			const group = new ReadToolGroupComponent();
@@ -348,7 +350,7 @@ describe("spotlight notice", () => {
 			toolCard("grep", { pattern: "refused", path: "src" }, id, output, spotlight);
 		const actions = await openSheet(GREP_SAVED, ORIGINAL, REDUCED, undefined, grepCard);
 
-		expect(actions).toEqual([{ act: "spotlight", toolCallId: "c1", spotlight: GREP_SAVED, reduced: REDUCED }]);
+		expect(actions).toEqual([{ spotlight: GREP_SAVED, reduced: REDUCED }]);
 		const overlay = harness!.find(node => node.k === "overlay");
 		expect(overlay?.p).toMatchObject({ role: "omp.overlay.spotlight" });
 		expect(prop(overlay, "head")).toContain("⭐ Spotlight · grep ·");
@@ -377,7 +379,7 @@ describe("spotlight notice", () => {
 
 	it("opens the sheet on a click: the original folded where the model did not see it, tinted by why", async () => {
 		const actions = await openSheet(RICH, RICH_ORIGINAL, RICH_REDUCED);
-		expect(actions).toEqual([{ act: "spotlight", toolCallId: "c1", spotlight: RICH, reduced: RICH_REDUCED }]);
+		expect(actions).toEqual([{ spotlight: RICH, reduced: RICH_REDUCED }]);
 		const h = harness!;
 
 		const overlay = h.find(node => node.k === "overlay");
@@ -611,7 +613,7 @@ describe("spotlight notice", () => {
 
 		// The model saw the original; the host shows the would-be text beside it.
 		const actions = await openSheet(heldOut, RICH_ORIGINAL, RICH_ORIGINAL, RICH_REDUCED);
-		expect(actions).toEqual([{ act: "spotlight", toolCallId: "c1", spotlight: heldOut, reduced: RICH_ORIGINAL }]);
+		expect(actions).toEqual([{ spotlight: heldOut, reduced: RICH_ORIGINAL }]);
 		const h = harness!;
 		const shown = h.find(node => node.p?.role === "omp.tool.spotlight");
 		expect(shown?.p).toMatchObject({ tone: "muted", actions: { click: "spotlight" } });

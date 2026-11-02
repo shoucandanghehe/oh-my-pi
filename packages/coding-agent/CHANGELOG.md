@@ -68,6 +68,34 @@
 - Exported `unwrapHashlineHeaderPath` from `@oh-my-pi/pi-coding-agent` to turn a `[path#TAG]` target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
 - `devin-cli` login imports Devin CLI credentials, so the `devin` provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - `devin-windsurf` login authenticates the `devin` provider with an existing Windsurf Enterprise account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Agent workspace panes keep input hooks, queued-message editing, compaction and tree navigation bound to their own session when it runs on a worker thread.
+- `/pause` now includes worker-homed subagents and workers still starting; exiting paused preserves their transcripts without aborted turns, and `/continue` resumes each agent on its home thread.
+- `/btw` in a focused worker agent now runs on that agent's home thread and retains frozen native conversation context across follow-ups and restarts.
+- Thin tool images are padded to the vision model's minimum height or width instead of causing a 400 on the next turn ([#18081](https://github.com/can1357/oh-my-pi/issues/18081))
+- JSON query truncation notices now report the 50KB read budget instead of the bytes shown ([#18022](https://github.com/can1357/oh-my-pi/pull/18022) by [@eggpeat](https://github.com/eggpeat))
+- Extension links stay clickable and extension-drawn replies and custom messages keep their renderers on every launch, not only the first after an edit; `ctx.ui.getLinkClicksAvailable()` no longer turns false on later launches ([#18116](https://github.com/can1357/oh-my-pi/pull/18116) by [@materemias](https://github.com/materemias))
+- An AST Grep capture spanning several lines shows on one `meta:` row of the result card instead of one row per line, so collapsed results no longer show its later lines and a blank line inside it no longer splits the match from its file ([#18105](https://github.com/can1357/oh-my-pi/pull/18105) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Extension shortcuts on a reserved chord spelled with a different modifier order (e.g. `ctrl+shift+p`) are now ignored like the reserved spelling ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
+- When extensions register one shortcut in different spellings (`alt+ctrl+x` and `ctrl+alt+x`, or `?` and `shift+?`), only the last one loaded is bound, as with identical spellings, instead of the first silently winning
+- Building from source works again instead of stopping at the dependency install ([#18074](https://github.com/can1357/oh-my-pi/pull/18074) by [@Maziar123](https://github.com/Maziar123))
+- `.`/`c` continue works again after `/handoff` or a compaction summarized away your last prompt, instead of reporting "Nothing to resume"
+- Fixed `omp bash` and `omp sh` starting without a visible prompt when `PS1` is unset
+- The cache miss marker (`display.cacheMissMarker`) now flags turns that re-send most of the conversation even when the shared system prompt block was still cached, as happens after an idle gap while other sessions keep that block warm
+- A running session no longer falls back to a setting's default when `config.yml` gains a value its omp version doesn't know (such as an `edit.mode` a newer omp added); it keeps the value it had, so the edit doesn't change its tools and throw away every open session's prompt cache
+- Forcing a queued message with Enter now resumes the agent even when interruption races tool completion or model preparation
+- `.`/`c` continue no longer fails with "Nothing to resume" in a session started by a `/skill:` command
+- Interrupting a Python eval cell that is waiting on a top-level `await` (Esc, a timeout, or an awaited tool call) now cancels the cell and keeps the kernel and its variables ([#18115](https://github.com/can1357/oh-my-pi/pull/18115) by [@Winston-Hsiao](https://github.com/Winston-Hsiao))
+- Apostrophes in slash-command and prompt-template arguments, such as `/fix the user's login bug` or `/fix don't break it`, now reach `$ARGUMENTS` and `$1`, `$2`, … intact instead of being stripped and merging the rest of the line into one argument ([#18008](https://github.com/can1357/oh-my-pi/issues/18008))
+- Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+- A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+- The first frame of a new session always shows your configured default model and the thinking level a new session starts at; a session launched with `--model`, a model switched mid-session, or a project-only default no longer leaks into other folders' first frame
+- Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Skills listed in the system prompt get their compressed routing hint instead of a cut-off description when the hint runs past 12 words but fits 160 characters; skills an earlier version gave up on are compressed again
+- Uncached skill descriptions no longer send background model requests after the session-tree cost cap is reached, and their completed spend counts toward the cap ([#18016](https://github.com/can1357/oh-my-pi/issues/18016))
+- Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- The idle recap no longer disappears when the session is resumed, restarted or its transcript is rebuilt; the latest recap stays at the end until the conversation moves on ([#18113](https://github.com/can1357/oh-my-pi/pull/18113) by [@materemias](https://github.com/materemias))
+- Fixed a chat session that ends up on the model assigned to the `web` (or another model-kind) role adopting that role's retry fallback chain and cycling `web/*` search providers as chat models, each failing with `Unhandled API in mapOptionsForApi: web-search` ([#18056](https://github.com/can1357/oh-my-pi/pull/18056) by [@haesol-shin](https://github.com/haesol-shin))
 
 ### Changed
 
@@ -202,6 +230,7 @@
 
 ### Fixed
 
+- BTW conversations now preserve images in frozen Main summaries across resume and session rewrites.
 - Hindsight mental models seeded from now on refresh as full rewrites with a 1000-token page target and at most every 6 hours, instead of delta edits that only appended and grew past the injection budget.
 - Short mental models no longer waste injection budget: room they leave unused goes to longer models instead of truncating them at an even three-way split.
 - Per-call model selection now preserves named delegation tiers when multiple tiers share a model.

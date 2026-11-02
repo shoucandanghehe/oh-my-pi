@@ -11,7 +11,7 @@
  * trace sizes the plain result (`plainChars`, `plainTokens`); savings count against it.
  */
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { encodeHeat, keptRanges, SPOTLIGHT_VIEW_LINES, type SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
@@ -246,7 +246,7 @@ export async function shapeToolResult<TDetails extends { meta?: OutputMeta } | u
 		return shaped.spotlight ? { ...plain, details: withSpotlight(plain.details, shaped.spotlight) } : plain;
 	}
 	let details = withSpotlight(result.details, shaped.spotlight);
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: shaped.text }];
+	const content: (TextContent | MediaContent)[] = [{ type: "text", text: shaped.text }];
 	for (const block of result.content) {
 		if (block.type !== "text") content.push(block);
 	}
@@ -326,8 +326,8 @@ export async function shapeCalledTool(session: ToolSession, call: CalledToolResu
 }
 
 /** `content` with its text blocks replaced by one block of `text`, where the first was; other blocks stay in order. */
-function withText(content: readonly (TextContent | ImageContent)[], text: string): (TextContent | ImageContent)[] {
-	const out: (TextContent | ImageContent)[] = [];
+function withText(content: readonly (TextContent | MediaContent)[], text: string): (TextContent | MediaContent)[] {
+	const out: (TextContent | MediaContent)[] = [];
 	let placed = false;
 	for (const block of content) {
 		if (block.type !== "text") out.push(block);

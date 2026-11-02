@@ -13,6 +13,8 @@ export interface BtwPromotionRequest {
 	anchorLeafId: string;
 	sessionId: string;
 	turns: readonly EphemeralConversationTurn[];
+	/** Effective standard history, including consecutive inputs and tool messages. */
+	messages?: readonly AgentMessage[];
 }
 
 export interface BtwPausedRequest {
