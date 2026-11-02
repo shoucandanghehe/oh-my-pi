@@ -168,7 +168,8 @@ export class Disclosure implements Component {
 
 	/** Mirror the terminal-local toggle into the controlled state. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "toggle" && event.key === "") this.setExpanded(!event.collapsed);
+		if (event.type === "toggle" && event.collapsed !== undefined && event.key === "")
+			this.setExpanded(!event.collapsed);
 	}
 
 	render(width: number): readonly string[] {

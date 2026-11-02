@@ -2,8 +2,6 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { EphemeralConversationTurn } from "./ephemeral-conversation";
 
-export const BTW_THREAD_CUSTOM_TYPE = "btw-thread";
-
 export interface BtwThreadModelRef {
 	provider: string;
 	id: string;
@@ -13,12 +11,8 @@ export interface BtwPromotionRequest {
 	anchorLeafId: string;
 	sessionId: string;
 	turns: readonly EphemeralConversationTurn[];
-}
-
-export interface BtwPausedRequest {
-	input: string;
-	images?: ImageContent[];
-	timestamp: number;
+	/** Effective standard history, including consecutive inputs and tool messages. */
+	messages?: readonly AgentMessage[];
 }
 
 export interface BtwPromotionLifecycle {
@@ -39,11 +33,7 @@ export type BtwThreadEvent =
 			createdAt: number;
 			anchorLeafId: string;
 			model: BtwThreadModelRef;
-			sideSessionId: string;
-			baseMessages: readonly AgentMessage[];
-			turns: readonly EphemeralConversationTurn[];
 	  })
-	| (BtwThreadEventBase & { op: "turn"; turn: EphemeralConversationTurn })
 	| (BtwThreadEventBase & { op: "title"; title: string })
 	| (BtwThreadEventBase & { op: "draft"; text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] })
 	| (BtwThreadEventBase & { op: "read"; through: number })
@@ -68,5 +58,4 @@ export interface RestoredBtwThread {
 	readThrough: number;
 	phase: "ready" | "error";
 	error?: string;
-	pausedRequest?: BtwPausedRequest;
 }

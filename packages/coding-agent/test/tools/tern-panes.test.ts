@@ -96,6 +96,7 @@ const command = process.argv[2];
 await Bun.write(${JSON.stringify(temp.path())} + "/" + command + ".stdin", await Bun.stdin.text());
 if (command === "split") console.log(JSON.stringify({ session: 1, tab: 2, block: 3 }));
 if (command === "ls") console.log(JSON.stringify({ sessions: [{ shown: true, tabs: [{ shown: true, blocks: [{ id: 3, focused: true }] }] }] }));
+if (command === "move") await Bun.write(${JSON.stringify(temp.path())} + "/move.json", JSON.stringify(process.argv.slice(2)));
 if (command === "plugin") console.log(JSON.stringify({ plugins: [{ id: "omp-workspace", version: "0.2.0", status: "ready" }] }));
 if (command === "ctl") {
 	await Bun.write(${JSON.stringify(temp.path())} + "/notification.json", JSON.stringify(process.argv.slice(2)));
@@ -111,6 +112,7 @@ if (command === "ctl") {
 const client = new TernPaneClient({ pane: 1, socketPath: "test-socket" }, process.cwd(), ${JSON.stringify(executable)}, ["omp"]);
 await client.open("ws://127.0.0.1:1234/test");
 await client.focus(3);
+await client.move({ block: 3, target: 1, dir: "above" });
 await client.focused();
 await client.close(3);
 await client.balance();
@@ -136,13 +138,14 @@ process.stdout.write(await Bun.stdin.text());
 		"open-url",
 		"omp-workspace://balance/1",
 	]);
-	for (const command of ["split", "focus", "ls", "close", "plugin", "ctl"]) {
+	expect(await Bun.file(temp.join("move.json")).json()).toEqual(["move", "3", "above", "1"]);
+	for (const command of ["split", "move", "focus", "ls", "close", "plugin", "ctl"]) {
 		expect(await Bun.file(temp.join(`${command}.stdin`)).text()).toBe("");
 	}
 });
 
 it.skipIf(process.platform === "win32")(
-	"lists split pane sizes and active-tab visibility without floating or live detached blocks",
+	"lists only the owner's tab panes, excluding floats, detached blocks and other tabs or sessions",
 	async () => {
 		await using temp = await TempDir.create("@omp-tern-membership-");
 		const executable = temp.join("tern");
@@ -157,7 +160,7 @@ console.log(JSON.stringify({ sessions: [{ shown: true, tabs: [{ shown: true, blo
 		await Bun.write(
 			probe,
 			`import { TernPaneClient } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/tools/browser/tern/panes.ts"))};
-const client = new TernPaneClient({ pane: 1, socketPath: "test-socket" }, process.cwd(), ${JSON.stringify(executable)});
+const client = new TernPaneClient({ pane: 3, socketPath: "test-socket" }, process.cwd(), ${JSON.stringify(executable)});
 console.log(JSON.stringify(await client.splitPanes()));
 `,
 		);
@@ -169,11 +172,7 @@ console.log(JSON.stringify(await client.splitPanes()));
 		]);
 		expect(stderr).toBe("");
 		expect(exitCode).toBe(0);
-		expect(JSON.parse(stdout)).toEqual([
-			{ block: 3, columns: 80, rows: 50, shown: true },
-			{ block: 7, columns: 64, rows: 59, shown: false },
-			{ block: 8, columns: 80, rows: 120, shown: false },
-		]);
+		expect(JSON.parse(stdout)).toEqual([{ block: 3, columns: 80, rows: 50, shown: true }]);
 	},
 );
 

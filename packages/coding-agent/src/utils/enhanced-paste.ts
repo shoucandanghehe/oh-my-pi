@@ -24,6 +24,7 @@ interface PasteListingState {
 	pw?: string;
 	loc?: string;
 	finish?: (text: string | undefined) => boolean;
+	pasteImage?: (image: ImageContent) => void | Promise<void>;
 }
 
 interface PasteReadState {
@@ -33,12 +34,19 @@ interface PasteReadState {
 	mimeType: string;
 	chunks: string[];
 	finish?: (text: string | undefined) => boolean;
+	pasteImage?: (image: ImageContent) => void | Promise<void>;
+}
+
+/** One notification's captured destination, retained through the asynchronous read. */
+export interface EnhancedPasteDelivery {
+	finish(text: string | undefined): boolean;
+	pasteImage(image: ImageContent): void | Promise<void>;
 }
 
 export interface EnhancedPasteHandlers {
 	write(data: string): void;
 	/** Reserve ordered delivery from the paste notification through the clipboard read. */
-	beginPaste?(): ((text: string | undefined) => boolean) | undefined;
+	beginPaste?(): ((text: string | undefined) => boolean) | EnhancedPasteDelivery | undefined;
 	pasteText(text: string): void;
 	pasteImage(image: ImageContent): void | Promise<void>;
 	/** Whether the paste lands where styled text goes (the composer): HTML on the clipboard is then read. */
@@ -171,11 +179,13 @@ export class EnhancedPasteController {
 		// Unsolicited paste notifications have no id; explicit read replies echo their request's id.
 		if (status === "OK") {
 			const loc = packet.metadata.get("loc");
+			const delivery = this.#handlers.beginPaste?.();
 			this.#listing = {
 				mimes: [],
 				pw: packet.metadata.get("pw"),
 				loc: loc === "primary" ? loc : undefined,
-				finish: this.#handlers.beginPaste?.(),
+				finish: typeof delivery === "function" ? delivery : delivery?.finish,
+				pasteImage: typeof delivery === "function" ? undefined : delivery?.pasteImage,
 			};
 			return;
 		}
@@ -233,11 +243,13 @@ export class EnhancedPasteController {
 			} else if (read.kind === "html") {
 				await this.#handlers.pasteHtml(bytes.toString("utf8"));
 			} else {
-				await this.#handlers.pasteImage({
+				const image: ImageContent = {
 					type: "image",
 					data: bytes.toString("base64"),
 					mimeType: read.mimeType,
-				});
+				};
+				if (read.pasteImage) await read.pasteImage(image);
+				else await this.#handlers.pasteImage(image);
 			}
 		} finally {
 			this.#endRead(read);
@@ -274,6 +286,7 @@ export class EnhancedPasteController {
 				mimeType: selected.mimeType,
 				chunks: [],
 				finish: listing.finish,
+				pasteImage: listing.pasteImage,
 			};
 			const encodedMime = Buffer.from(selected.mimeType, "utf8").toString("base64");
 			const metadata = ["type=read", `id=${id}`];

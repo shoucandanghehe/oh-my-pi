@@ -1,5 +1,5 @@
 import { createSyntheticToolResultMessage, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, MessageAttribution, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { SessionEntry } from "./session-entries";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
@@ -45,6 +45,13 @@ export interface SessionExitData {
 	pendingToolCalls?: PendingToolCallDiagnostic[];
 }
 
+/** Raw, not-yet-recorded user intent parked before the standard prompt pipeline. */
+export interface PausedPendingPrompt {
+	text: string;
+	images?: ImageContent[];
+	attribution?: MessageAttribution;
+}
+
 /**
  * Durable marker written when every live agent has parked at the model-call
  * boundary and the process exits while still paused. Resume loads the session
@@ -54,6 +61,7 @@ export interface AgentsPausedData {
 	pausedAt: string;
 	/** Registry ids that were mid-turn (main + live subagents). */
 	agentIds: string[];
+	pendingPrompt?: PausedPendingPrompt;
 }
 
 interface PendingToolCallRecord extends PendingToolCallDiagnostic {
@@ -130,10 +138,28 @@ interface UnfinishedTurn {
 	recordedAt: string;
 }
 
+function isPausedPendingPrompt(value: unknown): value is PausedPendingPrompt {
+	return (
+		isObject(value) &&
+		typeof value.text === "string" &&
+		(value.attribution === undefined || value.attribution === "user" || value.attribution === "agent") &&
+		(value.images === undefined ||
+			(Array.isArray(value.images) &&
+				value.images.every(
+					image =>
+						isObject(image) &&
+						image.type === "image" &&
+						typeof image.data === "string" &&
+						typeof image.mimeType === "string",
+				)))
+	);
+}
+
 /** Latest `agents_paused` entry on the branch, if not yet continued. */
 export function readAgentsPaused(entries: readonly SessionEntry[]): AgentsPausedData | undefined {
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
+		if (entry.type === "reset_boundary") return undefined;
 		if (entry.type !== "custom") continue;
 		if (entry.customType === AGENTS_CONTINUED_CUSTOM_TYPE) return undefined;
 		if (entry.customType !== AGENTS_PAUSED_CUSTOM_TYPE || !isObject(entry.data)) continue;
@@ -142,7 +168,9 @@ export function readAgentsPaused(entries: readonly SessionEntry[]): AgentsPaused
 		if (typeof pausedAt !== "string" || !Array.isArray(agentIds) || !agentIds.every(id => typeof id === "string")) {
 			return undefined;
 		}
-		return { pausedAt, agentIds: agentIds as string[] };
+		const pendingPrompt = entry.data.pendingPrompt;
+		if (pendingPrompt !== undefined && !isPausedPendingPrompt(pendingPrompt)) return undefined;
+		return { pausedAt, agentIds: agentIds as string[], ...(pendingPrompt === undefined ? {} : { pendingPrompt }) };
 	}
 	return undefined;
 }

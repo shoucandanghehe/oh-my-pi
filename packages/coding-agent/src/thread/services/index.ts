@@ -13,6 +13,7 @@ import { integrationsThreadService } from "./integrations";
 import { loggerThreadService } from "./logging";
 import { lspThreadService } from "./lsp";
 import { memoryThreadService } from "./memory";
+import { pauseThreadService } from "./pause";
 import { runtimeThreadService } from "./runtime";
 import { runtimeIdentityThreadService } from "./runtime-identity";
 import { settingsThreadService } from "./settings";
@@ -22,6 +23,7 @@ export const THREAD_SERVICES: readonly ThreadService[] = [
 	identityThreadService,
 	// Early, so a worker's `logger.flush()` waits for main from the first service boot on.
 	loggerThreadService,
+	pauseThreadService,
 	runtimeIdentityThreadService,
 	settingsThreadService,
 	authService,

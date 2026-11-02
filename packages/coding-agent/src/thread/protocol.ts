@@ -46,6 +46,8 @@ export type SubagentMainApi = {
 	ping: RpcMethod<[nonce: number], number>;
 	/** Route a follow-up turn of a session not homed on the calling worker to its home thread. */
 	runFollowUpTurn: RpcMethod<[options: FollowUpTurnOptions], SingleResult>;
+	/** A worker's current model-boundary barrier acknowledgement, tagged with main's pause epoch. */
+	pauseState: RpcMethod<[epoch: number, ready: boolean], void>;
 };
 
 /** Methods a subagent host worker serves to the main thread. */
@@ -62,6 +64,12 @@ export type SubagentWorkerApi = {
 	runFollowUpTurn: RpcMethod<[options: FollowUpTurnOptions], SingleResult>;
 	/** Cold-revive a parked subagent here from its transcript; main receives the session's mirror. */
 	revivePersisted: RpcMethod<[spec: PersistedReviveSpec, expected: AgentRef], AgentSessionHandle>;
+	/** Engage/release the worker's gate; unrelated to resuming a session turn. */
+	setPaused: RpcMethod<[paused: boolean, epoch: number], void>;
+	/** Persist local paused tails and report active agent ids before main commits its marker. */
+	preparePausedExit: RpcMethod<[], string[]>;
+	/** Silently abort and dispose sessions on their home thread after the durable marker committed. */
+	disposePausedExit: RpcMethod<[], void>;
 };
 
 /** Link held by the main thread for one worker. */

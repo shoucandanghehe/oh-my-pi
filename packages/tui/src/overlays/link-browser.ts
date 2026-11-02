@@ -226,7 +226,7 @@ export class LinkBrowserComponent implements Component {
 			proseOnlyThinking: this.#deps.proseOnlyThinking,
 			expandThinkingBlocks: this.#deps.expandThinkingBlocks,
 			linkTargets: this.#deps.linkTargets,
-			textRenderers: this.#deps.textRenderers,
+			getAssistantTextRenderers: () => this.#deps.textRenderers,
 			requestRender: this.#deps.requestRender,
 		});
 		builder.rebuild(entries);

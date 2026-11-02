@@ -4,6 +4,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AppViewportHoverProvider,
 	CombinedAutocompleteProvider,
+	Container,
 	type Component,
 	componentContains,
 	type Focusable,
@@ -26,22 +27,28 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { ExtensionWidgets } from "@oh-my-pi/pi-tui/chrome/extension-widgets";
 import type { KeyId } from "@oh-my-pi/pi-tui/app-keybindings";
+import { getKeybindings } from "@oh-my-pi/pi-tui/keybindings";
 import type { ExtensionRunner } from "../../extensibility/extensions/runner";
 import type { BtwThreadPhase } from "../../session/btw-manager";
 import type { BtwThreadModelRef } from "../../session/btw-thread";
-import type { EphemeralConversationStatus, EphemeralConversationTurn } from "../../session/ephemeral-conversation";
-import { sanitizeAssistantForReparentedHistory } from "../../session/messages";
+import type { EphemeralConversationStatus } from "../../session/ephemeral-conversation";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { renderWorkspacePaneHeader } from "@oh-my-pi/pi-tui/chrome/shared";
 import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme/theme";
 import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
+import { sameAssistantTurn } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
 import type { ExtensionPresentationSource } from "@oh-my-pi/pi-tui/chat/extension-types";
+import type { TranscriptActions } from "@oh-my-pi/pi-tui/chat/transcript-actions";
+import { PANE_SESSION_SLASH_COMMANDS, type PaneSessionControls } from "@oh-my-pi/pi-tui/chat/session-controls";
+import { QueuedMessagesBand, type QueuedMessageGroup } from "@oh-my-pi/pi-tui/prompt/queued-messages";
+import { openPaneSessionTree } from "../utils/pane-session-controls";
+import type { AgentSession } from "../../session/agent-session";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
 import type { ComposerFacts } from "@oh-my-pi/pi-tui/status-line/types";
 import { BtwShareSummaryDialog } from "./btw-share-summary-dialog";
 
-import { col, node, span, text } from "@oh-my-pi/pi-tui/native/describe";
+import { col, node, span, stableKey, text } from "@oh-my-pi/pi-tui/native/describe";
 import type { DescribeContext, NativeNode, NativeSurface, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { actionBar, actionButton } from "@oh-my-pi/pi-tui/native/overlay";
 import { SelectListSheet } from "@oh-my-pi/pi-tui/native/picker";
@@ -54,24 +61,18 @@ export interface BtwThreadView {
 	readonly draft: string;
 	readonly draftImages?: readonly ImageContent[];
 	readonly draftImageLinks?: readonly (string | undefined)[];
-	readonly turns: readonly EphemeralConversationTurn[];
+	readonly messages: readonly AgentMessage[];
+	readonly streamingMessage?: AssistantMessage;
+	readonly queued?: readonly (QueuedMessageGroup & { readonly edits: readonly (() => void)[] })[];
+	readonly controls?: PaneSessionControls;
 	readonly getTool?: (name: string) => AgentTool | undefined;
 	readonly isBuiltInTool?: (name: string) => boolean;
 	readonly extensionRunner?: Pick<
 		ExtensionRunner,
-		"observePresentation" | "getAssistantThinkingRenderers" | "getMessageRenderer"
+		"observePresentation" | "getAssistantThinkingRenderers" | "getAssistantTextRenderers" | "getMessageRenderer"
 	>;
 	readonly status?: EphemeralConversationStatus;
 	readonly unread: number;
-	readonly request:
-		| {
-				readonly input: string;
-				readonly images?: readonly ImageContent[];
-				readonly messages: readonly AgentMessage[];
-				readonly streamMessage: AssistantMessage | undefined;
-				readonly timestamp: number;
-		  }
-		| undefined;
 }
 
 export interface BtwConversationPaneOptions {
@@ -80,16 +81,27 @@ export interface BtwConversationPaneOptions {
 	nativePane?: boolean;
 	cwd: string;
 	expandKeys: readonly KeyId[];
+	followUpKeys?: readonly KeyId[];
+	dequeueKeys?: readonly KeyId[];
 	hideThinkingBlock: () => boolean;
 	proseOnlyThinking: () => boolean;
 	resolveLinks?: (texts: readonly string[]) => Promise<ReadonlyMap<string, string>>;
+	transcriptActions?: Pick<TranscriptActions, "copy">;
 	requestRender: () => void;
+	configureEditor?: (editor: CustomEditor, key?: string) => void;
 	statusLine: Pick<StatusLineComponent, "getTopBorder" | "setRuntimeStatus" | "dispose"> & {
 		setHookStatus?: StatusLineComponent["setHookStatus"];
 	};
-	onSubmit: (input: string, images?: ImageContent[], key?: string) => boolean;
+	onSubmit: (
+		input: string,
+		images?: ImageContent[],
+		key?: string,
+		streamingBehavior?: "steer" | "followUp",
+		imageLinks?: (string | undefined)[],
+	) => boolean;
 	onNewThread: () => boolean;
 	canCopy: (key: string) => boolean;
+	canPromote: (key: string) => boolean;
 	onCopy: (key: string) => Promise<boolean>;
 	onClose: () => void;
 	onDraftChange: (key: string, text: string, images?: ImageContent[], imageLinks?: (string | undefined)[]) => void;
@@ -97,10 +109,9 @@ export interface BtwConversationPaneOptions {
 	onSelectThread: (key: string) => boolean;
 	onDisplayThread?: (key: string) => void;
 	onMarkRead: (key: string) => void;
+	onDequeue?: (key: string) => void;
 	onCloseThread: (key: string) => Promise<boolean>;
 	onPromoteThread: (key: string) => Promise<boolean>;
-	/** A submit was consumed because the selected thread is still streaming. */
-	onRejectedSubmit?: () => void;
 }
 
 const RAIL_MAX_WIDTH = 30;
@@ -120,6 +131,7 @@ const BTW_SLASH_COMMANDS: SlashCommand[] = [
 		argumentHint: "[question]",
 		allowArgs: true,
 	},
+	...PANE_SESSION_SLASH_COMMANDS,
 	{
 		name: "help",
 		description: "List available BTW actions",
@@ -151,14 +163,15 @@ export class BtwConversationPane
 	readonly #options: BtwConversationPaneOptions;
 	readonly #header: Component = {
 		render: () => [],
-		describe: () => this.#describeHeader(),
+		describe: cx => this.#describeHeader(cx),
 		handleNativeEvent: event => this.handleNativeEvent(event),
 	};
 	readonly #widgets: ExtensionWidgets;
+	readonly #transcriptActions: TranscriptActions;
 	readonly #statusKeys = new Set<string>();
 	#presentation: ExtensionPresentationSource | undefined;
 	#detachPresentation: (() => void) | undefined;
-	#menu: { kind: "threads" | "actions"; list: SelectList; handle: OverlayHandle } | undefined;
+	#menu: { kind: "threads" | "actions"; list: SelectList; handle?: OverlayHandle } | undefined;
 	readonly #approvalLifetime = new AbortController();
 	#approvalTail = Promise.resolve();
 	#approval: { finish: (approved: boolean) => void } | undefined;
@@ -167,12 +180,6 @@ export class BtwConversationPane
 	#selectedKey: string | undefined;
 	#previewKey: string | undefined;
 	#displayedKey: string | undefined;
-	#renderedTurns: readonly EphemeralConversationTurn[] | undefined;
-	#renderedTurnsLength = 0;
-	#renderedRequestInput: string | undefined;
-	#renderedRequestTimestamp: number | undefined;
-	#renderedRequestMessages: readonly AgentMessage[] | undefined;
-	#renderedRequestMessagesLength = 0;
 	#renderedStreamMessage: AssistantMessage | undefined;
 	#railOffset = 0;
 	#railCollapsed = true;
@@ -185,10 +192,17 @@ export class BtwConversationPane
 	#height = 20;
 	#abandoned = false;
 	readonly wantsKeyRelease = true;
+	readonly #queueBand = new Container();
+	#renderedMessages: readonly AgentMessage[] | undefined;
+	#closeTree: (() => void) | undefined;
 
 	constructor(options: BtwConversationPaneOptions) {
 		this.#options = options;
 		this.#widgets = new ExtensionWidgets(options.ui);
+		this.#transcriptActions = { ...options.transcriptActions };
+		const aboveEditor = new Container();
+		aboveEditor.addChild(this.#widgets.above);
+		aboveEditor.addChild(this.#queueBand);
 		this.#pane = new ChatTranscriptPane({
 			builder: {
 				ui: options.ui,
@@ -198,20 +212,23 @@ export class BtwConversationPane
 				getMessageRenderer: type => this.#displayed()?.extensionRunner?.getMessageRenderer(type),
 				getAssistantThinkingRenderers: () =>
 					this.#displayed()?.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+				getAssistantTextRenderers: () => this.#displayed()?.extensionRunner?.getAssistantTextRenderers?.() ?? [],
 				resolveLinks: options.resolveLinks,
 				hideThinkingBlock: options.hideThinkingBlock,
 				proseOnlyThinking: options.proseOnlyThinking,
 				requestRender: options.requestRender,
+				transcriptActions: this.#transcriptActions,
 			},
 			editor: {
 				label: "Ask BTW",
 				placeholder: "Ask a side question…",
 				images: true,
-				onSubmit: (input, images, key) => options.onSubmit(input, images, key),
+				followUpKeys: options.followUpKeys,
+				onSubmit: (input, images, key, links, mode) => options.onSubmit(input, images, key, mode, links),
 				autocompleteProvider: new CombinedAutocompleteProvider(BTW_SLASH_COMMANDS, options.cwd),
 			},
 			expandKeys: options.expandKeys,
-			aboveEditor: this.#widgets.above,
+			aboveEditor,
 			belowEditor: this.#widgets.below,
 			getEditorTopBorder: availableWidth => options.statusLine.getTopBorder(availableWidth),
 			getPlaceholder: () =>
@@ -219,6 +236,7 @@ export class BtwConversationPane
 					? "Ask a side question without interrupting Main."
 					: "Start this conversation with a question.",
 			getNotice: () => this.#selected()?.error,
+			configureEditor: options.configureEditor,
 			onEditorChange: (text, images, imageLinks, key) => {
 				if (key && !this.#abandoned) this.#options.onDraftChange(key, text, images, imageLinks);
 			},
@@ -300,10 +318,10 @@ export class BtwConversationPane
 		);
 		return this.#options.nativePane
 			? composer
-			: node("col", { grow: 1, gap: "sm" }, [this.#describeHeader(), this.#pane.describeTranscript(cx), composer]);
+			: node("col", { grow: 1, gap: "sm" }, [this.#describeHeader(cx), this.#pane.describeTranscript(cx), composer]);
 	}
 
-	#describeHeader(): NativeNode {
+	#describeHeader(cx: DescribeContext): NativeNode {
 		const selected = this.#selected();
 		return node(
 			"row",
@@ -335,13 +353,43 @@ export class BtwConversationPane
 						]
 					: []),
 				actionButton("+", "new", { title: "New thread" }),
-				...(selected ? [actionButton("···", "more", { title: "Thread actions" })] : []),
+				...(selected
+					? [
+							cx.supports("menu")
+								? node(
+										"menu",
+										{
+											title: "Thread actions",
+											align: "end",
+											size: "sm",
+											open: this.#menu?.kind === "actions" && !this.#menu.handle,
+											active:
+												this.#menu?.kind === "actions" && !this.#menu.handle
+													? this.#menu.list.getSelectedItem()?.value
+													: undefined,
+											items: this.#menuItems("actions").map(item => ({
+												id: item.value,
+												label: item.label,
+												...(item.value === "delete" ? { danger: true } : {}),
+											})),
+										},
+										undefined,
+										`thread-actions-${stableKey(selected.key)}`,
+									)
+								: actionButton("···", "more", { title: "Thread actions" }),
+						]
+					: []),
 			],
 			"header",
 		);
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "toggle" && event.open !== undefined) {
+			if (event.open) this.#openMenu("actions", true);
+			else this.#closeMenu();
+			return;
+		}
 		if (event.type !== "action") return;
 		if (this.#approval && (event.act === "approve" || event.act === "deny")) {
 			this.#approval.finish(event.act === "approve");
@@ -349,7 +397,10 @@ export class BtwConversationPane
 		}
 		if (event.act === "threads") this.#openMenu("threads");
 		else if (event.act === "more") this.#openMenu("actions");
-		else this.#runNativeAction(event.act);
+		else {
+			this.#closeMenu();
+			this.#runNativeAction(event.act);
+		}
 	}
 
 	#runNativeAction(act: string): void {
@@ -382,12 +433,12 @@ export class BtwConversationPane
 		if (!selected) return [];
 		return [
 			...(this.#options.canCopy(selected.key) ? [{ value: "copy-thread", label: "Copy conversation" }] : []),
-			...(selected.phase !== "running" && selected.turns.length > 0 ? [{ value: "promote", label: "Promote" }] : []),
+			...(this.#options.canPromote(selected.key) ? [{ value: "promote", label: "Promote" }] : []),
 			{ value: "delete", label: "Delete thread" },
 		];
 	}
 
-	#openMenu(kind: "threads" | "actions"): void {
+	#openMenu(kind: "threads" | "actions", native = false): void {
 		this.#closeMenu();
 		const items = this.#menuItems(kind);
 		if (items.length === 0) return;
@@ -416,6 +467,11 @@ export class BtwConversationPane
 			this.#options.requestRender();
 		};
 		list.onCancel = () => this.#closeMenu();
+		if (native) {
+			this.#menu = { kind, list };
+			this.#options.requestRender();
+			return;
+		}
 		const component: Component = {
 			render: width => list.render(width),
 			describe: cx => (sheet && cx.supports("picker") ? sheet.describe() : node("col", {}, [list])),
@@ -436,7 +492,7 @@ export class BtwConversationPane
 	#closeMenu(): void {
 		const menu = this.#menu;
 		this.#menu = undefined;
-		menu?.handle.hide();
+		menu?.handle?.hide();
 		this.#options.requestRender();
 	}
 
@@ -637,6 +693,11 @@ export class BtwConversationPane
 			else if (matchesKey(data, "escape")) this.#approval.finish(false);
 			return;
 		}
+		if (this.#menu && !this.#menu.handle) {
+			this.#menu.list.handleInput(data);
+			this.#options.requestRender();
+			return;
+		}
 		if (
 			this.#options.ui.nativeRendering &&
 			matchesKey(data, "escape") &&
@@ -646,6 +707,31 @@ export class BtwConversationPane
 			return;
 		}
 		this.#pane.handleInput(data);
+	}
+
+	restoreDraft(
+		key: string,
+		text: string,
+		images?: readonly ImageContent[],
+		links?: readonly (string | undefined)[],
+	): void {
+		this.#pane.restoreDraft(key, text, images, links);
+	}
+
+	showTree(session: AgentSession, onChange: (draft?: string, images?: ImageContent[]) => void): void {
+		this.#closeTree?.();
+		this.#closeTree = openPaneSessionTree(this.#options.ui, session, {
+			restore: input => onChange(input.text, input.images),
+			changed: () => {
+				onChange();
+				this.#options.requestRender();
+			},
+			error: message => {
+				this.#pane.setNotice(message);
+				this.#options.requestRender();
+			},
+			focus: () => this.#options.ui.setFocus(this),
+		});
 	}
 
 	getPasteTarget(): CustomEditor | undefined {
@@ -717,6 +803,7 @@ export class BtwConversationPane
 	dispose(): void {
 		this.#approvalLifetime.abort();
 		this.#closeMenu();
+		this.#closeTree?.();
 		if (this.#hoverClearTimer) {
 			clearTimeout(this.#hoverClearTimer);
 			this.#hoverClearTimer = undefined;
@@ -736,11 +823,8 @@ export class BtwConversationPane
 			else this.#toggleRail();
 			return true;
 		}
-		// Consume the submit while the selected thread is streaming: the editor
-		// clears itself on submit, so letting Enter through would silently drop
-		// the drafted question (pi-tui Editor#submitValue is not vetoable).
-		if (!editorEmpty && matchesKey(data, "enter") && this.#selected()?.phase === "running") {
-			this.#options.onRejectedSubmit?.();
+		if (this.#options.dequeueKeys?.some(key => matchesKey(data, key)) && this.#selectedKey) {
+			this.#options.onDequeue?.(this.#selectedKey);
 			return true;
 		}
 		if (editorEmpty && matchesKey(data, "tab")) return this.#selectAdjacent(1);
@@ -897,9 +981,26 @@ export class BtwConversationPane
 		if (displayed && displayed.key !== previousKey) this.#options.onDisplayThread?.(displayed.key);
 		this.#options.statusLine.setRuntimeStatus(displayed?.status, displayed?.title);
 		const editor = this.#pane.getPasteTarget();
+		const controls = displayed?.controls;
+		const hadRetry = Boolean(this.#transcriptActions.retry);
+		this.#transcriptActions.retry = controls ? () => this.#runControl(() => controls.retry()) : undefined;
+		if (hadRetry !== Boolean(this.#transcriptActions.retry)) this.#pane.invalidate();
 		if (editor) {
 			editor.nativeMinWidth = 1;
-			editor.disableSubmit = displayed?.phase === "running";
+			editor.disableSubmit = false;
+			this.#options.configureEditor?.(editor, this.#selectedKey);
+			editor.setActionKeys("app.interrupt", getKeybindings().getKeys("app.clear"));
+			editor.onEscape = () => {
+				const selectedControls = this.#selected()?.controls;
+				if (selectedControls?.isRunning()) void this.#runControl(() => selectedControls.abort());
+				else editor.clearDraft();
+			};
+			editor.setActionKeys("app.retry", getKeybindings().getKeys("app.retry"));
+			editor.onRetry = () => {
+				const selectedControls = this.#selected()?.controls;
+				if (selectedControls) void this.#runControl(() => selectedControls.retry());
+			};
+			editor.composerState = () => ({ running: this.#selected()?.controls?.isRunning() ?? false });
 			const usage = displayed?.status?.stats.contextUsage;
 			const facts: ComposerFacts = {
 				context: node("meter", {
@@ -939,98 +1040,70 @@ export class BtwConversationPane
 				handleNativeEvent: () => {},
 			};
 		}
+		this.#queueBand.clear();
+		if (displayed?.queued?.length) {
+			const groups = displayed.queued;
+			this.#queueBand.addChild(
+				new QueuedMessagesBand(groups, this.#options.dequeueKeys?.[0] ?? "alt+up", (group, index) =>
+					groups[group]?.edits[index]?.(),
+				),
+			);
+		}
 		const samePresentation = this.#presentation === displayed?.extensionRunner;
 		this.#syncPresentation(displayed?.extensionRunner);
-		const sameRenderedRequest =
-			samePresentation &&
-			displayed !== undefined &&
-			displayed.key === previousKey &&
-			displayed.request !== undefined &&
-			this.#renderedTurns === displayed.turns &&
-			this.#renderedTurnsLength === displayed.turns.length &&
-			this.#renderedRequestInput === displayed.request.input &&
-			this.#renderedRequestTimestamp === displayed.request.timestamp;
-		const transcriptUnchanged =
-			samePresentation &&
-			displayed !== undefined &&
-			displayed.key === previousKey &&
-			this.#renderedTurns === displayed.turns &&
-			this.#renderedTurnsLength === displayed.turns.length &&
-			this.#renderedRequestInput === displayed.request?.input &&
-			this.#renderedRequestTimestamp === displayed.request?.timestamp &&
-			this.#renderedRequestMessages === displayed.request?.messages &&
-			this.#renderedRequestMessagesLength === (displayed.request?.messages.length ?? 0) &&
-			this.#renderedStreamMessage === displayed.request?.streamMessage;
-		const streamMessage = displayed?.request?.streamMessage;
-		let updatedStream =
-			sameRenderedRequest &&
-			this.#renderedRequestMessages === displayed.request?.messages &&
-			this.#renderedRequestMessagesLength === (displayed.request?.messages.length ?? 0) &&
-			this.#renderedStreamMessage !== undefined &&
-			streamMessage !== undefined &&
-			this.#pane.updateStreamingAssistant(streamMessage);
-		if (
-			!updatedStream &&
-			sameRenderedRequest &&
-			this.#renderedStreamMessage !== undefined &&
-			streamMessage === undefined
-		) {
-			const finalMessage = displayed.request?.messages.at(-1);
-			updatedStream = finalMessage?.role === "assistant" && this.#pane.finalizeStreamingAssistant(finalMessage);
-		}
-		if (
-			!updatedStream &&
-			samePresentation &&
-			displayed !== undefined &&
-			displayed.key === previousKey &&
-			displayed.request === undefined &&
-			this.#renderedRequestInput !== undefined &&
-			this.#renderedTurnsLength + 1 === displayed.turns.length
-		) {
-			const completedTurn = displayed.turns.at(-1);
-			if (
-				completedTurn?.input === this.#renderedRequestInput &&
-				completedTurn.timestamp === this.#renderedRequestTimestamp
-			) {
-				updatedStream = this.#pane.finalizeStreamingAssistant(
-					sanitizeAssistantForReparentedHistory(completedTurn.assistantMessage),
-				);
-			}
-		}
-		if (!updatedStream && !transcriptUnchanged) this.#pane.rebuild(displayed ? this.#messages(displayed) : []);
-		this.#renderedTurns = displayed?.turns;
-		this.#renderedTurnsLength = displayed?.turns.length ?? 0;
-		this.#renderedRequestInput = displayed?.request?.input;
-		this.#renderedRequestTimestamp = displayed?.request?.timestamp;
-		this.#renderedRequestMessages = displayed?.request?.messages;
-		this.#renderedRequestMessagesLength = displayed?.request?.messages.length ?? 0;
-		this.#renderedStreamMessage = displayed?.request?.streamMessage;
+		this.#syncTranscript(
+			displayed?.messages ?? [],
+			displayed?.streamingMessage,
+			!samePresentation || displayed?.key !== previousKey,
+		);
+		this.#pane.updateToolUpdates(controls?.getToolUpdates() ?? []);
 		if (displayed && displayed.key !== previousKey) {
 			this.#pane.setScrollOffset(this.#scrollOffsets.get(displayed.key) ?? "bottom");
 		}
 	}
 
-	#messages(thread: BtwThreadView): AgentMessage[] {
-		const messages: AgentMessage[] = [];
-		for (const turn of thread.turns) {
-			messages.push({
-				role: "user",
-				content: [{ type: "text", text: turn.input }, ...(turn.images ?? [])],
-				timestamp: turn.timestamp,
-			});
-			if (turn.intermediateMessages) messages.push(...turn.intermediateMessages);
-			messages.push(sanitizeAssistantForReparentedHistory(turn.assistantMessage));
+	async #runControl(run: () => Promise<void>): Promise<void> {
+		try {
+			await run();
+		} catch (error) {
+			this.#pane.setNotice(error instanceof Error ? error.message : String(error));
 		}
-		if (thread.request) {
-			messages.push({
-				role: "user",
-				content: [{ type: "text", text: thread.request.input }, ...(thread.request.images ?? [])],
-				timestamp: thread.request.timestamp,
-			});
-			messages.push(...thread.request.messages);
-			if (thread.request.streamMessage) messages.push(thread.request.streamMessage);
+		this.#options.requestRender();
+	}
+
+	#syncTranscript(messages: readonly AgentMessage[], stream: AssistantMessage | undefined, reset: boolean): void {
+		const previous = this.#renderedMessages ?? [];
+		let appendFrom = previous.length;
+		let rebuild =
+			reset || (messages !== previous && !previous.every((message, index) => message === messages[index]));
+		let finalized = false;
+		if (!rebuild && this.#renderedStreamMessage) {
+			const final = messages[appendFrom];
+			if (final?.role === "assistant" && sameAssistantTurn(this.#renderedStreamMessage, final)) {
+				finalized = this.#pane.finalizeStreamingAssistant(final);
+				rebuild = !finalized;
+				appendFrom++;
+			} else if (messages.length > appendFrom) {
+				rebuild = true;
+			}
 		}
-		return messages;
+		if (rebuild) {
+			this.#pane.rebuild(stream ? [...messages, stream] : messages, { transientTail: Boolean(stream) });
+		} else {
+			const appended = messages.slice(appendFrom);
+			if (appended.length) this.#pane.append(appended);
+			if (stream) {
+				if (this.#renderedStreamMessage && !finalized && !appended.length) {
+					if (!this.#pane.updateStreamingAssistant(stream))
+						this.#pane.rebuild([...messages, stream], { transientTail: true });
+				} else this.#pane.append([stream], { transientTail: true });
+			}
+		}
+		this.#renderedMessages = messages;
+		// message_end clears the live stream before its journal entry is appended.
+		// Keep the transient block through that gap; only its canonical final or
+		// a changed display context can retire it.
+		this.#renderedStreamMessage = stream ?? (!rebuild && !finalized ? this.#renderedStreamMessage : undefined);
 	}
 
 	#displayed(): BtwThreadView | undefined {

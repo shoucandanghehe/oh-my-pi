@@ -277,6 +277,7 @@ export class SubagentWorker implements WorkerPeer {
 			clearTimeout(timer);
 		}
 		this.#booted = true;
+		for (const service of this.#services) service.onWorkerReady?.(this);
 		logger.debug("Subagent worker booted", {
 			threadId: this.threadId,
 			bootMs: Math.round(bootMs),
@@ -363,6 +364,7 @@ export class SubagentWorkerPool {
 	/** Prewarm spawns scheduled for the next macrotask. */
 	#pendingSpawns = 0;
 	#disposed = false;
+	#pausedExitWorkers: readonly SubagentWorker[] | undefined;
 
 	constructor(options: SubagentWorkerPoolOptions) {
 		this.#options = options;
@@ -390,6 +392,7 @@ export class SubagentWorkerPool {
 	 */
 	place(): SubagentPlacement {
 		if (this.#disposed) throw new Error("Subagent worker pool is disposed");
+		if (this.#pausedExitWorkers) throw new Error("Subagent worker pool is exiting while paused");
 		const worker = this.#select();
 		if (!worker) return { worker: undefined, release: this.beginMainRun() };
 		return { worker, release: worker.beginRun() };
@@ -435,7 +438,7 @@ export class SubagentWorkerPool {
 	 * it booted; an idle worker those spawns may use gets its idle countdown restarted.
 	 */
 	prewarm(expectedSpawns = 1): void {
-		if (this.#disposed) return;
+		if (this.#disposed || this.#pausedExitWorkers) return;
 		const slots = this.#slots(this.runsInFlight + Math.max(1, expectedSpawns));
 		let slot = 0;
 		for (const worker of this.#workers.values()) {
@@ -447,7 +450,7 @@ export class SubagentWorkerPool {
 			this.#pendingSpawns++;
 			setImmediate(() => {
 				this.#pendingSpawns--;
-				if (this.#disposed || this.#workers.size >= slots) return;
+				if (this.#disposed || this.#pausedExitWorkers || this.#workers.size >= slots) return;
 				this.#spawn(true);
 			});
 		}
@@ -461,6 +464,25 @@ export class SubagentWorkerPool {
 	/** Snapshot of live workers (including ones still starting), in slot order. */
 	workers(): SubagentWorker[] {
 		return [...this.#workers.values()];
+	}
+
+	/** Stop new placements, then include every starting or live worker in durable exit preparation. */
+	async preparePausedExit(): Promise<string[]> {
+		const workers = (this.#pausedExitWorkers ??= this.workers());
+		const ids = await Promise.all(
+			workers.map(async worker => {
+				await worker.ready;
+				return worker.link.call("preparePausedExit");
+			}),
+		);
+		return ids.flat();
+	}
+
+	/** The pause-shutdown reason is created and consumed exclusively on each session's home thread. */
+	async disposePausedExit(): Promise<void> {
+		const workers = this.#pausedExitWorkers;
+		if (!workers) throw new Error("Subagent worker pool has not prepared a paused exit");
+		await Promise.all(workers.map(worker => worker.link.call("disposePausedExit")));
 	}
 
 	/** Observe worker deaths (crash, idle shutdown, dispose); returns an unsubscribe fn. */

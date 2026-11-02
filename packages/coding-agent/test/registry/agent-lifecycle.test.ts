@@ -1,28 +1,72 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
+import type {
+	AgentSessionEvent,
+	AgentSessionEventListener,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session-events";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 interface SessionStub {
 	session: AgentSession;
 	disposeCalls: () => number;
+	startCompaction: () => void;
+	endCompaction: () => void;
+	listenerCount: () => number;
 }
 
-/** Minimal session: the lifecycle manager only ever calls dispose() on it. */
+/** Minimal session with the maintenance observation contract used by the lifecycle owner. */
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 	let calls = 0;
+	let compacting = false;
+	const listeners = new Set<AgentSessionEventListener>();
+	const emit = (event: AgentSessionEvent) => {
+		for (const listener of listeners) listener(event);
+	};
 	const stub = {
+		get isCompacting() {
+			return compacting;
+		},
+		subscribe: (listener: AgentSessionEventListener) => {
+			listeners.add(listener);
+			return () => {
+				listeners.delete(listener);
+			};
+		},
 		dispose: async () => {
 			calls++;
 			await dispose?.();
 		},
 	};
-	return { session: stub as unknown as AgentSession, disposeCalls: () => calls };
+	return {
+		session: stub as unknown as AgentSession,
+		disposeCalls: () => calls,
+		startCompaction: () => {
+			compacting = true;
+			emit({ type: "manual_compaction_start" });
+		},
+		endCompaction: () => {
+			// AgentSession publishes the outcome before clearing its busy marker.
+			emit({ type: "manual_compaction_end", aborted: false });
+			compacting = false;
+		},
+		listenerCount: () => listeners.size,
+	};
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -39,6 +83,55 @@ async function flushAsync(): Promise<void> {
 }
 
 const TTL = 20;
+
+/** Real manual maintenance, held at its extension hook rather than by a guessed delay. */
+async function createControlledCompaction(tempDir: TempDir) {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled Anthropic model");
+	const entered = Promise.withResolvers<void>();
+	const finish = Promise.withResolvers<void>();
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("anthropic", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+	const sessionManager = SessionManager.inMemory(tempDir.path());
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("session_before_compact", async event => {
+				entered.resolve();
+				await finish.promise;
+				return {
+					compaction: {
+						summary: "compacted without parking",
+						shortSummary: undefined,
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: {},
+					},
+				};
+			});
+		},
+		tempDir.path(),
+		new EventBus(),
+		runtime,
+		"lifecycle-manual-compaction",
+	);
+	const mock = createMockModel({ handler: { content: ["A completed turn with enough history to compact."] } });
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		}),
+		sessionManager,
+		settings: Settings.isolated({ "compaction.keepRecentTokens": 1 }),
+		modelRegistry,
+		extensionRunner: new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry),
+	});
+	await session.prompt("first completed turn");
+	await session.prompt("second completed turn");
+	return { session, authStorage, entered, finish };
+}
 
 describe("AgentLifecycleManager", () => {
 	let registry: AgentRegistryApi;
@@ -136,6 +229,141 @@ describe("AgentLifecycleManager", () => {
 		expect(ref?.session).toBeNull();
 		expect(ref?.sessionFile).toBe("/tmp/1-Sub.jsonl");
 		expect(lifecycle.has("1-Sub")).toBe(true);
+	});
+
+	it("manual compaction survives the idle TTL without disposal or abort and gets a fresh TTL on completion", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-compaction-");
+		const { session, authStorage, entered, finish } = await createControlledCompaction(tempDir);
+		const disposed = vi.spyOn(session, "dispose");
+		const outcomes: AgentSessionEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "manual_compaction_end") outcomes.push(event);
+		});
+		vi.useFakeTimers();
+		const ref = registerIdleSub("Compact-Sub", session);
+		lifecycle.adopt(ref.id, { idleTtlMs: TTL });
+		vi.advanceTimersByTime(TTL - 1);
+		const compacting = session.compact();
+		try {
+			await entered.promise;
+			vi.advanceTimersByTime(TTL * 4);
+			await flushAsync();
+			expect(ref.status).toBe("idle");
+			expect(ref.session).toBe(session);
+			expect(disposed).not.toHaveBeenCalled();
+			// Explicit park must respect the same busy boundary as TTL park.
+			await lifecycle.park(ref.id);
+			expect(disposed).not.toHaveBeenCalled();
+
+			finish.resolve();
+			const result = await compacting;
+			expect(result.summary).toBe("compacted without parking");
+			expect(outcomes).toEqual([{ type: "manual_compaction_end", result, aborted: false }]);
+			vi.advanceTimersByTime(TTL - 1);
+			await flushAsync();
+			expect(ref.session).toBe(session);
+			vi.advanceTimersByTime(1);
+			await flushAsync();
+			expect(ref.status).toBe("parked");
+			expect(ref.session).toBeNull();
+			expect(disposed).toHaveBeenCalledTimes(1);
+		} finally {
+			finish.resolve();
+			await compacting.catch(() => {});
+			vi.useRealTimers();
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("park rechecks real maintenance busy state after its pre-detach await, before the start event", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-compact-race-");
+		const { session, authStorage, entered, finish } = await createControlledCompaction(tempDir);
+		const disposed = vi.spyOn(session, "dispose");
+		vi.useFakeTimers();
+		const ref = registerIdleSub("Compact-Race", session);
+		lifecycle.adopt(ref.id, { idleTtlMs: TTL });
+		const parking = lifecycle.park(ref.id);
+		// compact() installs isCompacting synchronously, then awaits abort()
+		// before publishing manual_compaction_start.
+		const compacting = session.compact();
+		try {
+			expect(session.isCompacting).toBe(true);
+			await Promise.resolve();
+			expect(ref.session).toBe(session);
+			expect(disposed).not.toHaveBeenCalled();
+			await parking;
+			await entered.promise;
+			finish.resolve();
+			await compacting;
+			vi.advanceTimersByTime(TTL);
+			await flushAsync();
+			expect(ref.status).toBe("parked");
+			expect(disposed).toHaveBeenCalledTimes(1);
+		} finally {
+			finish.resolve();
+			await compacting.catch(() => {});
+			await parking;
+			vi.useRealTimers();
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("revive observes the new session's maintenance and detaches the parked and released observers", async () => {
+		vi.useFakeTimers();
+		const old = makeSessionStub();
+		const revived = makeSessionStub();
+		const ref = registerIdleSub("Compact-Revive", old.session);
+		lifecycle.adopt(ref.id, { idleTtlMs: TTL, revive: async () => revived.session });
+		await lifecycle.park(ref.id);
+		expect(old.listenerCount()).toBe(0);
+		await lifecycle.ensureLive(ref.id);
+
+		revived.startCompaction();
+		vi.advanceTimersByTime(TTL * 2);
+		await flushAsync();
+		expect(ref.session).toBe(revived.session);
+		expect(revived.disposeCalls()).toBe(0);
+		revived.endCompaction();
+		vi.advanceTimersByTime(TTL - 1);
+		// A stale outcome from the previous runtime cannot reset the new TTL.
+		old.endCompaction();
+		vi.advanceTimersByTime(1);
+		await flushAsync();
+		expect(ref.status).toBe("parked");
+		expect(revived.disposeCalls()).toBe(1);
+		expect(revived.listenerCount()).toBe(0);
+		await lifecycle.ensureLive(ref.id);
+		await lifecycle.release(ref.id);
+		expect(revived.listenerCount()).toBe(0);
+	});
+
+	it("re-adopt, ref replacement, unregister, park, and retirement detach obsolete maintenance observers", async () => {
+		const old = makeSessionStub();
+		const ref = registerIdleSub("Compact-Replaced", old.session);
+		lifecycle.adopt(ref.id, { idleTtlMs: TTL });
+		lifecycle.adopt(ref.id, { idleTtlMs: TTL });
+		expect(old.listenerCount()).toBe(1);
+		const replacement = makeSessionStub();
+		const next = registerIdleSub(ref.id, replacement.session);
+		expect(old.listenerCount()).toBe(0);
+		lifecycle.adopt(next.id, { idleTtlMs: TTL }, next);
+		registry.unregister(next.id, next);
+		expect(replacement.listenerCount()).toBe(0);
+		const reAdopted = registerIdleSub(next.id, replacement.session);
+		lifecycle.adopt(reAdopted.id, { idleTtlMs: TTL });
+		const parking = lifecycle.park(reAdopted.id);
+		// Re-adoption during the cancel window installs a different observer
+		// for the same ref; park must detach that current observer.
+		lifecycle.adopt(reAdopted.id, { idleTtlMs: TTL }, reAdopted);
+		await parking;
+		expect(reAdopted.status).toBe("parked");
+		expect(replacement.listenerCount()).toBe(0);
+		registerIdleSub(next.id, replacement.session);
+		lifecycle.adopt(next.id, { idleTtlMs: TTL });
+		AgentLifecycleManager.resetGlobalForTests();
+		expect(replacement.listenerCount()).toBe(0);
 	});
 
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {

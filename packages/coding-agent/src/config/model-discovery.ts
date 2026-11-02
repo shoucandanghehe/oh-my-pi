@@ -35,7 +35,6 @@ import {
 	type ThinkingConfig,
 	runnerApiKind,
 } from "@oh-my-pi/pi-catalog/types";
-import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";

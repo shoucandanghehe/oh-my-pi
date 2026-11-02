@@ -19,23 +19,25 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner } from "../extensibility/extensions";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, InputEventResult } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { currentThreadId } from "../thread/identity";
-import type { AgentSession } from "./agent-session";
+import type { AgentSession, NavigateTreeResult } from "./agent-session";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import type {
 	AgentSessionDisposeOptions,
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
+	ContinuePausedAgentsResult,
 	DequeuedMessage,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
+	PausedTurnContinuation,
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
@@ -45,12 +47,14 @@ import type {
 	SteerOptions,
 } from "./agent-session-types";
 import type { BlobPutOptions, BlobPutResult } from "./blob-store";
+import type { BtwTurnOptions } from "./btw-turn";
 import type { IdleMaintenanceOptions } from "./idle-maintenance";
 import type { CustomMessage } from "./messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import type { AdvisorStatusOverviewEntry } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
-import type { ModelUsageRecord, SessionEntry, UsageStatistics } from "./session-entries";
+import type { ModelUsageRecord, SessionEntry, SessionTreeNode, UsageStatistics } from "./session-entries";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 
 /** Session-manager reads other agents' code performs on a session it does not own. */
 export interface AgentSessionManagerHandle {
@@ -102,6 +106,8 @@ export interface AgentSessionHandle {
 	readonly sessionManager: AgentSessionManagerHandle;
 	/** Whether the agent is currently streaming a response. */
 	readonly isStreaming: boolean;
+	/** Whether home-thread maintenance currently owns this session, even when it is not watched. */
+	readonly isCompacting: boolean;
 	/** When the current run started; undefined between runs. */
 	readonly runStartedAt: number | undefined;
 	/** Whether the session still owes turns to IRC messages (held, queued, or awaiting compaction). */
@@ -148,6 +154,8 @@ export interface AgentSessionHandle {
 	waitForIrcReplies(): Promise<void>;
 	/** Send a prompt (or steer/follow up while streaming, per `options.streamingBehavior`). */
 	prompt(text: string, options?: PromptOptions): Promise<boolean>;
+	/** Continue this session's durable paused tail on its home thread. */
+	continuePausedTurn(): Promise<PausedTurnContinuation>;
 	/** Queue a steering message for the next step boundary. */
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void>;
 	/** Abort the current operation and wait for the agent to become idle. */
@@ -173,6 +181,11 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	getBranch(fromId?: string): SessionEntry[];
 	/** Id of the current leaf entry. */
 	getLeafId(): string | null;
+	/** Tree and labels used by pane-local navigation. */
+	getTree(): SessionTreeNode[];
+	appendLabelChange(targetId: string, label: string | undefined): string | Promise<string>;
+	/** Observe committed journal entries. */
+	subscribeToEntries(observer: (entry: SessionEntry) => void): () => void;
 	/** The newest entry that moves the conversation, when the active branch ends at it (`conversationTip`). */
 	getConversationTip(): SessionEntry | undefined;
 	/** Append a custom entry (a worker-homed session appends on its home thread). */
@@ -226,6 +239,7 @@ export interface AgentViewState {
 
 /** Live `tool_execution_update` event replayed when the TUI attaches mid-tool. */
 export type ToolExecutionUpdateEvent = Extract<AgentSessionEvent, { type: "tool_execution_update" }>;
+export type ToolStreamUpdateEvent = Extract<AgentSessionEvent, { type: "tool_stream_update" }>;
 
 /**
  * Whether `session` is homed on this thread. Thread bridges decode a handle
@@ -276,8 +290,6 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly skills: readonly Skill[];
 	/** Whether the effective thinking level is resolved automatically. */
 	readonly isAutoThinking: boolean;
-	/** Whether a compaction is in progress. */
-	readonly isCompacting: boolean;
 	/** Speculative compaction state. */
 	readonly compactionSpeculation: "idle" | "running" | "armed";
 	/** Bumped whenever context usage changes. */
@@ -290,8 +302,30 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly isTtsrAbortPending: boolean;
 	/** Whether input is queued that an interrupt would act on. */
 	readonly hasInterruptibleInput: boolean;
+	/** Deferred-command admission barriers, owned by this session's home thread. */
+	readonly isSessionTransitioning: boolean;
+	readonly hasAdmittedSubmission: boolean;
+	readonly queuedMessageCount: number;
+	waitForIdle(): Promise<void>;
+	waitForAdmittedSubmissions(): Promise<void>;
+	waitForSessionTransition(): Promise<void>;
+	hasPendingAsyncWork(): boolean;
+	settleAsyncWork(): Promise<void>;
+	/** Run interactive input hooks on the receiving session, not its renderer ancestor. */
+	emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined>;
+	/** Open the model transport while composing. */
+	prewarmModelConnection(): void;
+	/** Compact and navigate the receiving session. */
+	compact(instructions?: string, options?: CompactOptions): Promise<CompactionResult>;
+	navigateTree(
+		targetId: string,
+		options?: { summarize?: boolean; requireIdle?: boolean },
+	): Promise<NavigateTreeResult>;
+	hasPausedAgents(): boolean;
+	continuePausedAgents(): Promise<ContinuePausedAgentsResult>;
 	/** Tool execution updates of tools still running, for mid-tool attach. */
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[];
+	activeToolStreamUpdates(): readonly ToolStreamUpdateEvent[];
 	/** Await persistence of messages already emitted. */
 	settleInFlightMessagePersistence(): Promise<void>;
 	/** Session context for transcript rendering. */
@@ -363,6 +397,11 @@ export interface AgentViewSession extends AgentSessionHandle {
 	hasBuiltInTool(name: string): boolean;
 	/** Queued steering and follow-up messages. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number };
+	/** Capture the selected message's identity; stale controls never edit another message. */
+	getQueuedMessageEditAction(
+		queue: "steering" | "followUp",
+		index: number,
+	): ((beforeInterrupt?: () => void) => Promise<RestoredQueuedMessage | undefined>) | undefined;
 	/** Remove and return the newest queued message with the queue it came from. */
 	popLastQueuedMessage(): DequeuedMessage | undefined;
 	/** Resume an interrupted turn. */
@@ -375,6 +414,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	abortCompaction(reason?: unknown): void;
 	/** Run a side turn (e.g. /btw) against the session's model without touching its transcript. */
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
+	/** Run a read-only BTW history turn on this session's home thread, over frozen native context. */
+	runBtwTurn(args: BtwTurnOptions): Promise<EphemeralTurnResult>;
 	/** Whether an ephemeral turn's `maxTokens` reaches the provider unchanged. */
 	ephemeralMaxTokensPreservesRequest(): boolean;
 	/** Export the transcript to HTML; returns the written path. */

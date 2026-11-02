@@ -49,7 +49,7 @@ class Line implements Component, CompactTranscriptBlock {
 	}
 
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "toggle") this.toggles.push(event.collapsed);
+		if (event.type === "toggle" && event.collapsed !== undefined) this.toggles.push(event.collapsed);
 	}
 }
 

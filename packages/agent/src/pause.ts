@@ -29,6 +29,12 @@ export type AgentPauseListener = (paused: boolean) => void;
 /** Listener invoked whenever active-loop or waiter membership changes. */
 export type AgentPauseWaitersListener = () => void;
 
+/** A host-owned barrier, e.g. the aggregate gate of a worker thread. */
+export interface AgentPauseParticipant {
+	setReady(ready: boolean): void;
+	dispose(): void;
+}
+
 /**
  * Abort reason for dispose/exit while the pause gate is holding loops at the
  * model boundary. The agent loop ends cleanly without synthesizing an aborted
@@ -47,6 +53,7 @@ export class AgentPauseGate {
 	#activeLoops = new Set<symbol>();
 	/** Active loops currently parked at the model-call boundary. */
 	#modelWaiters = new Set<symbol>();
+	#participants = new Set<{ ready: boolean }>();
 
 	/** True while the gate is engaged. */
 	get paused(): boolean {
@@ -74,7 +81,32 @@ export class AgentPauseGate {
 	 * decide when a process exit would leave a durable, continuable transcript.
 	 */
 	get ready(): boolean {
-		return this.#gate !== undefined && this.#modelWaiters.size === this.#activeLoops.size;
+		return this.#gate !== undefined && this.allLoopsParked;
+	}
+
+	/** Local loops and every host-owned barrier have reached their safe point. */
+	get allLoopsParked(): boolean {
+		return (
+			this.#modelWaiters.size === this.#activeLoops.size &&
+			[...this.#participants].every(participant => participant.ready)
+		);
+	}
+
+	/** Register an unacknowledged barrier; failures must stay unready until explicitly removed. */
+	registerParticipant(): AgentPauseParticipant {
+		const participant = { ready: false };
+		this.#participants.add(participant);
+		this.#notifyWaiters();
+		return {
+			setReady: ready => {
+				if (!this.#participants.has(participant) || participant.ready === ready) return;
+				participant.ready = ready;
+				this.#notifyWaiters();
+			},
+			dispose: () => {
+				if (this.#participants.delete(participant)) this.#notifyWaiters();
+			},
+		};
 	}
 
 	/** Register a live agent loop. Returns an opaque id for later wait/unregister. */

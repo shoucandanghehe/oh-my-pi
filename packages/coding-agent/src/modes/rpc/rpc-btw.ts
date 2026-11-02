@@ -16,7 +16,7 @@ import {
 	BtwHistoryStore,
 	getBtwLatestTurn,
 } from "../../session/btw-history";
-import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
+import { beginBtwTurn, patchLatestBtwTurn } from "../../session/btw-turn";
 import type { RpcBtwDeltaFrame, RpcBtwHistoryRecord, RpcBtwRecordFrame } from "./rpc-types";
 
 type RpcBtwOutputFrame =
@@ -38,10 +38,7 @@ function toRpcRecord({ title: _title, ...record }: BtwHistoryRecord): RpcBtwHist
 }
 
 export class RpcBtwController {
-	readonly #session: Pick<
-		AgentSession,
-		"model" | "createEphemeralConversation" | "publishBtwSummary" | "sessionManager"
-	>;
+	readonly #session: Pick<AgentSession, "model" | "runBtwTurn" | "sessionManager">;
 	readonly #output: (frame: RpcBtwOutputFrame) => void;
 	#store: BtwHistoryStore | undefined;
 	/** `sessionId \0 artifactsDir` the store was opened for. */
@@ -52,12 +49,12 @@ export class RpcBtwController {
 	/** Bumped by every cancel and session change; a `btw` still starting from before gives up. */
 	#epoch = 0;
 	/** Terminal checkpoint writes still in flight. */
-	readonly #writes = new Set<Promise<void>>();
+	readonly #writes = new Set<Promise<boolean>>();
 	/** Terminal checkpoints that failed, keyed by record id (latest wins); retried before any move. */
 	readonly #unsaved = new Map<string, RunningBtw>();
 
 	constructor(
-		session: Pick<AgentSession, "model" | "createEphemeralConversation" | "publishBtwSummary" | "sessionManager">,
+		session: Pick<AgentSession, "model" | "runBtwTurn" | "sessionManager">,
 		output: (frame: RpcBtwOutputFrame) => void,
 	) {
 		this.#session = session;
@@ -218,10 +215,31 @@ export class RpcBtwController {
 	): Promise<void> {
 		if (this.#running !== running) return;
 		try {
-			const { replyText } = await runBtwTurn(this.#session, {
+			const checkpoint = await running.store.readConversation(running.record.id);
+			running.abort.signal.throwIfAborted();
+			const { replyText } = await this.#session.runBtwTurn({
 				question,
 				history,
 				conversationKey,
+				checkpoint,
+				onCheckpoint: async (checkpoint, phase) => {
+					if (phase === "frozen") running.abort.signal.throwIfAborted();
+					const current = running.store.getRecords().find(record => record.id === running.record.id);
+					if (current && getBtwLatestTurn(current).createdAt !== getBtwLatestTurn(running.record).createdAt)
+						return;
+					running.store.stageConversation(running.record.id, checkpoint);
+					if (phase === "frozen") {
+						if (!(await this.#persist(running))) throw new Error("Could not save frozen BTW context");
+					} else if (getBtwLatestTurn(running.record).status !== "running") {
+						await Promise.all(this.#writes);
+						const latest = running.store.getRecords().find(record => record.id === running.record.id);
+						if (
+							!this.#unsaved.has(running.record.id) &&
+							latest?.followUps?.length === running.record.followUps?.length
+						)
+							void this.#persist(running);
+					}
+				},
 				source: { threadKey: running.record.id, threadTitle: running.record.question },
 				signal: running.abort.signal,
 				onTextDelta: delta => {
@@ -246,18 +264,25 @@ export class RpcBtwController {
 		this.#running = undefined;
 		running.record = patchLatestBtwTurn(running.record, patch);
 		this.#output({ type: "btw_record", record: toRpcRecord(running.record) });
+		void this.#persist(running);
+	}
+
+	#persist(running: RunningBtw): Promise<boolean> {
 		const write = running.store.upsert(running.record).then(
 			() => {
 				this.#unsaved.delete(running.record.id);
+				return true;
 			},
 			error => {
 				this.#unsaved.set(running.record.id, running);
 				const message = `Could not save /btw history: ${toError(error).message}`;
 				logger.error(message);
 				this.#output({ type: "notice", level: "error", message, source: "btw-history" });
+				return false;
 			},
 		);
 		this.#writes.add(write);
 		void write.finally(() => this.#writes.delete(write));
+		return write;
 	}
 }

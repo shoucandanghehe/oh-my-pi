@@ -204,7 +204,7 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	motion: { reduce: "boolean" },
 	features: { features: "array" },
 	visible: { visible: "boolean" },
-	toggle: { id: "string", collapsed: "boolean" },
+	toggle: { id: "string" },
 	select: { id: "string", item: "string" },
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
@@ -231,6 +231,7 @@ function decodeEvent(value: Record<string, unknown>): TspEvent | null {
 		const got = value[key];
 		if (want === "array" ? !isStringArray(got) : typeof got !== want) return null;
 	}
+	if (value.ev === "toggle" && typeof value.collapsed !== "boolean" && typeof value.open !== "boolean") return null;
 	return value as TspEvent;
 }
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { RpcClosedError } from "../../src/thread/rpc";
 import type { ThreadService, WorkerPeer } from "../../src/thread/services";
@@ -15,6 +16,7 @@ import {
 const cleanups: Array<() => void> = [];
 
 afterEach(() => {
+	agentPauseGate.resume();
 	for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
@@ -80,6 +82,29 @@ function probeService(): ThreadService & { installed: WorkerPeer[]; exits: strin
 }
 
 describe("SubagentWorker", () => {
+	it("keeps a starting worker unready until boot and warm-up have acknowledged the paused gate", async () => {
+		const entered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		agentPauseGate.pause();
+		const worker = startWorker({
+			warmUp: async () => {
+				entered.resolve();
+				await finish.promise;
+			},
+		});
+		await entered.promise;
+		expect(agentPauseGate.ready).toBe(false);
+		finish.resolve();
+		await worker.ready;
+		expect(agentPauseGate.ready).toBe(true);
+		// An actual communication failure cannot be treated as a ready barrier.
+		worker.terminate("pause peer failed");
+		expect(agentPauseGate.ready).toBe(false);
+		agentPauseGate.resume();
+		agentPauseGate.pause();
+		expect(agentPauseGate.ready).toBe(true);
+	});
+
 	it("boots and answers a ping that round-trips through a sync call to main", async () => {
 		const probe = probeService();
 		const worker = startWorker({ services: [...THREAD_SERVICES, probe] });
@@ -172,6 +197,18 @@ describe("allowedSubagentWorkers", () => {
 });
 
 describe("SubagentWorkerPool", () => {
+	it("rejects paused disposal if a prepared worker dies instead of silently omitting its failed link", async () => {
+		agentPauseGate.pause();
+		const pool = workerOnlyPool(1);
+		const { worker, release } = await leaseFrom(pool);
+		release();
+		expect(agentPauseGate.ready).toBe(true);
+		await pool.preparePausedExit();
+		worker.terminate("lost after pause preparation");
+		expect(agentPauseGate.ready).toBe(false);
+		await expect(pool.disposePausedExit()).rejects.toBeInstanceOf(RpcClosedError);
+	});
+
 	it("keeps 8 concurrent runs on main, balances runs 9–17 over main and one worker, and adds a second at 18", async () => {
 		const pool = startPool(4);
 		const placements = Array.from({ length: 8 }, () => pool.place());

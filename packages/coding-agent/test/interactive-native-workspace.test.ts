@@ -69,7 +69,7 @@ describe("interactive app-viewport with native TSP rendering", () => {
 				composer.start({ playWelcomeIntro: false });
 				flush();
 			}
-			mode = new InteractiveMode(session, "test", undefined, () => {}, undefined, undefined, undefined, composer);
+			mode = new InteractiveMode(session, "test", () => {}, undefined, undefined, undefined, composer);
 		} finally {
 			if (previousBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
 			else Bun.env.PI_TUI_RENDER_BACKEND = previousBackend;

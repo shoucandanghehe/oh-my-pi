@@ -1,17 +1,20 @@
-import type { Agent, AgentEvent, AgentTool, AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
+import type { Agent, AgentTool, AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { bindPreparedExtensions } from "../extensibility/extensions/loader";
-import { ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions/runner";
+import { ExtensionRunner } from "../extensibility/extensions/runner";
 import type { ExtensionUIContext, PreparedExtension, ToolInfo } from "../extensibility/extensions/types";
 import { ExtensionToolWrapper, RegisteredToolAdapter } from "../extensibility/extensions/wrapper";
 import { applyToolProxy } from "../extensibility/tool-proxy";
-import { unwrapHashlineHeaderPath } from "../tools/plan-mode-guard";
+import { unwrapHashlineHeaderPath } from "../tools/hashline-header-path";
 import { dispatchXdevTool, resolveXdevTool, type XdevState, xdevDocs, xdevListing } from "../tools/xdev";
-import { SessionManager } from "./session-manager";
+import type { AgentSession } from "./agent-session";
+import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
+import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import type { SessionManager } from "./session-manager";
 
 const SIDE_NATIVE_TOOLS: Record<string, true> = {
 	read: true,
@@ -47,10 +50,9 @@ export class BtwExtensionRuntime {
 	readonly sessionManager: SessionManager;
 	readonly modelRegistry: ModelRegistry;
 	readonly #agent: Agent;
-	readonly #unsubscribe: () => void;
-	#eventTail = Promise.resolve();
-	#turnIndex = 0;
+	session!: AgentSession;
 	#disposed = false;
+	readonly #onSessionClosed: ((manager: SessionManager) => void) | undefined;
 	/** Whether a call to one of {@link tools} stays within BTW's read-only and send-to-main permissions. */
 	readonly permits: (tool: AgentTool, args: Record<string, unknown>) => boolean;
 
@@ -61,6 +63,7 @@ export class BtwExtensionRuntime {
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
 		permits: (tool: AgentTool, args: Record<string, unknown>) => boolean,
+		onSessionClosed?: (manager: SessionManager) => void,
 	) {
 		this.runner = runner;
 		this.tools = tools;
@@ -68,12 +71,15 @@ export class BtwExtensionRuntime {
 		this.modelRegistry = modelRegistry;
 		this.#agent = agent;
 		this.permits = permits;
-		this.#unsubscribe = agent.subscribe(event => {
-			this.#eventTail = this.#eventTail
-				.then(() => this.#emitAgentEvent(event))
-				.catch(error => {
-					logger.warn("BTW extension event failed", { event: event.type, error: String(error) });
-				});
+		this.#onSessionClosed = onSessionClosed;
+	}
+
+	async dispose(): Promise<void> {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		await this.session?.dispose({
+			pausedExit: this.session.hasPausedAgents(),
+			onSessionClosed: this.#onSessionClosed,
 		});
 	}
 
@@ -91,10 +97,13 @@ export class BtwExtensionRuntime {
 		sendToMainSessionTool?: AgentTool;
 		approveSummary?: (summary: string, signal?: AbortSignal) => Promise<boolean>;
 		approvalUI?: ExtensionUIContext;
+		sessionManager: SessionManager;
+		createSession: (runtime: BtwExtensionRuntime) => AgentSession;
+		onSessionClosed?: (manager: SessionManager) => void;
 	}): Promise<BtwExtensionRuntime> {
 		const { agent, modelRegistry, settings } = options;
 		const bound = await bindPreparedExtensions(options.preparedExtensions, options.cwd);
-		const sessionManager = SessionManager.inMemory(options.cwd);
+		const sessionManager = options.sessionManager;
 		// The context's legacy modelRegistry surface is deliberately limited; registration,
 		// credential mutation, and provider configuration belong to Main, not BTW.
 		const queryRegistry = new Proxy(modelRegistry, {
@@ -231,7 +240,17 @@ export class BtwExtensionRuntime {
 		}
 		const permits = (tool: AgentTool, args: Record<string, unknown>): boolean =>
 			tool === deviceWriteTool ? resolvePermittedDevice(args) !== undefined : options.isReadOnlyToolCall(tool, args);
-		const side = new BtwExtensionRuntime(runner, agent, tools, sessionManager, queryRegistry, permits);
+		const side = new BtwExtensionRuntime(
+			runner,
+			agent,
+			tools,
+			sessionManager,
+			queryRegistry,
+			permits,
+			options.onSessionClosed,
+		);
+		const session = options.createSession(side);
+		side.session = session;
 		const ui = options.approvalUI;
 		const sideUI =
 			sendToMainSession && (ui || options.approveSummary)
@@ -257,31 +276,57 @@ export class BtwExtensionRuntime {
 		}
 		runner.initialize(
 			{
-				sendMessage: () => unsupported("sendMessage"),
-				sendUserMessage: () => unsupported("sendUserMessage"),
-				appendEntry: () => unsupported("appendEntry"),
-				setLabel: () => unsupported("setLabel"),
-				getActiveTools: () => tools.map(tool => tool.name),
+				sendMessage: (message, sendOptions) => {
+					void session.sendCustomMessage(message, sendOptions).catch(error => {
+						logger.warn("BTW extension send failed", { error: String(error) });
+					});
+				},
+				sendUserMessage: (content, sendOptions) => {
+					void session.sendUserMessage(content, sendOptions).catch(error => {
+						logger.warn("BTW extension user send failed", { error: String(error) });
+					});
+				},
+				appendEntry: (customType, data) => {
+					sessionManager.appendCustomEntry(customType, data);
+				},
+				setLabel: (targetId, label) => {
+					sessionManager.appendLabelChange(targetId, label);
+				},
+				getActiveTools: () => session.getEnabledToolNames(),
 				getAllTools: () => options.toolInfos.filter(info => tools.some(tool => tool.name === info.name)),
-				setActiveTools: async () => unsupported("setActiveTools"),
-				getCommands: () => [],
-				setModel: async () => unsupported("setModel"),
-				getThinkingLevel: () => agent.state.thinkingLevel,
-				setThinkingLevel: () => unsupported("setThinkingLevel"),
-				getSessionName: () => undefined,
-				setSessionName: async () => unsupported("setSessionName"),
+				setActiveTools: names =>
+					session.setActiveToolsByName(names.filter(name => tools.some(tool => tool.name === name))),
+				getCommands: () => getSessionSlashCommands(session),
+				setModel: model => runExtensionSetModel(session, model),
+				getThinkingLevel: () => session.thinkingLevel,
+				setThinkingLevel: level => session.setThinkingLevel(level),
+				getSessionName: () => sessionManager.getSessionName(),
+				setSessionName: async name => {
+					await sessionManager.setSessionName(name, "user");
+				},
 			},
 			{
 				getModel: () => isolateModel(agent.state.model),
 				isIdle: () => !agent.state.isStreaming,
 				abort: () => agent.abort(),
-				hasPendingMessages: () => false,
+				hasPendingMessages: () => session.queuedMessageCount > 0,
 				shutdown: () => unsupported("shutdown"),
-				getContextUsage: () => undefined,
-				compact: async () => unsupported("compact"),
+				getContextUsage: () => session.getContextUsage(),
+				compact: instructions => runExtensionCompact(session, instructions),
 				getSystemPrompt: () => [...agent.state.systemPrompt],
 			},
-			undefined,
+			{
+				getContextUsage: () => session.getContextUsage(),
+				waitForIdle: () => agent.waitForIdle(),
+				newSession: async () => unsupported("newSession"),
+				branch: async entryId => ({ cancelled: (await session.branch(entryId)).cancelled }),
+				navigateTree: async (entryId, navOptions) => ({
+					cancelled: (await session.navigateTree(entryId, { summarize: navOptions?.summarize })).cancelled,
+				}),
+				switchSession: async () => unsupported("switchSession"),
+				reload: async () => session.reload(),
+				compact: instructions => runExtensionCompact(session, instructions),
+			},
 			sideUI,
 			"tui",
 			{ installFileFallbacks: false, registerProviders: false },
@@ -303,7 +348,7 @@ export class BtwExtensionRuntime {
 			modelRegistry: this.modelRegistry,
 			model: isolateModel(agent.state.model),
 			isIdle: () => !agent.state.isStreaming,
-			hasQueuedMessages: () => false,
+			hasQueuedMessages: () => this.session.queuedMessageCount > 0,
 			abort: () => agent.abort(),
 			settings: this.runner.sessionSettings,
 			ui: this.runner.getUIContext(),
@@ -312,82 +357,5 @@ export class BtwExtensionRuntime {
 			toolCall,
 			toolApprovalPreview: "never",
 		};
-	}
-
-	async settleEvents(): Promise<void> {
-		await this.#eventTail;
-	}
-
-	async dispose(): Promise<void> {
-		if (this.#disposed) return;
-		this.#disposed = true;
-		this.#unsubscribe();
-		await this.#eventTail;
-		try {
-			await emitSessionShutdownEvent(this.runner);
-		} catch (error) {
-			logger.warn("BTW extension shutdown failed", { error: String(error) });
-		}
-	}
-
-	async #emitAgentEvent(event: AgentEvent): Promise<void> {
-		const runner = this.runner;
-		if (event.type === "agent_start") {
-			this.#turnIndex = 0;
-			await runner.emit({ type: "agent_start" });
-		} else if (event.type === "agent_end") {
-			await runner.emit({ type: "agent_end", messages: event.messages });
-		} else if (event.type === "turn_start") {
-			await runner.emit({ type: "turn_start", turnIndex: this.#turnIndex, timestamp: Date.now() });
-		} else if (event.type === "turn_end") {
-			await runner.emit({
-				type: "turn_end",
-				turnIndex: this.#turnIndex++,
-				message: event.message,
-				toolResults: event.toolResults,
-			});
-		} else if (event.type === "message_start") {
-			await runner.emit({ type: "message_start", message: event.message });
-		} else if (event.type === "message_update") {
-			await runner.emit({
-				type: "message_update",
-				message: event.message,
-				assistantMessageEvent: event.assistantMessageEvent,
-			});
-		} else if (event.type === "message_end") {
-			let message: typeof event.message;
-			try {
-				message = structuredClone(event.message);
-			} catch {
-				// Third-party metadata may not be cloneable; keep notification-only
-				// observers detached from the agent's mutable transcript.
-				message = JSON.parse(JSON.stringify(event.message)) as typeof event.message;
-			}
-			await runner.emit({ type: "message_end", message });
-		} else if (event.type === "tool_execution_start") {
-			await runner.emit({
-				type: "tool_execution_start",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-				intent: event.intent,
-			});
-		} else if (event.type === "tool_execution_update") {
-			await runner.emit({
-				type: "tool_execution_update",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-				partialResult: event.partialResult,
-			});
-		} else if (event.type === "tool_execution_end") {
-			await runner.emit({
-				type: "tool_execution_end",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				result: event.result,
-				isError: event.isError ?? false,
-			});
-		}
 	}
 }

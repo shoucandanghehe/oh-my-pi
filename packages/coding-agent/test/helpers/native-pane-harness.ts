@@ -2,7 +2,7 @@ import type { TerminalStartOptions } from "@oh-my-pi/pi-tui/terminal";
 import type { TspNode } from "@oh-my-pi/pi-wire";
 import { NativeWorkspace } from "../../src/modes/native-workspace/workspace";
 import { runNativePaneRelay } from "../../src/modes/native-workspace/relay";
-import type { TernPanePlacement, TernSplitResult } from "../../src/tools/browser/tern/panes";
+import type { TernPaneMove, TernPanePlacement, TernSplitResult } from "../../src/tools/browser/tern/panes";
 import { TspTestTerminal, tspEvent } from "../../../tui/test/native/tsp-harness";
 
 export class RelayTestTerminal extends TspTestTerminal {
@@ -39,6 +39,7 @@ export class RelayTestTerminal extends TspTestTerminal {
 export class NativePaneHarness {
 	readonly terminals = new Map<number, RelayTestTerminal>();
 	readonly placements: (TernPanePlacement | undefined)[] = [];
+	readonly moves: TernPaneMove[] = [];
 	readonly workspace: NativeWorkspace;
 	readonly #relays: Promise<void>[] = [];
 	focused = 1;
@@ -56,6 +57,10 @@ export class NativePaneHarness {
 					const relay = runNativePaneRelay(endpoint, terminal);
 					this.#relays.push(relay);
 					return { session: 1, tab: 1, block };
+				},
+				move: async move => {
+					this.moves.push(move);
+					this.focused = move.block;
 				},
 				focus: async block => {
 					this.focused = block;

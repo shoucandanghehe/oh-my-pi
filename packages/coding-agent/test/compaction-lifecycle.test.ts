@@ -1,7 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { CompactionCancelledError, type CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { sessionCommandQueue } from "@oh-my-pi/pi-coding-agent/session/session-command-queue";
 import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { Container, Spacer } from "@oh-my-pi/pi-tui";
@@ -195,6 +203,29 @@ describe("compaction queued for the next yield", () => {
 			waitForSubmissionDispatches: vi.fn(async () => {}),
 			hasPendingSubmission: () => false,
 		} as unknown as InteractiveModeContext;
+		Object.assign(session, { sessionManager });
+		const queue = sessionCommandQueue(ctx.session);
+		queue.request = ctx.yieldCompaction;
+		Object.defineProperties(ctx, {
+			yieldCompaction: {
+				get: () => queue.request,
+				set: (request: InteractiveModeContext["yieldCompaction"]) => {
+					queue.request = request;
+				},
+			},
+			compactionQueuedMessages: {
+				get: () => queue.messages,
+				set: (messages: InteractiveModeContext["compactionQueuedMessages"]) => {
+					queue.messages = messages;
+				},
+			},
+			compactionQueueOrigin: {
+				get: () => queue.origin,
+				set: (origin: InteractiveModeContext["compactionQueueOrigin"]) => {
+					queue.origin = origin;
+				},
+			},
+		});
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
 		return { state, ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
@@ -315,5 +346,144 @@ describe("compaction queued for the next yield", () => {
 		skillDispatch.resolve();
 		await running;
 		expect(handleCompactCommand).toHaveBeenCalledTimes(1);
+	});
+
+	it("delivers held input after withdrawing the compact barrier without a view observer", async () => {
+		const firstModelStarted = Promise.withResolvers<void>();
+		const finishFirstModel = Promise.withResolvers<void>();
+		const waitingForIdle = Promise.withResolvers<void>();
+		const auth = createInMemoryAuthStorage();
+		auth.keys.setRuntime("anthropic", "test-key");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					firstModelStarted.resolve();
+					await finishFirstModel.promise;
+					return { content: ["Initial response"] };
+				},
+				{ content: ["Held response"] },
+			],
+		});
+		const sessionManager = SessionManager.inMemory();
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: { model, systemPrompt: ["Test child"], tools: [] },
+				streamFn: mock.stream,
+			}),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(auth),
+			memoryEnabled: false,
+		});
+		const queue = sessionCommandQueue(session);
+		let initial: Promise<boolean> | undefined;
+		let watching: Promise<void> | undefined;
+		try {
+			initial = session.prompt("Initial child input");
+			await firstModelStarted.promise;
+			queue.request = {
+				text: "/compact soft",
+				mode: "soft",
+				sessionId: sessionManager.getSessionId(),
+				leafId: sessionManager.getLeafId(),
+			};
+			queue.messages.push({ text: "Held child input", mode: "followUp" });
+			const waitForIdle = session.waitForIdle.bind(session);
+			vi.spyOn(session, "waitForIdle").mockImplementation(() => {
+				waitingForIdle.resolve();
+				return waitForIdle();
+			});
+			const executeCompact = vi.fn(async () => {});
+			const restore = vi.fn();
+			watching = queue.run(session, {
+				settleSubmissions: async () => {},
+				isCurrent: () => true,
+				hasPendingSubmission: () => false,
+				restore,
+				// No pane observer exists to retry a drain from this notification.
+				changed: () => {},
+				execute: executeCompact,
+				flush: () =>
+					queue.drain(session, {
+						execute: async message => {
+							await session.prompt(message.text, { images: message.images, streamingBehavior: message.mode });
+						},
+						restore,
+						changed: () => {},
+					}),
+			});
+			await waitingForIdle.promise;
+			queue.request = undefined;
+			finishFirstModel.resolve();
+			await initial;
+			await watching;
+			expect(executeCompact).not.toHaveBeenCalled();
+			expect(restore).not.toHaveBeenCalled();
+			expect(mock.calls).toHaveLength(2);
+			expect(mock.calls[1]!.context.messages.at(-1)?.content).toEqual([{ type: "text", text: "Held child input" }]);
+			expect(session.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "Held response" }],
+			});
+			expect(queue.messages).toEqual([]);
+			expect(queue.request).toBeUndefined();
+			expect(queue.origin).toBeUndefined();
+		} finally {
+			queue.request = undefined;
+			queue.messages = [];
+			finishFirstModel.resolve();
+			await session.abort();
+			await watching?.catch(() => {});
+			await initial?.catch(() => {});
+			await session.dispose();
+			auth.close();
+		}
+	});
+
+	it("restores held input instead of flushing it when a withdrawn barrier's branch is no longer current", async () => {
+		const { ctx, controller, sessionManager, handleCompactCommand, flushCompactionQueue } = buildYieldCtx();
+		const waiting = Promise.withResolvers<void>();
+		const idle = Promise.withResolvers<void>();
+		ctx.session.waitForIdle = () => {
+			waiting.resolve();
+			return idle.promise;
+		};
+		ctx.compactionQueuedMessages.push({ text: "For the previous branch", mode: "followUp" });
+		const watching = controller.runYieldCompaction();
+		await waiting.promise;
+		ctx.yieldCompaction = undefined;
+		sessionManager.branch = [{ id: "different-branch" }];
+		idle.resolve();
+		await watching;
+		expect(ctx.restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(flushCompactionQueue).not.toHaveBeenCalled();
+	});
+
+	it("does not redeliver input already restored to Main's editor when its barrier was withdrawn", async () => {
+		const { ctx, controller, handleCompactCommand, flushCompactionQueue } = buildYieldCtx();
+		const waiting = Promise.withResolvers<void>();
+		const idle = Promise.withResolvers<void>();
+		ctx.session.waitForIdle = () => {
+			waiting.resolve();
+			return idle.promise;
+		};
+		ctx.compactionQueuedMessages.push({ text: "Restored to the editor", mode: "followUp" });
+		ctx.restoreCompactionQueueToEditor = vi.fn(() => {
+			ctx.yieldCompaction = undefined;
+			ctx.compactionQueuedMessages = [];
+			ctx.compactionQueueOrigin = undefined;
+		});
+		const watching = controller.runYieldCompaction();
+		await waiting.promise;
+		ctx.restoreCompactionQueueToEditor();
+		idle.resolve();
+		await watching;
+		expect(ctx.restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(flushCompactionQueue).not.toHaveBeenCalled();
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(ctx.compactionQueueOrigin).toBeUndefined();
 	});
 });

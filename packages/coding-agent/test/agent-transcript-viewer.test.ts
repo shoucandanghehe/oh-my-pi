@@ -13,6 +13,7 @@ import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extens
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { isAgentViewSession } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import {
@@ -28,6 +29,27 @@ import { fileUriForTerminal } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { TspHarness } from "../../tui/test/native/tsp-harness";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import type { PaneQueuedMessageGroup, PaneSessionControls } from "@oh-my-pi/pi-tui/chat/session-controls";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { getKeybindings, setKeybindings } from "@oh-my-pi/pi-tui/keybindings";
+import { ChatTranscriptPane } from "@oh-my-pi/pi-tui/chat/chat-transcript-pane";
+
+function createSessionControls(overrides: Partial<PaneSessionControls> = {}): PaneSessionControls {
+	const messages: AgentMessage[] = [];
+	return {
+		submit: vi.fn(async () => {}),
+		dequeue: vi.fn(async () => undefined),
+		abort: vi.fn(async () => {}),
+		retry: vi.fn(async () => {}),
+		isRunning: () => false,
+		getToolUpdates: () => [],
+		getPending: () => [],
+		getMessages: () => messages,
+		subscribe: vi.fn(() => () => {}),
+		dispose: vi.fn(),
+		...overrides,
+	};
+}
 
 let widgetAuth: AuthStorage;
 let widgetModels: ModelRegistry;
@@ -49,7 +71,11 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-function createRunningViewer(ui: TUI = new TUI(new ProcessTerminal()), statusContent?: string): AgentTranscriptViewer {
+function createRunningViewer(
+	ui: TUI = new TUI(new ProcessTerminal()),
+	statusContent?: string,
+	deps: Partial<AgentTranscriptViewerDeps> = {},
+): AgentTranscriptViewer {
 	const registry = new AgentRegistry();
 	registry.register({
 		id: "Worker",
@@ -78,6 +104,7 @@ function createRunningViewer(ui: TUI = new TUI(new ProcessTerminal()), statusCon
 		requestRender: () => {},
 		onClose: () => {},
 		onHubToggle: () => {},
+		...deps,
 	});
 	viewer.setViewportHeight(8);
 	return viewer;
@@ -125,6 +152,351 @@ function createMessageableViewer(h: TspHarness, session: AgentSession): AgentTra
 	return viewer;
 }
 describe("AgentTranscriptViewer", () => {
+	it("sends local slash commands through session controls and honors configured follow-up keys", async () => {
+		const keys = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory({ "app.message.followUp": ["ctrl+x", "ctrl+enter"] }));
+		const controls = createSessionControls();
+		const submit = vi.spyOn(controls, "submit");
+		const registry = new AgentRegistry();
+		registry.register({ id: "Worker", displayName: "Worker", kind: "sub", status: "parked", session: null });
+		const ensureLive = vi.fn();
+		const h = await TspHarness.start();
+		const viewer = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+			sessionControls: controls,
+			lifecycle: () => ({ ensureLive }),
+		});
+		const terminalViewer = createRunningViewer(new TUI(new ProcessTerminal()), undefined, {
+			sessionControls: controls,
+		});
+		h.tui.setFocus(viewer);
+		try {
+			const editor = viewer.getPasteTarget()!;
+			editor.setText("/compact");
+			h.terminal.send("\r");
+			await h.until(() => submit.mock.calls.length === 1);
+			expect(controls.submit).toHaveBeenNthCalledWith(1, "/compact", undefined, "steer", []);
+			expect(editor.getText()).toBe("");
+
+			const image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
+			editor.setDraft("Later [Image #1]", [image]);
+			editor.pendingImageLinks = ["file:///later.png"];
+			h.terminal.send("\x18");
+			await h.until(() => submit.mock.calls.length === 2);
+			expect(controls.submit).toHaveBeenNthCalledWith(2, "Later [Image #1]", [image], "followUp", [
+				"file:///later.png",
+			]);
+
+			editor.setText("Native newline");
+			h.terminal.send("\x1b[13;5u");
+			await h.render();
+			expect(editor.getExpandedText()).toBe("Native newline\n");
+			expect(controls.submit).toHaveBeenCalledTimes(2);
+			editor.clearDraft();
+			const input = h.find(node => node.k === "editor")!;
+			h.event({ ev: "send", sf: h.terminal.surface!, id: input.id, text: "/queue /compact focus" });
+			await h.until(() => submit.mock.calls.length === 3);
+			expect(controls.submit).toHaveBeenNthCalledWith(3, "/queue /compact focus", undefined, "steer", []);
+
+			terminalViewer.getPasteTarget()!.setText("Terminal follow-up");
+			terminalViewer.handleInput("\x1b[13;5u");
+			await h.until(() => submit.mock.calls.length === 4);
+			expect(controls.submit).toHaveBeenNthCalledWith(4, "Terminal follow-up", undefined, "followUp", []);
+			expect(ensureLive).not.toHaveBeenCalled();
+			expect(h.errors).toEqual([]);
+		} finally {
+			terminalViewer.dispose();
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			setKeybindings(keys);
+		}
+	});
+
+	it("restores a rejected controlled submission with its links beside newer image typing", async () => {
+		const rejected = Promise.withResolvers<void>();
+		const controls = createSessionControls({ submit: () => rejected.promise });
+		const registry = new AgentRegistry();
+		registry.register({ id: "Worker", displayName: "Worker", kind: "sub", status: "running", session: null });
+		const h = await TspHarness.start();
+		const viewer = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+			sessionControls: controls,
+		});
+		h.tui.setFocus(viewer);
+		try {
+			const editor = viewer.getPasteTarget()!;
+			const failedImage = { type: "image" as const, data: "ZmFpbGVk", mimeType: "image/png" };
+			const newerImage = { type: "image" as const, data: "bmV3ZXI=", mimeType: "image/png" };
+			editor.setDraft("Failed [Image #1]", [failedImage]);
+			editor.pendingImageLinks = ["file:///failed.png"];
+			h.terminal.send("\r");
+			await h.until(() => editor.getText() === "");
+			editor.setDraft("Newer [Image #1]", [newerImage]);
+			editor.pendingImageLinks = ["file:///newer.png"];
+			rejected.reject(new Error("Command rejected"));
+			await h.until(() => editor.getExpandedText().includes("Failed [Image #2]"));
+			expect(editor.getExpandedText()).toBe("Failed [Image #2]\n\nNewer [Image #1]");
+			expect(editor.pendingImages).toEqual([newerImage, failedImage]);
+			expect(editor.pendingImageLinks).toEqual(["file:///newer.png", "file:///failed.png"]);
+			expect(JSON.stringify(h.doc())).toContain("Command rejected");
+			expect(h.errors).toEqual([]);
+		} finally {
+			rejected.resolve();
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+		}
+	});
+
+	it("uses controlled queue edit and dequeue results without losing a newer draft or image links", async () => {
+		const keys = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory());
+		const image = { type: "image" as const, data: "cXVldWVk", mimeType: "image/png" };
+		const newerImage = { type: "image" as const, data: "bmV3ZXI=", mimeType: "image/png" };
+		const selected = Promise.withResolvers<{ text: string; images: (typeof image)[]; imageLinks: string[] }>();
+		const edit = vi.fn(() => selected.promise);
+		const dequeue = vi.fn(async () => ({
+			text: "/compact queued",
+			images: [image],
+			imageLinks: ["file:///dequeued.png"],
+		}));
+		let pending: readonly PaneQueuedMessageGroup[] = [
+			{ label: "Queued", messages: ["Inspect [Image #1]"], edits: [edit] },
+		];
+		let changed: (() => void) | undefined;
+		const controls = createSessionControls({
+			dequeue,
+			getPending: () => pending,
+			subscribe: callback => {
+				changed = callback;
+				return () => {};
+			},
+		});
+		const registry = new AgentRegistry();
+		registry.register({ id: "Worker", displayName: "Worker", kind: "sub", status: "running", session: null });
+		const h = await TspHarness.start();
+		const viewer = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+			sessionControls: controls,
+		});
+		h.tui.setFocus(viewer);
+		try {
+			await h.render();
+			const editor = viewer.getPasteTarget()!;
+			const action = h.find(node => node.p?.role === "omp.queue.edit")!;
+			h.event({ ev: "action", sf: h.terminal.surface!, id: action.id, act: "queue.edit" });
+			expect(edit).toHaveBeenCalledTimes(1);
+			editor.setDraft("Newer [Image #1]", [newerImage]);
+			editor.pendingImageLinks = ["file:///newer.png"];
+			selected.resolve({ text: "Inspect [Image #1]", images: [image], imageLinks: ["file:///selected.png"] });
+			await h.until(() => editor.getExpandedText().includes("Inspect [Image #2]"));
+			expect(editor.getExpandedText()).toBe("Inspect [Image #2]\n\nNewer [Image #1]");
+			expect(editor.pendingImages).toEqual([newerImage, image]);
+			expect(editor.pendingImageLinks).toEqual(["file:///newer.png", "file:///selected.png"]);
+			pending = [{ label: "Queued commands", messages: ["/compact queued"], edits: [dequeue] }];
+			changed!();
+			await h.render();
+			expect(JSON.stringify(h.region("dock"))).toContain("/compact queued");
+			editor.clearDraft();
+			h.terminal.send("\x1b[1;2A");
+			await h.until(() => editor.getExpandedText() === "/compact queued");
+			expect(dequeue).toHaveBeenCalledTimes(1);
+			expect(editor.pendingImages).toEqual([image]);
+			expect(editor.pendingImageLinks).toEqual(["file:///dequeued.png"]);
+			pending = [];
+			changed!();
+			await h.render();
+			expect(h.find(node => node.p?.role === "omp.queue")).toBeUndefined();
+			expect(controls.submit).not.toHaveBeenCalled();
+			expect(h.errors).toEqual([]);
+		} finally {
+			selected.resolve({ text: "", images: [], imageLinks: [] });
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			setKeybindings(keys);
+		}
+	});
+
+	it("replaces controlled branch context while keeping stream identity and another pane untouched", async () => {
+		let messages: readonly AgentMessage[] = [{ role: "user", content: "Worker branch A", timestamp: 1 }];
+		const state: { messages: AgentMessage[]; streamMessage: AgentMessage | null } = {
+			messages: [],
+			streamMessage: null,
+		};
+		let changed: (() => void) | undefined;
+		const unsubscribe = vi.fn();
+		const abort = vi.fn();
+		const dispose = vi.fn();
+		const onClose = vi.fn();
+		const controls = createSessionControls({
+			getMessages: () => messages,
+			subscribe: callback => {
+				changed = callback;
+				return unsubscribe;
+			},
+		});
+		const mainMessages: AgentMessage[] = [{ role: "user", content: "Main branch unchanged", timestamp: 2 }];
+		const mainControls = createSessionControls({
+			getMessages: () => mainMessages,
+		});
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			status: "running",
+			session: { agent: { state }, getSessionStats: () => undefined, abort, dispose } as unknown as AgentSession,
+			sessionFile: "/not-a-raw-journal-to-read.jsonl",
+		});
+		registry.register({ id: "Main", displayName: "Main", kind: "sub", status: "idle", session: null });
+		const h = await TspHarness.start();
+		const viewer = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+			sessionControls: controls,
+			onClose,
+		});
+		const main = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+			agentId: "Main",
+			sessionControls: mainControls,
+		});
+		const rebuild = vi.spyOn(ChatTranscriptPane.prototype, "rebuild");
+		try {
+			await h.render();
+			expect(JSON.stringify(h.doc())).toContain("Worker branch A");
+			const assistant = { ...createAssistantMessage("Partial answer"), timestamp: 42 };
+			state.streamMessage = assistant;
+			changed!();
+			await h.render();
+			const stream = h.find(node => node.k === "md" && node.p?.text === "Partial answer")!;
+			expect(stream.p).toMatchObject({ stream: true });
+			state.streamMessage = { ...assistant, content: [{ type: "text", text: "Complete answer" }] };
+			changed!();
+			await h.render();
+			expect(h.byId(stream.id)).toMatchObject({ k: "md", p: { text: "Complete answer", stream: true } });
+			const final = state.streamMessage;
+			messages = [...messages, final];
+			state.messages = [...messages];
+			state.streamMessage = null;
+			changed!();
+			await h.render();
+			expect(h.byId(stream.id)).toMatchObject({ k: "md", p: { text: "Complete answer" } });
+			expect(h.byId(stream.id)?.p).not.toHaveProperty("stream");
+			expect(rebuild).not.toHaveBeenCalled();
+			messages = [{ role: "user", content: "Worker branch B after reset", timestamp: 3 }];
+			changed!();
+			await h.render();
+			const document = JSON.stringify(h.doc());
+			expect(document).toContain("Worker branch B after reset");
+			expect(document).not.toContain("Worker branch A");
+			expect(document).not.toContain("Complete answer");
+			expect(document).toContain("Main branch unchanged");
+			expect(rebuild).toHaveBeenCalledTimes(1);
+			viewer.handleNativeEvent({ type: "action", key: "close", act: "close", mods: [] });
+			expect(onClose).toHaveBeenCalledTimes(1);
+			viewer.dispose();
+			expect(unsubscribe).toHaveBeenCalledTimes(1);
+			expect(controls.dispose).not.toHaveBeenCalled();
+			expect(abort).not.toHaveBeenCalled();
+			expect(dispose).not.toHaveBeenCalled();
+			expect(state.messages).toEqual(expect.arrayContaining([final]));
+			expect(h.errors).toEqual([]);
+		} finally {
+			rebuild.mockRestore();
+			viewer.dispose();
+			main.dispose();
+			h.stop();
+			setNativeRendering(false);
+		}
+	});
+
+	it("falls back to the parked file only while controls have no live display context", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-viewer-controlled-parked-"));
+		const file = path.join(dir, "Worker.jsonl");
+		fs.writeFileSync(
+			file,
+			`${JSON.stringify({
+				type: "message",
+				id: "parked",
+				parentId: null,
+				timestamp: "2026-11-01T00:00:00.000Z",
+				message: { role: "user", content: "Parked file context", timestamp: 1 },
+			})}\n`,
+		);
+		let messages: readonly AgentMessage[] | undefined;
+		let changed: (() => void) | undefined;
+		const controls = createSessionControls({
+			getMessages: () => messages,
+			subscribe: callback => {
+				changed = callback;
+				return () => {};
+			},
+		});
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Worker",
+			displayName: "Worker",
+			kind: "sub",
+			status: "parked",
+			session: null,
+			sessionFile: file,
+		});
+		const h = await TspHarness.start();
+		const viewer = createNativeViewer(h, registry, dir, agentTranscriptSource, { sessionControls: controls });
+		try {
+			await h.render();
+			expect(JSON.stringify(h.doc())).toContain("Parked file context");
+			messages = [{ role: "user", content: "Selected live branch", timestamp: 2 }];
+			changed!();
+			await h.render();
+			expect(JSON.stringify(h.doc())).toContain("Selected live branch");
+			expect(JSON.stringify(h.doc())).not.toContain("Parked file context");
+			messages = undefined;
+			changed!();
+			await h.render();
+			expect(JSON.stringify(h.doc())).toContain("Parked file context");
+			expect(JSON.stringify(h.doc())).not.toContain("Selected live branch");
+			expect(h.errors).toEqual([]);
+		} finally {
+			viewer.dispose();
+			h.stop();
+			setNativeRendering(false);
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not grant injected local controls to remote or advisor viewers", async () => {
+		const controls = createSessionControls();
+		const chat = vi.fn();
+		const registry = new AgentRegistry();
+		registry.register({ id: "Worker", displayName: "Worker", kind: "sub", status: "running", session: null });
+		registry.register({ id: "Advisor", displayName: "Advisor", kind: "advisor", status: "idle", session: null });
+		const h = await TspHarness.start();
+		const remote = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+			sessionControls: controls,
+			remote: { chat, kill: vi.fn(), revive: vi.fn(), readTranscript: async () => ({ text: "", newSize: 0 }) },
+		});
+		const advisor = createNativeViewer(h, registry, process.cwd(), agentTranscriptSource, {
+			agentId: "Advisor",
+			sessionControls: controls,
+		});
+		try {
+			h.tui.setFocus(remote);
+			remote.getPasteTarget()!.setText("Guest message");
+			h.terminal.send("\r");
+			await h.render();
+			expect(chat).toHaveBeenCalledWith("Worker", "Guest message");
+			expect(advisor.getPasteTarget()).toBeUndefined();
+			advisor.handleInput("/clear\r");
+			expect(controls.submit).not.toHaveBeenCalled();
+			expect(controls.subscribe).not.toHaveBeenCalled();
+			expect(controls.dequeue).not.toHaveBeenCalled();
+			expect(h.errors).toEqual([]);
+		} finally {
+			remote.dispose();
+			advisor.dispose();
+			h.stop();
+			setNativeRendering(false);
+		}
+	});
+
 	it("returns a real pre-dispatch failure to the editor without replacing a newer image draft", async () => {
 		const auth = createInMemoryAuthStorage();
 		const session = new AgentSession({
@@ -421,12 +793,15 @@ describe("AgentTranscriptViewer", () => {
 			kind: "sub",
 			parentId: "Main",
 			status: "running",
-			session: { extensionRunner: runner } as AgentSession,
+			session: { extensionRunner: runner, activeToolExecutionUpdates: () => [] } as unknown as AgentSession,
 		});
 		const open = () => {
 			const viewer = new AgentTranscriptViewer({
 				transcript: agentTranscriptSource,
-				getExtensionPresentation: agentId => registry.get(agentId)?.session?.extensionRunner,
+				getExtensionPresentation: agentId => {
+					const session = registry.get(agentId)?.session;
+					return session && isAgentViewSession(session) ? session.extensionRunner : undefined;
+				},
 				agentId: "Widgets",
 				registry,
 				ui,
@@ -490,11 +865,14 @@ describe("AgentTranscriptViewer", () => {
 			kind: "sub",
 			parentId: "Main",
 			status: "running",
-			session: { extensionRunner: oldRunner } as AgentSession,
+			session: { extensionRunner: oldRunner, activeToolExecutionUpdates: () => [] } as unknown as AgentSession,
 		});
 		const viewer = new AgentTranscriptViewer({
 			transcript: agentTranscriptSource,
-			getExtensionPresentation: agentId => registry.get(agentId)?.session?.extensionRunner,
+			getExtensionPresentation: agentId => {
+				const session = registry.get(agentId)?.session;
+				return session && isAgentViewSession(session) ? session.extensionRunner : undefined;
+			},
 			agentId: "Revive",
 			registry,
 			ui: new TUI(new ProcessTerminal()),
@@ -509,7 +887,10 @@ describe("AgentTranscriptViewer", () => {
 		viewer.setViewportHeight(12);
 		try {
 			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("Old run");
-			registry.attachSession("Revive", { extensionRunner: newRunner } as AgentSession);
+			registry.attachSession("Revive", {
+				extensionRunner: newRunner,
+				activeToolExecutionUpdates: () => [],
+			} as unknown as AgentSession);
 			expect(Bun.stripANSI(viewer.render(80).join("\n"))).toContain("Revived run");
 			expect(oldWidget.dispose).toHaveBeenCalledTimes(1);
 			oldRunner.getUIContext().setWidget("late", ["Late old update"]);

@@ -952,7 +952,10 @@ export class NativeBackend {
 		let ui: NativeUiEvent;
 		switch (event.ev) {
 			case "toggle":
-				ui = { type: "toggle", key: target.keypath, collapsed: event.collapsed };
+				ui =
+					event.open === undefined
+						? { type: "toggle", key: target.keypath, collapsed: event.collapsed }
+						: { type: "toggle", key: target.keypath, open: event.open };
 				break;
 			case "select":
 				ui = { type: "select", key: target.keypath, item: item(event.item) };

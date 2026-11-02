@@ -58,7 +58,7 @@ describe("issue #4806 command output during streaming", () => {
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
 		terminal = new VirtualTerminal(100, 80);
 		const composer = new Composer({ terminal });
-		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, undefined, composer);
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, composer);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 		await mode.init({ suppressWelcomeIntro: true });
 	});

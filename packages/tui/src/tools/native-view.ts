@@ -7,7 +7,7 @@ import * as path from "node:path";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
-import { fileUriForTerminal, tryFileUri } from "../render/hyperlink";
+import { fileUriForTerminal } from "../render/hyperlink";
 import { type ParsedDiagnostic, parseDiagnosticMessage, pathNameStart, shortenPath } from "../render/render-utils";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";

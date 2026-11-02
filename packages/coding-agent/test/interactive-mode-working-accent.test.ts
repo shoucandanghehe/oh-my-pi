@@ -8,7 +8,8 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import * as sessionColor from "@oh-my-pi/pi-tui/theme/session-color";
-import { type Component, SPINNER_ADVANCE_MS } from "@oh-my-pi/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { spinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
 import { adjustHsv, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgStatusLineSessionAccent } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -256,7 +257,7 @@ describe("InteractiveMode working activity", () => {
 });
 
 describe("InteractiveMode working status spinner", () => {
-	it("repaints the editor status border on every working-loader spinner advance", async () => {
+	it("keeps the elapsed status border updating with a fixed loader glyph", async () => {
 		const { mode } = await createHarness("Animated status");
 		let monotonicNow = 1_000;
 		let wallNow = 1_000;
@@ -269,8 +270,9 @@ describe("InteractiveMode working status spinner", () => {
 			mode.statusLine.markActivityStart();
 			mode.ensureLoadingAnimation();
 			requestComponentRender.mockClear();
-			monotonicNow += SPINNER_ADVANCE_MS;
-			vi.advanceTimersByTime(SPINNER_ADVANCE_MS);
+			wallNow += spinnerInterval();
+			monotonicNow += spinnerInterval();
+			vi.advanceTimersByTime(spinnerInterval());
 			const repaintTarget = requestComponentRender.mock.calls
 				.map(([target]) => target)
 				.find(target => target !== mode.loadingAnimation) as Component | undefined;
@@ -280,10 +282,9 @@ describe("InteractiveMode working status spinner", () => {
 			requestComponentRender.mockClear();
 
 			wallNow += 2_000;
-			monotonicNow += SPINNER_ADVANCE_MS;
-			vi.advanceTimersByTime(SPINNER_ADVANCE_MS);
+			monotonicNow += spinnerInterval();
+			vi.advanceTimersByTime(spinnerInterval());
 
-			expect(requestComponentRender).toHaveBeenCalledWith(mode.loadingAnimation);
 			expect(requestComponentRender).toHaveBeenCalledWith(repaintTarget);
 			expect(renderStatus()).toContain(" 2s ");
 		} finally {

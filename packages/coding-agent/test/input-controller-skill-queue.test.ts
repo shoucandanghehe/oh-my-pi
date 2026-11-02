@@ -895,6 +895,23 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 		expect(rendered).not.toContain("Steer:");
 	});
 
+	it("distinguishes a scheduled compaction from ordinary queued slash text", async () => {
+		fixture = await createRealSession();
+		fixture.session.agent.followUp({
+			role: "user",
+			content: "/compact",
+			attribution: "user",
+			timestamp: Date.now(),
+		});
+		const { ctx, pendingMessagesContainer } = createStubInteractiveModeContextForUiHelpers(fixture.session);
+		ctx.yieldCompaction = { text: "/compact soft", mode: "soft", sessionId: "session", leafId: null };
+		new UiHelpers(ctx).updatePendingMessagesDisplay();
+
+		const rendered = Bun.stripANSI(pendingMessagesContainer.render(120).join("\n"));
+		expect(rendered).toContain("1. /compact");
+		expect(rendered).toContain("2. Compaction queued · /compact soft");
+	});
+
 	it("requests the pending-container repaint after rebuilding and clearing it", async () => {
 		fixture = await createRealSession();
 		const { session } = fixture;

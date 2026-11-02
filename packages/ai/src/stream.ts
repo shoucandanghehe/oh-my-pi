@@ -2115,7 +2115,7 @@ function mapOptionsForApi<TApi extends Api>(
 					forceReasoningOff: options?.forceReasoningOff,
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
-					preferWebsockets: options?.preferWebsockets,
+					preferWebsockets: typeof options?.preferWebsockets === "boolean" ? options.preferWebsockets : undefined,
 				});
 			}
 			return castApi<"openai-completions">({
@@ -2158,7 +2158,7 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				storeResponses: options?.storeResponses,
-				preferWebsockets: options?.preferWebsockets,
+				preferWebsockets: typeof options?.preferWebsockets === "boolean" ? options.preferWebsockets : undefined,
 			});
 
 		case "azure-openai-responses":

@@ -318,8 +318,15 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 		return true;
 	}
 
-	/** A glass sheet titled "Paused" (not the whole pane: the transcript stays visible, frozen). */
-	readonly nativeOverlay = { role: "omp.overlay.pause", size: "md", anchor: "center", head: "Paused" } as const;
+	/** A glass sheet over the frozen transcript. */
+	get nativeOverlay() {
+		return {
+			role: "omp.overlay.pause",
+			size: "md",
+			anchor: "center",
+			head: agentPauseGate.allLoopsParked ? "Paused" : "Pausing",
+		} as const;
+	}
 
 	/**
 	 * The sheet: a hero (the pause glyph beside the live hold clock and the
@@ -329,7 +336,8 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 	describe(): NativeNode {
 		if (this.#native) return this.#native;
 		const snapshot = this.#workSnapshot;
-		const outstanding = snapshot.unsettledTurns > 0 || snapshot.unfinishedJobs > 0;
+		const hasOutstandingWork = snapshot.unsettledTurns > 0 || snapshot.unfinishedJobs > 0;
+		const outstanding = !agentPauseGate.allLoopsParked || hasOutstandingWork;
 		const status = col(
 			[
 				keyed(
@@ -425,7 +433,7 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 							agentPauseGate.ready ? "success" : "warning",
 						),
 						span(
-							` · ${agentPauseGate.modelWaiterCount}/${agentPauseGate.activeLoopCount} agent loops parked`,
+							` · ${agentPauseGate.modelWaiterCount}/${agentPauseGate.activeLoopCount} local agent loops parked`,
 							"dim",
 						),
 					],
@@ -464,7 +472,7 @@ export class PauseScreenComponent<TParticipant = unknown> implements Component, 
 			elapsed,
 			this.host.sessionName,
 			this.#workSnapshot,
-			agentPauseGate.activeLoopCount === agentPauseGate.modelWaiterCount,
+			agentPauseGate.allLoopsParked,
 		);
 	}
 }

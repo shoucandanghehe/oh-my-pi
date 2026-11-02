@@ -1199,6 +1199,7 @@ describe("MainSessionPane", () => {
 				return true;
 			},
 			onNewThread: () => true,
+			canPromote: () => false,
 			canCopy: () => false,
 			onCopy: async () => false,
 			onClose: () => {},
@@ -1216,9 +1217,8 @@ describe("MainSessionPane", () => {
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 			error: undefined,
 			draft: "",
-			turns: [],
+			messages: [],
 			unread: 0,
-			request: undefined,
 		};
 		btw.update([thread], thread.key);
 		const model = WorkspaceModel.single("main");
