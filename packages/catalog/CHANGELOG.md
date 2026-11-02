@@ -12,6 +12,11 @@
 
 - Fixed Mistral discovery listing embedding, OCR, moderation, transcription, and speech models as chat models; only rows with `capabilities.completion_chat` are offered, with context, image input, and reasoning read from the row ([#18244](https://github.com/can1357/oh-my-pi/pull/18244) by [@VeigaPunk](https://github.com/VeigaPunk))
 - A failed refresh no longer replaces a cached catalog whose models carry request headers with an empty snapshot; the next launch refetches it instead ([#18227](https://github.com/can1357/oh-my-pi/issues/18227))
+### Added
+
+- Added a `video` input modality to `Model.input`, the `input-modalities` axis, build-time narrowing, the model-cache row validator, and the dynamic-model input guard ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
+- Added GPT Image 2.5, Flare, and Sunburst image-model selection for Codex proxies configured with the Images API.
 
 ## [18.17.0] - 2026-11-06
 
