@@ -32,6 +32,8 @@
 - Subagents receive task instructions with their blank lines, Markdown hard breaks, and table spacing intact, whether given inline or via `taskFile`.
 - Hindsight `retain` and `learn` memories are no longer lost when delivery fails or omp exits: they are kept on disk, retried, and delivered by the next session without duplicates ([#18176](https://github.com/can1357/oh-my-pi/pull/18176) by [@alphastorm](https://github.com/alphastorm))
 - Nested task worktrees remain recoverable when their parent finishes, is retained, or is retried.
+- Native agent panes stack the first pair beside Main before expanding to a third column, then grow evenly within the two agent columns.
+- Native BTW panes open above Main when at least two other split panes are already open in the same tab.
 - Subagents keep their session-scoped MCP tools when browser settings change.
 - Fixed the session crashing with `Native shell returned an invalid execution trace` when a bash command assigned a long value containing multi-byte characters such as Chinese text ([#18259](https://github.com/can1357/oh-my-pi/issues/18259))
 - `grep -e` and `rg -e` in the bash tool accept patterns that start with `-` (e.g. `grep -e "--canary"`) instead of failing with an unknown-option error.

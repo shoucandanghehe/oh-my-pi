@@ -58,10 +58,10 @@ describe("Main-owned Tern workspace panes", () => {
 						),
 					),
 				);
-				// The first pane splits Main to the right; the second opens the second column beside it.
+				// Two agents share the right column rather than opening a third column.
 				expect(native.placements).toEqual([
 					{ block: 1, dir: "right" },
-					{ block: 2, dir: "right" },
+					{ block: 2, dir: "down" },
 				]);
 				expect(native.focused).toBe(preserveFocus ? 1 : 3);
 				await native.until(() => [2, 3].every(block => native.nodes(block).some(node => node.k === "editor")));
@@ -108,7 +108,7 @@ describe("Main-owned Tern workspace panes", () => {
 		expect(native.focused).toBe(1);
 	});
 
-	it("tiles panes beside Main as a grid on a landscape window and refills the slot a closed pane leaves", async () => {
+	it("stacks the first pair before expanding to two balanced agent columns and refills closed slots", async () => {
 		const native = new NativePaneHarness();
 		cleanups.push(() => native.dispose());
 		const cell = vi.spyOn(terminalCapabilities, "getCellDimensions").mockReturnValue({ widthPx: 14, heightPx: 26 });
@@ -117,7 +117,7 @@ describe("Main-owned Tern workspace panes", () => {
 		vi.spyOn(native.workspace.client, "splitPanes").mockImplementation(async () =>
 			(await listed()).map(pane => (pane.block === 1 ? { ...pane, columns: 273, rows: 80 } : pane)),
 		);
-		for (let index = 0; index < 4; index++) {
+		for (let index = 0; index < 6; index++) {
 			await native.workspace.open(
 				`agent:${index}`,
 				`Agent ${index}`,
@@ -129,19 +129,22 @@ describe("Main-owned Tern workspace panes", () => {
 		}
 		expect(native.placements).toEqual([
 			{ block: 1, dir: "right" },
-			{ block: 2, dir: "right" },
 			{ block: 2, dir: "down" },
+			{ block: 2, dir: "right" },
+			{ block: 4, dir: "down" },
 			{ block: 3, dir: "down" },
+			{ block: 5, dir: "down" },
 		]);
+		expect(native.moves).toEqual([{ block: 3, target: 2, dir: "below" }]);
 
-		native.workspace.close("agent:2"); // Block 4 was split from block 2.
+		native.workspace.close("agent:4"); // Block 6 was the bottom of the first agent column.
 		await native.workspace.open(
 			"replacement",
 			"Replacement",
 			() => new Text("Transcript"),
 			() => {},
 		);
-		expect(native.placements.at(-1)).toEqual({ block: 2, dir: "down" });
+		expect(native.placements.at(-1)).toEqual({ block: 3, dir: "down" });
 	});
 
 	it("keeps landscape placement when a background Main still reports its old split size after all children close", async () => {
@@ -164,7 +167,7 @@ describe("Main-owned Tern workspace panes", () => {
 		}
 		expect(native.placements).toEqual([
 			{ block: 1, dir: "right" },
-			{ block: 2, dir: "right" },
+			{ block: 2, dir: "down" },
 		]);
 
 		main = { block: 1, columns: 64, rows: 59, shown: false };
@@ -211,11 +214,11 @@ describe("Main-owned Tern workspace panes", () => {
 		]);
 	});
 
-	it("starts below Main on a portrait window and remeasures the visible Main after all children close", async () => {
+	it("keeps portrait placement while BTW remains and remeasures after all children close", async () => {
 		const native = new NativePaneHarness();
 		cleanups.push(() => native.dispose());
 		vi.spyOn(terminalCapabilities, "getCellDimensions").mockReturnValue({ widthPx: 14, heightPx: 26 });
-		let main = { block: 1, columns: 80, rows: 120, shown: true };
+		let main = { block: 1, columns: 100, rows: 100, shown: true };
 		const listed = native.workspace.client.splitPanes;
 		vi.spyOn(native.workspace.client, "splitPanes").mockImplementation(async () =>
 			(await listed()).map(pane => (pane.block === 1 ? main : pane)),
@@ -230,12 +233,29 @@ describe("Main-owned Tern workspace panes", () => {
 		}
 		expect(native.placements).toEqual([
 			{ block: 1, dir: "down" },
-			{ block: 2, dir: "down" },
 			{ block: 2, dir: "right" },
-			{ block: 3, dir: "right" },
+			{ block: 2, dir: "down" },
+			{ block: 4, dir: "right" },
 		]);
+		expect(native.moves).toEqual([{ block: 3, target: 2, dir: "right-of" }]);
 
+		await native.workspace.open(
+			"btw",
+			"BTW",
+			() => new Text("Conversation"),
+			() => {},
+		);
 		for (let index = 0; index < 4; index++) native.workspace.close(`agent:${index}`);
+		main = { block: 1, columns: 100, rows: 50, shown: true };
+		await native.workspace.open(
+			"with-btw",
+			"With BTW",
+			() => new Text("Transcript"),
+			() => {},
+		);
+		expect(native.placements.at(-1)).toEqual({ block: 1, dir: "down" });
+		native.workspace.close("with-btw");
+		native.workspace.close("btw");
 		main = { block: 1, columns: 273, rows: 80, shown: true };
 		await native.workspace.open(
 			"again",
@@ -401,7 +421,7 @@ describe("Main-owned Tern workspace panes", () => {
 			() => {},
 		);
 		// Waiting for TSP readiness must not hold Tern's placement transaction.
-		expect(native.placements).toEqual([{ block: 999, dir: "right" }]);
+		expect(native.placements).toEqual([{ block: 999, dir: "down" }]);
 		await native.until(() => native.nodes(2).some(node => node.k === "editor"));
 		expect(view.ui.nativeRendering).toBe(true);
 		native.workspace.close("waiting");
@@ -424,12 +444,50 @@ describe("Main-owned Tern workspace panes", () => {
 		expect(native.placements).toEqual([
 			{ block: 1, dir: "right" },
 			{ block: 1, dir: "right" },
-			{ block: 3, dir: "right" },
+			{ block: 3, dir: "down" },
 		]);
 		await native.until(() => [3, 4].every(block => native.nodes(block).some(node => node.k === "editor")));
 		expect(native.nodes(2).some(node => node.k === "editor" && node.p?.text === "retained draft")).toBe(true);
 		for (const block of [2, 3, 4]) expect(native.terminals.get(block)!.errors).toEqual([]);
 	});
+
+	for (const count of [1, 2]) {
+		it(`opens BTW ${count === 2 ? "above Main" : "beside the agent"} with ${count} live non-Main panes`, async () => {
+			const native = new NativePaneHarness();
+			cleanups.push(() => native.dispose());
+			const create = () => new CustomEditor(getEditorTheme());
+			for (let index = 0; index < count; index++) {
+				await native.workspace.open(`agent:${index}`, `Agent ${index}`, create, () => {}, true);
+			}
+			native.terminals.get(2)!.send("retained agent draft");
+			await native.until(() =>
+				native.nodes(2).some(node => node.k === "editor" && node.p?.text === "retained agent draft"),
+			);
+
+			await native.workspace.open("btw", "BTW", create, () => {});
+			const btw = count + 2;
+			expect(native.placements.at(-1)).toEqual({ block: count === 2 ? 1 : 2, dir: "down" });
+			expect(native.moves).toEqual(count === 2 ? [{ block: btw, target: 1, dir: "above" }] : []);
+			expect(native.focused).toBe(btw);
+			await native.until(() => native.nodes(btw).some(node => node.k === "editor"));
+			native.terminals.get(btw)!.send("BTW draft");
+			await native.until(() => native.nodes(btw).some(node => node.k === "editor" && node.p?.text === "BTW draft"));
+			expect(native.nodes(2).some(node => node.k === "editor" && node.p?.text === "retained agent draft")).toBe(
+				true,
+			);
+
+			if (count === 2) {
+				await native.workspace.open("agent:2", "Agent 2", create, () => {}, true);
+				expect(native.placements.at(-1)).toEqual({ block: 2, dir: "right" });
+				expect(native.moves.at(-1)).toEqual({ block: 3, target: 2, dir: "below" });
+				expect(native.focused).toBe(btw);
+			}
+			native.workspace.close("btw");
+			await native.workspace.open("btw", "BTW", create, () => {});
+			expect(native.placements.at(-1)).toEqual({ block: count === 2 ? 1 : 2, dir: "down" });
+			if (count === 2) expect(native.moves.at(-1)).toEqual({ block: 6, target: 1, dir: "above" });
+		});
+	}
 
 	it("keeps a reopened view alive when a cancelled launch returns late", async () => {
 		const native = new NativePaneHarness();
