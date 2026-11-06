@@ -3251,7 +3251,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		try {
 			if (path === "browser.enabled" && this.#reconcileBrowserMcpFilter) {
 				const tools = await this.#reconcileBrowserMcpFilter(enabled);
-				await this.refreshMCPTools(tools);
+				if (tools) await this.refreshMCPTools(tools);
 			}
 			if (this.agent.state.messages.length === 0) await this.refreshBaseSystemPrompt();
 		} catch (error) {

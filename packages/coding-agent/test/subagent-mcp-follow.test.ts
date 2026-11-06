@@ -4,7 +4,7 @@
  * that adds or removes a server reaches the live child instead of the child
  * retaining its spawn-time snapshot forever.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,9 +18,11 @@ import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createMCPProxyTools, followMCPTools } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { followMCPTools } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { cfgBrowserEnabled } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { manyToolName } from "./fixtures/many-tools-mcp";
+import { LOADED_TOOL, LOADER_TOOL } from "./fixtures/lazy-loader-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
 
@@ -55,6 +57,7 @@ describe("subagent session MCP tools follow the shared manager", () => {
 		for (const session of sessions.splice(0)) await session.dispose().catch(() => {});
 		await manager.disconnectAll();
 		authStorage.close();
+		vi.restoreAllMocks();
 		removeSyncWithRetries(dir);
 	});
 
@@ -110,6 +113,48 @@ describe("subagent session MCP tools follow the shared manager", () => {
 		await connectReady({ bravo: fixtureConfig() });
 		await child.runToolRegistryMutation(async () => undefined);
 		expect(serversOf(child)).toEqual(["bravo"]);
+	}, 20_000);
+
+	it("keeps tools loaded by a child in its own scope after a browser setting change", async () => {
+		await connectReady({
+			alpha: {
+				type: "stdio",
+				command: process.execPath,
+				args: [path.join(import.meta.dir, "fixtures", "lazy-loader-mcp.ts")],
+			},
+		});
+		const follower = followMCPTools(manager, { scope: "Follow-browser" });
+		const { session: child } = await createAgentSession({
+			...sessionOptions(),
+			settings: Settings.isolated({ "browser.enabled": false }),
+			mcpManager: manager,
+			mcpTools: follower.proxyTools(),
+			mcpToolScope: follower.scope,
+			parentTaskPrefix: "Follow-browser",
+		});
+		sessions.push(child);
+		follower.bind(child);
+		const loader = child.getToolByName(`mcp__alpha_${LOADER_TOOL}`);
+		if (!loader) throw new Error("expected the child loader");
+		await loader.execute("load-for-child", {});
+		await child.runToolRegistryMutation(async () => undefined);
+		const loadedName = `mcp__alpha_${LOADED_TOOL}`;
+		expect(child.getEnabledToolNames()).toContain(loadedName);
+		expect(manager.getTools().map(tool => tool.name)).not.toContain(loadedName);
+
+		const reconcile = vi.spyOn(manager, "reconcileBrowserFilter");
+		cfgBrowserEnabled.override(child.settings, true);
+		await Promise.resolve();
+		const pending = reconcile.mock.results.at(-1);
+		if (!pending || pending.type !== "return") throw new Error("expected browser reconciliation");
+		await pending.value;
+		// Let the settings listener enqueue its registry update before draining that queue.
+		const tick = Promise.withResolvers<void>();
+		setImmediate(tick.resolve);
+		await tick.promise;
+		await child.runToolRegistryMutation(async () => undefined);
+		expect(child.getEnabledToolNames()).toContain(loadedName);
+		expect(manager.getTools().map(tool => tool.name)).not.toContain(loadedName);
 	}, 20_000);
 
 	it("keeps a child's explicitly supplied same-name tool over the MCP proxy, before and after a reload", async () => {

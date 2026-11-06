@@ -5152,7 +5152,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);
-						return mcpManager.getTools();
+						return options.mcpToolScope === undefined ? mcpManager.getTools() : undefined;
 					}
 				: undefined,
 			memoryEnabled: !restrictToolNames,
