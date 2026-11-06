@@ -142,7 +142,7 @@ export async function createSessionWorktree(
 	}
 	const primaryRoot = repository.primaryRoot() ?? repository.info().repoRoot;
 	const slug = branch.replaceAll(/[^A-Za-z0-9._-]+/g, "-");
-	const basePath = getWorktreeDir(`${slug}-${hashPath(primaryRoot)}`);
+	const basePath = getWorktreeDir(cwd, `${slug}-${hashPath(primaryRoot)}`);
 	const worktreePath = await resolveAvailableWorktreePath(basePath, await repository.worktrees());
 	await fs.mkdir(path.dirname(worktreePath), { recursive: true });
 
@@ -152,6 +152,7 @@ export async function createSessionWorktree(
 		clone: cfgWorktreeClone.get(settings),
 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
 		keepChanges,
+		excludePaths: [path.dirname(basePath)],
 	});
 	return {
 		path: await fs.realpath(worktreePath),

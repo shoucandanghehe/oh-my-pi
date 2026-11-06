@@ -37,8 +37,18 @@ impl IsolationBackend for RcopyBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_excluding(lower, merged, &[])
+	}
+
+	fn start_excluding(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[std::path::PathBuf],
+	) -> IsoResult<()> {
 		let lower = tree::canonical_existing_dir(lower, "rcopy source", IsoError::other)?;
-		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
+		let merged = tree::resolve_path(merged)?;
+		let excluded = tree::relative_exclusions(&lower, &merged, exclude_paths)?;
 		tree::prepare_destination(&merged, "rcopy", tree::remove_existing)?;
 		if is_git_worktree(&lower) {
 			git_worktree_add(&lower, &merged)?;
@@ -48,9 +58,14 @@ impl IsolationBackend for RcopyBackend {
 			// files exactly as they exist in lower. No applyBaseline call
 			// in the caller — every backend's post-`start` invariant is
 			// the same.
-			seed_dirty_state(&lower, &merged)
+			seed_dirty_state(&lower, &merged, &excluded)?;
+			tree::remove_exclusions(&merged, &excluded)
 		} else {
-			recursive_copy(&lower, &merged)
+			let skip = excluded
+				.iter()
+				.map(|path| path.as_os_str())
+				.collect::<Vec<_>>();
+			recursive_copy(&lower, &merged, &skip)
 		}
 	}
 
@@ -135,35 +150,64 @@ fn git_worktree_remove(merged: &Path) -> IsoResult<()> {
 /// `lower` at the moment `start()` was called, so the rest of the PAL
 /// contract ("merged mirrors lower's live working tree") holds for
 /// rcopy on git inputs too.
-fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
-	let staged = git_capture(lower, &["diff", "--binary", "--no-color", "--cached"])?;
+fn seed_dirty_state(lower: &Path, merged: &Path, excluded: &[std::path::PathBuf]) -> IsoResult<()> {
+	let staged =
+		git_capture_excluding(lower, &["diff", "--binary", "--no-color", "--cached"], excluded)?;
 	if !staged.is_empty() {
 		git_apply(merged, &staged, &["--cached"])?;
 		git_apply(merged, &staged, &[])?;
 	}
 
-	let unstaged = git_capture(lower, &["diff", "--binary", "--no-color"])?;
+	let unstaged = git_capture_excluding(lower, &["diff", "--binary", "--no-color"], excluded)?;
 	if !unstaged.is_empty() {
 		git_apply(merged, &unstaged, &[])?;
 	}
 
-	let untracked = git_capture(lower, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+	let untracked = git_capture_excluding(
+		lower,
+		&["ls-files", "--others", "--exclude-standard", "-z"],
+		excluded,
+	)?;
 	for path_bytes in untracked.split(|b| *b == 0) {
 		if path_bytes.is_empty() {
 			continue;
 		}
 		let rel = std::str::from_utf8(path_bytes)
 			.map_err(|err| IsoError::other(format!("untracked path is not valid UTF-8: {err}")))?;
+		let relative = Path::new(rel);
+		if excluded.iter().any(|path| relative.starts_with(path)) {
+			continue;
+		}
+		let skip = excluded
+			.iter()
+			.filter_map(|path| path.strip_prefix(relative).ok())
+			.map(Path::as_os_str)
+			.collect::<Vec<_>>();
 		let src = lower.join(rel);
 		let dst = merged.join(rel);
 		if let Some(parent) = dst.parent() {
 			std::fs::create_dir_all(parent)
 				.map_err(|err| IsoError::other(format!("create {}: {err}", parent.display())))?;
 		}
-		copy_path(&src, &dst)?;
+		copy_path(&src, &dst, &skip)?;
 	}
 
 	Ok(())
+}
+
+fn git_capture_excluding(
+	cwd: &Path,
+	args: &[&str],
+	excluded: &[std::path::PathBuf],
+) -> IsoResult<Vec<u8>> {
+	let pathspecs = excluded
+		.iter()
+		.map(|path| format!(":(top,exclude,literal){}", path.to_string_lossy().replace('\\', "/")))
+		.collect::<Vec<_>>();
+	let mut args = args.to_vec();
+	args.extend(["--", "."]);
+	args.extend(pathspecs.iter().map(String::as_str));
+	git_capture(cwd, &args)
 }
 
 fn git_capture(cwd: &Path, args: &[&str]) -> IsoResult<Vec<u8>> {
@@ -260,7 +304,7 @@ fn git_apply_with_program(
 /// Copy a single path (regular file, symlink, or directory) from `src`
 /// to `dst`, preserving mtime. Used by the untracked-files pass;
 /// directories are recursed via [`tree::copy_dir_contents`].
-fn copy_path(src: &Path, dst: &Path) -> IsoResult<()> {
+fn copy_path(src: &Path, dst: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
 	let meta = std::fs::symlink_metadata(src)
 		.map_err(|err| IsoError::other(format!("stat {}: {err}", src.display())))?;
 	if meta.file_type().is_symlink() {
@@ -268,7 +312,7 @@ fn copy_path(src: &Path, dst: &Path) -> IsoResult<()> {
 	} else if meta.file_type().is_dir() {
 		std::fs::create_dir_all(dst)
 			.map_err(|err| IsoError::other(format!("create {}: {err}", dst.display())))?;
-		tree::copy_dir_contents(src, dst, &[], &Rcopy)?;
+		tree::copy_dir_contents(src, dst, skip, &Rcopy)?;
 		Rcopy.finish_dir(src, dst)
 	} else {
 		Rcopy.file(src, dst, meta.file_type())
@@ -279,10 +323,10 @@ fn copy_path(src: &Path, dst: &Path) -> IsoResult<()> {
 /// `copy` already preserves mtime on the macOS/Linux platforms we care
 /// about, but we still set it explicitly to keep behaviour consistent
 /// across hosts where the stdlib promise is weaker.
-fn recursive_copy(lower: &Path, merged: &Path) -> IsoResult<()> {
+fn recursive_copy(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
 	std::fs::create_dir_all(merged)
 		.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-	tree::copy_dir_contents(lower, merged, &[], &Rcopy)
+	tree::copy_dir_contents(lower, merged, skip, &Rcopy)
 }
 
 struct Rcopy;
@@ -351,6 +395,115 @@ mod tests {
 	};
 
 	use super::*;
+
+	#[test]
+	fn rcopy_inside_source_excludes_only_storage_and_keeps_nested_isolation_independent() {
+		let root = TempDirGuard::new();
+		let lower = root.path().join("lower");
+		let storage = lower.join("sub/.worktrees");
+		fs::create_dir_all(storage.join("previous")).unwrap();
+		fs::write(storage.join(".omp-worktree-root"), "managed\n").unwrap();
+		fs::write(storage.join("previous/keep"), "previous workspace\n").unwrap();
+		fs::write(lower.join("sub/file"), "neighbor\n").unwrap();
+		fs::write(lower.join("sub/.worktrees-neighbor"), "not storage\n").unwrap();
+		let merged = storage.join("parent/m");
+
+		RcopyBackend
+			.start_excluding(&lower, &merged, std::slice::from_ref(&storage))
+			.unwrap();
+		assert_eq!(fs::read(merged.join("sub/file")).unwrap(), b"neighbor\n");
+		assert_eq!(fs::read(merged.join("sub/.worktrees-neighbor")).unwrap(), b"not storage\n");
+		assert!(!merged.join("sub/.worktrees").exists());
+
+		let nested_storage = merged.join("sub/.worktrees");
+		let nested = nested_storage.join("child/m");
+		RcopyBackend
+			.start_excluding(&merged, &nested, &[nested_storage])
+			.unwrap();
+		assert_eq!(fs::read(nested.join("sub/file")).unwrap(), b"neighbor\n");
+		assert!(!nested.join("sub/.worktrees").exists());
+		fs::write(nested.join("sub/file"), "child edit\n").unwrap();
+		assert_eq!(fs::read(merged.join("sub/file")).unwrap(), b"neighbor\n");
+		assert_eq!(fs::read(lower.join("sub/file")).unwrap(), b"neighbor\n");
+
+		RcopyBackend.stop(&nested).unwrap();
+		RcopyBackend.stop(&merged).unwrap();
+		assert_eq!(fs::read(storage.join("previous/keep")).unwrap(), b"previous workspace\n");
+		assert_eq!(fs::read(storage.join(".omp-worktree-root")).unwrap(), b"managed\n");
+	}
+
+	#[test]
+	fn rcopy_git_dirty_seeding_omits_storage_and_sibling_worktrees() {
+		let root = TempDirGuard::new();
+		let lower = root.path().join("lower");
+		fs::create_dir_all(lower.join("sub")).unwrap();
+		git_capture(&lower, &["init", "-q"]).unwrap();
+		fs::write(lower.join("sub/file"), "base\n").unwrap();
+		git_capture(&lower, &["add", "."]).unwrap();
+		git_capture(&lower, &[
+			"-c",
+			"user.name=Test",
+			"-c",
+			"user.email=test@example.com",
+			"-c",
+			"commit.gpgsign=false",
+			"commit",
+			"-qm",
+			"base",
+		])
+		.unwrap();
+		let storage = lower.join("sub/.worktrees");
+		fs::create_dir_all(&storage).unwrap();
+		let previous = storage.join("previous");
+		git_worktree_add(&lower, &previous).unwrap();
+		fs::write(previous.join("keep"), "sibling workspace\n").unwrap();
+		fs::write(storage.join(".omp-worktree-root"), "managed\n").unwrap();
+		fs::write(lower.join("sub/file"), "dirty\n").unwrap();
+		fs::write(lower.join("sub/untracked"), "untracked\n").unwrap();
+		let merged = storage.join("parent/m");
+
+		RcopyBackend
+			.start_excluding(&lower, &merged, std::slice::from_ref(&storage))
+			.unwrap();
+		assert_eq!(fs::read(merged.join("sub/file")).unwrap(), b"dirty\n");
+		assert_eq!(fs::read(merged.join("sub/untracked")).unwrap(), b"untracked\n");
+		assert!(!merged.join("sub/.worktrees").exists());
+		let nested_storage = merged.join("sub/.worktrees");
+		let nested = nested_storage.join("child/m");
+		RcopyBackend
+			.start_excluding(&merged, &nested, &[nested_storage])
+			.unwrap();
+		assert_eq!(fs::read(nested.join("sub/file")).unwrap(), b"dirty\n");
+		assert_eq!(fs::read(nested.join("sub/untracked")).unwrap(), b"untracked\n");
+		assert!(!nested.join("sub/.worktrees").exists());
+		RcopyBackend.stop(&nested).unwrap();
+		RcopyBackend.stop(&merged).unwrap();
+		assert_eq!(fs::read(previous.join("keep")).unwrap(), b"sibling workspace\n");
+		assert_eq!(fs::read(lower.join("sub/file")).unwrap(), b"dirty\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn rcopy_exclusion_symlink_does_not_copy_or_remove_its_outside_target() {
+		let root = TempDirGuard::new();
+		let lower = root.path().join("lower");
+		let outside = root.path().join("outside");
+		fs::create_dir_all(&lower).unwrap();
+		fs::create_dir_all(&outside).unwrap();
+		fs::write(outside.join("keep"), "outside data\n").unwrap();
+		fs::write(lower.join("file"), "source\n").unwrap();
+		let storage = lower.join(".worktrees");
+		std::os::unix::fs::symlink(&outside, &storage).unwrap();
+		let merged = root.path().join("merged");
+
+		RcopyBackend
+			.start_excluding(&lower, &merged, &[storage, outside.clone()])
+			.unwrap();
+		assert!(!merged.join(".worktrees").exists());
+		assert_eq!(fs::read(merged.join("file")).unwrap(), b"source\n");
+		assert_eq!(fs::read(outside.join("keep")).unwrap(), b"outside data\n");
+		assert_eq!(fs::read(lower.join("file")).unwrap(), b"source\n");
+	}
 
 	/// The non-git `start` path mirrors file and directory mtimes, including
 	/// on readonly files, so the mtime-skipping diff stays fast.

@@ -1,4 +1,5 @@
 import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
+import { getWorktreesDir } from "@oh-my-pi/pi-utils";
 import type { IsolationHandle, WorktreeBaseline } from "../task/worktree";
 import { captureBaseline, cleanupIsolation, ensureIsolation, getRepoRoot } from "../task/worktree";
 
@@ -28,12 +29,17 @@ export interface SecurityRemediationContext {
 
 async function prepareRemediationContext(cwd: string): Promise<SecurityRemediationContext> {
 	const repoRoot = await getRepoRoot(cwd);
-	return { repoRoot, baseline: await captureBaseline(repoRoot) };
+	return { repoRoot, baseline: await captureBaseline(repoRoot, undefined, undefined, [getWorktreesDir(cwd)]) };
 }
 
 export interface SecurityRemediationDependencies {
 	prepareContext?: (cwd: string) => Promise<SecurityRemediationContext>;
-	createIsolation?: (repositoryRoot: string, id: string, preferred?: IsoBackendKind) => Promise<IsolationHandle>;
+	createIsolation?: (
+		repositoryRoot: string,
+		id: string,
+		preferred: IsoBackendKind | undefined,
+		cwd: string,
+	) => Promise<IsolationHandle>;
 	cleanupIsolation?: (handle: IsolationHandle) => Promise<void>;
 	createId?: () => string;
 }
@@ -83,7 +89,7 @@ export async function prepareSecurityRemediationWorkspace(
 	const context = await prepareContext(request.cwd);
 	assertSecurityRemediationBaselineClean(context.baseline);
 	const id = request.isolationId?.trim() || dependencies.createId?.() || createRemediationId();
-	const handle = await createIsolation(context.repoRoot, id, request.preferredBackend);
+	const handle = await createIsolation(context.repoRoot, id, request.preferredBackend, request.cwd);
 	let cleaned = false;
 	return {
 		id,

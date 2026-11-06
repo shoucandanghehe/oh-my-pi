@@ -126,12 +126,14 @@ pub struct VcsWorktreeEntry {
 /// Worktree creation options.
 #[napi(object)]
 pub struct VcsWorktreeAddOptions {
-	pub detach:       bool,
-	pub clone:        bool,
-	pub backend:      Option<IsoBackendKind>,
+	pub detach:        bool,
+	pub clone:         bool,
+	pub backend:       Option<IsoBackendKind>,
 	/// Carry the source checkout's uncommitted changes into the new worktree
 	/// (target must be the source `HEAD`).
-	pub keep_changes: Option<bool>,
+	pub keep_changes:  Option<bool>,
+	/// Absolute source directories omitted from the disposable worktree.
+	pub exclude_paths: Option<Vec<String>>,
 }
 /// Worktree creation outcome.
 #[napi(object)]
@@ -895,6 +897,12 @@ impl VcsGitRepo {
 				detach: options.detach,
 				clone,
 				keep_changes: options.keep_changes.unwrap_or(false),
+				exclude_paths: options
+					.exclude_paths
+					.unwrap_or_default()
+					.into_iter()
+					.map(std::path::PathBuf::from)
+					.collect(),
 			})
 			.map(|result| VcsWorktreeAddResult {
 				cloned_with: result.cloned_with.map(to_napi_kind),

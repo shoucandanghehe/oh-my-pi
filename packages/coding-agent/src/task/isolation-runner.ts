@@ -44,6 +44,7 @@ import {
 	commitToBranch,
 	ensureIsolation,
 	getRepoRoot,
+	hasNestedWorktrees,
 	mergeTaskBranches,
 	type WorktreeBaseline,
 } from "./worktree";
@@ -321,6 +322,7 @@ export async function retainIsolationWorkspace(
 			sidecarOk = false;
 		}
 	}
+	if (await hasNestedWorktrees(isolationDir)) return { dir: isolationDir, sidecarOk };
 	const retainedBase = await vacateIsolationSlot(baseDir);
 	return { dir: retainedBase ? path.join(retainedBase, path.basename(isolationDir)) : isolationDir, sidecarOk };
 }
@@ -359,13 +361,13 @@ export interface IsolationWorkspace {
 	cleanup(): Promise<void>;
 }
 
-/** Opens the workspace of one isolated run in `repoRoot` for agent `agentId`. */
-export type OpenWorkspace = (repoRoot: string, agentId: string) => Promise<IsolationWorkspace>;
+/** Opens a run's workspace, resolving its configured storage against the owning `cwd`. */
+export type OpenWorkspace = (repoRoot: string, agentId: string, cwd: string) => Promise<IsolationWorkspace>;
 
 /** Workspaces materialised by the natives PAL, `backend` a hint (`undefined` ⇒ the resolver picks). */
 export function nativeWorkspace(backend: IsoBackendKind | undefined): OpenWorkspace {
-	return async (repoRoot, agentId) => {
-		const handle = await ensureIsolation(repoRoot, agentId, backend);
+	return async (repoRoot, agentId, cwd) => {
+		const handle = await ensureIsolation(repoRoot, agentId, backend, cwd);
 		return {
 			dir: handle.mergedDir,
 			retain: () => retainIsolationWorkspace(handle.mergedDir, handle.backend),
@@ -489,9 +491,14 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return releasePromise;
 	};
 	try {
-		workspace = await opts.openWorkspace(opts.context.repoRoot, opts.agentId);
+		workspace = await opts.openWorkspace(opts.context.repoRoot, opts.agentId, opts.baseOptions.cwd);
 		const isolationDir = workspace.dir;
-		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
+		const baseline = await captureIsolationBaseline(
+			isolationDir,
+			opts.context.repoRoot,
+			undefined,
+			opts.baseOptions.cwd,
+		);
 		taskBaseline = baseline;
 		const result = await runSubprocess({
 			...opts.baseOptions,

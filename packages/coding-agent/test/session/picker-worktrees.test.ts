@@ -92,6 +92,7 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 	}
 
 	it("lists a session moved into a worktree from the original checkout, and vice versa", async () => {
+		process.env.OMP_WORKTREE_DIR = ".worktrees";
 		const moved = await sessionMovedByWt("wt/live");
 		const stayed = await answeredSession(repo);
 		await stayed.close();
@@ -126,7 +127,26 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		expect(await SessionManager.isFromRemovedWorktree(listed, repo)).toBe(true);
 	});
 
+	it("finds subfolder-owned worktree sessions in both directions and after removal", async () => {
+		process.env.OMP_WORKTREE_DIR = ".worktrees";
+		const cwd = path.join(repo, "pkg");
+		const stayed = await answeredSession(cwd);
+		await stayed.close();
+		const moved = await answeredSession(cwd);
+		const worktree = await createSessionWorktree(cwd, Settings.isolated(), "wt/subfolder");
+		await moved.moveTo(worktree.path);
+		await moved.close();
+		const expected = [moved.getSessionId(), stayed.getSessionId()].sort();
+		expect((await pickerSessions(cwd)).map(session => session.id).sort()).toEqual(expected);
+		expect((await pickerSessions(worktree.path)).map(session => session.id).sort()).toEqual(expected);
+		await $`git worktree remove --force ${worktree.path} && git worktree prune`.cwd(repo).quiet();
+		const listed = (await pickerSessions(cwd)).find(session => session.id === moved.getSessionId())!;
+		expect(listed.cwd).toBe(worktree.path);
+		expect(await SessionManager.isFromRemovedWorktree(listed, cwd)).toBe(true);
+	});
+
 	it("keeps a removed worktree's session listed and relocates it into the checkout on resume", async () => {
+		process.env.OMP_WORKTREE_DIR = ".worktrees";
 		const moved = await sessionMovedByWt("wt/gone");
 		// `omp worktree clear` removes and prunes: git no longer knows the worktree.
 		await $`git worktree remove --force ${moved.worktree} && git worktree prune`.cwd(repo).quiet();

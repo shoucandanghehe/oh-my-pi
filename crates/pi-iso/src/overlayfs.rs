@@ -46,13 +46,22 @@ impl IsolationBackend for OverlayfsBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_excluding(lower, merged, &[])
+	}
+
+	fn start_excluding(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[std::path::PathBuf],
+	) -> IsoResult<()> {
 		#[cfg(target_os = "linux")]
 		{
-			imp::start(lower, merged)
+			imp::start(lower, merged, exclude_paths)
 		}
 		#[cfg(not(target_os = "linux"))]
 		{
-			let _ = (lower, merged);
+			let _ = (lower, merged, exclude_paths);
 			Err(IsoError::unavailable("overlayfs isolation is only available on Linux"))
 		}
 	}
@@ -124,14 +133,21 @@ mod imp {
 		)
 	}
 
-	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
+	pub fn start(lower: &Path, merged: &Path, exclude_paths: &[PathBuf]) -> IsoResult<()> {
 		let lower = tree::canonical_existing_dir(lower, "overlay lower", IsoError::other)?;
-		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
+		let merged = tree::resolve_path(merged)?;
 		let base = merged.parent().ok_or_else(|| {
 			IsoError::other(format!("merged path has no parent: {}", merged.display()))
 		})?;
 		let upper = base.join("upper");
 		let work = base.join("work");
+		// The auxiliary upper/work directories must not project back into the
+		// overlay when its caller-owned base is inside the lower tree.
+		let mut exclude_paths = exclude_paths.to_vec();
+		if base.starts_with(&lower) {
+			exclude_paths.push(base.to_path_buf());
+		}
+		let excluded = tree::relative_exclusions(&lower, &merged, &exclude_paths)?;
 
 		remove_dir_if_exists(&upper, "stale overlay upper")?;
 		remove_dir_if_exists(&work, "stale overlay work")?;
@@ -152,18 +168,66 @@ mod imp {
 			work.display()
 		);
 
-		match kernel_mount(&merged, &opts) {
+		let kernel = prepare_whiteouts(&upper, &excluded, MountFlavor::Kernel)
+			.and_then(|()| kernel_mount(&merged, &opts));
+		match kernel {
 			Ok(()) => {
 				ACTIVE_MOUNTS.lock().insert(merged, MountFlavor::Kernel);
 				Ok(())
 			},
 			Err(err) if err.is_unavailable() => {
+				// fuse-overlayfs also supports unprivileged .wh.NAME markers;
+				// never traverse/remove the lower directory through the mount.
+				remove_dir_if_exists(&upper, "kernel overlay upper")?;
+				fs::create_dir_all(&upper)
+					.map_err(|err| IsoError::other(format!("create upper dir: {err}")))?;
+				prepare_whiteouts(&upper, &excluded, MountFlavor::Fuse)?;
 				fuse_mount(&lower, &upper, &work, &merged)?;
 				ACTIVE_MOUNTS.lock().insert(merged, MountFlavor::Fuse);
 				Ok(())
 			},
 			Err(err) => Err(err),
 		}
+	}
+
+	fn prepare_whiteouts(upper: &Path, excluded: &[PathBuf], flavor: MountFlavor) -> IsoResult<()> {
+		for relative in excluded {
+			let parent = upper.join(relative.parent().unwrap_or_else(|| Path::new("")));
+			fs::create_dir_all(&parent).map_err(|err| {
+				IsoError::other(format!("create whiteout parent {}: {err}", parent.display()))
+			})?;
+			let name = relative
+				.file_name()
+				.ok_or_else(|| IsoError::other("empty overlay exclusion"))?;
+			match flavor {
+				MountFlavor::Kernel => {
+					let path = upper.join(relative);
+					let path_c = to_cstring(path.as_os_str().as_bytes(), "whiteout")?;
+					// SAFETY: the CString outlives mknod; a 0:0 character device
+					// is overlayfs's whiteout and is created only in the fresh
+					// upper.
+					if unsafe { libc::mknod(path_c.as_ptr(), libc::S_IFCHR | 0o600, 0) } != 0 {
+						let err = std::io::Error::last_os_error();
+						if matches!(
+							err.raw_os_error(),
+							Some(libc::EPERM | libc::EACCES | libc::EOPNOTSUPP)
+						) {
+							return Err(IsoError::unavailable(format!(
+								"cannot create overlay whiteout: {err}"
+							)));
+						}
+						return Err(IsoError::other(format!("whiteout {}: {err}", path.display())));
+					}
+				},
+				MountFlavor::Fuse => {
+					let mut whiteout = std::ffi::OsString::from(".wh.");
+					whiteout.push(name);
+					fs::File::create(parent.join(whiteout))
+						.map_err(|err| IsoError::other(format!("create fuse whiteout: {err}")))?;
+				},
+			}
+		}
+		Ok(())
 	}
 
 	pub fn stop(merged: &Path) -> IsoResult<()> {

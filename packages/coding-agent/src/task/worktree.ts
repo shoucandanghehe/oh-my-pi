@@ -6,7 +6,16 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	formatBytes,
+	getWorktreeDir,
+	getWorktreesDir,
+	isEnoent,
+	logger,
+	pathIsWithin,
+	relativePathWithinRoot,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
@@ -38,6 +47,8 @@ export interface RepoBaseline {
 	unstaged: string;
 	untracked: string[];
 	untrackedPatch: string;
+	/** Managed storage paths relative to this snapshot's repo root, excluded from untracked capture. */
+	worktreePaths?: string[];
 }
 
 /** Baseline state for the project, including any nested git repos. */
@@ -88,12 +99,17 @@ async function realCommonDir(dir: string): Promise<string | undefined> {
  * targets the source checkout's admin dir; baselining each one re-hashes its
  * whole tree against a foreign index and froze the host (#16068).
  */
-async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]): Promise<string[]> {
+async function discoverNestedRepos(
+	repoRoot: string,
+	ownRepos: readonly string[],
+	worktreesDirs: readonly string[],
+): Promise<string[]> {
 	// Get submodule paths so we can exclude them
 	const submodulePaths = new Set(await vcs.requireGit(repoRoot).submodulePaths());
 	const ownCommonDirs = new Set(
 		(await Promise.all(ownRepos.map(realCommonDir))).filter((dir): dir is string => dir !== undefined),
 	);
+	const nestedWorktrees = worktreesDirs.filter(root => relativePathWithinRoot(repoRoot, root) !== null);
 
 	// Find all .git dirs/files that aren't the root or known submodules
 	const result: string[] = [];
@@ -108,6 +124,7 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 			if (entry.name === "node_modules" || entry.name === ".git") continue;
 			if (!entry.isDirectory()) continue;
 			const full = path.join(dir, entry.name);
+			if (nestedWorktrees.some(root => pathIsWithin(root, full))) continue;
 			const rel = path.relative(repoRoot, full);
 			// Check if this directory is itself a git repo
 			const gitDir = path.join(full, ".git");
@@ -222,7 +239,11 @@ async function captureUntrackedPatch(
  * budget, so an oversized change set fails inside the renderer instead of
  * after the whole patch is in memory.
  */
-async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promise<RepoBaseline> {
+async function captureRepoBaseline(
+	repoRoot: string,
+	budgetBytes: number,
+	worktreesDirs: readonly string[],
+): Promise<RepoBaseline> {
 	const repo = vcs.requireGit(repoRoot);
 	const headCommit = (await repo.headSha()) ?? "";
 	let staged: string;
@@ -239,7 +260,12 @@ async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promi
 		}
 		throw error;
 	}
-	const untracked = await repo.lsFiles(true, true);
+	const worktreePaths = worktreesDirs
+		.map(root => relativePathWithinRoot(repoRoot, root))
+		.filter((root): root is string => root !== null);
+	const untracked = (await repo.lsFiles(true, true)).filter(
+		entry => !worktreePaths.some(root => pathIsWithin(path.join(repoRoot, root), path.join(repoRoot, entry))),
+	);
 	// Gate before capturing the untracked patch: that step embeds every
 	// untracked byte into one in-memory string, so an oversized tree must be
 	// refused here rather than after buffering gigabytes (#8939). Untracked
@@ -251,7 +277,15 @@ async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promi
 		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes, budgetBytes);
 	}
 	const untrackedPatch = await captureUntrackedPatch(repoRoot, untracked, repo);
-	return { repoRoot, headCommit, staged, unstaged, untracked, untrackedPatch };
+	return {
+		repoRoot,
+		headCommit,
+		staged,
+		unstaged,
+		untracked,
+		untrackedPatch,
+		...(worktreePaths.length ? { worktreePaths } : {}),
+	};
 }
 
 interface SyntheticTreeOptions {
@@ -293,16 +327,23 @@ export async function captureBaseline(
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	ownRepos: readonly string[] = [repoRoot],
+	worktreesDirs: readonly string[] = [getWorktreesDir(repoRoot)],
 ): Promise<WorktreeBaseline> {
 	const [root, nestedPaths] = await Promise.all([
-		captureRepoBaseline(repoRoot, budgetBytes),
-		discoverNestedRepos(repoRoot, ownRepos),
+		captureRepoBaseline(repoRoot, budgetBytes, worktreesDirs),
+		discoverNestedRepos(repoRoot, ownRepos, worktreesDirs),
 	]);
 	const nested = await Promise.all(
-		nestedPaths.map(async relativePath => ({
-			relativePath,
-			baseline: await captureRepoBaseline(path.join(repoRoot, relativePath), budgetBytes),
-		})),
+		nestedPaths.map(async relativePath => {
+			const nestedRoot = path.join(repoRoot, relativePath);
+			return {
+				relativePath,
+				baseline: await captureRepoBaseline(nestedRoot, budgetBytes, [
+					...worktreesDirs,
+					getWorktreesDir(nestedRoot),
+				]),
+			};
+		}),
 	);
 	return { root, nested };
 }
@@ -323,8 +364,12 @@ export async function captureIsolationBaseline(
 	isolationDir: string,
 	repoRoot: string,
 	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+	sourceCwd: string = repoRoot,
 ): Promise<WorktreeBaseline> {
-	const { root, nested } = await captureBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot]);
+	const worktreesDirs = [getWorktreesDir(isolationDir)];
+	const sourceStorage = relativePathWithinRoot(repoRoot, getWorktreesDir(sourceCwd));
+	if (sourceStorage) worktreesDirs.push(path.join(isolationDir, sourceStorage));
+	const { root, nested } = await captureBaseline(isolationDir, budgetBytes, [isolationDir, repoRoot], worktreesDirs);
 	return {
 		root: { ...root, repoRoot },
 		nested: nested.map(({ relativePath, baseline }) => ({
@@ -340,7 +385,9 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const currentHead = (await repo.headSha()) ?? "";
 	const currentStaged = await repo.diffText({ binary: true, cached: true });
 	const currentUnstaged = await repo.diffText({ binary: true });
-	const currentUntracked = await repo.lsFiles(true, true);
+	const currentUntracked = (await repo.lsFiles(true, true)).filter(
+		entry => !rb.worktreePaths?.some(root => pathIsWithin(path.join(repoDir, root), path.join(repoDir, entry))),
+	);
 	const currentUntrackedPatch = await captureUntrackedPatch(repoDir, currentUntracked, repo);
 	const committedPatch =
 		currentHead && currentHead !== rb.headCommit ? await diffTreeOrEmpty(repo, rb.headCommit, currentHead) : "";
@@ -606,10 +653,10 @@ function errorMessage(err: unknown): string {
  * worktrees dir: it holds the owner marker and either the native `m` mount or
  * the record of an ovnfs checkout (see `./ovnfs`).
  */
-export function taskIsolationBaseDir(repoRoot: string, id: string): string {
+export function taskIsolationBaseDir(repoRoot: string, id: string, cwd: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return getWorktreeDir(`${TASK_ISOLATION_DIR_PREFIX}${digest}`);
+	return getWorktreeDir(cwd, `${TASK_ISOLATION_DIR_PREFIX}${digest}`);
 }
 
 /**
@@ -650,18 +697,36 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	}
 }
 
+/** Whether deleting or moving this workspace would also lose nested managed worktrees. */
+export async function hasNestedWorktrees(isolationDir: string): Promise<boolean> {
+	const root = getWorktreesDir(isolationDir);
+	if (!pathIsWithin(isolationDir, root) || pathIsWithin(root, isolationDir)) return false;
+	try {
+		return (await fs.readdir(root)).length > 0;
+	} catch (error) {
+		if (isEnoent(error)) return false;
+		throw error;
+	}
+}
+
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
 	preferred?: IsoBackendKind,
+	cwd: string = baseCwd,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
-	const baseDir = taskIsolationBaseDir(repoRoot, id);
+	const baseDir = taskIsolationBaseDir(repoRoot, id, cwd);
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
+	if (await hasNestedWorktrees(mergedDir)) {
+		throw new Error(
+			`Isolation workspace ${mergedDir} still contains nested worktrees; recover or clear them before reusing it.`,
+		);
+	}
 
 	for (const candidate of candidates) {
 		await fs.rm(baseDir, { recursive: true, force: true });
@@ -673,7 +738,7 @@ export async function ensureIsolation(
 		await fs.mkdir(baseDir, { recursive: true });
 		await writeIsolationOwner(baseDir, id);
 		try {
-			await natives.isoStart(candidate, repoRoot, mergedDir);
+			await natives.isoStart(candidate, repoRoot, mergedDir, [path.dirname(baseDir)]);
 			// Sever the isolation's git metadata from the source checkout. Copy
 			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
 			// pointer file (or the rcopy `git worktree add` registration) leaves
@@ -709,6 +774,10 @@ export async function ensureIsolation(
  */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 	const baseDir = path.dirname(handle.mergedDir);
+	if (await hasNestedWorktrees(handle.mergedDir)) {
+		if (needsNativeTeardown(handle.backend)) await writeRetainedBackend(baseDir, handle.backend);
+		throw new Error(`Kept isolation workspace ${handle.mergedDir} because it still contains nested worktrees.`);
+	}
 	try {
 		await natives.isoStop(handle.backend, handle.mergedDir);
 	} catch (err) {

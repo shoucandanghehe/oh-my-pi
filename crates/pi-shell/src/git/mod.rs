@@ -483,9 +483,10 @@ impl Plan {
 		self
 			.repo
 			.worktree_add(&self.path, &self.target, WorktreeAddOptions {
-				detach:       self.detach,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        self.detach,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})?;
 		let linked = GitRepo::require(&self.path)?;
 		if let Some(reason) = &self.lock {

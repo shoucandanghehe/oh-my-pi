@@ -42,6 +42,7 @@ mod windows_block_clone;
 mod zfs;
 
 pub use diff::{ChangeKind, Diff, FileChange};
+pub use tree::{relative_exclusions, remove_exclusions};
 
 /// Stable identifier for which backend a build was compiled with.
 ///
@@ -271,8 +272,26 @@ pub trait IsolationBackend: Send + Sync {
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()>;
 
-	/// Clone `lower` into `merged` copy-on-write, omitting named top-level
-	/// entries.
+	/// Start with absolute source directories omitted from the disposable view.
+	/// Snapshot backends can remove them from their independent copy; walkers,
+	/// mounts, and projections override this to filter before exposing the tree.
+	fn start_excluding(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[std::path::PathBuf],
+	) -> IsoResult<()> {
+		let excluded = tree::relative_exclusions(lower, merged, exclude_paths)?;
+		self.start(lower, merged)?;
+		if let Err(err) = tree::remove_exclusions(merged, &excluded) {
+			let _ = self.stop(merged);
+			return Err(err);
+		}
+		Ok(())
+	}
+
+	/// Clone `lower` into `merged` copy-on-write, omitting source-relative
+	/// paths.
 	fn clone_tree(
 		&self,
 		_lower: &Path,

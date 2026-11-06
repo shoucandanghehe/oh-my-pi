@@ -1,5 +1,5 @@
 /**
- * List and clean up agent-managed git worktrees under `~/.omp/wt`.
+ * List and clean up agent-managed git worktrees under the configured base.
  */
 
 import { getProjectDir } from "@oh-my-pi/pi-utils";
@@ -33,7 +33,7 @@ export default class Worktree extends Command {
 	static flags = {
 		cwd: Flags.string({
 			char: "C",
-			description: "Repository/base directory (add)",
+			description: "Working directory for repository operations and worktree path configuration",
 		}),
 		branch: Flags.string({
 			char: "b",
@@ -80,9 +80,7 @@ export default class Worktree extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Worktree);
-		// Load settings so the `worktree.base` override is applied before we scan
-		// — otherwise this command would inspect ~/.omp/wt while the agent created
-		// its worktrees under the configured base.
+		const cwd = flags.cwd ?? getProjectDir();
 		if (args.action === "add") {
 			if (!args.path) {
 				console.error("Error: Missing required argument: path");
@@ -91,7 +89,7 @@ export default class Worktree extends Command {
 			}
 			try {
 				await addWorktree({
-					cwd: flags.cwd,
+					cwd,
 					path: args.path,
 					commit: args.commit,
 					branch: flags.branch,
@@ -106,9 +104,11 @@ export default class Worktree extends Command {
 			return;
 		}
 
-		await Settings.init({ cwd: getProjectDir() });
+		// Apply this project's worktree.base before resolving the scan root.
+		await Settings.init({ cwd });
 		if (args.action === "clear") {
 			const { failed } = await clearWorktrees({
+				cwd,
 				all: flags.all ?? false,
 				dryRun: flags["dry-run"] ?? false,
 				json: flags.json ?? false,
@@ -116,6 +116,6 @@ export default class Worktree extends Command {
 			if (failed > 0) process.exitCode = 1;
 			return;
 		}
-		await listWorktrees({ json: flags.json ?? false });
+		await listWorktrees({ cwd, json: flags.json ?? false });
 	}
 }

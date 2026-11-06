@@ -40,14 +40,28 @@ impl IsolationBackend for LinuxReflinkBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_excluding(lower, merged, &[])
+	}
+
+	fn start_excluding(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[std::path::PathBuf],
+	) -> IsoResult<()> {
 		#[cfg(target_os = "linux")]
 		{
-			imp::start(lower, merged)
+			let excluded = crate::tree::relative_exclusions(lower, merged, exclude_paths)?;
+			let skip = excluded
+				.iter()
+				.map(|path| path.as_os_str())
+				.collect::<Vec<_>>();
+			self.clone_tree(lower, merged, &skip)
 		}
 		#[cfg(not(target_os = "linux"))]
 		{
-			let _ = (lower, merged);
-			Err(IsoError::unavailable("Linux FICLONE reflink isolation is only available on Linux"))
+			let _ = exclude_paths;
+			self.clone_tree(lower, merged, &[])
 		}
 	}
 
@@ -89,12 +103,9 @@ mod imp {
 		tree::{self, TreeCopy},
 	};
 
-	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		clone_tree(lower, merged, &[])
-	}
-
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
 		let lower = tree::canonical_existing_dir(lower, "reflink source", IsoError::other)?;
+		tree::relative_exclusions(&lower, merged, &[])?;
 		tree::prepare_destination(merged, "reflink clone", tree::remove_existing)?;
 		let result = (|| {
 			fs::create_dir(merged)

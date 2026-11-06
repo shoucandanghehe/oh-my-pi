@@ -20,6 +20,7 @@
 ### Fixed
 
 - Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
+- Fixed in-project isolation and cloned worktrees recursively copying their own storage; `isoStart` and `worktreeAdd` now accept exact storage-directory exclusions.
 
 ## [18.17.0] - 2026-11-06
 

@@ -18,6 +18,7 @@ import {
 	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import { readRetainedMountBackend } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import { type IsolationWorkspace, nativeWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
@@ -246,6 +247,11 @@ describe("worktree isolation helpers", () => {
 		});
 
 		it("retries isoResolve candidates when a backend is path-unavailable", async () => {
+			const savedEnv = process.env.OMP_WORKTREE_DIR;
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-retry-worktrees-"));
+			tempDirs.push(worktreeBase);
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
 			const unavailable = new Error("ISO_UNAVAILABLE: btrfs source is not a subvolume");
 			const isoResolve = vi.spyOn(natives, "isoResolve").mockResolvedValue({
 				kind: natives.IsoBackendKind.Btrfs,
@@ -261,16 +267,140 @@ describe("worktree isolation helpers", () => {
 				message.startsWith("ISO_UNAVAILABLE:"),
 			);
 
-			const handle = await ensureIsolation(repo, "retry-path-unavailable");
+			try {
+				const handle = await ensureIsolation(repo, "retry-path-unavailable");
 
-			expect(isoResolve).toHaveBeenCalledWith(null);
-			expect(isoStart.mock.calls.map(call => call[0])).toEqual([
-				natives.IsoBackendKind.Btrfs,
-				natives.IsoBackendKind.Rcopy,
-			]);
-			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
-			expect(handle.fellBack).toBe(true);
-			expect(handle.fallbackReason).toBe(unavailable.message);
+				expect(isoResolve).toHaveBeenCalledWith(null);
+				expect(isoStart.mock.calls.map(call => call[0])).toEqual([
+					natives.IsoBackendKind.Btrfs,
+					natives.IsoBackendKind.Rcopy,
+				]);
+				expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+				expect(handle.fellBack).toBe(true);
+				expect(handle.fallbackReason).toBe(unavailable.message);
+			} finally {
+				setWorktreesDir(undefined);
+				if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = savedEnv;
+			}
+		});
+
+		it("captures untracked work and nested repos when the storage base is an ancestor of the workspace", async () => {
+			const savedEnv = process.env.OMP_WORKTREE_DIR;
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-capture-worktrees-"));
+			tempDirs.push(worktreeBase);
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			let isolation: IsolationWorkspace | undefined;
+			try {
+				isolation = await nativeWorkspace(natives.IsoBackendKind.Rcopy)(repo, "ancestor-base", repo);
+				const baseline = await captureIsolationBaseline(isolation.dir, repo);
+				await Bun.write(path.join(isolation.dir, "new.txt"), "recover this work\n");
+				const delta = await captureDeltaPatch(isolation.dir, baseline);
+				expect(delta.rootPatch).toContain("new.txt");
+				expect(delta.rootPatch).toContain("+recover this work");
+				const nested = path.join(isolation.dir, "nested");
+				await fs.mkdir(nested);
+				await initRepo(nested);
+				await runGit(nested, [
+					"-c",
+					"user.name=Test",
+					"-c",
+					"user.email=test@example.com",
+					"commit",
+					"--allow-empty",
+					"-qm",
+					"nested",
+				]);
+				expect((await captureBaseline(isolation.dir)).nested.map(entry => entry.relativePath)).toEqual(["nested"]);
+			} finally {
+				await isolation?.cleanup();
+				setWorktreesDir(undefined);
+				if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = savedEnv;
+			}
+		});
+
+		it("does not report deletions for unchanged managed storage inside a nested repository", async () => {
+			const savedEnv = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(".worktrees");
+			const nested = path.join(repo, "nested-storage");
+			try {
+				await fs.mkdir(nested);
+				await initRepo(nested);
+				await runGit(nested, [
+					"-c",
+					"user.name=Test",
+					"-c",
+					"user.email=test@example.com",
+					"commit",
+					"--allow-empty",
+					"-qm",
+					"nested",
+				]);
+				await Bun.write(path.join(nested, ".worktrees", "previous", "keep.txt"), "unchanged workspace\n");
+				const baseline = await captureIsolationBaseline(repo, repo);
+				expect(baseline.nested.map(entry => entry.relativePath)).toEqual(["nested-storage"]);
+				expect(await captureDeltaPatch(repo, baseline)).toEqual({ rootPatch: "", nestedPatches: [] });
+				expect(await Bun.file(path.join(nested, ".worktrees", "previous", "keep.txt")).text()).toBe(
+					"unchanged workspace\n",
+				);
+			} finally {
+				setWorktreesDir(undefined);
+				if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = savedEnv;
+				await fs.rm(nested, { recursive: true, force: true });
+			}
+		});
+
+		it("places nested isolation under each owning cwd without copying or capturing managed worktrees", async () => {
+			const savedEnv = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(".worktrees");
+			const cwd = path.join(repo, "pkg");
+			await Bun.write(path.join(cwd, "local.txt"), "local content\n");
+			const previous = path.join(cwd, ".worktrees", "previous", "keep.txt");
+			await Bun.write(previous, "existing workspace\n");
+			let parent: IsolationWorkspace | undefined;
+			let child: IsolationWorkspace | undefined;
+			let retainedChildDir: string | undefined;
+			const open = nativeWorkspace(natives.IsoBackendKind.Rcopy);
+			try {
+				parent = await open(repo, "relative-parent", cwd);
+				expect(path.dirname(path.dirname(parent.dir))).toBe(path.join(cwd, ".worktrees"));
+				expect(await Bun.file(path.join(parent.dir, "pkg", "local.txt")).text()).toBe("local content\n");
+				expect(await Bun.file(path.join(parent.dir, "pkg", ".worktrees", "previous", "keep.txt")).exists()).toBe(
+					false,
+				);
+				const baseline = await captureIsolationBaseline(parent.dir, repo);
+				child = await open(parent.dir, "relative-child", parent.dir);
+				expect(path.dirname(path.dirname(child.dir))).toBe(path.join(parent.dir, ".worktrees"));
+				expect(await Bun.file(path.join(child.dir, "merged.txt")).text()).toBe("base version\n");
+				expect((await captureBaseline(parent.dir)).nested).toEqual([]);
+				expect(await captureDeltaPatch(parent.dir, baseline)).toEqual({ rootPatch: "", nestedPatches: [] });
+				expect(await Bun.file(previous).text()).toBe("existing workspace\n");
+				await Bun.write(path.join(child.dir, "recover.txt"), "retained child work\n");
+				retainedChildDir = (await child.retain()).dir;
+				await expect(parent.cleanup()).rejects.toThrow("still contains nested worktrees");
+				expect((await parent.retain()).dir).toBe(parent.dir);
+				await expect(open(repo, "relative-parent", cwd)).rejects.toThrow("still contains nested worktrees");
+				expect(await Bun.file(path.join(retainedChildDir, "recover.txt")).text()).toBe("retained child work\n");
+			} finally {
+				if (retainedChildDir) {
+					await cleanupIsolation({
+						mergedDir: retainedChildDir,
+						backend: natives.IsoBackendKind.Rcopy,
+						fellBack: false,
+						fallbackReason: null,
+					});
+				} else await child?.cleanup();
+				await parent?.cleanup();
+				setWorktreesDir(undefined);
+				if (savedEnv === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = savedEnv;
+				await fs.rm(cwd, { recursive: true, force: true });
+			}
 		});
 
 		it("uses compact isolation paths that do not embed long task ids", async () => {

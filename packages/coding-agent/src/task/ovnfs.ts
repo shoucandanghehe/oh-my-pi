@@ -22,17 +22,18 @@
  * @example
  * // Picked by the task runner when ovnfs is found and `isolation.backend` is auto:
  * const open = ovnfsWorkspace("/work/ovnfs/bin/ovnfs");
- * const workspace = await open(repoRoot, "AuthRefactor"); // workspace.dir: /work/.tree/agents/omp-authrefactor-1a2b3c
+ * const workspace = await open(repoRoot, "AuthRefactor", sessionCwd); // workspace.dir: /work/.tree/agents/omp-authrefactor-1a2b3c
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { callSocket, OvnfsError } from "../ovnfs/client";
 import { forgetDaemon, startDaemon } from "../ovnfs/daemon";
+import { writeFileAtomically } from "../utils/atomic-file";
 import type { IsolationWorkspace, OpenWorkspace, RetainedWorkspace } from "./isolation-runner";
 import { vacateIsolationSlot } from "./isolation-runner";
 import { writeIsolationOwner } from "./isolation-ownership";
-import { taskIsolationBaseDir } from "./worktree";
+import { hasNestedWorktrees, taskIsolationBaseDir } from "./worktree";
 
 /** Record of the checkout an isolation dir stands for. */
 export const OVNFS_CHECKOUT_FILE = ".omp-ovnfs-checkout.json";
@@ -42,6 +43,8 @@ interface CheckoutRecord {
 	/** ovnfs executable that opened the checkout (it can start the daemon again). */
 	command: string;
 	checkout: string;
+	/** Checkout path, recorded after creation so reclamation can protect nested worktrees. */
+	dir?: string;
 }
 
 /** The checkout part of ovnfs's `new` reply. */
@@ -114,6 +117,9 @@ export async function releaseOvnfsCheckout(dir: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
+	if (record.dir && (await hasNestedWorktrees(record.dir))) {
+		throw new Error(`Kept ovnfs workspace ${record.dir} because it still contains nested worktrees.`);
+	}
 	await removeCheckout(record.command, record.checkout);
 	return true;
 }
@@ -135,6 +141,10 @@ class OvnfsWorkspace implements IsolationWorkspace {
 
 	/** Remove the checkout, then its record; a checkout that cannot be removed keeps its record for `omp worktree clear`. */
 	async cleanup(): Promise<void> {
+		if (await hasNestedWorktrees(this.dir)) {
+			await this.retain();
+			throw new Error(`Kept ovnfs workspace ${this.dir} because it still contains nested worktrees.`);
+		}
 		await releaseCheckoutRecord(this.baseDir, this.command, this.checkout);
 	}
 }
@@ -145,8 +155,8 @@ class OvnfsWorkspace implements IsolationWorkspace {
  * silent fallback to native isolation.
  */
 export function ovnfsWorkspace(command: string): OpenWorkspace {
-	return async (repoRoot, agentId) => {
-		const baseDir = taskIsolationBaseDir(repoRoot, agentId);
+	return async (repoRoot, agentId, cwd) => {
+		const baseDir = taskIsolationBaseDir(repoRoot, agentId, cwd);
 		// A dead run with this id may still record a checkout. Reusing the slot
 		// deletes that record, so a removal that fails has to move the record
 		// and its owner marker aside first — or leave them and refuse the slot.
@@ -178,13 +188,13 @@ export function ovnfsWorkspace(command: string): OpenWorkspace {
 		// returns, so a crash or a lost reply still names the checkout. It is
 		// deleted only after removal is confirmed.
 		let recorded = false;
+		const record: CheckoutRecord = { command, checkout };
+		let reply: NewReply;
 		try {
 			await startDaemon(command);
-			const record: CheckoutRecord = { command, checkout };
 			await Bun.write(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify(record));
 			recorded = true;
-			const reply = await call<NewReply>(command, "new", { dir: repoRoot, name: checkout });
-			return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout);
+			reply = await call<NewReply>(command, "new", { dir: repoRoot, name: checkout });
 		} catch (err) {
 			// `exists` refused the name: that checkout predates this attempt, so
 			// only the new local record goes — removing the checkout would
@@ -196,5 +206,8 @@ export function ovnfsWorkspace(command: string): OpenWorkspace {
 				`ovnfs isolation failed: ${err instanceof Error ? err.message : String(err)} (set isolation.backend to a native backend to bypass ovnfs)`,
 			);
 		}
+		record.dir = reply.checkout.path;
+		await writeFileAtomically(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify(record));
+		return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout);
 	};
 }
