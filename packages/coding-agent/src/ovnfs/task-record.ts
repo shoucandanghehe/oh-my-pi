@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { hasNestedWorktrees } from "../task/worktree";
 import { removeCheckout } from "./checkouts";
 
 /** Record of the checkout an isolation dir stands for. */
@@ -12,6 +13,8 @@ export interface CheckoutRecord {
 	checkout: string;
 	/** The checkout on the same capture a branch commit reads its baseline from, while it exists. */
 	start?: string;
+	/** Checkout path for detecting nested worktrees before removing it. */
+	dir?: string;
 }
 
 /**
@@ -31,9 +34,13 @@ export async function releaseOvnfsCheckout(dir: string): Promise<boolean> {
 		!isRecord(record) ||
 		typeof record.command !== "string" ||
 		typeof record.checkout !== "string" ||
-		(record.start !== undefined && typeof record.start !== "string")
+		(record.start !== undefined && typeof record.start !== "string") ||
+		(record.dir !== undefined && typeof record.dir !== "string")
 	) {
 		throw new Error(`Invalid ovnfs isolation record in ${dir}`);
+	}
+	if (record.dir && (await hasNestedWorktrees(record.dir))) {
+		throw new Error(`Kept ovnfs workspace ${record.dir} because it still contains nested worktrees.`);
 	}
 	if (record.start) await removeCheckout(record.command, record.start);
 	await removeCheckout(record.command, record.checkout);

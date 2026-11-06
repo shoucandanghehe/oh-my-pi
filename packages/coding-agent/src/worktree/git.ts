@@ -13,7 +13,7 @@ export const gitWorktree: WorktreeBackend = {
 	async create({ repository, settings, branch, sourceCwd, baseCommit, keptChanges }) {
 		const primaryRoot = repository.primaryRoot();
 		const slug = branch.replaceAll(/[^A-Za-z0-9._-]+/g, "-");
-		const basePath = getWorktreeDir(`${slug}-${hashPath(primaryRoot)}`);
+		const basePath = getWorktreeDir(sourceCwd, `${slug}-${hashPath(primaryRoot)}`);
 		const worktreePath = await resolveAvailableWorktreePath(basePath, await repository.worktrees());
 		await fs.mkdir(path.dirname(worktreePath), { recursive: true });
 
@@ -23,6 +23,7 @@ export const gitWorktree: WorktreeBackend = {
 			clone: cfgWorktreeClone.get(settings),
 			backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
 			keepChanges: keptChanges,
+			excludePaths: [path.dirname(basePath)],
 		});
 		return {
 			path: await fs.realpath(worktreePath),

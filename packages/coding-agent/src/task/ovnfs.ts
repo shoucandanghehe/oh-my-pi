@@ -26,7 +26,7 @@
  * @example
  * // Picked by the task runner when ovnfs is found and `isolation.backend` is auto:
  * const open = ovnfsWorkspace("/work/ovnfs/bin/ovnfs");
- * const workspace = await open(repoRoot, "AuthRefactor"); // workspace.dir: /work/.tree/agents/omp-authrefactor-1a2b3c
+ * const workspace = await open(repoRoot, "AuthRefactor", sessionCwd); // workspace.dir: /work/.tree/agents/omp-authrefactor-1a2b3c
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -35,10 +35,11 @@ import { callOvnfs, checkoutStem, type NewReply, removeCheckout } from "../ovnfs
 import { OvnfsError, socketFeatures } from "../ovnfs/client";
 import { startDaemon } from "../ovnfs/daemon";
 import { type CheckoutRecord, OVNFS_CHECKOUT_FILE, releaseOvnfsCheckout } from "../ovnfs/task-record";
+import { writeFileAtomically } from "../utils/atomic-file";
 import type { IsolationWorkspace, OpenWorkspace, RetainedWorkspace, WorkspaceStart } from "./isolation-runner";
 import { vacateIsolationSlot } from "./isolation-runner";
 import { writeIsolationOwner } from "./isolation-ownership";
-import { captureIsolationBaseline, taskIsolationBaseDir, type WorktreeBaseline } from "./worktree";
+import { captureIsolationBaseline, hasNestedWorktrees, taskIsolationBaseDir, type WorktreeBaseline } from "./worktree";
 
 /** The part of ovnfs's `diff` reply used here. */
 interface DiffReply {
@@ -95,11 +96,12 @@ class OvnfsWorkspace implements IsolationWorkspace {
 		private readonly checkout: string,
 		/** The checkout's capture when it is the run's starting state; then no baseline is taken at start. */
 		capture: { base: string; repoRoot: string } | undefined,
+		cwd: string,
 	) {
 		if (capture) {
 			this.start = {
 				rootPatch: () => this.#rootPatch(),
-				baseline: () => this.#baseline(capture.base, capture.repoRoot),
+				baseline: () => this.#baseline(capture.base, capture.repoRoot, cwd),
 			};
 		}
 	}
@@ -124,16 +126,16 @@ class OvnfsWorkspace implements IsolationWorkspace {
 	 * Read the baseline the run started from in a second checkout on the same
 	 * capture, recorded beside the first until it is removed again.
 	 */
-	async #baseline(base: string, repoRoot: string): Promise<WorktreeBaseline> {
+	async #baseline(base: string, repoRoot: string, cwd: string): Promise<WorktreeBaseline> {
 		const start = `${this.checkout}-start`;
 		const recordPath = path.join(this.baseDir, OVNFS_CHECKOUT_FILE);
-		const record: CheckoutRecord = { command: this.command, checkout: this.checkout };
+		const record: CheckoutRecord = { command: this.command, checkout: this.checkout, dir: this.dir };
 		await Bun.write(recordPath, JSON.stringify({ ...record, start }));
 		// A start checkout an earlier, interrupted call left behind.
 		await removeCheckout(this.command, start);
 		try {
 			const reply = await callOvnfs<NewReply>(this.command, "new", { base, name: start });
-			return await captureIsolationBaseline(reply.checkout.path, repoRoot);
+			return await captureIsolationBaseline(reply.checkout.path, repoRoot, undefined, cwd);
 		} finally {
 			try {
 				await removeCheckout(this.command, start);
@@ -155,6 +157,10 @@ class OvnfsWorkspace implements IsolationWorkspace {
 
 	/** Remove the checkouts, then their record; a checkout that cannot be removed keeps the record for `omp worktree clear`. */
 	async cleanup(): Promise<void> {
+		if (await hasNestedWorktrees(this.dir)) {
+			await this.retain();
+			throw new Error(`Kept ovnfs workspace ${this.dir} because it still contains nested worktrees.`);
+		}
 		await releaseCheckoutRecord(this.baseDir, this.command, this.checkout);
 	}
 }
@@ -203,8 +209,8 @@ async function claimFreeSlot(baseDir: string): Promise<boolean> {
  * silent fallback to native isolation.
  */
 export function ovnfsWorkspace(command: string): OpenWorkspace {
-	return async (repoRoot, agentId) => {
-		const baseDir = taskIsolationBaseDir(repoRoot, agentId);
+	return async (repoRoot, agentId, cwd) => {
+		const baseDir = taskIsolationBaseDir(repoRoot, agentId, cwd);
 		if (!(await claimFreeSlot(baseDir))) {
 			// A dead run with this id may still record a checkout. Reusing the slot
 			// deletes that record, so a removal that fails has to move the record
@@ -238,14 +244,16 @@ export function ovnfsWorkspace(command: string): OpenWorkspace {
 		// returns, so a crash or a lost reply still names the checkout. It is
 		// deleted only after removal is confirmed.
 		let recorded = false;
+		const record: CheckoutRecord = { command, checkout };
 		try {
 			await startDaemon(command);
-			const record: CheckoutRecord = { command, checkout };
 			await Bun.write(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify(record));
 			recorded = true;
 			const reply = await callOvnfs<NewReply>(command, "new", { dir: repoRoot, name: checkout });
+			record.dir = reply.checkout.path;
+			await writeFileAtomically(path.join(baseDir, OVNFS_CHECKOUT_FILE), JSON.stringify(record));
 			const capture = await startingCapture(command, repoRoot, reply);
-			return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout, capture);
+			return new OvnfsWorkspace(reply.checkout.path, baseDir, command, checkout, capture, cwd);
 		} catch (err) {
 			// `exists` refused the name: that checkout predates this attempt, so
 			// only the new local record goes — removing the checkout would

@@ -5,6 +5,7 @@ import { hashPath, isEnoent, logger, resolveEquivalentPath } from "@oh-my-pi/pi-
 import { callOvnfs, checkoutStem, type NewReply, removeCheckout } from "../ovnfs/checkouts";
 import { callSocket, OvnfsError, socketFeatures } from "../ovnfs/client";
 import { runningDaemon, startDaemon } from "../ovnfs/daemon";
+import { hasNestedWorktrees } from "../task/worktree";
 import type { OvnfsCheckout, SessionWorktree, WorktreeBackend } from "./backend";
 import { type OvnfsRecord, readOvnfsRecords, writeOvnfsRecord } from "./ovnfs-records";
 
@@ -96,6 +97,9 @@ async function checkoutExists(socket: string, record: OvnfsCheckout): Promise<bo
 async function removeRecorded(record: OvnfsRecord, options: { keepCommits?: boolean } = {}): Promise<void> {
 	const { socket } = await startDaemon(record.command);
 	if (await checkoutExists(socket, record)) {
+		if (await hasNestedWorktrees(record.root)) {
+			throw new Error(`Kept ${record.root} because it still contains nested worktrees; clear those first.`);
+		}
 		if (options.keepCommits && !(await socketFeatures(socket)).has("rm.keep_commits")) {
 			throw new Error("Update ovnfs before clearing worktrees: the daemon cannot protect unpublished commits.");
 		}

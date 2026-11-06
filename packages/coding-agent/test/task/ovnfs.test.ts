@@ -124,7 +124,7 @@ describe("ovnfs checkout recovery", () => {
 		failRemoval = false;
 		const beforeClear = removed.length;
 		vi.spyOn(console, "log").mockImplementation(() => {});
-		const cleared = await clearWorktrees({ all: false, dryRun: false, json: true });
+		const cleared = await clearWorktrees({ cwd: repo, all: false, dryRun: false, json: true });
 		expect(cleared).toEqual({ removed: 1, failed: 0 });
 		expect(removed.slice(beforeClear)).toEqual([STALE]);
 		await expect(fs.stat(sibling)).rejects.toMatchObject({ code: "ENOENT" });

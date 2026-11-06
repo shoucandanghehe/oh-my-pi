@@ -2,7 +2,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
@@ -21,10 +21,12 @@ export interface AddWorktreeOptions {
 }
 
 export interface ListWorktreesOptions {
+	cwd: string;
 	json: boolean;
 }
 
 export interface ClearWorktreesOptions {
+	cwd: string;
 	/** Remove all managed entries, including live Git and ovnfs worktrees. */
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
@@ -86,6 +88,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 		detach,
 		clone: cfgWorktreeClone.get(settings),
 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
+		excludePaths: [getWorktreesDir(cwd)],
 	});
 	if (!options.quiet) {
 		console.log(`HEAD is now at ${shortSha} ${subject}`);
@@ -105,13 +108,13 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 }
 
 export async function listWorktrees(options: ListWorktreesOptions): Promise<void> {
-	const entries = await managedWorktrees();
+	const entries = await managedWorktrees(options.cwd);
 	if (options.json) {
 		console.log(JSON.stringify(entries, null, 2));
 		return;
 	}
 	if (entries.length === 0) {
-		console.log(chalk.dim("No agent-managed worktrees found."));
+		console.log(chalk.dim(`No agent-managed Git worktrees under ${getWorktreesDir(options.cwd)} or managed ovnfs checkouts.`));
 		return;
 	}
 	let live = 0;
@@ -128,7 +131,7 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 }
 
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
-	const entries = await managedWorktrees();
+	const entries = await managedWorktrees(options.cwd);
 	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
 
 	if (targets.length === 0) {

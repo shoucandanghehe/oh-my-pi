@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __resetDirsFromEnvForTests, getAgentDir, getNativesDir } from "@oh-my-pi/pi-utils/dirs";
+import {
+	__resetDirsFromEnvForTests,
+	getAgentDir,
+	getNativesDir,
+	getWorktreeDir,
+	getWorktreesDir,
+	setWorktreesDir,
+} from "@oh-my-pi/pi-utils/dirs";
 
 const ENV_KEYS = [
 	"HOME",
@@ -12,13 +19,14 @@ const ENV_KEYS = [
 	"PI_CONFIG_DIR",
 	"PI_CODING_AGENT_DIR",
 	"PI_NATIVES_DIR",
+	"OMP_WORKTREE_DIR",
 	"XDG_DATA_HOME",
 	"XDG_STATE_HOME",
 	"XDG_CACHE_HOME",
 ] as const;
 const xdgPlatform = process.platform === "linux" || process.platform === "darwin";
 
-describe("native directory override", () => {
+describe("managed directory overrides", () => {
 	let tempRoot = "";
 	let home = "";
 	let originalEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
@@ -40,6 +48,7 @@ describe("native directory override", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		setWorktreesDir(undefined);
 		for (const key of ENV_KEYS) {
 			const value = originalEnv[key];
 			if (value === undefined) delete process.env[key];
@@ -91,5 +100,31 @@ describe("native directory override", () => {
 	])("keeps the existing cache root when the override is %s", (_label, override) => {
 		process.env.PI_NATIVES_DIR = override;
 		expect(getNativesDir()).toBe(path.join(home, ".omp", "natives"));
+	});
+
+	it("resolves worktree settings against each operation cwd without rebinding on lookup", () => {
+		const first = path.join(tempRoot, "first");
+		const second = path.join(tempRoot, "second");
+		setWorktreesDir(" .worktrees ");
+		expect(getWorktreeDir(first, "one")).toBe(path.join(first, ".worktrees", "one"));
+		expect(getWorktreeDir(second, "two")).toBe(path.join(second, ".worktrees", "two"));
+		expect(getWorktreesDir(first)).toBe(path.join(first, ".worktrees"));
+	});
+
+	it("keeps environment-over-setting priority for relative, home-relative and absolute worktree paths", () => {
+		const cwd = path.join(tempRoot, "project");
+		setWorktreesDir(".worktrees");
+		process.env.OMP_WORKTREE_DIR = " ../shared ";
+		expect(getWorktreesDir(cwd)).toBe(path.join(tempRoot, "shared"));
+		process.env.OMP_WORKTREE_DIR = "~/trees";
+		expect(getWorktreesDir(cwd)).toBe(path.join(home, "trees"));
+		process.env.OMP_WORKTREE_DIR = path.join(tempRoot, "absolute");
+		expect(getWorktreesDir(cwd)).toBe(path.join(tempRoot, "absolute"));
+		process.env.OMP_WORKTREE_DIR = " \t ";
+		expect(getWorktreesDir(cwd)).toBe(path.join(cwd, ".worktrees"));
+		setWorktreesDir("~/configured");
+		expect(getWorktreesDir(cwd)).toBe(path.join(home, "configured"));
+		setWorktreesDir(undefined);
+		expect(getWorktreesDir(cwd)).toBe(path.join(home, ".omp", "wt"));
 	});
 });

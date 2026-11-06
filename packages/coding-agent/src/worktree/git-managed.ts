@@ -6,6 +6,7 @@ import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
 import { releaseOvnfsCheckout } from "../ovnfs/task-record";
+import { hasNestedWorktrees } from "../task/worktree";
 import type { ManagedWorktree } from "./backend";
 import { OVNFS_RECORD_DIR } from "./ovnfs-records";
 
@@ -55,11 +56,20 @@ async function stopRetainedMount(dir: string): Promise<boolean> {
 }
 
 /** Discover entries in the OMP worktree directory, including legacy nested entries. */
-export async function managedGitWorktrees(): Promise<ManagedWorktree[]> {
-	return (await scanWorktrees()).map(entry => ({ ...entry, remove: () => removeEntry(entry) }));
+export async function managedGitWorktrees(cwd: string): Promise<ManagedWorktree[]> {
+	return (await scanWorktrees(cwd)).map(entry => ({ ...entry, remove: () => removeEntry(entry) }));
 }
 
 async function removeEntry(entry: DiskEntry): Promise<void> {
+	const checkouts =
+		entry.kind === "task-isolation"
+			? TASK_ISOLATION_MOUNT_DIRS.map(name => path.join(entry.path, name))
+			: [entry.path];
+	for (const checkout of checkouts) {
+		if (await hasNestedWorktrees(checkout)) {
+			throw new Error(`Kept ${checkout} because it still contains nested worktrees; clear those first.`);
+		}
+	}
 	const parent = entry.parentRepo ? vcs.git(entry.parentRepo) : null;
 	if (entry.kind === "pr-checkout" && !entry.orphanReason && (await parent?.worktreeRemove(entry.path, true))) return;
 	if (entry.kind === "task-isolation") {
@@ -70,8 +80,8 @@ async function removeEntry(entry: DiskEntry): Promise<void> {
 	await parent?.worktreePrune().catch(() => {});
 }
 
-async function scanWorktrees(): Promise<DiskEntry[]> {
-	const root = getWorktreesDir();
+async function scanWorktrees(cwd: string): Promise<DiskEntry[]> {
+	const root = getWorktreesDir(cwd);
 	let topLevel: string[];
 	try {
 		topLevel = await fs.readdir(root);

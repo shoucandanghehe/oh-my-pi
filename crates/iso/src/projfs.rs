@@ -47,13 +47,23 @@ impl IsolationBackend for ProjfsBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
+		self.start_excluding(lower, merged, &[])
+	}
+
+	fn start_excluding(
+		&self,
+		lower: &Path,
+		merged: &Path,
+		exclude_paths: &[std::path::PathBuf],
+	) -> IsoResult<()> {
 		#[cfg(windows)]
 		{
-			imp::start(&lower.to_string_lossy(), &merged.to_string_lossy())
+			let excluded = crate::tree::relative_exclusions(lower, merged, exclude_paths)?;
+			imp::start(&lower.to_string_lossy(), &merged.to_string_lossy(), excluded)
 		}
 		#[cfg(not(windows))]
 		{
-			let _ = (lower, merged);
+			let _ = (lower, merged, exclude_paths);
 			Err(IsoError::unavailable("ProjFS isolation is only available on Windows"))
 		}
 	}
@@ -303,8 +313,16 @@ mod imp {
 
 	struct ProviderContext {
 		lower_root:   PathBuf,
+		excluded:     Vec<PathBuf>,
 		api:          Arc<ProjfsApi>,
 		enumerations: Mutex<BTreeMap<u128, DirectoryEnumeration>>,
+	}
+
+	impl ProviderContext {
+		fn excludes(&self, relative: &Path) -> bool {
+			let relative = PathBuf::from(normalize_session_key(relative));
+			self.excluded.iter().any(|path| relative.starts_with(path))
+		}
 	}
 
 	struct ProjfsSession {
@@ -346,7 +364,7 @@ mod imp {
 		}
 	}
 
-	pub fn start(lower_root: &str, projection_root: &str) -> IsoResult<()> {
+	pub fn start(lower_root: &str, projection_root: &str, excluded: Vec<PathBuf>) -> IsoResult<()> {
 		let api = Arc::new(ProjfsApi::load().map_err(unavailable_error)?);
 		let lower_root_path = resolve_existing_dir(lower_root)?;
 		let projection_root_path = resolve_projection_root(projection_root)?;
@@ -389,6 +407,10 @@ mod imp {
 
 		let provider_context = Box::new(ProviderContext {
 			lower_root:   lower_root_path,
+			excluded:     excluded
+				.into_iter()
+				.map(|path| PathBuf::from(normalize_session_key(&path)))
+				.collect(),
 			api:          api.clone(),
 			enumerations: Mutex::new(BTreeMap::new()),
 		});
@@ -616,6 +638,9 @@ mod imp {
 		};
 
 		let relative_path = callback_relative_path(callback_data);
+		if context.excludes(&relative_path) {
+			return hresult_from_win32(ERROR_FILE_NOT_FOUND);
+		}
 		let source_path = context.lower_root.join(relative_path);
 		let metadata = match fs::symlink_metadata(&source_path) {
 			Ok(metadata) => metadata,
@@ -669,6 +694,9 @@ mod imp {
 		}
 
 		let relative_path = callback_relative_path(callback_data);
+		if context.excludes(&relative_path) {
+			return hresult_from_win32(ERROR_FILE_NOT_FOUND);
+		}
 		let source_path = context.lower_root.join(relative_path);
 		let mut file = match fs::File::open(&source_path) {
 			Ok(file) => file,
@@ -762,10 +790,16 @@ mod imp {
 		context: &ProviderContext,
 		relative_path: &Path,
 	) -> io::Result<Vec<DirectoryEntry>> {
+		if context.excludes(relative_path) {
+			return Err(io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND as i32));
+		}
 		let source_dir = context.lower_root.join(relative_path);
 		let mut entries = Vec::new();
 		for entry in fs::read_dir(&source_dir)? {
 			let entry = entry?;
+			if context.excludes(&relative_path.join(entry.file_name())) {
+				continue;
+			}
 			let path = entry.path();
 			// Not `DirEntry::metadata`: on Windows that is the FindNextFileW
 			// record, whose size and write time NTFS updates lazily while

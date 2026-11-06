@@ -3068,8 +3068,10 @@ export interface IsoResolveResult {
 /**
  * Materialise `merged` as a writable view of `lower` using the requested
  * backend. `kind` defaults to the native backend.
+ *
+ * `exclude_paths` contains absolute source directories to omit.
  */
-export declare function isoStart(kind: IsoBackendKind | undefined | null, lower: string, merged: string): Promise<void>
+export declare function isoStart(kind: IsoBackendKind | undefined | null, lower: string, merged: string, excludePaths?: Array<string> | undefined | null): Promise<void>
 
 /** Tear down a previously started backend at `merged`. */
 export declare function isoStop(kind: IsoBackendKind | undefined | null, merged: string): Promise<void>
@@ -4799,6 +4801,8 @@ export interface VcsWorktreeAddOptions {
    * (target must be the source `HEAD`).
    */
   keepChanges?: boolean
+  /** Absolute source directories omitted from the disposable worktree. */
+  excludePaths?: Array<string>
 }
 
 /** Worktree creation outcome. */

@@ -127,9 +127,10 @@ fn clone_excludes_self_ignored_environments_and_nested_cmake_caches() {
 	let target = temp.path().join("target");
 	let result = repo
 		.worktree_add(&target, "HEAD", WorktreeAddOptions {
-			detach:       true,
-			clone:        WorktreeClone::Auto,
-			keep_changes: false,
+			detach:        true,
+			clone:         WorktreeClone::Auto,
+			keep_changes:  false,
+			exclude_paths: Vec::new(),
 		})
 		.unwrap();
 	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
@@ -172,6 +173,7 @@ fn clone_exclusion_keeps_tracked_data_and_keep_changes_state() {
 				detach: true,
 				clone: WorktreeClone::Auto,
 				keep_changes,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 		assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
@@ -220,6 +222,7 @@ fn clone_disabled_or_unavailable_uses_an_ordinary_checkout() {
 				detach: true,
 				clone,
 				keep_changes: false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 		assert!(result.cloned_with.is_none());
@@ -259,9 +262,10 @@ fn clone_reconciles_carried_paths_using_target_ignore_rules() {
 	let target = temp.path().join("target");
 	let result = repo
 		.worktree_add(&target, &target_commit, WorktreeAddOptions {
-			detach:       true,
-			clone:        WorktreeClone::Auto,
-			keep_changes: false,
+			detach:        true,
+			clone:         WorktreeClone::Auto,
+			keep_changes:  false,
+			exclude_paths: Vec::new(),
 		})
 		.unwrap();
 	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
@@ -296,9 +300,10 @@ fn clone_target_cleanup_does_not_discard_keep_changes() {
 	let target = temp.path().join("target");
 	let result = repo
 		.worktree_add(&target, "HEAD", WorktreeAddOptions {
-			detach:       true,
-			clone:        WorktreeClone::Auto,
-			keep_changes: true,
+			detach:        true,
+			clone:         WorktreeClone::Auto,
+			keep_changes:  true,
+			exclude_paths: Vec::new(),
 		})
 		.unwrap();
 	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
@@ -345,9 +350,10 @@ fn clone_target_cleanup_keeps_nested_repositories_and_unlinks_only_symlinks() {
 	let target = temp.path().join("target");
 	let result = repo
 		.worktree_add(&target, &target_commit, WorktreeAddOptions {
-			detach:       true,
-			clone:        WorktreeClone::Auto,
-			keep_changes: false,
+			detach:        true,
+			clone:         WorktreeClone::Auto,
+			keep_changes:  false,
+			exclude_paths: Vec::new(),
 		})
 		.unwrap();
 	assert!(result.cloned_with.is_some(), "{:?}", result.clone_error);
@@ -359,4 +365,56 @@ fn clone_target_cleanup_keeps_nested_repositories_and_unlinks_only_symlinks() {
 	assert!(!target.join("links").exists(), "source-only symlink was not unlinked");
 	assert_eq!(snapshot(&outside), outside_before, "cleanup followed a symlink outside the clone");
 	assert_eq!(snapshot(&source), source_before);
+}
+
+#[test]
+fn in_source_worktree_storage_is_omitted_without_losing_neighboring_changes() {
+	for clone in [WorktreeClone::Auto, WorktreeClone::Off] {
+		let (temp, source, repo) = fixture();
+		if clone == WorktreeClone::Auto && !clone_works_on(temp.path()) {
+			eprintln!("SKIP clone path: no working clone backend on this filesystem");
+			continue;
+		}
+		write(&source, "sub/file", "tracked neighbor\n");
+		git(&source, &["add", "sub/file"]);
+		git(&source, &["commit", "-qm", "neighbor"]);
+		write(&source, "sub/file", "dirty neighbor\n");
+		write(&source, "sub/local", "untracked neighbor\n");
+		write(&source, "sub/.worktrees-neighbor", "not managed storage\n");
+		let storage = source.join("sub/.worktrees");
+		fs::create_dir_all(&storage).unwrap();
+		let previous = storage.join("previous");
+		git(&source, &["worktree", "add", "--detach", previous.to_str().unwrap(), "HEAD"]);
+		write(&previous, "keep", "sibling workspace\n");
+		write(&storage, ".omp-worktree-root", "managed\n");
+		let target = storage.join("current/m");
+		let result = repo
+			.worktree_add(&target, "HEAD", WorktreeAddOptions {
+				detach: true,
+				clone,
+				keep_changes: true,
+				exclude_paths: vec![storage.clone()],
+			})
+			.unwrap();
+
+		assert_eq!(
+			result.cloned_with.is_some(),
+			clone == WorktreeClone::Auto,
+			"{:?}",
+			result.clone_error
+		);
+		assert_eq!(fs::read(target.join("sub/file")).unwrap(), b"dirty neighbor\n");
+		assert_eq!(fs::read(target.join("sub/local")).unwrap(), b"untracked neighbor\n");
+		assert_eq!(
+			fs::read(target.join("sub/.worktrees-neighbor")).unwrap(),
+			b"not managed storage\n"
+		);
+		assert!(!target.join("sub/.worktrees").exists());
+		fs::write(target.join("sub/file"), "isolated edit\n").unwrap();
+		assert_eq!(fs::read(source.join("sub/file")).unwrap(), b"dirty neighbor\n");
+		assert_eq!(fs::read(previous.join("keep")).unwrap(), b"sibling workspace\n");
+		assert_eq!(fs::read(storage.join(".omp-worktree-root")).unwrap(), b"managed\n");
+		repo.worktree_remove(&target, true).unwrap();
+		assert_eq!(fs::read(previous.join("keep")).unwrap(), b"sibling workspace\n");
+	}
 }
