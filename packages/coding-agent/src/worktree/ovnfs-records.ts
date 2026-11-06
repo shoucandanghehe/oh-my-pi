@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getWorktreeDir, isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { getWorktreesDir, isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import type { OvnfsCheckout } from "./backend";
 
 /** Reserved metadata directory in the managed worktree base. */
@@ -15,7 +15,7 @@ export interface OvnfsRecord extends OvnfsCheckout {
 
 function recordPath(record: OvnfsRecord): string {
 	const key = Bun.hash(JSON.stringify([record.command, record.checkout, record.created])).toString(16);
-	return path.join(getWorktreeDir(OVNFS_RECORD_DIR), `${key}.json`);
+	return path.join(getWorktreesDir(), OVNFS_RECORD_DIR, `${key}.json`);
 }
 
 /** Publish a checkout record or its removal without exposing a partially written record. */
@@ -32,7 +32,8 @@ export async function writeOvnfsRecord(record: OvnfsRecord): Promise<void> {
 
 /** Read checkout provenance, including entries whose mount or source has disappeared. */
 export async function readOvnfsRecords(): Promise<OvnfsRecord[]> {
-	const recordsDir = getWorktreeDir(OVNFS_RECORD_DIR);
+	// The index must stay discoverable even from a detached or removed mount.
+	const recordsDir = path.join(getWorktreesDir(), OVNFS_RECORD_DIR);
 	let names: string[];
 	try {
 		names = await fs.readdir(recordsDir);

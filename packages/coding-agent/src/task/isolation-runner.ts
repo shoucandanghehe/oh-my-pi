@@ -48,6 +48,7 @@ import {
 	type DeltaPatchResult,
 	ensureIsolation,
 	getRepoRoot,
+	hasNestedWorktrees,
 	mergeTaskBranches,
 	type WorktreeBaseline,
 } from "./worktree";
@@ -309,10 +310,10 @@ interface RunChanges {
  * ({@link IsolationWorkspace.start}) needs nothing taken now; any other gets
  * its baseline captured before the run begins.
  */
-async function trackChanges(workspace: IsolationWorkspace, repoRoot: string): Promise<RunChanges> {
+async function trackChanges(workspace: IsolationWorkspace, repoRoot: string, cwd: string): Promise<RunChanges> {
 	const start = workspace.start;
 	if (!start) {
-		const baseline = await captureIsolationBaseline(workspace.dir, repoRoot);
+		const baseline = await captureIsolationBaseline(workspace.dir, repoRoot, undefined, cwd);
 		return {
 			delta: () => captureDeltaPatch(workspace.dir, baseline),
 			baseline: async () => baseline,
@@ -378,6 +379,7 @@ export async function retainIsolationWorkspace(
 			sidecarOk = false;
 		}
 	}
+	if (await hasNestedWorktrees(isolationDir)) return { dir: isolationDir, sidecarOk };
 	const retainedBase = await vacateIsolationSlot(baseDir);
 	return { dir: retainedBase ? path.join(retainedBase, path.basename(isolationDir)) : isolationDir, sidecarOk };
 }
@@ -433,13 +435,13 @@ export interface IsolationWorkspace {
 	cleanup(): Promise<void>;
 }
 
-/** Opens the workspace of one isolated run in `repoRoot` for agent `agentId`. */
-export type OpenWorkspace = (repoRoot: string, agentId: string) => Promise<IsolationWorkspace>;
+/** Opens a run's workspace, resolving its configured storage against the owning `cwd`. */
+export type OpenWorkspace = (repoRoot: string, agentId: string, cwd: string) => Promise<IsolationWorkspace>;
 
 /** Workspaces materialised by the natives PAL, `backend` a hint (`undefined` ⇒ the resolver picks). */
 export function nativeWorkspace(backend: IsoBackendKind | undefined): OpenWorkspace {
-	return async (repoRoot, agentId) => {
-		const handle = await ensureIsolation(repoRoot, agentId, backend);
+	return async (repoRoot, agentId, cwd) => {
+		const handle = await ensureIsolation(repoRoot, agentId, backend, cwd);
 		return {
 			dir: handle.mergedDir,
 			retain: () => retainIsolationWorkspace(handle.mergedDir, handle.backend),
@@ -574,9 +576,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		return releasePromise;
 	};
 	try {
-		workspace = await opts.openWorkspace(opts.context.repoRoot, opts.agentId);
+		workspace = await opts.openWorkspace(opts.context.repoRoot, opts.agentId, opts.baseOptions.cwd);
 		const isolationDir = workspace.dir;
-		const runChanges = await trackChanges(workspace, opts.context.repoRoot);
+		const runChanges = await trackChanges(workspace, opts.context.repoRoot, opts.baseOptions.cwd);
 		changes = runChanges;
 		const result = await runSubprocess({
 			...opts.baseOptions,

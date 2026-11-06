@@ -132,6 +132,23 @@ describe("session worktree helpers (real git)", () => {
 	const create = (keepChanges = true, name = branch) =>
 		createSessionWorktree(repo, Settings.isolated(NO_OVNFS), name, { keepChanges });
 
+	it("resolves relative storage from the supplied cwd and follows a move into a worktree", async () => {
+		setWorktreesDir(".worktrees");
+		const cwd = path.join(repo, "pkg");
+		await fs.mkdir(cwd);
+		await Bun.write(path.join(cwd, "local.txt"), "keep local content\n");
+		await Bun.write(path.join(cwd, ".worktrees", "previous", "keep.txt"), "existing worktree\n");
+		const first = await createSessionWorktree(cwd, Settings.isolated(NO_OVNFS), "wt/first");
+		expect(path.dirname(first.path)).toBe(path.join(cwd, ".worktrees"));
+		expect(await Bun.file(path.join(first.path, "pkg", "local.txt")).text()).toBe("keep local content\n");
+		expect(await exists(path.join(first.path, "pkg", ".worktrees"))).toBe(false);
+		const second = await createSessionWorktree(first.path, Settings.isolated(NO_OVNFS), "wt/second");
+		expect(path.dirname(second.path)).toBe(path.join(first.path, ".worktrees"));
+		expect(await Bun.file(path.join(cwd, ".worktrees", "previous", "keep.txt")).text()).toBe("existing worktree\n");
+		await removeSessionWorktree(second, false);
+		await removeSessionWorktree(first, false);
+	});
+
 	it("offers a worktree only in a primary checkout with commits", async () => {
 		const plain = path.join(root, "plain");
 		const unborn = path.join(root, "unborn");
@@ -597,7 +614,7 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 		expect(await canAutoCreateWorktree(wt.path, settings)).toBe(false);
 
 		const output = vi.spyOn(console, "log").mockImplementation(() => {});
-		await listWorktrees({ json: true });
+		await listWorktrees({ cwd: repo, json: true });
 		const listed = JSON.parse(output.mock.calls.at(-1)?.[0]);
 		expect(listed).toEqual(
 			expect.arrayContaining([
@@ -605,9 +622,15 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 				expect.objectContaining({ path: native.path, kind: "pr-checkout" }),
 			]),
 		);
-		expect(await clearWorktrees({ all: true, json: true, dryRun: true })).toEqual({ removed: 0, failed: 0 });
+		expect(await clearWorktrees({ cwd: repo, all: true, json: true, dryRun: true })).toEqual({
+			removed: 0,
+			failed: 0,
+		});
 		expect(await exists(wt.path)).toBe(true);
-		expect(await clearWorktrees({ all: true, json: true, dryRun: false })).toEqual({ removed: 2, failed: 0 });
+		expect(await clearWorktrees({ cwd: repo, all: true, json: true, dryRun: false })).toEqual({
+			removed: 2,
+			failed: 0,
+		});
 		expect(await exists(wt.path)).toBe(false);
 		expect(await exists(native.path)).toBe(false);
 
