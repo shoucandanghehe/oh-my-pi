@@ -242,9 +242,36 @@ export async function worktreeSessionDirs(cwd: string, sessionDir: string): Prom
 		const repo = vcs.git(cwd);
 		const prefix = repo?.prefixOf(cwd);
 		if (!repo || prefix == null) return [];
-		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot));
-		for (const worktree of await repo.worktrees()) {
+		const worktrees = await repo.worktrees();
+		const primaryRoot = repo.primaryRoot();
+		const owners = new Set([cwd, ...worktrees.map(worktree => path.resolve(worktree.path, prefix))]);
+		const dirs = new Set<string>();
+		for (const owner of owners) {
+			for (const dir of managedWorktreeSessionDirs(primaryRoot, prefix, sessionsRoot, owner)) dirs.add(dir);
+		}
+		for (const worktree of worktrees) {
 			dirs.add(sessionDirForCwd(path.resolve(worktree.path, prefix), sessionsRoot));
+		}
+		if (getWorktreesDir(cwd) !== getWorktreesDir(primaryRoot)) {
+			// /wt moves to the new checkout root, even when its owner was a subfolder.
+			for (const dir of managedWorktreeSessionDirs(primaryRoot, "", sessionsRoot, cwd)) dirs.add(dir);
+			if (!prefix) {
+				const root = repo.info().repoRoot;
+				for (let owner = path.dirname(root); pathIsWithin(primaryRoot, owner); owner = path.dirname(owner)) {
+					const siblings = managedWorktreeSessionDirs(primaryRoot, "", sessionsRoot, owner);
+					if (
+						getWorktreesDir(owner) === path.dirname(root) &&
+						pathIsWithin(owner, getWorktreesDir(owner)) &&
+						getWorktreesDir(owner) !== owner &&
+						siblings.includes(sessionDirForCwd(root, sessionsRoot))
+					) {
+						dirs.add(sessionDirForCwd(owner, sessionsRoot));
+						for (const dir of siblings) dirs.add(dir);
+						break;
+					}
+					if (path.dirname(owner) === owner) break;
+				}
+			}
 		}
 		dirs.delete(path.resolve(sessionDir));
 		return [...dirs];
@@ -264,10 +291,10 @@ const WORKTREE_NAME_PROBE = "{worktree}";
  * `createSessionWorktree` and `resolveAvailableWorktreePath`), so the match
  * needs no git metadata and survives the worktree's removal.
  */
-function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, sessionsRoot: string): string[] {
+function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, sessionsRoot: string, cwd: string): string[] {
 	// Encode against the canonical base: a live worktree's directory was named
 	// from its realpath, and the probe path does not exist to be resolved.
-	const probe = path.join(resolveEquivalentPath(getWorktreesDir()), WORKTREE_NAME_PROBE, prefix);
+	const probe = path.join(resolveEquivalentPath(getWorktreesDir(cwd)), WORKTREE_NAME_PROBE, prefix);
 	const [head, tail] = path.basename(sessionDirForCwd(probe, sessionsRoot)).split(WORKTREE_NAME_PROBE);
 	if (tail === undefined) return [];
 	// The name hashes the root as spelled when the worktree was made; a symlinked

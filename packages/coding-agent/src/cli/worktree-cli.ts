@@ -27,7 +27,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { hasLiveIsolationOwner, ISOLATION_OWNER_FILE, readRetainedMountBackend } from "../task/isolation-ownership";
 import { releaseOvnfsCheckout } from "../task/ovnfs";
-import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
+import { formatIsolationBackend, hasNestedWorktrees, parseIsolationBackend } from "../task/worktree";
 
 import { cfgIsolationBackend, cfgWorktreeClone } from "../task/settings";
 
@@ -59,10 +59,12 @@ export interface AddWorktreeOptions {
 }
 
 export interface ListWorktreesOptions {
+	cwd: string;
 	json: boolean;
 }
 
 export interface ClearWorktreesOptions {
+	cwd: string;
 	/** Remove every entry, including live PR-checkout worktrees. */
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
@@ -154,6 +156,7 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 		detach,
 		clone: cfgWorktreeClone.get(settings),
 		backend: parseIsolationBackend(cfgIsolationBackend.get(settings)),
+		excludePaths: [getWorktreesDir(cwd)],
 	});
 	if (!options.quiet) {
 		console.log(`HEAD is now at ${shortSha} ${subject}`);
@@ -171,13 +174,13 @@ export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
 }
 
 export async function listWorktrees(options: ListWorktreesOptions): Promise<void> {
-	const entries = await scanWorktrees();
+	const entries = await scanWorktrees(options.cwd);
 	if (options.json) {
 		console.log(JSON.stringify(entries, null, 2));
 		return;
 	}
 	if (entries.length === 0) {
-		console.log(chalk.dim(`No agent-managed worktrees found under ${getWorktreesDir()}.`));
+		console.log(chalk.dim(`No agent-managed worktrees found under ${getWorktreesDir(options.cwd)}.`));
 		return;
 	}
 	let live = 0;
@@ -194,7 +197,7 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 }
 
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ removed: number; failed: number }> {
-	const entries = await scanWorktrees();
+	const entries = await scanWorktrees(options.cwd);
 	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
 
 	if (targets.length === 0) {
@@ -222,6 +225,15 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	const parentsToPrune = new Set<string>();
 	for (const target of targets) {
 		try {
+			const checkouts =
+				target.kind === "task-isolation"
+					? TASK_ISOLATION_MOUNT_DIRS.map(name => path.join(target.path, name))
+					: [target.path];
+			for (const checkout of checkouts) {
+				if (await hasNestedWorktrees(checkout)) {
+					throw new Error(`Kept ${checkout} because it still contains nested worktrees; clear those first.`);
+				}
+			}
 			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
 				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
 				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
@@ -278,8 +290,8 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 // Scanner
 // ───────────────────────────────────────────────────────────────────────────
 
-async function scanWorktrees(): Promise<WorktreeEntry[]> {
-	const root = getWorktreesDir();
+async function scanWorktrees(cwd: string): Promise<WorktreeEntry[]> {
+	const root = getWorktreesDir(cwd);
 	let topLevel: string[];
 	try {
 		topLevel = await fs.readdir(root);

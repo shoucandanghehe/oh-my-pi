@@ -11,7 +11,7 @@ import { effect, register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { $which, isRecord, logger, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, setWorktreesDir } from "@oh-my-pi/pi-utils";
 import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
@@ -233,16 +233,11 @@ export const cfgWorktreeBase = register({
 		group: "Isolation",
 		label: "Worktree Base Directory",
 		description:
-			"Base directory for agent-managed worktrees — task-isolation copies, `github` PR checkouts, and `omp worktree` cleanup all live here. Unset uses ~/.omp/wt. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_WORKTREE_DIR env var overrides this.",
+			"Base directory for agent-managed worktrees — task-isolation copies, `github` PR checkouts, and `omp worktree` cleanup all live here. Unset uses ~/.omp/wt. Accepts absolute, ~-relative, or operation-cwd-relative paths (e.g. .worktrees). The OMP_WORKTREE_DIR env var overrides this.",
 	},
 });
 effect(cfgWorktreeBase, value => {
-	const dir = value?.trim() ? value : undefined;
-	// Always applied, so an unset/empty value clears a previous override. setWorktreesDir expands `~`,
-	// rejects relative paths, and returns the applied absolute path (undefined when cleared/rejected).
-	if (!setWorktreesDir(dir) && dir) {
-		logger.warn("Settings: worktree.base must be an absolute or ~-relative path; ignoring", { value: dir });
-	}
+	setWorktreesDir(value);
 });
 
 export const cfgTaskEager = register({

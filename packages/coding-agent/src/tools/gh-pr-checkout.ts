@@ -410,6 +410,7 @@ export async function checkoutPullRequest(
 	options: PrCheckoutOptions,
 ): Promise<PrCheckoutOutcome> {
 	const { prRef, repo, force } = options;
+	const cwd = session.cwd;
 	if (prRef?.startsWith("-")) {
 		throw new ToolError(`invalid PR identifier: ${prRef}. Pass a PR number, URL, or branch name.`);
 	}
@@ -418,7 +419,7 @@ export async function checkoutPullRequest(
 	appendRepoFlag(args, repo, prRef);
 	args.push("--json", GH_PR_CHECKOUT_FIELDS.join(","));
 
-	const data = await github.json<GhPrViewData>(session.cwd, args, signal, {
+	const data = await github.json<GhPrViewData>(cwd, args, signal, {
 		repoProvided: Boolean(repo),
 	});
 	const prNumber = data.number;
@@ -428,10 +429,10 @@ export async function checkoutPullRequest(
 
 	const headRefName = requireNonEmpty(data.headRefName, "head branch");
 	const headRefOid = requireNonEmpty(data.headRefOid, "head commit");
-	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
+	const repoRoot = await requireGitRepoRoot(cwd, signal);
 	const primaryRepoRoot = await requirePrimaryGitRepoRoot(repoRoot, signal);
 	const localBranch = `pr-${prNumber}`;
-	const worktreePath = getWorktreeDir(`${prNumber}-${hashPath(primaryRepoRoot)}`);
+	const worktreePath = getWorktreeDir(cwd, `${prNumber}-${hashPath(primaryRepoRoot)}`);
 
 	// Every git mutation against `repoRoot` from here on must run under the
 	// per-repo lock. Worktrees of the same primary repo share `.git/config`,
@@ -510,6 +511,7 @@ export async function checkoutPullRequest(
 						detach: false,
 						clone: cfgWorktreeClone.get(session.settings),
 						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
+						excludePaths: [path.dirname(worktreePath)],
 					},
 					signal,
 				);

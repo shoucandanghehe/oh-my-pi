@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { expandWindowsLongPath } from "@oh-my-pi/pi-natives/path";
 import { engines, version } from "../package.json" with { type: "json" };
 import { isEnoent, isEnotdir } from "./fs-error";
+import { expandTilde } from "./path";
 import { isBunTestRuntime } from "./test-runtime";
 
 /** App name (e.g. "omp") */
@@ -742,12 +743,9 @@ export function getRemoteDir(): string {
  * Expand a leading `~` and require an absolute result. Returns `undefined` for
  * empty/whitespace input or a path that is still relative after expansion.
  *
- * Worktree bases and the natives directory are process-global: a worktree base
- * is consumed by both creation (PR checkout, task isolation) and cleanup
- * (`omp worktree`), and every launch extracts or loads the native addon from
- * the same natives directory. A relative value would resolve against whatever
- * cwd happened to launch `omp`, so those readers could disagree — we refuse it
- * rather than silently bind it to cwd.
+ * Native addon overrides must stay absolute so every launch loads from the
+ * same directory. Worktree overrides instead resolve against their operation's
+ * explicitly supplied cwd.
  */
 function resolveAbsoluteDir(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
@@ -761,30 +759,26 @@ function resolveAbsoluteDir(value: string | undefined): string | undefined {
 let worktreesDirOverride: string | undefined;
 
 /**
- * Relocate the base directory for agent-managed worktrees (PR checkouts, task
- * isolation, and `omp worktree` cleanup all read the same base). Driven by the
- * `worktree.base` setting in coding-agent; pass `undefined`/empty to clear and
- * fall back to `OMP_WORKTREE_DIR` or the `~/.omp/wt` default.
- *
- * `~` is expanded and a relative path is rejected (see {@link resolveAbsoluteDir}).
- * Returns the absolute path that took effect, or `undefined` if the input was
- * cleared or rejected — callers can warn on a non-empty input that returns
- * `undefined`.
+ * Configure the base directory for agent-managed worktrees. Driven by the
+ * `worktree.base` setting in coding-agent; pass `undefined`/empty to clear.
+ * Relative values stay relative until lookup so session directory changes
+ * take effect without rebinding the setting to the process cwd.
  */
 export function setWorktreesDir(dir: string | undefined): string | undefined {
-	worktreesDirOverride = resolveAbsoluteDir(dir);
+	worktreesDirOverride = dir?.trim() || undefined;
 	return worktreesDirOverride;
 }
 
 /**
  * Get the agent-managed worktrees directory. Resolution order: the
  * `OMP_WORKTREE_DIR` env var, then the {@link setWorktreesDir} override (the
- * `worktree.base` setting), then the `~/.omp/wt` default. The env var and the
- * override are both `~`-expanded and must be absolute; a relative value is
- * ignored and resolution falls through.
+ * `worktree.base` setting), then the profile/XDG-aware `~/.omp/wt` default.
+ * Overrides expand `~`; relative paths resolve against the owning session or
+ * CLI operation's `cwd`.
  */
-export function getWorktreesDir(): string {
-	return resolveAbsoluteDir(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
+export function getWorktreesDir(cwd: string): string {
+	const override = process.env.OMP_WORKTREE_DIR?.trim() || worktreesDirOverride;
+	return override ? path.resolve(cwd, expandTilde(override)) : dirs.rootSubdir("wt", "data");
 }
 
 /** Get the SSH control socket directory (~/.omp/ssh-control). */
@@ -859,9 +853,9 @@ export function hashPath(absPath: string): string {
 	return Bun.hash(path.resolve(absPath)).toString(16).padStart(16, "0").slice(-7);
 }
 
-/** Get the path to a single worktree directory (~/.omp/wt/<segment>). */
-export function getWorktreeDir(segment: string): string {
-	return path.join(getWorktreesDir(), segment);
+/** Get the path to a single managed worktree for an operation in `cwd`. */
+export function getWorktreeDir(cwd: string, segment: string): string {
+	return path.join(getWorktreesDir(cwd), segment);
 }
 
 /**

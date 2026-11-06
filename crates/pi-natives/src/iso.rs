@@ -7,8 +7,9 @@
 //!   hint) and report any fallback to the caller; probes run off the JS thread.
 //! - `iso_probe(kind?)` — backend availability, with an optional explicit kind
 //!   override; falls back to the native backend when omitted.
-//! - `iso_start(kind?, lower, merged)` / `iso_stop(kind?, merged)` — sync
-//!   syscalls wrapped in `spawn_blocking` so the JS side gets a normal Promise.
+//! - `iso_start(kind?, lower, merged, exclude_paths?)` / `iso_stop(kind?,
+//!   merged)` — sync syscalls wrapped in `spawn_blocking` so JS gets a normal
+//!   Promise.
 //! - `iso_diff(lower, merged)` — backend-agnostic diff capture; emits one
 //!   [`IsoFileChange`] per file. `diff` is `Some(unified)` for text files and
 //!   `None` for binary files — callers copy the bytes from `merged` directly if
@@ -136,15 +137,29 @@ pub fn iso_resolve(preferred: Option<IsoBackendKind>) -> task::Promise<IsoResolv
 
 /// Materialise `merged` as a writable view of `lower` using the requested
 /// backend. `kind` defaults to the native backend.
+///
+/// `exclude_paths` contains absolute source directories to omit.
 #[napi]
-pub async fn iso_start(kind: Option<IsoBackendKind>, lower: String, merged: String) -> Result<()> {
+pub async fn iso_start(
+	kind: Option<IsoBackendKind>,
+	lower: String,
+	merged: String,
+	exclude_paths: Option<Vec<String>>,
+) -> Result<()> {
 	let resolved = kind.map_or_else(BackendKind::native, from_napi_kind);
 	let lower_path = std::path::PathBuf::from(lower);
 	let merged_path = std::path::PathBuf::from(merged);
-	tokio::task::spawn_blocking(move || pi_iso::backend(resolved).start(&lower_path, &merged_path))
-		.await
-		.map_err(|err| Error::from_reason(format!("iso_start join: {err}")))?
-		.map_err(to_napi_error)
+	let exclude_paths = exclude_paths
+		.unwrap_or_default()
+		.into_iter()
+		.map(std::path::PathBuf::from)
+		.collect::<Vec<_>>();
+	tokio::task::spawn_blocking(move || {
+		pi_iso::backend(resolved).start_excluding(&lower_path, &merged_path, &exclude_paths)
+	})
+	.await
+	.map_err(|err| Error::from_reason(format!("iso_start join: {err}")))?
+	.map_err(to_napi_error)
 }
 
 /// Tear down a previously started backend at `merged`.

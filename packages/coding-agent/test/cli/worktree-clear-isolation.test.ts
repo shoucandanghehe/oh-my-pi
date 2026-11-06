@@ -3,13 +3,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
+import { clearWorktrees, listWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import {
 	ISOLATION_OWNER_FILE,
 	RETAINED_BACKEND_FILE,
 	writeIsolationOwner,
 	writeRetainedBackend,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import * as ovnfsClient from "@oh-my-pi/pi-coding-agent/ovnfs/client";
+import * as ovnfsDaemon from "@oh-my-pi/pi-coding-agent/ovnfs/daemon";
+import { OVNFS_CHECKOUT_FILE, ovnfsWorkspace } from "@oh-my-pi/pi-coding-agent/task/ovnfs";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -77,7 +80,7 @@ describe("worktree clear task-isolation ownership", () => {
 			JSON.stringify({ pid: process.pid, id: "recyc06", startToken: "not-the-current-token" }),
 		);
 
-		await clearWorktrees({ all: false, dryRun: false, json: true });
+		await clearWorktrees({ cwd: base, all: false, dryRun: false, json: true });
 
 		const exists = async (p: string): Promise<boolean> =>
 			await fs.stat(p).then(
@@ -103,7 +106,7 @@ describe("worktree clear task-isolation ownership", () => {
 		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
 		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
 
-		await clearWorktrees({ all: false, dryRun: false, json: true });
+		await clearWorktrees({ cwd: base, all: false, dryRun: false, json: true });
 
 		expect(isoStopSpy).toHaveBeenCalledWith(natives.IsoBackendKind.Overlayfs, path.join(retained, "m"));
 		await expect(fs.stat(retained)).rejects.toThrow();
@@ -114,7 +117,7 @@ describe("worktree clear task-isolation ownership", () => {
 		await Bun.write(path.join(plain, ISOLATION_OWNER_FILE), JSON.stringify({ pid: await deadPid(), id: "plain08" }));
 		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
 
-		await clearWorktrees({ all: false, dryRun: false, json: true });
+		await clearWorktrees({ cwd: base, all: false, dryRun: false, json: true });
 
 		expect(isoStopSpy).not.toHaveBeenCalled();
 		await expect(fs.stat(plain)).rejects.toThrow();
@@ -129,7 +132,7 @@ describe("worktree clear task-isolation ownership", () => {
 		await writeRetainedBackend(retained, natives.IsoBackendKind.Overlayfs);
 		vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("umount EBUSY"));
 
-		const { failed } = await clearWorktrees({ all: false, dryRun: false, json: true });
+		const { failed } = await clearWorktrees({ cwd: base, all: false, dryRun: false, json: true });
 		expect(failed).toBe(1);
 
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
@@ -144,9 +147,72 @@ describe("worktree clear task-isolation ownership", () => {
 		await Bun.write(path.join(retained, RETAINED_BACKEND_FILE), "{ not json");
 		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
 
-		await clearWorktrees({ all: false, dryRun: false, json: true });
+		await clearWorktrees({ cwd: base, all: false, dryRun: false, json: true });
 
 		expect(isoStopSpy).not.toHaveBeenCalled();
 		expect(await Bun.file(path.join(retained, "m", "work.txt")).exists()).toBe(true);
+	});
+
+	it("does not traverse a retained child mount when reclaiming its orphan parent", async () => {
+		setWorktreesDir(".worktrees");
+		const cwd = path.join(base, "owner");
+		const parent = path.join(cwd, ".worktrees", "tparent");
+		const child = path.join(parent, "m", ".worktrees", "tchild.retained", "m");
+		await Bun.write(path.join(child, "work.txt"), "recoverable child work\n");
+		await writeRetainedBackend(path.dirname(child), natives.IsoBackendKind.Overlayfs);
+		const stop = vi.spyOn(natives, "isoStop").mockResolvedValue();
+		expect(await clearWorktrees({ cwd, all: false, dryRun: false, json: true })).toEqual({ removed: 0, failed: 1 });
+		expect(stop).not.toHaveBeenCalled();
+		expect(await Bun.file(path.join(child, "work.txt")).text()).toBe("recoverable child work\n");
+	});
+
+	it("keeps an ovnfs record and checkout when nested worktrees prevent removal or slot reuse", async () => {
+		setWorktreesDir(".worktrees");
+		const cwd = path.join(base, "owner");
+		const checkout = path.join(base, "daemon", "parent");
+		await fs.mkdir(checkout, { recursive: true });
+		vi.spyOn(ovnfsDaemon, "startDaemon").mockResolvedValue({
+			socket: "fixture.socket",
+			mount: path.dirname(checkout),
+		});
+		const call = vi
+			.spyOn(ovnfsClient, "callSocket")
+			.mockResolvedValue({ checkout: { name: "parent", path: checkout } });
+		const open = ovnfsWorkspace("fixture-ovnfs");
+		await open(path.join(base, "source"), "parent", cwd);
+		const storage = path.join(cwd, ".worktrees");
+		const [entry] = await fs.readdir(storage);
+		const record = path.join(storage, entry!, OVNFS_CHECKOUT_FILE);
+		await Bun.write(path.join(checkout, ".worktrees", "child", "m", "work.txt"), "recoverable ovnfs child\n");
+		expect(await clearWorktrees({ cwd, all: true, dryRun: false, json: true })).toEqual({ removed: 0, failed: 1 });
+		await expect(open(path.join(base, "source"), "parent", cwd)).rejects.toThrow("still contains nested worktrees");
+		expect(call.mock.calls.map(args => args[1])).toEqual(["new"]);
+		expect(await Bun.file(record).exists()).toBe(true);
+		expect(await Bun.file(path.join(checkout, ".worktrees", "child", "m", "work.txt")).text()).toBe(
+			"recoverable ovnfs child\n",
+		);
+	});
+
+	it("lists and clears only the relative base of the supplied cwd", async () => {
+		setWorktreesDir(".worktrees");
+		const first = path.join(base, "first");
+		const second = path.join(base, "second");
+		const orphan = path.join(first, ".worktrees", "orphan");
+		const untouched = path.join(second, ".worktrees", "orphan");
+		await fs.mkdir(orphan, { recursive: true });
+		await fs.mkdir(untouched, { recursive: true });
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await listWorktrees({ cwd: first, json: true });
+		expect(JSON.parse(log.mock.calls.at(-1)![0])).toEqual([expect.objectContaining({ path: orphan, kind: "empty" })]);
+		await clearWorktrees({ cwd: first, all: false, dryRun: true, json: true });
+		expect(JSON.parse(log.mock.calls.at(-1)![0])).toEqual({ wouldRemove: [orphan] });
+		expect(await fs.stat(orphan).then(stat => stat.isDirectory())).toBe(true);
+		expect(await clearWorktrees({ cwd: first, all: false, dryRun: false, json: true })).toEqual({
+			removed: 1,
+			failed: 0,
+		});
+		await expect(fs.stat(orphan)).rejects.toThrow();
+		expect(await fs.stat(untouched).then(stat => stat.isDirectory())).toBe(true);
 	});
 });

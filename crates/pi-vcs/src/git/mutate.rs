@@ -633,6 +633,8 @@ impl GitRepo {
 		options: WorktreeAddOptions,
 	) -> Result<WorktreeAddResult> {
 		let repo = self.gix()?;
+		let excluded = pi_iso::relative_exclusions(self.root(), path, &options.exclude_paths)
+			.map_err(|err| Error::backend("git worktree add", err))?;
 		let id = resolve_commit(&repo, ref_name)?;
 		if path.exists() && fs::read_dir(path)?.next().is_some() {
 			return Err(Error::backend(
@@ -692,8 +694,10 @@ impl GitRepo {
 		let mut clone_error = None;
 		if let Some(preferred) = preferred {
 			for kind in pi_iso::clone_candidates(preferred) {
-				match self.worktree_add_cloned(path, id, &head, kind, options.keep_changes) {
+				match self.worktree_add_cloned(path, id, &head, kind, options.keep_changes, &excluded) {
 					Ok(()) => {
+						pi_iso::remove_exclusions(path, &excluded)
+							.map_err(|err| Error::backend("git worktree add", err))?;
 						return Ok(WorktreeAddResult { cloned_with: Some(kind), clone_error });
 					},
 					Err(err) => {
@@ -710,8 +714,10 @@ impl GitRepo {
 		let linked_repo = linked.gix()?;
 		checkout_tree(&linked, &linked_repo, id, true)?;
 		if options.keep_changes {
-			self.seed_worktree_changes(path, &admin, id)?;
+			self.seed_worktree_changes(path, &admin, id, &excluded)?;
 		}
+		pi_iso::remove_exclusions(path, &excluded)
+			.map_err(|err| Error::backend("git worktree add", err))?;
 		Ok(WorktreeAddResult { cloned_with: None, clone_error })
 	}
 
@@ -725,6 +731,7 @@ impl GitRepo {
 		path: &Path,
 		admin: &Path,
 		head_commit: gix::hash::ObjectId,
+		excluded: &[PathBuf],
 	) -> Result<()> {
 		let repo = self.gix()?;
 		let (dirty_tracked, untracked) = collect_clone_reconciliation_paths(&repo)?;
@@ -750,7 +757,12 @@ impl GitRepo {
 		};
 
 		for relative in dirty_tracked.iter().chain(&untracked).chain(&staged) {
-			copy_worktree_path(self.root(), path, relative.as_bstr())?;
+			if !excluded
+				.iter()
+				.any(|path| relative.to_path_lossy().starts_with(path))
+			{
+				copy_worktree_path(self.root(), path, relative.as_bstr())?;
+			}
 		}
 		let Some(mut index) = source_index else {
 			return Ok(());
@@ -772,6 +784,7 @@ impl GitRepo {
 		head: &str,
 		kind: pi_iso::BackendKind,
 		keep_changes: bool,
+		excluded: &[PathBuf],
 	) -> Result<()> {
 		let repo = self.gix()?;
 		for key in ["core.sparseCheckout", "core.splitIndex"] {
@@ -786,8 +799,10 @@ impl GitRepo {
 			return Err(Error::backend("git worktree add", "source index is missing"));
 		}
 
+		let mut skip = vec![OsStr::new(".git")];
+		skip.extend(excluded.iter().map(|path| path.as_os_str()));
 		pi_iso::backend(kind)
-			.clone_tree(self.root(), path, &[OsStr::new(".git")])
+			.clone_tree(self.root(), path, &skip)
 			.map_err(|err| Error::backend("git worktree add", err))?;
 		let admin = register_worktree(path, &self.info().common_dir, head)?;
 		fs::copy(&source_index, admin.join("index"))?;
@@ -2752,9 +2767,10 @@ mod tests {
 		let _ = fs::remove_dir_all(&linked);
 		repo
 			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
+				detach:        true,
+				clone:         WorktreeClone::Off,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "main\r\n");
@@ -3002,9 +3018,10 @@ mod tests {
 		let _ = fs::remove_dir_all(&linked);
 		repo
 			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
+				detach:        true,
+				clone:         WorktreeClone::Off,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
@@ -3032,9 +3049,10 @@ mod tests {
 		let linked = linked_dir.path().to_path_buf();
 		repo
 			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
+				detach:        true,
+				clone:         WorktreeClone::Off,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 
@@ -3076,9 +3094,10 @@ mod tests {
 		let _ = fs::remove_dir_all(&linked);
 		let result = repo
 			.worktree_add(&linked, "target", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 
@@ -3303,9 +3322,10 @@ mod tests {
 		let clone_works = clone_works_on(temp.path());
 		let result = repo
 			.worktree_add(&linked, "same-as-head", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 		if clone_works {
@@ -3349,6 +3369,7 @@ mod tests {
 					detach: false,
 					clone,
 					keep_changes: true,
+					exclude_paths: Vec::new(),
 				})
 				.unwrap();
 			if clone == WorktreeClone::Off {
@@ -3376,7 +3397,12 @@ mod tests {
 			let rejected = repo.worktree_add(
 				&temp.path().join("../linked-keep-rejected"),
 				"HEAD~1",
-				WorktreeAddOptions { detach: true, clone, keep_changes: true },
+				WorktreeAddOptions {
+					detach: true,
+					clone,
+					keep_changes: true,
+					exclude_paths: Vec::new(),
+				},
 			);
 			assert!(rejected.is_err(), "keep_changes must require the source HEAD as target");
 			let _ = repo.worktree_remove(&linked, true);
@@ -3409,6 +3435,7 @@ mod tests {
 					detach: false,
 					clone,
 					keep_changes: true,
+					exclude_paths: Vec::new(),
 				})
 				.unwrap();
 			if clone == WorktreeClone::Off {
@@ -3434,9 +3461,10 @@ mod tests {
 		let _ = fs::remove_dir_all(&linked);
 		repo
 			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
+				detach:        true,
+				clone:         WorktreeClone::Off,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 		assert!(
@@ -3449,9 +3477,10 @@ mod tests {
 		let _ = fs::remove_dir_all(&linked);
 		repo
 			.worktree_add(&linked, "main", WorktreeAddOptions {
-				detach:       true,
-				clone:        WorktreeClone::Off,
-				keep_changes: false,
+				detach:        true,
+				clone:         WorktreeClone::Off,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();

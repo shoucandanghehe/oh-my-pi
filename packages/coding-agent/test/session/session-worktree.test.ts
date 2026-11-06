@@ -109,6 +109,23 @@ describe("session worktree helpers (real git)", () => {
 	const create = (keepChanges = true, name = branch) =>
 		createSessionWorktree(repo, Settings.isolated(), name, { keepChanges });
 
+	it("resolves relative storage from the supplied cwd and follows a move into a worktree", async () => {
+		setWorktreesDir(".worktrees");
+		const cwd = path.join(repo, "pkg");
+		await fs.mkdir(cwd);
+		await Bun.write(path.join(cwd, "local.txt"), "keep local content\n");
+		await Bun.write(path.join(cwd, ".worktrees", "previous", "keep.txt"), "existing worktree\n");
+		const first = await createSessionWorktree(cwd, Settings.isolated(), "wt/first");
+		expect(path.dirname(first.path)).toBe(path.join(cwd, ".worktrees"));
+		expect(await Bun.file(path.join(first.path, "pkg", "local.txt")).text()).toBe("keep local content\n");
+		expect(await exists(path.join(first.path, "pkg", ".worktrees"))).toBe(false);
+		const second = await createSessionWorktree(first.path, Settings.isolated(), "wt/second");
+		expect(path.dirname(second.path)).toBe(path.join(first.path, ".worktrees"));
+		expect(await Bun.file(path.join(cwd, ".worktrees", "previous", "keep.txt")).text()).toBe("existing worktree\n");
+		await removeSessionWorktree(second, false);
+		await removeSessionWorktree(first, false);
+	});
+
 	it("offers a worktree only in a primary checkout with commits", async () => {
 		const plain = path.join(root, "plain");
 		const unborn = path.join(root, "unborn");

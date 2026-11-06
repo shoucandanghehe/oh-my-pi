@@ -1157,46 +1157,52 @@ describe("github tool", () => {
 			await removeWithRetries(fixture.baseDir);
 		});
 
-		it("checks out a pull request into a worktree and configures contributor push metadata", async () => {
-			const githubSpy = vi
-				.spyOn(github, "json")
-				.mockResolvedValueOnce({
-					number: 123,
-					title: "Contributor fix",
-					url: "https://ghe.example.com/base/repo/pull/123",
-					baseRefName: "main",
-					headRefName: fixture.headRefName,
-					headRefOid: fixture.headRefOid,
-					headRepository: { nameWithOwner: "contrib/repo" },
-					headRepositoryOwner: { login: "contrib" },
-					isCrossRepository: true,
-					maintainerCanModify: true,
-				})
-				.mockResolvedValueOnce({
-					nameWithOwner: "contrib/repo",
-					sshUrl: fixture.forkBare,
-					url: fixture.forkBare,
-				});
-
-			const tool = new GithubTool(createSession(fixture.repoRoot));
-			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: "123" });
-			expect(githubSpy.mock.calls[1]?.[1]).toContain("ghe.example.com/contrib/repo");
-			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-			const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
-			const worktreePath = await expectedWorktreePath(tempHome.home, primaryRoot, "pr-123");
-			expect(text).toContain("Checked Out Pull Request #123");
-			expect(text).toContain(`Worktree: ${worktreePath}`);
-			// Contributor push metadata persisted to git config (single read).
-			// `--get-regexp` echoes variable names in git's canonical lowercase.
-			const cfg = runGit(fixture.repoRoot, ["config", "--get-regexp", "^branch\\.pr-123\\."]);
-			expect(cfg).toContain("branch.pr-123.pushremote forksrc");
-			expect(cfg).toContain(`branch.pr-123.merge refs/heads/${fixture.headRefName}`);
-			const listedWorktrees = runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])
-				.split("\n")
-				.filter(line => line.startsWith("worktree "))
-				.map(line => normalizePathForComparison(line.slice("worktree ".length)));
-			expect(listedWorktrees).toContain(normalizePathForComparison(worktreePath));
-			expect(runGit(worktreePath, ["branch", "--show-current"])).toBe("pr-123");
+		it("checks out under the session cwd's relative base and configures contributor push metadata", async () => {
+			const savedWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			process.env.OMP_WORKTREE_DIR = ".worktrees";
+			try {
+				const githubSpy = vi
+					.spyOn(github, "json")
+					.mockResolvedValueOnce({
+						number: 123,
+						title: "Contributor fix",
+						url: "https://ghe.example.com/base/repo/pull/123",
+						baseRefName: "main",
+						headRefName: fixture.headRefName,
+						headRefOid: fixture.headRefOid,
+						headRepository: { nameWithOwner: "contrib/repo" },
+						headRepositoryOwner: { login: "contrib" },
+						isCrossRepository: true,
+						maintainerCanModify: true,
+					})
+					.mockResolvedValueOnce({
+						nameWithOwner: "contrib/repo",
+						sshUrl: fixture.forkBare,
+						url: fixture.forkBare,
+					});
+				const cwd = path.join(fixture.repoRoot, "pkg");
+				await fs.mkdir(cwd);
+				const tool = new GithubTool(createSession(cwd));
+				const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: "123" });
+				expect(githubSpy.mock.calls[1]?.[1]).toContain("ghe.example.com/contrib/repo");
+				const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+				const primaryRoot = vcs.requireGit(fixture.repoRoot).primaryRoot() ?? fixture.repoRoot;
+				const worktreePath = await fs.realpath(path.join(cwd, ".worktrees", `123-${hashPath(primaryRoot)}`));
+				expect(text).toContain("Checked Out Pull Request #123");
+				expect(text).toContain(`Worktree: ${worktreePath}`);
+				const cfg = runGit(fixture.repoRoot, ["config", "--get-regexp", "^branch\\.pr-123\\."]);
+				expect(cfg).toContain("branch.pr-123.pushremote forksrc");
+				expect(cfg).toContain(`branch.pr-123.merge refs/heads/${fixture.headRefName}`);
+				const listedWorktrees = runGit(fixture.repoRoot, ["worktree", "list", "--porcelain"])
+					.split("\n")
+					.filter(line => line.startsWith("worktree "))
+					.map(line => normalizePathForComparison(line.slice("worktree ".length)));
+				expect(listedWorktrees).toContain(normalizePathForComparison(worktreePath));
+				expect(runGit(worktreePath, ["branch", "--show-current"])).toBe("pr-123");
+			} finally {
+				if (savedWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = savedWorktreeDir;
+			}
 		});
 
 		// These assertions are non-mutating (a no-op add and rejected adds), so
