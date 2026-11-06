@@ -363,8 +363,8 @@ export interface AgentSessionConfig {
 	hasNativeTool?: (name: string) => boolean;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
-	/** Reconcile browser MCP connections after browser prelude availability changes. */
-	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[]>;
+	/** Reconcile browser MCP connections; scoped followers own their refresh and return no snapshot. */
+	reconcileBrowserMcpFilter?: (enabled: boolean) => Promise<CustomTool[] | undefined>;
 	/** Updates tool-session predicates from the live active tool set. */
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
