@@ -24,6 +24,7 @@ interface PasteListingState {
 	loc?: string;
 	finish?: (text: string | undefined) => boolean;
 	pasteImage?: (image: ImageContent) => void | Promise<void>;
+	pasteNative?: () => Promise<boolean>;
 }
 
 interface PasteReadState {
@@ -40,6 +41,7 @@ interface PasteReadState {
 export interface EnhancedPasteDelivery {
 	finish(text: string | undefined): boolean;
 	pasteImage(image: ImageContent): void | Promise<void>;
+	pasteNative?(): Promise<boolean>;
 }
 
 export interface EnhancedPasteHandlers {
@@ -100,6 +102,7 @@ export class EnhancedPasteController {
 	#listing: PasteListingState | undefined;
 	#pending: PasteListingState[] = [];
 	#read: PasteReadState | undefined;
+	#nativePaste: PasteListingState | undefined;
 	#nextReadId = 0;
 	#handlers: EnhancedPasteHandlers;
 
@@ -136,6 +139,10 @@ export class EnhancedPasteController {
 		}
 		listing?.finish?.(undefined);
 		for (const paste of pending) paste.finish?.(undefined);
+		const nativePaste = this.#nativePaste;
+		this.#nativePaste = undefined;
+		nativePaste?.finish?.(undefined);
+		if (nativePaste) nativePaste.finish = undefined;
 	}
 
 	handleInput(data: string): boolean {
@@ -176,6 +183,7 @@ export class EnhancedPasteController {
 				loc: loc === "primary" ? loc : undefined,
 				finish: typeof delivery === "function" ? delivery : delivery?.finish,
 				pasteImage: typeof delivery === "function" ? undefined : delivery?.pasteImage,
+				pasteNative: typeof delivery === "function" ? undefined : delivery?.pasteNative,
 			};
 			return;
 		}
@@ -186,7 +194,7 @@ export class EnhancedPasteController {
 		} else if (status === "DONE") {
 			this.#listing = undefined;
 			this.#pending.push(listing);
-			this.#startRead();
+			void this.#startRead();
 		} else if (status) {
 			this.#listing = undefined;
 			this.#handlers.showStatus(`Enhanced paste failed: ${status}`);
@@ -250,19 +258,36 @@ export class EnhancedPasteController {
 		const finish = read.finish;
 		read.finish = undefined;
 		finish?.(undefined);
-		this.#startRead();
+		void this.#startRead();
 	}
 
-	#startRead(): void {
-		if (this.#read) return;
+	async #startRead(): Promise<void> {
+		if (this.#read || this.#nativePaste) return;
 		let listing: PasteListingState | undefined;
 		while ((listing = this.#pending.shift())) {
 			const selected = choosePasteMime(listing.mimes);
 			if (!selected) {
-				listing.finish?.(undefined);
 				// Native readers use the regular clipboard, not the terminal's primary selection.
-				if (listing.loc === "primary" || !this.#handlers.pasteNative()) {
+				if (listing.loc === "primary") {
 					this.#handlers.showStatus("Clipboard paste has no supported text or image data");
+					listing.finish?.(undefined);
+				} else if (listing.pasteNative) {
+					this.#nativePaste = listing;
+					try {
+						if (!(await listing.pasteNative())) {
+							this.#handlers.showStatus("Clipboard paste has no supported text or image data");
+						}
+					} finally {
+						listing.finish?.(undefined);
+						if (this.#nativePaste === listing) this.#nativePaste = undefined;
+					}
+					void this.#startRead();
+					return;
+				} else {
+					listing.finish?.(undefined);
+					if (!this.#handlers.pasteNative()) {
+						this.#handlers.showStatus("Clipboard paste has no supported text or image data");
+					}
 				}
 				continue;
 			}

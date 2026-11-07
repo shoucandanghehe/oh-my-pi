@@ -104,11 +104,60 @@ describe("clipboard paste input order in the native composer", () => {
 
 	it("releases the later keys when the clipboard advertises no supported content", async () => {
 		const { editor, statuses } = setup();
-		feed(packet("OK"), "a", packet("DATA", `:mime=${Buffer.from("text/html").toString("base64")}`));
+		feed(packet("OK", ":loc=primary"), "a", packet("DATA", `:mime=${Buffer.from("text/html").toString("base64")}`));
 		feed("b", packet("DONE"), "c");
 		await Promise.resolve();
 		expect(editor.getText()).toBe("abc");
 		expect(statuses).toEqual(["Clipboard paste has no supported text or image data"]);
+	});
+
+	it("keeps native fallback in the captured composer ahead of later keys after focus changes", async () => {
+		const clipboard = Promise.withResolvers<string>();
+		const { editor } = setup(() => clipboard.promise);
+		const delivered = Promise.withResolvers<void>();
+		const beginPaste = editor.beginPaste.bind(editor);
+		vi.spyOn(editor, "beginPaste").mockImplementation(() => {
+			const finish = beginPaste();
+			return text => {
+				const accepted = finish(text);
+				delivered.resolve();
+				return accepted;
+			};
+		});
+		feed(packet("OK"), "tail", packet("DATA", `:mime=${Buffer.from("image/tiff").toString("base64")}`));
+		const other = new CustomEditor(defaultEditorTheme);
+		harness!.tui.addChild(other);
+		harness!.tui.setFocus(other);
+		feed(packet("DONE"));
+		expect(editor.getText()).toBe("");
+		clipboard.resolve("paste ");
+		await delivered.promise;
+		expect(editor.getText()).toBe("paste tail");
+		expect(other.getText()).toBe("");
+	});
+
+	it("releases native fallback input on interrupt and admits the next enhanced paste", async () => {
+		const clipboard = Promise.withResolvers<string>();
+		const { editor } = setup(() => clipboard.promise);
+		editor.onEscape = () => {};
+		feed(packet("OK"), packet("DATA", `:mime=${Buffer.from("image/tiff").toString("base64")}`), packet("DONE"));
+		feed("before", "\x1b[27u", "after");
+		expect(editor.getText()).toBe("beforeafter");
+		feed(packet("OK"), packet("DATA", `:mime=${TEXT_MIME}`), packet("DONE"));
+		feed(readReply("DATA", `:mime=${TEXT_MIME};${Buffer.from(" next").toString("base64")}`), readReply("DONE"));
+		expect(editor.getText()).toBe("beforeafter next");
+		clipboard.resolve("");
+		await clipboard.promise;
+	});
+
+	it("does not deliver a selector's delayed clipboard response into the next focused composer", () => {
+		const { editor } = setup();
+		const selector = { render: () => [], handleInput: () => {} };
+		harness!.tui.setFocus(selector);
+		feed(packet("OK"), packet("DATA", `:mime=${TEXT_MIME}`), packet("DONE"));
+		harness!.tui.setFocus(editor);
+		feed(readReply("DATA", `:mime=${TEXT_MIME};${Buffer.from("wrong draft").toString("base64")}`), readReply("DONE"));
+		expect(editor.getText()).toBe("");
 	});
 
 	it("inserts raw clipboard text before a following IME commit and typed keys", async () => {

@@ -1273,6 +1273,33 @@ describe("InputController image paste into an image-accepting prompt", () => {
 		expect(context.ctx.showStatus).not.toHaveBeenCalledWith("Clipboard paste has no supported text or image data");
 	});
 
+	it("keeps Enter queued while a text-only prompt waits for native clipboard fallback", async () => {
+		const context = await createPromptContext();
+		const submitted = Promise.withResolvers<string>();
+		const clipboard = Promise.withResolvers<string>();
+		const prompt = new HookEditorComponent(
+			context.ctx.ui,
+			"Answer",
+			undefined,
+			text => submitted.resolve(text),
+			vi.fn(),
+			{
+				promptStyle: true,
+			},
+		);
+		context.setFocused(prompt);
+		new InputController(context.ctx, {
+			readImage: async () => null,
+			readText: () => clipboard.promise,
+		}).setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		dispatchInput(listeners, "\x1b]5522;type=read:status=OK\x1b\\");
+		dispatchInput(listeners, "\x1b]5522;type=read:status=DONE\x1b\\");
+		prompt.handleInput("\r");
+		clipboard.resolve("answer");
+		expect(await submitted.promise).toBe("answer");
+	});
+
 	it("prefers a Finder file URL over the co-advertised icon bitmap (#8769)", async () => {
 		const imagePath = await writePng("finder.png");
 		const context = await createPromptContext();

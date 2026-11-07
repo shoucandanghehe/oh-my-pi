@@ -1102,18 +1102,27 @@ export class InputController {
 			write: data => ui.terminal.write(data),
 			beginPaste: () => {
 				const target = this.#resolvePasteTarget(ui);
+				const focused = ui.getFocused();
 				const editor = target instanceof CustomEditor ? target : undefined;
 				const context = editor ? this.#captureEditorPasteContext(editor) : undefined;
-				const finish = target?.beginPaste?.();
 				const imageEditor = this.#imagePasteEditor(target);
+				const promptPaste = target && !imageEditor ? this.#beginPromptImagePaste(target) : undefined;
+				const finish = promptPaste ? undefined : target?.beginPaste?.();
 				return {
 					finish: text => {
 						if (context && !context.isCurrent()) text = undefined;
 						let accepted = false;
-						if (finish) accepted = finish(text);
-						else if (text !== undefined && this.#resolvePasteTarget(ui) === target) {
-							target?.pasteText(text);
-							accepted = target !== undefined;
+						if (promptPaste) {
+							if (text) promptPaste.sink.pasteText(text);
+							promptPaste.finish();
+							accepted = text !== undefined;
+						} else if (finish) accepted = finish(text);
+						else if (text !== undefined && target && this.#resolvePasteTarget(ui) === target) {
+							target.pasteText(text);
+							accepted = true;
+						} else if (text !== undefined && !target && ui.getFocused() === focused && focused?.handleInput) {
+							focused.handleInput(`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`);
+							accepted = true;
 						}
 						ui.requestRender();
 						return accepted;
@@ -1124,8 +1133,13 @@ export class InputController {
 							this.ctx.showStatus("Paste is not supported in this pane");
 							return;
 						}
-						if (imageEditor) await this.#editorImageSink(imageEditor, context).attach(image, message);
+						if (promptPaste && target.acceptsImages) await promptPaste.sink.attach(image, message);
+						else if (imageEditor) await this.#editorImageSink(imageEditor, context).attach(image, message);
 						else await this.#pasteImageIntoFocus(sink => sink.attach(image, message), target);
+					},
+					pasteNative: async () => {
+						if (!target || (context && !context.isCurrent())) return false;
+						return this.handleImagePaste(target, promptPaste);
 					},
 				};
 			},
@@ -2976,7 +2990,10 @@ export class InputController {
 		}
 	}
 
-	async handleImagePaste(target: PasteTarget | undefined = this.#resolvePasteTarget()): Promise<boolean> {
+	async handleImagePaste(
+		target: PasteTarget | undefined = this.#resolvePasteTarget(),
+		promptPaste?: PromptImagePaste,
+	): Promise<boolean> {
 		if (!this.#clipboardIsTerminalLocal()) {
 			this.ctx.showStatus(REMOTE_CLIPBOARD_STATUS);
 			return false;
@@ -2989,11 +3006,14 @@ export class InputController {
 		const editorContext = target instanceof CustomEditor ? this.#captureEditorPasteContext(target) : undefined;
 		const promptTarget = target instanceof CustomEditor ? null : target;
 		let finishPaste: ((text: string | undefined) => boolean) | undefined;
-		let promptPaste: PromptImagePaste | undefined;
+		const ownsPaste = promptPaste === undefined;
 		try {
-			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
-			else finishPaste = promptTarget?.beginPaste?.();
-			const sink = promptPaste?.sink ?? (editor ? this.#editorImageSink(editor) : undefined);
+			if (!promptPaste && promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
+			else if (!promptPaste) finishPaste = promptTarget?.beginPaste?.();
+			const sink =
+				promptTarget && !promptTarget.acceptsImages
+					? undefined
+					: (promptPaste?.sink ?? (editor ? this.#editorImageSink(editor) : undefined));
 			const content = await this.clipboard.readContent?.();
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
@@ -3090,7 +3110,7 @@ export class InputController {
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
 		} finally {
-			promptPaste?.finish();
+			if (ownsPaste) promptPaste?.finish();
 			finishPaste?.(undefined);
 		}
 	}
