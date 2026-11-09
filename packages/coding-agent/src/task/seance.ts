@@ -19,6 +19,7 @@ import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
 import { getBundledAgent } from "./agents";
 import { SEANCE_AGENT_NAME } from "./seance-policy";
+import { cfgTaskAgentModelOverrides } from "./settings";
 import type { AgentDefinition, SeanceTaskSchemaFields } from "./types";
 
 export interface ResolvedSeanceSource {
@@ -246,7 +247,7 @@ export async function prepareSeance(context: {
 	const modelRegistry = context.session.modelRegistry;
 	if (!modelRegistry) throw new Error("Seance cannot resolve a model in this session.");
 	await modelRegistry.awaitBackgroundRefresh().catch(() => {});
-	const requestedModel = context.model;
+	const requestedModel = context.model ?? cfgTaskAgentModelOverrides.get(context.session.settings)[SEANCE_AGENT_NAME];
 	const requestedModels =
 		requestedModel === undefined
 			? source.modelSelectors

@@ -4,6 +4,7 @@ import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { formatTaskResultSummary } from "@oh-my-pi/pi-coding-agent/task/result-summary";
 import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-lifecycle";
 import * as seanceResolver from "@oh-my-pi/pi-coding-agent/task/seance";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -102,6 +103,31 @@ describe("/seance", () => {
 
 		expect(ctx.showHookSelector).toHaveBeenCalled();
 		expect(ctx.showModelSelector).not.toHaveBeenCalled();
+	});
+	it("uses the configured default without asking for a historical or replacement model", async () => {
+		const resolved = sourceSession("/repo/.omp/sessions/configured.jsonl");
+		vi.spyOn(seanceResolver, "resolveSeanceSource").mockResolvedValue({
+			file: resolved.path,
+			id: resolved.id,
+			modelSelectors: [],
+		});
+		const ctx = createInteractiveModeContext({
+			session: { settings: Settings.isolated({ "task.agentModelOverrides": { seance: "openai/configured" } }) },
+		});
+		const execute = vi.fn(async () =>
+			taskResult({
+				results: [{ id: "Configured", exitCode: 0, resolvedModel: "openai/configured" } as never],
+			}),
+		);
+		registerTaskTool(ctx, execute as AgentTool["execute"]);
+		ctx.showHookSelector = vi.fn();
+		ctx.showModelSelector = vi.fn();
+
+		await runSeanceCommand(ctx, resolved.path);
+
+		expect(ctx.showHookSelector).not.toHaveBeenCalled();
+		expect(ctx.showModelSelector).not.toHaveBeenCalled();
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("openai/configured"));
 	});
 	it("bypasses model pickers for an override and reports completed IDs with the actual model", async () => {
 		const resolved = sourceSession("/repo/.omp/sessions/old.jsonl");

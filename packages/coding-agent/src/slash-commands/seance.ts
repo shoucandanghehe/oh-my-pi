@@ -5,6 +5,7 @@ import type { TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { discoverAgents } from "../task/discovery";
 import { isBundledSeance, resolveSeanceSource } from "../task/seance";
 import { SEANCE_AGENT_NAME } from "../task/seance-policy";
+import { cfgTaskAgentModelOverrides } from "../task/settings";
 import seanceCommandPrompt from "../prompts/system/seance-command.md" with { type: "text" };
 import seanceCommandSolutionSpace from "../prompts/system/seance-command-solution-space.md" with { type: "text" };
 import { parseCommandArgs } from "../utils/command-args";
@@ -119,7 +120,10 @@ async function chooseSeanceModel(
 			includeGlobal: true,
 		});
 		const sourceSession = source.file;
-		if (model !== undefined) {
+		if (
+			model !== undefined ||
+			cfgTaskAgentModelOverrides.get(ctx.session.settings)[SEANCE_AGENT_NAME] !== undefined
+		) {
 			void launchSeance(ctx, sourceSession, model);
 			return;
 		}

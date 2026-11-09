@@ -240,7 +240,7 @@ For task dispatch, model precedence is:
 2. the agent frontmatter's prioritized `model` list
 3. the parent's active model, then its configured/default model fallback
 
-A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below) replaces steps 2 and 3 when it is approved. It is a conflict error, rather than outranking anything, for an agent with a step-1 entry or a mention agent whose tag names a level. Role aliases in steps 1 and 2 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override; the bundled seance agent's `model` overrides its source session's saved model as before.
+A call's per-call `model` (task item / flat call, eval `agent()` / `workpool()`; see below) replaces steps 2 and 3 when it is approved. It is a conflict error, rather than outranking anything, for an agent with a step-1 entry or a mention agent whose tag names a level. Role aliases in steps 1 and 2 are expanded through `modelRoles`. Host callers (SDK `runStructuredSubagent({ model })`, `omp cleanse --model`) supply an ungated model ahead of the settings override. The bundled seance uses its own order: explicit `model` → `task.agentModelOverrides.seance` → the source session's saved models; this also applies to `/seance [--model selector]`.
 
 ### Per-call `model`
 

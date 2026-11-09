@@ -54,7 +54,7 @@ import {
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createSessionDefaults } from "../helpers/session-defaults";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -289,6 +289,114 @@ describe("structured subagent primitive", () => {
 		} finally {
 			authStorage.close();
 			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("routes seance requests through the persisted model override unless this call selects another model", async () => {
+		using root = TempDir.createSync("@omp-seance-model-override-");
+		const cwd = path.join(root.path(), "project");
+		const agentDir = path.join(root.path(), "agent");
+		await fs.mkdir(cwd, { recursive: true });
+		const sourceFile = path.join(root.path(), "source.jsonl");
+		const sourceText = `${[
+			{ type: "session", version: 3, id: "override-source", timestamp: "2026-10-01T00:00:00.000Z", cwd },
+			{
+				type: "model_change",
+				id: "saved-model",
+				parentId: null,
+				timestamp: "2026-10-01T00:00:01.000Z",
+				model: "mock/seance-expensive",
+				role: "default",
+			},
+		]
+			.map(entry => JSON.stringify(entry))
+			.join("\n")}\n`;
+		await Bun.write(sourceFile, sourceText);
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			"task:\n  agentModelOverrides:\n    seance: '@consult'\nmodelRoles:\n  consult: mock/seance-cheap\n",
+		);
+		const settings = await Settings.loadIsolated({ cwd, agentDir });
+		const auth = await AuthStorage.create(":memory:");
+		auth.keys.setRuntime("mock", "test-key");
+		const sourceId = "seance-persistent-model-regression";
+		registerMockApi(sourceId);
+		const expensive = createMockModel({ id: "seance-expensive", handler: () => ({ content: ["expensive"] }) });
+		const cheap = createMockModel({ id: "seance-cheap", handler: () => ({ content: ["configured"] }) });
+		const explicit = createMockModel({ id: "seance-explicit", handler: () => ({ content: ["explicit"] }) });
+		const registry = new ModelRegistry(auth, path.join(root.path(), "models.yml"));
+		vi.spyOn(registry, "getAvailable").mockReturnValue([expensive, cheap, explicit]);
+		vi.spyOn(registry, "find").mockImplementation((provider, id) =>
+			provider === "mock" ? [expensive, cheap, explicit].find(model => model.id === id) : undefined,
+		);
+		const seance = getBundledAgent("seance");
+		if (!seance) throw new Error("Expected the bundled seance agent");
+		mockDiscovery(seance);
+		const parent = Object.assign(session({ cwd, settings }), {
+			authStorage: auth,
+			modelRegistry: registry,
+			restrictToolNames: true,
+			enableMCP: false,
+			enableLsp: false,
+			enableIrc: false,
+		});
+		const ids = ["ConfiguredSeance", "ExplicitSeance"];
+		const artifactDirs: string[] = [];
+		const previousAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		try {
+			const configured = await runStructuredSubagent(
+				request({
+					session: parent,
+					agent: "seance",
+					sourceSession: sourceFile,
+					structured: false,
+					identity: { id: ids[0] },
+					keepAlive: false,
+				}),
+			);
+			artifactDirs.push(configured.artifactsDir);
+			expect(configured.result.exitCode).toBe(0);
+			expect(configured.result.output).toBe("configured");
+			expect(cheap.calls).toHaveLength(1);
+			expect(expensive.calls).toHaveLength(0);
+
+			const overridden = await runStructuredSubagent(
+				request({
+					session: parent,
+					agent: "seance",
+					sourceSession: sourceFile,
+					model: "mock/seance-explicit",
+					structured: false,
+					identity: { id: ids[1] },
+					keepAlive: false,
+				}),
+			);
+			artifactDirs.push(overridden.artifactsDir);
+			expect(overridden.result.output).toBe("explicit");
+			expect(explicit.calls).toHaveLength(1);
+
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				"task:\n  agentModelOverrides:\n    seance: mock/unavailable-consult-model\n",
+			);
+			await expect(
+				runStructuredSubagent(request({ session: parent, agent: "seance", sourceSession: sourceFile })),
+			).rejects.toThrow("No available saved model can serve this source.");
+			expect(cheap.calls).toHaveLength(1);
+			expect(expensive.calls).toHaveLength(0);
+			expect(await Bun.file(sourceFile).text()).toBe(sourceText);
+		} finally {
+			for (const id of ids) {
+				await AgentRegistry.global().get(id)?.session?.dispose();
+				AgentRegistry.global().unregister(id);
+			}
+			for (const dir of artifactDirs) await fs.rm(dir, { recursive: true, force: true });
+			unregisterCustomApis(sourceId);
+			settings.cancelPendingSaves();
+			auth.close();
+			AgentStorage.close();
+			setAgentDir(previousAgentDir);
 		}
 	});
 

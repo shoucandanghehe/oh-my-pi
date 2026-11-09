@@ -1,2 +1,3 @@
-Historical consults: `agent: "seance"` with `sourceSession` (id/path); the source stays unchanged. `model` overrides the saved source model; set it when that one is absent/unavailable.
+Historical consults: use `agent: "seance"` with `sourceSession` (id/path); optional `model` overrides the saved source model. The source stays unchanged.
+Without explicit `model`, `task.agentModelOverrides.seance` takes precedence over saved source models. If the selected model is absent/unavailable, set `model` explicitly.
 When the user points at an earlier session, the consult IS the read: NEVER read, grep, or re-run its `.jsonl` here. Only facts that changed since (an open PR's state) need a live check.
