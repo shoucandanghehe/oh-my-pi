@@ -17,6 +17,193 @@
 - Nix builds with `withAppleFm = false` no longer compile the Apple Foundation Models bridge with the host's Xcode ([#18911](https://github.com/can1357/oh-my-pi/pull/18911))
 - Apple Silicon Nix builds include Apple Foundation Models support instead of silently building without it ([#16584](https://github.com/can1357/oh-my-pi/pull/16584) by [@honsunrise](https://github.com/honsunrise))
 - `ask` over RPC hosts without a form dialog now shows each prompt with the form's surrounding paragraphs, lists, preformatted blocks and tables instead of only the question ([#18927](https://github.com/can1357/oh-my-pi/issues/18927))
+### Breaking Changes
+
+- BTW metadata events no longer carry conversation snapshots or full turns; completed requests emit `terminal` events. Existing session journals are unchanged.
+- Removed unused `BTW_THREAD_CUSTOM_TYPE`, `BtwPausedRequest`, `RestoredBtwThread.pausedRequest`, and `CodexSearchParams` exports.
+- `EnhancedPasteHandlers.beginPaste` now returns a delivery object instead of also accepting a completion function.
+
+### Added
+
+- Extensions can import the form theme, the native span helpers (`styledSpans`, `compactText`, `rowsText` and the rest of the ANSI/span conversions), the `xd://` URL helpers (`parseXdUrl` and friends) and the `cfgExtensionTranscriptPresenters` setting handle from `@oh-my-pi/pi-coding-agent` instead of internal module paths, which stop the extension from loading when a file moves ([#18849](https://github.com/can1357/oh-my-pi/pull/18849) by [@materemias](https://github.com/materemias))
+- `/queue /compact [mode] [focus]` compacts after the current run finishes without interrupting it; queued input remains editable.
+- BTW and local subagent panes now support in-flight steering, queued messages, compaction, and history-tree navigation without affecting Main.
+- BTW and local subagent panes can stop and retry their own runs, show live tool output, and use pane-local clipboard attachments and draft editing without affecting Main.
+- Native BTW thread actions now open in a dropdown beside the toolbar, with keyboard navigation and the existing popup on older Tern versions.
+- Task and eval select general-purpose identities through the available `default` and `slow` agents; only higher identities from a classified Main model require session-wide approval. Approval and denial persist across resume regardless of underlying models; specialists and user-authorized exact-model agents need no tier approval.
+- Added `providers.openaiWebsockets: only` to keep Codex turns and streamed compaction on WebSockets without falling back to full-context SSE requests.
+- `/sleep [authorization]` keeps unattended runs moving: `ask`, approval prompts, and other dialogs fail at once instead of waiting for you, the agent decides within what you authorized or marks the step blocked, and long `bash`/`eval` calls move to the background instead of holding the turn. `/sleep off` ends it.
+
+### Changed
+
+- `worktree.base` and `OMP_WORKTREE_DIR` accept cwd-relative paths such as `.worktrees`; creation and `omp worktree list|clear --cwd` use the owning session or CLI directory. The default stays unchanged.
+
+### Fixed
+
+- `^model` tags now stay usable for any number of subagent spawns on the session branch, and tagging several models offers a pool to choose from instead of making the agent split work evenly across them.
+- Seance consultations now honor `task.agentModelOverrides.seance` as a persistent model default; task `model` and `/seance --model` still take precedence ([#16848](https://github.com/can1357/oh-my-pi/issues/16848)).
+- Nested task worktrees remain recoverable when their parent finishes, is retained, or is retried.
+- Native agent panes stack the first pair beside Main before expanding to a third column, then grow evenly within the two agent columns.
+- Native BTW panes open above Main when at least two other split panes are already open in the same tab.
+- Subagents keep their session-scoped MCP tools when browser settings change.
+- Agent workspace panes keep input hooks, queued-message editing, compaction and tree navigation bound to their own session when it runs on a worker thread.
+- `/pause` now includes worker-homed subagents and workers still starting; exiting paused preserves their transcripts without aborted turns, and `/continue` resumes each agent on its home thread.
+- `/btw` in a focused worker agent now runs on that agent's home thread and retains frozen native conversation context across follow-ups and restarts.
+- BTW conversations now preserve images in frozen Main summaries across resume and session rewrites.
+- Hindsight mental models seeded from now on refresh as full rewrites with a 1000-token page target and at most every 6 hours, instead of delta edits that only appended and grew past the injection budget.
+- Short mental models no longer waste injection budget: room they leave unused goes to longer models instead of truncating them at an even three-way split.
+- Per-call model selection now preserves named delegation tiers when multiple tiers share a model.
+- Side panes no longer trigger Main-only message actions or editor shortcuts, and subagent transcripts use their own tool and extension renderers.
+- BTW and subagent panes no longer accept `/clear`, preserving their conversation and task context; Main still supports it.
+- `/queue /compact` now completes the command and mode, and pending compaction is explicitly labeled above the composer.
+- HTML exports from preview binaries embed the matching fork viewer instead of requesting unavailable upstream assets.
+- Enhanced-paste image paths now attach correctly while later keystrokes wait for the paste.
+- Durable BTW conversations now retain image attachments, vision descriptions, and explicit side-command titles across resume and promotion.
+- Tool and system prompts no longer promise behavior the runtime lacks (read/grep/glob limits, edit-mode atomicity, LSP/GitHub/web-search parameters, Eval backends, `proc://` modes, memory and session notices); todo progress now reads `closed (completed or abandoned)` ([#15857](https://github.com/can1357/oh-my-pi/issues/15857)).
+- Non-interrupting TTSR prose reminders no longer claim that completed output was interrupted ([#15861](https://github.com/can1357/oh-my-pi/issues/15861)).
+- New Hindsight mental models use a 4096-token generation budget, configurable with `hindsight.mentalModelMaxTokens`, without changing existing models ([#6300](https://github.com/can1357/oh-my-pi/issues/6300)).
+- Hashline edits preserve required boundary lines when trimming them would break an otherwise valid replacement ([#16799](https://github.com/can1357/oh-my-pi/issues/16799)).
+- Native workspace panes now keep the correct split direction when reopened in background tabs or after resizing Main.
+- Fixed native workspace panes failing to rebalance in long-running Tern sessions; background tabs rebalance when selected.
+- Subagent transcript actions no longer operate Main: copy and retry stay in the child pane, while unsupported rewind and model-switch controls remain hidden.
+- Tern now supports durable BTW threads with native thread selection, drafts, follow-ups, copy, deletion, and promotion.
+- Tern can now show BTW and agent transcripts in native split panes beside Main, with shared session state and pane-local input.
+- Native agent and BTW panes in Tern now adapt to available space in a multi-column grid instead of stacking into one shrinking column.
+- Native agent panes now use full-width transcripts and sticky composers without Agent Hub popup chrome.
+- Native BTW panes now use a full-width conversation with a sticky composer, searchable thread switching, and on-demand thread actions.
+- BTW threads now generate and retain their own titles; Tern shows a single thread toolbar, read-only model facts, inline action buttons, prose summaries, and Send/Deny approval above the composer.
+- Audio and video files can now be attached from startup arguments or interactive `@file` mentions.
+- Custom image models can now use the OpenAI-compatible Images API in `models.yml`.
+- Task, scout, background-result, memory, and user-steering prompts now state facts instead of pushing mandatory delegation, resumption, proactive recall, or whole-task overrides.
+- Built-in Hindsight mental-model seeds now skip rules already written in AGENTS.md, skills, and other rule files.
+- Typing in a focused agent conversation now prewarms that agent's model connection instead of Main's.
+- Fixed consecutive clipboard image pastes being dropped while an earlier paste was still loading.
+- Fixed typing and input-method commits appearing before clipboard text pasted just ahead of them.
+- The todo tool description now warns that phase-wide `done`/`drop` overwrite already-dropped, blocked, or completed tasks, and that progress `done` counts include dropped tasks.
+- The workflowz notice no longer advertises a per-call `model` option for either `agent()` or `workpool()`; both helpers select through agent names.
+- The read tool description no longer claims `ssh://` directories can be searched with `grep`.
+- Codex native web search now rejects responses without valid structured sources instead of treating answer links as search evidence.
+- Concurrent native agent panes in Tern no longer time out while waiting for other panes to be placed.
+- Editing a queued message in Tern now restores the selected message and its images without losing other queued messages or the draft; editing live steering stops the current response and pauses automatic looping.
+- Ctrl+Enter now inserts a newline in Tern instead of sending the draft as a follow-up.
+- `/btw <question>` now starts inline in Tern; Enter opens the same durable conversation without sending it again.
+- BTW summary sharing now asks for confirmation in the originating conversation and displays readable source summaries in Main.
+- BTW transcripts no longer flicker while tool-call arguments stream.
+- Native agent and BTW split panes can now automatically even out without changing focus using the bundled `omp-workspace` Tern window plugin.
+- Fixed native workspace split balancing on Tern 0.9.4 without moving focus; background tabs rebalance when shown.
+- Native agent and BTW panes now keep automatic split balancing across concurrent opens, closes, and background tabs.
+- Native agent panes in Tern now tile beside Main as a grid that follows the window's shape instead of a row of narrow columns.
+- Resumed sessions in Tern no longer lose their transcript when native rendering activates during history replay.
+- Fixed `find` exhausting its deadline on a rate-limited judge despite a healthy fallback; later batches skip it until the earliest credential reset ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
+- Parent-agent IRC messages in agent panes now appear as IRC cards instead of user messages with raw steering markup.
+- Fixed native subagent and BTW panes not following new transcript output in Tern while preserving terminal-owned manual scrolling.
+- Fixed native agent and BTW panes flickering or temporarily showing an empty transcript in Tern.
+- Fixed concurrent native agent panes splitting from the same position in Tern.
+- Native BTW and agent panes no longer fail to open when an existing agent pane is detached or floating in a Tern picture-in-picture.
+- Opening native BTW and agent panes in Tern no longer leaks terminal protocol fragments into Main's input on WSL.
+- Tern native BTW and agent panes now launch correctly on Windows; WSL can also locate Tern through forwarded `LOCALAPPDATA`.
+- Fixed durable BTW replies failing with `Cannot access invalid private field`.
+- RPC queue restoration now preserves audio and video attachments when oversized responses omit images.
+- Tern now retains its native transcript, tool cards, and editor with app-viewport enabled, and restores the workspace if TSP negotiation fails ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2)).
+- Reworked agent, planning, delegation, and recovery guidance around evidence-driven execution, scoped autonomy, explicit approval boundaries, and proportionate verification.
+- Inline `/btw` questions are now durable threads from creation; Enter opens the same thread without an upgrade or repeated request, and dismissing a panel keeps its history.
+- BTW threads can now use web and structural search, memory lookups, and read-only LSP/GitHub operations, including `xd://` devices, while mutation and execution tools remain blocked.
+- BTW conversations now reuse Main's prompt cache: side requests declare Main's tool catalog while only read-only investigation calls execute.
+- Inline `/btw` answers now have the same read-only tools and summary sending as BTW threads.
+- Very large sessions now resume faster, while large agent transcript panes load incrementally and reflow only visible rows during split-pane resizing.
+- Changed BTW knowledge sharing: the BTW-only `xd://send_to_main_session` device publishes a user-approved, source-attributed summary into Main as `btw:summary` inbound context instead of steering Main with a synthetic user message.
+- Changed durable BTW panes to open with the thread rail collapsed by default, provide a `+ New BTW` action that immediately creates a blank thread, and let `/new` omit its first question.
+- BTW thread-rail hover previews and pinned expand/collapse actions now use a short interruptible slide animation.
+- Agent Hub now opens selected agents in persistent app-viewport workspace panes beside the sticky main-session editor, with pane-local transcript scrolling and the existing native-scrollback behavior preserved on other backends.
+- Agent transcript workspace panes now use the same reserved-column, draggable Braille scrollbar as the Main pane and global app viewport.
+- Pane drag-and-drop now previews the dragged transcript inside a themed destination frame without reflowing the live workspace.
+- Messageable Agent transcript panes now use the Main composer's full-width chrome, focus styling, labeled border, and empty-input placeholder.
+- Agent transcript workspace panes now use a responsive Main-style conversation shell with workspace-owned identity headers, rich composer metadata, compact low-height rendering, stable read-only Advisor geometry, and hover-aware interaction.
+- Resuming a session exited while paused no longer synthesizes an interrupted-turn abort; the transcript stays idle until `/continue`.
+- Updated the app-viewport preview workflow to build native addons through the Bazel pipeline after the legacy `build-native` action was removed.
+- User-appended instructions now retain their provenance even without generated append content and no longer claim to override higher-priority rules or approval requirements.
+- Workspace task clicks and hover highlights now honor session-level mouse settings.
+- Extension ask dialogs can now disable custom answers with `allowCustomInput: false`, consistently hiding the `Other (type your own)` option on host and collaboration guest UIs.
+- Interactive extensions can now detect `allowCustomInput` support through `ctx.ui.askDialogCapabilities` before relying on custom-answer suppression.
+- Added a return-to-bottom control beneath the Main app viewport scrollbar when transcript scrolling is detached, with hover feedback and click-to-resume following.
+- Added a host-local `localAskDialog` extension UI method for rich, scrollable decisions that must never be delegated to collaboration guests.
+- Added `/delete` to remove the selected durable BTW thread.
+- `/pause` waits until every live agent loop parks before the next model call, then allows `q` to exit with a durable `agents_paused` marker (`session_exit.kind = "paused"`).
+- `/continue` restarts agents after `omp --resume`; dismissing the pause screen resumes same-process loops, and neither path injects user-visible text.
+- Added explicit assistant thinking renderer result arms for extensions: `{ type: "append", component: Component }` keeps the existing supplemental rendering behavior, while `{ type: "replace", component: Component }` suppresses the default thinking Markdown so extensions can render the block themselves. Bare `Component` returns remain the legacy append shorthand. Thinking render contexts now include parent assistant message metadata and provider thinking content metadata for async renderer state.
+- Fixed app-viewport preview binaries failing to build.
+- Session shutdown now shows closing progress before waiting for live commands or session cleanup, and stops progress updates when cleanup completes or fails.
+- Double-Escape rewind opens quickly in long sessions, loading earlier turns and alternate branches as you navigate without discarding history.
+- Long app-viewport sessions restore and resize with visible content first, refining offscreen row counts in the background without shifting the reading position or text selection.
+- Reduced unrelated pane redraws during BTW, agent-transcript, and tool-progress updates.
+- Local agent panes now display their own extension widgets and statuses, including live TPS widgets, with cleanup on close and restoration on reopen.
+- Agent transcripts now open as ordinary draggable, resizable workspace panes without an enclosing Agents pane or a two-pane limit; automatic placement follows available space and preserves manually arranged panes.
+- Agents can leave optional tool, prompt, and harness feedback through `xd://roast`, saved locally in `roast.db` without uploading.
+- Clipboard images and text stay in the focused split-pane composer, including BTW drafts and replies, instead of leaking into Main.
+- Pasting an image and immediately pressing Enter waits for the attachment before submitting.
+- Clipboard copy no longer blocks terminal rendering, and Windows/WSL paste avoids repeated clipboard probes and waits that outlive subprocess timeouts.
+- Large app-viewport sessions no longer stutter while pending tool activity animates or the transcript scrolls.
+- Large app-viewport sessions now open and resize faster by keeping offscreen height measurement layout-only.
+- Workspace panes now reorganize into a balanced grid when a new subagent pane cannot fit the current split tree.
+- Revived historical subagents now reopen their background transcript panes.
+- BTW workspace panes now preserve the current scrolled position when tool-using replies finish.
+- Large resumed sessions now compute transcript height once without repeatedly syntax-highlighting offscreen history, keeping scrollbar geometry stable and subsequent frames responsive.
+- Added automatic background panes for running subagents; completed panes petrify through a multi-tone gray gradient before closing unless the user interacts with them.
+- Added `/debug petrify` and a matching Debug Tools entry to preview subagent pane petrification without starting a model or subagent.
+- Fixed dark stripes appearing across styled pane rows during the subagent petrification animation.
+- Fixed app-viewport Main, BTW, and subagent panes preserving live-tail following across text selection and exposing a working return-to-bottom control.
+- Fixed app-viewport text selections moving away from the pointer when output refreshes during a held drag.
+- Fixed app-viewport scroll jumps after session restore and while reading a streaming BTW reply.
+- Fixed the working-status spinner and elapsed time freezing during model output.
+- Fixed app-viewport startup and typing stalls in large sessions.
+- Fixed large-session scrollbar jumps and Ctrl+O/rapid-scroll stalls, including cold code blocks first entering the viewport; kept text selections fixed while output streams and made `/tree` selections update before branch replay.
+- Restoring hidden tool activity now keeps existing and newly added tool cards collapsed until Ctrl+O expands them.
+- Fixed concurrent app-viewport repaints leaving submitted text visible or freezing BTW input until the terminal resized.
+- Fixed long-session scrollbars filling the Main pane and full-history rendering during page or drag navigation.
+- Fixed app-viewport frame time growing with transcript size whenever new messages or tool cards were appended to large sessions.
+- Fixed Main pane wheel scrolling stopping above Todo and BTW cards in split-pane workspaces.
+- Fixed subagent pane updates shifting or overwriting content in the Main workspace pane.
+- Fixed inline BTW shortcuts stealing composer input after the panel was dismissed or while attachments were pending, and prevented late BTW operations from mutating replaced sessions.
+- Fixed durable BTW tools that require approval hanging before the prompt opens because the side transcript was waiting on Main's unrelated tool-preview gate.
+- Fixed durable BTW panes diverging from Main's transcript rendering: live and completed side turns now use the same tool cards, runtime tool metadata, and streamed-argument decoding.
+- Fixed the durable BTW pane's `New BTW` action to render as a hoverable button, reuse the active blank thread, and delete untouched blank threads when the pane closes.
+- Fixed BTW promotion dropping unsubmitted drafts of sibling threads: `abandon()` after a session transition must not write into the new session, so every durable child's draft is persisted before the branch is attempted.
+- Fixed silent loss of pane input submitted while a durable BTW reply is streaming: the submit is now consumed at the editor layer (the editor clears itself unconditionally on submit), keeping the drafted question and reporting that the reply is still running.
+- Fixed durable BTW pane status lines to follow the selected side thread's model, context usage, usage totals, session identity, and streaming state instead of Main, including live updates when switching threads.
+- Fixed Codex web search falling through GPT-5.6 Responses-Lite models to GPT-5.5: Lite models now use the native `/alpha/search` transport, including configured Codex proxy endpoints, while non-Lite models retain hosted Responses search ([#7319](https://github.com/can1357/oh-my-pi/issues/7319)).
+- Fixed plan approval freezing the TUI for the whole approved-plan run: the `xd://propose` completion started `handlePlanApproval` inside the event controller's serialized dispatch chain, so the operator's review choice and the blocking synthetic execution turn parked every subsequent agent event (streamed deltas, tool cards) behind an in-chain `await` — the agent executed with zero live rendering and the transcript only materialized after the run settled. The approval flow now runs off-chain, so events render in real time while the review is open and while the plan executes.
+- Fixed app-viewport selection copies replacing transcript rows that scrolled beyond the pane with blank lines in Main, Agent, and BTW panes.
+- Fixed tabbed lines in multiline Eval display values expanding across app-viewport workspace geometry and erasing the divider between conversation panes.
+- Fixed collapsed BTW thread-rail previews shifting the transcript and pane chrome left by one column when the overlay boundary crossed a double-width CJK character.
+- Fixed BTW thread-selection clicks being ignored while the thread rail was expanding.
+- Fixed selecting a thread from a hover preview either pinning the rail open or collapsing it immediately; the rail now stays temporary until the pointer leaves, while fixed rails remain open.
+- Fixed durable BTW conversations ending with an empty reply when a model attempted a tool call; denied calls now return an error tool result to the isolated child loop so it can continue with plain text, and the rejection history survives session restore.
+- Fixed right-clicking selected prompt text recalled with Up pasting the clipboard instead of copying the selection.
+- `/context`, `/session info`, and other immediate slash-command output now appears in the app viewport as soon as the command completes instead of remaining hidden until another prompt triggers a render.
+- Fixed Ctrl+O appearing to freeze large Advisor transcripts by expanding one viewport-anchored synthetic session update at a time while preserving its full Markdown rendering, instead of synchronously laying out every historical replay dump.
+- Fixed app-viewport sash dragging re-rendering the full main-session history, and restored Agent Hub toggle shortcuts while an agent pane has keyboard focus.
+- Restored the Main pane's proportional virtual scrollbar after moving transcript scrolling into the app-viewport workspace component, reusing the global viewport's Braille thumb style, reserved content column, and drag behavior.
+- Fixed pane drag-and-drop previews alternating between terminal white and the covered content's foreground color instead of using the active accent color.
+- Fixed dragged transcript previews appearing one cell down and right from their framed destination.
+- Fixed clicks in the app-viewport Main pane moving keyboard focus from an active `ask` or hook dialog to the detached editor, which made dialog navigation keys appear unresponsive.
+- Fixed copied text from app-viewport Main and agent panes including visual wrap newlines, per-row gutters, and pane scrollbars instead of logical transcript text, while keeping column-zero tool block content selectable.
+- Fixed active selections in app-viewport Main and agent panes staying on stale screen rows, failing to follow a stationary pointer during wheel scrolling, changing copied content, being cleared when a drag anchor moved offscreen, or highlighting the fixed input outside the origin scroll region.
+- Fixed Agent Hub opening as a partial, two-cell-narrow transparent overlay over an app-viewport workspace instead of an opaque bordered surface covering the full terminal geometry.
+- Fixed terminal progress and run-state titles switching to idle when either side of a concurrent main-session continuation and `/btw` request completed before the other; activity is now aggregated by owner, and non-terminal `agent_end` scheduling boundaries retain main-session ownership.
+- Fixed app-viewport pane focus chrome: all workspace headers now share `●`/`○` markers and focused/muted title colors, unfocused side-pane composers remain visible without showing hint text while focused, Agent/BTW composers use peer instances of Main's `StatusLineComponent` with the same live settings and exact segment/layout/background/cap/overflow rendering, and the BTW thread rail uses a centered divider chevron with a larger hover target; hovering the collapsed chevron peeks the rail without reflowing the transcript, spatial and brief leave tolerance prevent accidental closure, clicking a hovered thread pins it, and single-thread hover feedback remains active.
+- Fixed Agent workspace panes silently rendering Main's status line when their live `AgentSession` was unavailable; the pane now stays open, reports the missing session in its own status line, and switches in place to the target's `StatusLineComponent` when the session returns.
+- Fixed long-session UI lag during streaming and app-viewport scrolling: every compose re-rendered each settled `ToolExecutionComponent` (thousands of blocks re-walking their Box/renderer subtrees per frame, ~20µs × ~1.5k blocks ≈ 30ms per frame on a real 4k-message transcript). Settled tool blocks now memoize their rendered rows on (width, display key), cutting full frames from ~56ms to ~6ms; blocks with live inline images still re-render every frame to preserve image-budget side effects.
+- Fixed long app-viewport transcripts re-rendering every historical block for tail spinner and streaming updates by reusing unaffected transcript segments.
+- Fixed oversized Todo and BTW live panels hiding the editor in the app viewport; their rows now participate in viewport scrolling.
+- Fixed paused exits losing in-progress durable BTW requests; `/continue` now resumes them after session restore.
+- Fixed long durable BTW threads rebuilding their full transcript on every streaming update.
+- Fixed running subagent task cards moving after the compaction divider when the transcript is rebuilt.
+- Fixed Tern native rendering after entering WSL from PowerShell with app-viewport enabled.
+
+### Removed
+
+- Removed the durable BTW `/refresh` command and refresh journal event so a thread's frozen Main context and promotion anchor remain immutable for its lifetime.
+- Removed redundant hover/click guidance and the duplicate thread-count heading from the BTW thread rail.
 
 ### Added
 

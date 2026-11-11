@@ -59,6 +59,19 @@
 - Fixed Linux `press()` refusing with "AT-SPI action 'press' is unavailable" on Chromium and Electron menu items, list options and tabs, and on page elements whose only action is `doDefault`: a press now takes their `select` or `doDefault` action, as it already took `click` and `activate` ([#18921](https://github.com/can1357/oh-my-pi/pull/18921) by [@will-bogusz](https://github.com/will-bogusz))
 - macOS input from a second omp process no longer refuses with `UserIntervened` after the first process takes over a click in the same app; hardware clicks still pause input in that app ([#18896](https://github.com/can1357/oh-my-pi/pull/18896) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `omp worktree add` — and the bash tool's `git worktree add` rewrite — exiting 1 with `git: 'hook' is not a git command` on Git older than 2.36 (such as Git 2.34 on Ubuntu 22.04) after the worktree had already been created ([#18935](https://github.com/can1357/oh-my-pi/pull/18935) by [@Bensonluo](https://github.com/Bensonluo))
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Changed
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Fixed
+
+- Linux/glibc builds again return unused native heap pages to the OS after tool work goes idle, including memory released later by the JavaScript GC.
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
+- Fixed in-project isolation and cloned worktrees recursively copying their own storage; `isoStart` and `worktreeAdd` now accept exact storage-directory exclusions.
 
 ## [18.19.0] - 2026-11-12
 

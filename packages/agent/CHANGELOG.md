@@ -7,6 +7,22 @@
 ### Changed
 
 - `prepareCompaction()` runs as the `compaction.prepare` loop phase, so a `ui.loop-blocked` stall from a cold token walk over a long branch names compaction instead of "unknown" ([#15027](https://github.com/can1357/oh-my-pi/issues/15027), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
+### Added
+
+- Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
+- `agentPauseGate` now tracks active loops and model-boundary waiters (`ready`, `activeLoopCount`, `modelWaiterCount`) so hosts can wait for a durable pause barrier.
+- `PAUSE_SHUTDOWN_ABORT_REASON` ends a parked loop without synthesizing an aborted assistant turn, for process exit after a barrier pause.
+- Added route-resolved media propagation and remote-compaction parity, including top-level Responses audio and typed rejection of unsupported tool-result media.
+- Added `advertisedTools` (and `advertiseParentTools` for `createChild()`) to declare a different tool catalog to the provider than the tools a loop may execute, so a restricted child can share its parent's cached prompt prefix.
+
+### Changed
+
+- Process-wide pause only parks before the next model call (in-flight tools always finish) so a barrier exit leaves a continuable transcript.
+- Incremental compaction summaries now drop goals, steps, and constraints the user cancelled or replaced instead of carrying every earlier item forward.
+
+### Fixed
+
+- Paused agents now report readiness after asynchronous credential resolution.
 
 ## [18.18.9] - 2026-11-11
 
