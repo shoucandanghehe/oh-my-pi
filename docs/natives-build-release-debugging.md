@@ -40,7 +40,7 @@ Root `BUILD.bazel` instantiates one `native_addon` per Bazel-built `(platform, a
 | Target                               | Platform                                    | Canonical output                      |
 | ------------------------------------ | ------------------------------------------- | ------------------------------------- |
 | `//:natives-linux-x64-baseline`      | `//bazel/platforms:linux-x64-baseline`      | `pi_natives.linux-x64-baseline.node`  |
-| `//:natives-linux-x64-modern`        | `//bazel/platforms:linux-x64-modern`        | `pi_natives.linux-x64-modern.node`    |
+| `//:natives-linux-x64-modern`        | `//bazel/platforms:linux-x64-baseline` (shared) | `pi_natives.linux-x64-modern.node` |
 | `//:natives-linux-arm64`             | `//bazel/platforms:linux-arm64`             | `pi_natives.linux-arm64.node`         |
 | `//:natives-linux-musl-x64-baseline` | `//bazel/platforms:linux-musl-x64-baseline` | `pi_natives.linux-x64-baseline.node`  |
 | `//:natives-linux-musl-arm64`        | `//bazel/platforms:linux-musl-arm64`        | `pi_natives.linux-arm64.node`         |
@@ -58,7 +58,7 @@ Notes:
 
 ### 2) `native_addon` rule (`bazel/defs.bzl`)
 
-`native_addon` wraps `//crates/pi-natives:pi_natives` (a `rust_shared_library`) in a configuration transition that pins, per target:
+`native_addon` wraps the selected `rust_shared_library` in a configuration transition that pins, per target:
 
 - `--platforms=<the addon's platform>`
 - `--compilation_mode=opt`
@@ -67,7 +67,9 @@ Notes:
 
 This mirrors the old cargo `ci` profile. Because the profile lives **in the transition**, a bare `bazel build //:natives-<t>` is always release-grade regardless of `-c`, and every addon shares one cache entry per (platform, source) pair. The rule then symlinks the produced shared library to the loader's canonical `pi_natives.<platform>-<arch>[-<variant>].node` name, scoped under the rule name (`bazel-bin/natives-<t>/…`) so gnu/musl outputs with identical basenames cannot collide at the package level.
 
-Per-target codegen that is not part of the transition lives in `crates/pi-natives/BUILD.bazel` `rustc_flags` selects: `-Ctarget-cpu=x86-64-v2` (baseline) / `x86-64-v3` (modern) via `//bazel/variants`, the napi link args (`-Wl,-undefined,dynamic_lookup` on macOS, `-Wl,-z,nodelete` on linux — `build.rs`/`napi_build::setup()` is deliberately not wired in), `-Ctarget-feature=-crt-static` for musl, and `-Ctarget-feature=+crt-static` for win32 msvc, x64 and arm64 (paired with the `static_link_msvcrt` cc feature enabled in the `native_addon` transition so the C deps compile `/MT` in lock-step — the shipped `.node` then imports no `VCRUNTIME140.dll` from the VC++ Redistributable). The Cargo host path applies the same `+crt-static` policy to local Windows ARM64 builds in `build-bindings.ts`.
+The two Linux x64 addons use the same glibc 2.17 baseline platform and release settings, so `pi-builtins`, `pi-shell`, and their transitive dependencies have one configured build. Only the final addon and its embedded OAuth relay differ: `pi_natives` uses x86-64-v2, while `pi_natives_modern` and `oauth_callback_relay_modern` explicitly use x86-64-v3. They retain separate outputs and the existing loader filenames; native target builds remain sequential.
+
+Per-target codegen that is not part of the transition lives in `crates/pi-natives/BUILD.bazel`: ISA flags on the addon and relay targets, the napi link args (`-Wl,-undefined,dynamic_lookup` on macOS, `-Wl,-z,nodelete` on linux — `build.rs`/`napi_build::setup()` is deliberately not wired in), `-Ctarget-feature=-crt-static` for musl, and `-Ctarget-feature=+crt-static` for win32 msvc, x64 and arm64 (paired with the `static_link_msvcrt` cc feature enabled in the `native_addon` transition so the C deps compile `/MT` in lock-step — the shipped `.node` then imports no `VCRUNTIME140.dll` from the VC++ Redistributable). The Cargo host path applies the same `+crt-static` policy to local Windows ARM64 builds in `build-bindings.ts`.
 
 ### 3) Platforms and toolchains
 
@@ -181,8 +183,8 @@ repository downloads and xwin payloads under
 `$RUNNER_TOOL_CACHE/omp-bazel-cache`. `.github/actions/native-build` always asks
 Bazel to validate the current inputs; it neither restores nor uploads GitHub
 addon snapshots. Bun retains its normal package store in the service account's
-home. GitHub-hosted runners retain the source-matched addon and restorable disk
-cache path; vmon retains its existing HTTP-cache path.
+home. These actions target the fixed self-hosted runners only; hosted and vmon
+cache paths are no longer maintained.
 
 Raw addons land in `ci-natives/natives-<target>/`. Installation with
 `scripts/bazel-natives.ts --source` stamps the current package version into a

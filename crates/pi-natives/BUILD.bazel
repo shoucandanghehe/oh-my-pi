@@ -43,7 +43,11 @@ darwin_helper(
 darwin_helper(
     name = "capture_darwin_helper",
     src = "src/desktop/macos/capture/helper.m",
-    frameworks = ["AppKit", "ScreenCaptureKit", "CoreGraphics"],
+    frameworks = [
+        "AppKit",
+        "ScreenCaptureKit",
+        "CoreGraphics",
+    ],
     minimum_macos = "14.0",
 )
 
@@ -68,32 +72,45 @@ applefm_bridge(
     target_compatible_with = ["@platforms//os:macos"],
 )
 
-rust_binary(
-    name = "oauth_callback_relay",
-    srcs = [
-        "src/oauth_callback/publication.rs",
-        "src/oauth_callback/relay.rs",
-    ],
-    crate_root = "src/oauth_callback/relay.rs",
-    edition = "2024",
-    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
-    rustc_flags = [
-        "-Ccodegen-units=1",
-        "-Copt-level=z",
-        "-Cpanic=abort",
-        "-Cstrip=symbols",
-    ] + select({
+_NATIVE_VARIANTS = {
+    "": select({
         "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
         "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
         "//conditions:default": [],
-    }) + select({
-        "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
-        "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
-        "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
-        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
-        "//conditions:default": [],
     }),
-)
+    "_modern": ["-Ctarget-cpu=x86-64-v3"],
+}
+
+[
+    rust_binary(
+        name = "oauth_callback_relay" + suffix,
+        srcs = [
+            "src/oauth_callback/publication.rs",
+            "src/oauth_callback/relay.rs",
+        ],
+        crate_name = "oauth_callback_relay",
+        crate_root = "src/oauth_callback/relay.rs",
+        edition = "2024",
+        rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
+        rustc_flags = [
+            "-Ccodegen-units=1",
+            "-Copt-level=z",
+            "-Cpanic=abort",
+            "-Cstrip=symbols",
+        ] + isa_flags + select({
+            "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+            "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+            "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+            "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+            "//conditions:default": [],
+        }),
+        target_compatible_with = [
+            "@platforms//os:linux",
+            "@platforms//cpu:x86_64",
+        ] if suffix else [],
+    )
+    for suffix, isa_flags in _NATIVE_VARIANTS.items()
+]
 
 # Posts the releases of keys and buttons an input request still holds when
 # the host dies (src/desktop/macos/release_guard.rs). Shares release.rs and
@@ -124,97 +141,103 @@ rust_binary(
 # TypeScript typedef regeneration stays a cargo-side dev flow
 # (`bun --cwd packages/natives run build:bindings`); index.js/index.d.ts are
 # committed, so artifact builds never need the napi CLI.
-rust_shared_library(
-    name = "pi_natives",
-    srcs = glob(["src/**/*.rs"]),
-    aliases = aliases(),
-    compile_data = [":syntax_set"] + glob([
-        "src/syntaxes/*.sublime-syntax",
-        "src/fonts/*",
-        "data/*.bin.zst",
-        "src/utok/claude/testdata/*.json",
-        "src/desktop/linux/wayland/testdata/*.xkb",
-        "fixtures/*.json",
-        "fixtures/hpatch/*",
-    ]) + select({
-        "@platforms//os:macos": [
-            ":applefm_bridge",
-            ":oauth_callback_darwin_helper",
-            ":capture_darwin_helper",
-            ":keymap_darwin_helper",
-            ":input_release_helper",
+# The modern addon and relay select their ISA here, not through a different
+# platform, so both Linux x64 addons share their transitive dependency actions.
+[
+    rust_shared_library(
+        name = "pi_natives" + suffix,
+        srcs = glob(["src/**/*.rs"]),
+        aliases = aliases(),
+        compile_data = [":syntax_set"] + glob([
+            "src/syntaxes/*.sublime-syntax",
+            "src/fonts/*",
+            "data/*.bin.zst",
+            "src/utok/claude/testdata/*.json",
+            "src/desktop/linux/wayland/testdata/*.xkb",
+            "fixtures/*.json",
+            "fixtures/hpatch/*",
+        ]) + select({
+            "@platforms//os:macos": [
+                ":applefm_bridge",
+                ":oauth_callback_darwin_helper",
+                ":capture_darwin_helper",
+                ":keymap_darwin_helper",
+                ":input_release_helper",
+            ],
+            "//conditions:default": [":oauth_callback_relay" + suffix],
+        }),
+        crate_features = [],
+        crate_root = "src/lib.rs",
+        edition = "2024",
+        proc_macro_deps = all_crate_deps(proc_macro = True),
+        rustc_env = select({
+            "@platforms//os:macos": {
+                "OMP_APPLEFM_BRIDGE": "$(execpath :applefm_bridge)",
+                "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
+                "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
+                "OMP_CAPTURE_DARWIN_HELPER": "$(execpath :capture_darwin_helper)",
+                "OMP_KEYMAP_DARWIN_HELPER": "$(execpath :keymap_darwin_helper)",
+                "OMP_INPUT_RELEASE_HELPER": "$(execpath :input_release_helper)",
+            },
+            "//conditions:default": {
+                "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay{})".format(suffix),
+                "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
+            },
+        }),
+        rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
+        rustc_flags = isa_flags + select({
+            # napi_build::setup() equivalents (build.rs is not wired into Bazel):
+            # napi addons resolve Node symbols at load time on macOS; DF_1_NODELETE
+            # keeps the addon resident across Worker teardown on linux-gnu (napi
+            # emits it for gnu; harmless under musl's loader). windows-msvc needs
+            # nothing — napi-sys v3 imports node.exe via raw-dylib.
+            # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
+            # x86_64; every shipped darwin addon carries a signature.
+            # -install_name: otherwise the addon's id is its sandbox output path.
+            "@platforms//os:macos": [
+                "-Clink-arg=-Wl,-undefined,dynamic_lookup",
+                "-Clink-arg=-Wl,-adhoc_codesign",
+                "-Clink-arg=-Wl,-install_name,@rpath/libpi_natives.dylib",
+            ],
+            "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
+            "//conditions:default": [],
+        }) + select({
+            # musl defaults to +crt-static, under which rustc silently emits no
+            # cdylib at all; napi musl addons have always linked the dynamic CRT.
+            "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+            "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+            # Statically link the MSVC CRT so the shipped .node does not import
+            # VCRUNTIME140.dll from the Visual C++ Redistributable, which is absent
+            # on a clean Windows install and makes the loader's dlopen fail with
+            # "The specified module could not be found" (error 126). The C deps are
+            # switched to /MT in lock-step via the static_link_msvcrt cc feature in
+            # the native_addon transition (bazel/defs.bzl).
+            "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+            "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+            "//conditions:default": [],
+        }),
+        target_compatible_with = [
+            "@platforms//os:linux",
+            "@platforms//cpu:x86_64",
+        ] if suffix else [],
+        version = "17.1.5",
+        deps = all_crate_deps(normal = True) + [
+            "//crates/pi-ast",
+            "//crates/pi-builtins",
+            "//crates/pi-diff",
+            "//crates/pi-edit",
+            "//crates/pi-iso",
+            "//crates/pi-predict",
+            "//crates/pi-shell",
+            "//crates/pi-vcs",
+            "//crates/pi-vfs",
+            "//crates/pi-voice",
+            "//crates/pi-walker",
+            "//crates/vendor/napi",
         ],
-        "//conditions:default": [":oauth_callback_relay"],
-    }),
-    crate_features = [],
-    edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    rustc_env = select({
-        "@platforms//os:macos": {
-            "OMP_APPLEFM_BRIDGE": "$(execpath :applefm_bridge)",
-            "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
-            "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
-            "OMP_CAPTURE_DARWIN_HELPER": "$(execpath :capture_darwin_helper)",
-            "OMP_KEYMAP_DARWIN_HELPER": "$(execpath :keymap_darwin_helper)",
-            "OMP_INPUT_RELEASE_HELPER": "$(execpath :input_release_helper)",
-        },
-        "//conditions:default": {
-            "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay)",
-            "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
-        },
-    }),
-    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
-    rustc_flags = select({
-        "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
-        "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
-        "//conditions:default": [],
-    }) + select({
-        # napi_build::setup() equivalents (build.rs is not wired into Bazel):
-        # napi addons resolve Node symbols at load time on macOS; DF_1_NODELETE
-        # keeps the addon resident across Worker teardown on linux-gnu (napi
-        # emits it for gnu; harmless under musl's loader). windows-msvc needs
-        # nothing — napi-sys v3 imports node.exe via raw-dylib.
-        # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
-        # x86_64; every shipped darwin addon carries a signature.
-        # -install_name: otherwise the addon's id is its sandbox output path.
-        "@platforms//os:macos": [
-            "-Clink-arg=-Wl,-undefined,dynamic_lookup",
-            "-Clink-arg=-Wl,-adhoc_codesign",
-            "-Clink-arg=-Wl,-install_name,@rpath/libpi_natives.dylib",
-        ],
-        "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
-        "//conditions:default": [],
-    }) + select({
-        # musl defaults to +crt-static, under which rustc silently emits no
-        # cdylib at all; napi musl addons have always linked the dynamic CRT.
-        "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
-        "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
-        # Statically link the MSVC CRT so the shipped .node does not import
-        # VCRUNTIME140.dll from the Visual C++ Redistributable, which is absent
-        # on a clean Windows install and makes the loader's dlopen fail with
-        # "The specified module could not be found" (error 126). The C deps are
-        # switched to /MT in lock-step via the static_link_msvcrt cc feature in
-        # the native_addon transition (bazel/defs.bzl).
-        "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
-        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
-        "//conditions:default": [],
-    }),
-    version = "17.1.5",
-    deps = all_crate_deps(normal = True) + [
-        "//crates/pi-ast",
-        "//crates/pi-builtins",
-        "//crates/pi-diff",
-        "//crates/pi-edit",
-        "//crates/pi-walker",
-        "//crates/pi-iso",
-        "//crates/pi-predict",
-        "//crates/pi-shell",
-        "//crates/pi-vcs",
-        "//crates/pi-vfs",
-        "//crates/pi-voice",
-        "//crates/vendor/napi",
-    ],
-)
+    )
+    for suffix, isa_flags in _NATIVE_VARIANTS.items()
+]
 
 rust_test(
     name = "oauth_callback_relay_test",

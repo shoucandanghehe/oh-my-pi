@@ -13,26 +13,27 @@ exports_files([
     "Cargo.lock",
     "rustfmt.toml",
 ])
+
 _ADDONS = {
-    "linux-x64-baseline": ("//bazel/platforms:linux-x64-baseline", "pi_natives.linux-x64-baseline.node"),
-    "linux-x64-modern": ("//bazel/platforms:linux-x64-modern", "pi_natives.linux-x64-modern.node"),
-    "linux-arm64": ("//bazel/platforms:linux-arm64", "pi_natives.linux-arm64.node"),
-    "linux-musl-x64-baseline": ("//bazel/platforms:linux-musl-x64-baseline", "pi_natives.linux-x64-baseline.node"),
-    "linux-musl-arm64": ("//bazel/platforms:linux-musl-arm64", "pi_natives.linux-arm64.node"),
-    "darwin-x64-baseline": ("//bazel/platforms:darwin-x64-baseline", "pi_natives.darwin-x64-baseline.node"),
-    "darwin-arm64": ("//bazel/platforms:darwin-arm64", "pi_natives.darwin-arm64.node"),
-    "win32-x64-baseline": ("//bazel/platforms:win32-x64-baseline", "pi_natives.win32-x64-baseline.node"),
-    "win32-arm64": ("//bazel/platforms:win32-arm64", "pi_natives.win32-arm64.node"),
+    "linux-x64-baseline": ("//bazel/platforms:linux-x64-baseline", "pi_natives", "pi_natives.linux-x64-baseline.node"),
+    "linux-x64-modern": ("//bazel/platforms:linux-x64-baseline", "pi_natives_modern", "pi_natives.linux-x64-modern.node"),
+    "linux-arm64": ("//bazel/platforms:linux-arm64", "pi_natives", "pi_natives.linux-arm64.node"),
+    "linux-musl-x64-baseline": ("//bazel/platforms:linux-musl-x64-baseline", "pi_natives", "pi_natives.linux-x64-baseline.node"),
+    "linux-musl-arm64": ("//bazel/platforms:linux-musl-arm64", "pi_natives", "pi_natives.linux-arm64.node"),
+    "darwin-x64-baseline": ("//bazel/platforms:darwin-x64-baseline", "pi_natives", "pi_natives.darwin-x64-baseline.node"),
+    "darwin-arm64": ("//bazel/platforms:darwin-arm64", "pi_natives", "pi_natives.darwin-arm64.node"),
+    "win32-x64-baseline": ("//bazel/platforms:win32-x64-baseline", "pi_natives", "pi_natives.win32-x64-baseline.node"),
+    "win32-arm64": ("//bazel/platforms:win32-arm64", "pi_natives", "pi_natives.win32-arm64.node"),
 }
 
 [
     native_addon(
         name = "natives-" + target,
-        lib = "//crates/pi-natives:pi_natives",
         out = out,
+        lib = "//crates/pi-natives:" + lib,
         platform = platform,
     )
-    for target, (platform, out) in _ADDONS.items()
+    for target, (platform, lib, out) in _ADDONS.items()
 ]
 
 # Every shipped addon. Linux hosts (the vmon CI runners) build all of them: the

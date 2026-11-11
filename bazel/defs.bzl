@@ -1,6 +1,6 @@
 """Rules for producing release-grade, canonically named pi_natives addons.
 
-`native_addon` transitions //crates/pi-natives:pi_natives onto a shipping
+`native_addon` transitions the selected pi_natives library onto a shipping
 platform with the release codegen profile (opt, thin LTO, cgu=16, stripped —
 mirrors the cargo `ci` profile) and renames the produced shared library to the
 loader's canonical `pi_natives.<platform>-<arch>[-<variant>].node` filename.
@@ -65,6 +65,7 @@ def _native_addon_impl(ctx):
             ctx.attr.lib[0].label,
             [f.short_path for f in libs],
         ))
+
     # Scope under the rule name: gnu and musl addons share canonical filenames
     # (the loader never sees both), so bare package-level outputs would collide.
     out = ctx.actions.declare_file(ctx.label.name + "/" + ctx.attr.out)
@@ -79,7 +80,7 @@ native_addon = rule(
         "lib": attr.label(
             cfg = _addon_transition,
             mandatory = True,
-            doc = "The rust_shared_library target (//crates/pi-natives:pi_natives).",
+            doc = "The rust_shared_library target for the addon's ISA.",
         ),
         "platform": attr.label(
             mandatory = True,
