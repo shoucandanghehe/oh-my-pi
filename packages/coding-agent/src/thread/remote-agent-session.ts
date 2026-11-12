@@ -220,7 +220,6 @@ function emptyViewState(): SessionViewState {
 		queuedMessages: { steering: [], followUp: [], liveSteered: 0 },
 		restorableQueue: { steering: [], followUp: [] },
 		editableQueue: { steering: [], followUp: [] },
-		approvals: { scopes: [], grants: [] },
 		ephemeralMaxTokensPreservesRequest: false,
 		settings: { base: null, layers: [] },
 		activeToolExecutionUpdates: [],

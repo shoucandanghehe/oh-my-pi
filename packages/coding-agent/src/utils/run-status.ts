@@ -56,6 +56,7 @@ const runtime: {
 	reported: string | undefined;
 	/** The `working` status a command-line prompt holds from startup until its run reports. */
 	startup: RunFlowStatus | undefined;
+	setTitleState(state: TerminalTitleState): void;
 } = {
 	status: { state: "idle" },
 	dialogs: [],
@@ -63,6 +64,7 @@ const runtime: {
 	disposed: false,
 	reported: undefined,
 	startup: undefined,
+	setTitleState: setTerminalTitleState,
 };
 
 /** What every surface shows: the newest open dialog, else the event flow's status. */
@@ -75,6 +77,7 @@ function titleState(status: RunStatus): TerminalTitleState {
 	if (status.state === "blocked") return "attention";
 	return "idle";
 }
+
 /**
  * Base64 of `text` as one line of control-free UTF-8 within the `msg` limit, or
  * undefined when nothing printable remains. A terminal discards the whole
@@ -106,7 +109,7 @@ function report(): void {
 }
 
 function publish(): void {
-	setTerminalTitleState(titleState(shownStatus()));
+	runtime.setTitleState(titleState(shownStatus()));
 	report();
 }
 
@@ -173,15 +176,19 @@ export function resendProgramStatus(): void {
  * this terminal would take as "finished" before the prompt even starts.
  * {@link settleStartupRun} ends that hold.
  */
-export function initProgramStatus(options?: { startupRun?: boolean }): void {
+export function initProgramStatus(options?: {
+	startupRun?: boolean;
+	setTitleState?(state: TerminalTitleState): void;
+}): void {
 	runtime.disposed = false;
 	runtime.dialogs.length = 0;
 	runtime.startup = undefined;
+	runtime.setTitleState = options?.setTitleState ?? setTerminalTitleState;
 	if (options?.startupRun) {
 		runtime.startup = { state: "working" };
 		runtime.status = runtime.startup;
 		// Not `setRunStatus`: the record waits for `setProgramStatusEnabled`, but the title follows now.
-		setTerminalTitleState(titleState(shownStatus()));
+		runtime.setTitleState(titleState(shownStatus()));
 	}
 }
 
@@ -204,4 +211,5 @@ export function settleStartupRun(): void {
 export function disposeProgramStatus(): void {
 	clear();
 	runtime.disposed = true;
+	runtime.setTitleState("idle");
 }

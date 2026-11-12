@@ -197,7 +197,6 @@ export interface SessionViewState {
 	restorableQueue: SessionRestorableQueue;
 	/** Ids in displayed chip order, including live steering; edits resolve by identity on home. */
 	editableQueue: { steering: string[]; followUp: string[] };
-	approvals: SessionApprovalState;
 	ephemeralMaxTokensPreservesRequest: boolean;
 	settings: SessionSettingsSource;
 	/**

@@ -3989,13 +3989,7 @@ async function executeToolCalls(
 			concurrency === "shared" && sharedEffects.length > 0
 				? Promise.allSettled(sharedEffects).then(() => undefined)
 				: undefined;
-		const task = start.then(async () => {
-			try {
-				await runTool(record, index, earlierEffectsSettled);
-			} finally {
-				refreshPauseState();
-			}
-		});
+		const task = start.then(() => runTool(record, index, earlierEffectsSettled));
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;

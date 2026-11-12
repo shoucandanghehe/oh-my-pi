@@ -337,7 +337,7 @@ describe("task spawn validation", () => {
 				},
 			}),
 		);
-		const text = tool.description.split("\n").find(line => line.includes("`model`: one exact")) ?? "";
+		const text = tool.description.split("`model`: one exact")[1]?.split(/\n(?:- `|# )/, 1)[0] ?? "";
 		for (const advertised of ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]) expect(text).toContain(advertised);
 		for (const omitted of ["hidden/image", "hidden/judge", "`@smol`", "`pi/slow`", "`*`", "`default`", "`inherit`"]) {
 			expect(text).not.toContain(omitted);

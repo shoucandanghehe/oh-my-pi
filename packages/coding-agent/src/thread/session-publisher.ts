@@ -522,10 +522,6 @@ export class SessionPublisher {
 					.map(message => queuedEntry(message).id),
 				followUp: followUp.map(message => queuedEntry(message).id),
 			},
-			approvals: {
-				scopes: session.extensionRunner?.sessionApprovalKeys() ?? [],
-				grants: sessionApprovalGrantKeys(session.settings.getAgentDir(), session.sessionManager.getSessionId()),
-			},
 			ephemeralMaxTokensPreservesRequest: session.ephemeralMaxTokensPreservesRequest(),
 			settings: settingsSource(session.settings),
 		};

@@ -9636,7 +9636,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		await this.#prewalk.beginAutoTask();
 		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
 		const autoParallel = message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
-		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued", attachments);
+		const preparation = await this.#prepareAgentStart(
+			message,
+			prompt,
+			images,
+			generation,
+			signal,
+			"queued",
+			attachments,
+		);
 		const decision = await autoPrewalk;
 		const plan = await autoParallel;
 		return {

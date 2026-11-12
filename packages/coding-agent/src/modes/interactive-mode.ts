@@ -3076,7 +3076,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
-		initProgramStatus({ startupRun: options.startupRun });
+		initProgramStatus({
+			startupRun: options.startupRun,
+			setTitleState: state => {
+				if (state === "idle") this.terminalActivity.release(initProgramStatus);
+				else this.terminalActivity.set(initProgramStatus, state);
+			},
+		});
 		if (options.startupRun) this.terminalActivity.set(this, "working");
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.

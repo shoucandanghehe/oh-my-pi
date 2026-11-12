@@ -879,12 +879,8 @@ describe("html form", () => {
 				const path = findPath(root, node => node.k === "tabs")!;
 				let tabs: NativeNode = root;
 				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
-				const items = (tabs.p && "items" in tabs.p ? tabs.p.items : undefined) ?? [];
-				return items.flatMap(tab =>
-					typeof tab === "object" && "id" in tab && Array.isArray(tab.label) && tab.label[0]?.t === "✓ "
-						? [tab.id]
-						: [],
-				);
+				const items = tabs.k === "tabs" ? (tabs.p?.items ?? []) : [];
+				return items.flatMap(tab => (Array.isArray(tab.label) && tab.label[0]?.t === "✓ " ? [tab.id] : []));
 			};
 			// Both questions start with valid preselected answers, yet neither has been visited.
 			expect(checked()).toEqual([]);
@@ -930,8 +926,8 @@ describe("html form", () => {
 			const tabs = findPath(root, node => node.k === "tabs")!;
 			let strip: NativeNode = root;
 			for (const key of tabs.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
+			const items = strip.k === "tabs" ? (strip.p?.items ?? []) : [];
+			expect(items.map(item => item.id)).toEqual(["t0", "t1", "t2", "t3", "review"]);
 			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
 			const editorTab = form.describe(CX);
 			expect(textsOf(editorTab)).toContain("Editor");
@@ -987,11 +983,11 @@ describe("html form", () => {
 			const path = findPath(root, node => node.k === "tabs")!;
 			let strip: NativeNode = root;
 			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+			const items = strip.k === "tabs" ? (strip.p?.items ?? []) : [];
+			expect(items.map(item => item.id)).toEqual(["t0", "t1", "review"]);
 			// The shared tab is named after Name, the question the keyboard reaches.
 			const first = items[0];
-			expect(first && "label" in first && typeof first.label !== "string" ? first.label[0]?.t : "").toBe("Name");
+			expect(first && Array.isArray(first.label) ? first.label[0]?.t : "").toBe("Name");
 			// Focus opens on Name, the first control the keyboard reaches; the shown tab holds it.
 			expect(textsOf(root)).toContain("Name");
 		});
@@ -1005,8 +1001,8 @@ describe("html form", () => {
 			const path = findPath(root, node => node.k === "tabs")!;
 			let strip: NativeNode = root;
 			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
+			const items = strip.k === "tabs" ? (strip.p?.items ?? []) : [];
+			expect(items.map(item => item.id)).toEqual(["t0", "t1", "review"]);
 		});
 
 		it("natively: the form sits in the card's shrinking, scrolling list and the action bar stays outside it", () => {
