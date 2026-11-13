@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -8,6 +8,7 @@ import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	type RecoveryCompactionResult,
 	kUsageLimitRequestProvider,
@@ -138,6 +139,25 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("restores a failed turn when recovery only rebuilds the same revised compaction projection", async () => {
+		const manager = SessionManager.inMemory();
+		const kept = manager.appendMessage({ role: "user", content: "retained request", timestamp: 1 });
+		manager.appendCompaction("summary", undefined, kept, 100);
+		const compaction = manager.getBranch().at(-1);
+		if (compaction?.type !== "compaction") throw new Error("Expected compaction");
+		await manager.appendContextRevision([{ ...compaction, warning: "existing warning" }]);
+		const failed = makeMessage([{ type: "text", text: "partial output before failure" }], model);
+		const failedId = manager.appendMessage(failed);
+		const host = createHost(model, modelRegistry);
+		host.sessionManager = manager;
+		host.agent = new Agent({ initialState: { model, messages: manager.buildSessionContext().messages } });
+		host.persistedAssistantEntryId = () => failedId;
+		await new TurnRecovery(host).runRecoveryCompactionWithRollback("overflow", failed, { autoContinue: false });
+		expect(host.agent.state.messages.at(-1)).toEqual(failed);
+		expect(manager.getEntry(failedId)).toMatchObject({ type: "message", message: failed });
+		expect(manager.getBranch().at(-1)).toMatchObject({ type: "message", message: failed });
 	});
 
 	it("rolls back a usage fallback cancelled during model reconciliation", async () => {

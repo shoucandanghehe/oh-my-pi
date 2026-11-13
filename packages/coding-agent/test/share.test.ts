@@ -290,6 +290,35 @@ describe("buildShareSnapshot", () => {
 				},
 			} as unknown as SessionEntry,
 		];
+		entries.push({
+			type: "context_revision",
+			id: "revision",
+			parentId: "b1",
+			timestamp: ts,
+			revisions: [
+				entries[0] as Extract<SessionEntry, { type: "message" }>,
+				{
+					type: "compaction",
+					id: "compaction",
+					parentId: "a1",
+					timestamp: ts,
+					summary: `summary ${secret}`,
+					firstKeptEntryId: "a1",
+					tokensBefore: 100,
+					preserveData: { privateReplay: replaySentinel },
+				},
+				{
+					type: "custom_message",
+					id: "custom",
+					parentId: "compaction",
+					timestamp: ts,
+					customType: "test",
+					content: `custom ${secret}`,
+					display: true,
+					details: { privateReplay: replaySentinel },
+				},
+			],
+		});
 		const sm = {
 			getHeader: () => sessionData([], "x").header,
 			getEntries: () => entries,

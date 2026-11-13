@@ -112,6 +112,36 @@ function renderSession(entries: unknown[], leafId: string, subSessions?: Record<
 	return { assistant, document, context, lastScrolledId: () => lastScrolledId };
 }
 
+test("export leaf navigation replays context revisions without retaining a later leaf's cached content", () => {
+	const original = {
+		type: "message" as const,
+		id: "assistant",
+		parentId: null,
+		timestamp: "2026-01-01T00:00:01.000Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "original evidence" }],
+			stopReason: "stop",
+			timestamp: 1,
+		},
+	};
+	const revision = {
+		type: "context_revision",
+		id: "revision",
+		parentId: "assistant",
+		timestamp: original.timestamp,
+		revisions: [{ ...original, message: { ...original.message, content: [{ type: "text", text: "[elided]" }] } }],
+	};
+	const { document } = renderSession([original, revision], "revision");
+	expect(document.getElementById("messages")?.textContent).toContain("[elided]");
+	document.querySelector('.tree-node[data-id="assistant"]')!.click();
+	expect(document.getElementById("messages")?.textContent).toContain("original evidence");
+	expect(document.getElementById("messages")?.textContent).not.toContain("[elided]");
+	document.querySelector('.filter-btn[data-filter="all"]')!.click();
+	document.querySelector('.tree-node[data-id="revision"]')!.click();
+	expect(document.getElementById("messages")?.textContent).toContain("[elided]");
+});
+
 function renderAssistant(
 	content: AssistantBlock[],
 	stopReason: "stop" | "aborted" | "error" = "stop",

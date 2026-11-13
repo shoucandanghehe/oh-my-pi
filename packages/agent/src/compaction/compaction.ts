@@ -1510,7 +1510,14 @@ function prepareCompactionUnlabeled(
 	activeModel: Model | undefined,
 	tokenizer: Tokenizer,
 ): CompactionPreparation | undefined {
-	const lastEntry = pathEntries[pathEntries.length - 1];
+	const lastEntry = pathEntries.findLast(
+		entry =>
+			entry.type === "message" ||
+			entry.type === "custom_message" ||
+			entry.type === "compaction" ||
+			entry.type === "branch_summary" ||
+			entry.type === "reset_boundary",
+	);
 	// A speculative native record may leave uncovered messages before the record.
 	// A trailing boundary this preparation re-expands covers nothing yet.
 	if (

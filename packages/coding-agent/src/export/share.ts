@@ -196,6 +196,9 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 	};
 	const addEntry = (entry: SessionEntry): void => {
 		switch (entry.type) {
+			case "context_revision":
+				for (const revision of entry.revisions) addEntry(revision);
+				return;
 			case "message":
 				addMessage(entry.message);
 				return;
@@ -304,6 +307,13 @@ function redactShareEntry(
 	sharedRegexSecretValues: ReadonlySet<string>,
 ): SessionEntry {
 	switch (entry.type) {
+		case "context_revision":
+			return {
+				...entry,
+				revisions: entry.revisions.map(
+					revision => redactShareEntry(o, revision, sharedRegexSecretValues) as typeof revision,
+				),
+			};
 		case "message":
 			return { ...entry, message: redactShareMessage(o, entry.message, sharedRegexSecretValues) };
 		case "compaction":

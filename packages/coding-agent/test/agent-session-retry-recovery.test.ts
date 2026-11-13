@@ -92,7 +92,7 @@ interface AssistantEntry {
 
 function assistantEntries(sessionManager: SessionManager): AssistantEntry[] {
 	const result: AssistantEntry[] = [];
-	for (const entry of sessionManager.getEntries()) {
+	for (const entry of sessionManager.getBranch()) {
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "assistant") continue;
@@ -257,11 +257,11 @@ describe("AgentSession retry recovery", () => {
 
 		const rewriteStarted = Promise.withResolvers<void>();
 		const resumeRewrite = Promise.withResolvers<void>();
-		const rewriteEntries = sessionManager.rewriteEntries.bind(sessionManager);
-		vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+		const appendContextRevision = sessionManager.appendContextRevision.bind(sessionManager);
+		vi.spyOn(sessionManager, "appendContextRevision").mockImplementation(async revisions => {
 			rewriteStarted.resolve();
 			await resumeRewrite.promise;
-			await rewriteEntries();
+			await appendContextRevision(revisions);
 		});
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		const unsubscribe = session.subscribe(event => {

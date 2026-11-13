@@ -108,6 +108,7 @@ const WIRE_SESSION_ENTRY_TYPES: Record<WireSessionEntry["type"], true> = {
 	custom_message: true,
 	compaction: true,
 	branch_summary: true,
+	context_revision: true,
 	model_change: true,
 	thinking_level_change: true,
 };

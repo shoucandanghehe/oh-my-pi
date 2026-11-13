@@ -30,6 +30,40 @@ import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
 
+/** Apply only revisions belonging to the active journal path; retain other branches as evidence. */
+function projectContextRevisions(entries: readonly SessionEntry[]): SessionEntry[] {
+	const byId = new Map(entries.map(entry => [entry.id, entry]));
+	const path: SessionEntry[] = [];
+	const seen = new Set<string>();
+	const last = entries.at(-1);
+	let entry =
+		last?.activeLeafId === undefined ? last : last.activeLeafId === null ? undefined : byId.get(last.activeLeafId);
+	while (entry && !seen.has(entry.id)) {
+		path.push(entry);
+		seen.add(entry.id);
+		entry = entry.parentId ? byId.get(entry.parentId) : undefined;
+	}
+	const revised = new Map<string, SessionEntry>();
+	const ancestors = new Set<string>();
+	for (const current of path.reverse()) {
+		if (current.type === "context_revision") {
+			for (const revision of current.revisions) {
+				const original = byId.get(revision.id);
+				if (ancestors.has(revision.id) && original?.type === revision.type) {
+					revised.set(revision.id, {
+						...revision,
+						id: original.id,
+						parentId: original.parentId,
+						timestamp: original.timestamp,
+					});
+				}
+			}
+		}
+		ancestors.add(current.id);
+	}
+	return entries.map(current => revised.get(current.id) ?? current);
+}
+
 export type ConnectionPhase = "connecting" | "waiting" | "live" | "reconnecting" | "ended";
 
 export interface ActiveTool {
@@ -420,7 +454,7 @@ export class GuestClient {
 				}
 				this.#entries = pending.entries;
 				this.#entries.push(...pending.live);
-				this.#publishedEntries = [...this.#entries];
+				this.#publishedEntries = projectContextRevisions(this.#entries);
 				this.#pendingSnapshot = null;
 				this.#clearSnapshotProgressTimer();
 				this.#phase = "live";
@@ -438,7 +472,7 @@ export class GuestClient {
 					break;
 				}
 				this.#entries.push(frame.entry);
-				this.#publishedEntries = [...this.#entries];
+				this.#publishedEntries = projectContextRevisions(this.#entries);
 				break;
 			case "event":
 				this.#applyEvent(frame.event);

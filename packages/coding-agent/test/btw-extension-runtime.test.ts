@@ -170,6 +170,11 @@ describe("durable BTW extension runtime", () => {
 		const contexts: string[][] = [];
 		const developerContexts: string[][] = [];
 		const hookSessions: string[] = [];
+		const requestIdentities: Array<{
+			sessionId: string | undefined;
+			parentSessionId: string | undefined;
+			promptCacheKey: string | undefined;
+		}> = [];
 		const read: AgentTool = {
 			name: "read",
 			label: "Read",
@@ -184,6 +189,11 @@ describe("durable BTW extension runtime", () => {
 		};
 		let request = 0;
 		const sideStreamFn: StreamFn = (_model, context, options) => {
+			requestIdentities.push({
+				sessionId: options?.sessionId,
+				parentSessionId: options?.parentSessionId,
+				promptCacheKey: options?.promptCacheKey,
+			});
 			developerContexts.push(
 				context.messages
 					.filter(message => message.role === "developer")
@@ -418,6 +428,15 @@ describe("durable BTW extension runtime", () => {
 				expect(restored.turns.map(turn => turn.input)).toEqual(["after clear"]);
 				expect(restored.checkpoint().sideSessionId).toBe(lineage);
 				expect(restored.status?.stats.cost).toBe(6);
+				await restored.prompt("after restore");
+				expect(requestIdentities[0]?.sessionId).toBe(lineage);
+				for (const identity of requestIdentities) {
+					expect(identity).toMatchObject({
+						parentSessionId: main.sessionId,
+						promptCacheKey: main.agent.promptCacheKey ?? main.sessionId,
+					});
+					expect(identity.sessionId).not.toBe(main.sessionId);
+				}
 			} finally {
 				await restored.disposeExtensionRuntime();
 			}

@@ -14,6 +14,7 @@ import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { DelegationRole } from "../task/model-policy";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import type { RuntimeIdentity } from "./runtime-identity";
+import { sanitizeRehydratedOpenAIResponsesAssistantMessage } from "./messages";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -246,6 +247,7 @@ declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
 		titleChange: TitleChangeEntry;
 		credentialPin: CredentialPinEntry;
 		modelUsage: ModelUsageEntry;
+		contextRevision: ContextRevisionEntry;
 	}
 }
 
@@ -354,6 +356,71 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	attribution?: MessageAttribution;
 }
 
+/** A context-only replacement of an existing entry; its original journal record remains intact. */
+export type ContextRevisionValue = SessionMessageEntry | CustomMessageEntry | CompactionEntry;
+
+export function isContextRevisionValue(entry: SessionEntry): entry is ContextRevisionValue {
+	return entry.type === "message" || entry.type === "custom_message" || entry.type === "compaction";
+}
+
+/** Replacements apply only to ancestors on the branch containing this entry. */
+export interface ContextRevisionEntry extends SessionEntryBase {
+	type: "context_revision";
+	revisions: ContextRevisionValue[];
+}
+
+const rawContextEntries = new WeakMap<SessionEntry, SessionEntry>();
+const rehydratedContextEntries = new WeakSet<SessionEntry>();
+
+/** Preserve raw provenance when a projected branch is sliced or replayed at an older leaf. */
+export function rawSessionEntry(entry: SessionEntry): SessionEntry {
+	return rawContextEntries.get(entry) ?? entry;
+}
+
+/** Loaded provider replay metadata belongs to a previous live connection, not the raw journal. */
+export function markRehydratedSessionEntries(entries: readonly SessionEntry[]): void {
+	for (const entry of entries) rehydratedContextEntries.add(rawSessionEntry(entry));
+}
+
+/** Replay branch-local revisions without changing raw entries or their tree identity. */
+export function replayContextRevisions(path: readonly SessionEntry[]): SessionEntry[] {
+	const rawPath = path.map(rawSessionEntry);
+	const positions = new Map<string, number>();
+	const projected = rawPath.slice();
+	for (const [index, entry] of rawPath.entries()) {
+		if (entry.type === "context_revision") {
+			for (const revision of entry.revisions) {
+				const targetIndex = positions.get(revision.id);
+				if (targetIndex === undefined) continue;
+				const target = projected[targetIndex];
+				if (target.type !== revision.type) continue;
+				projected[targetIndex] = {
+					...revision,
+					id: target.id,
+					parentId: target.parentId,
+					timestamp: target.timestamp,
+					runtime: target.runtime,
+					activeLeafId: target.activeLeafId,
+				};
+				rawContextEntries.set(projected[targetIndex], rawPath[targetIndex]);
+			}
+		}
+		positions.set(entry.id, index);
+	}
+	return projected.map((entry, index) => {
+		const original = rawPath[index];
+		if (rehydratedContextEntries.has(original) && entry.type === "message" && entry.message.role === "assistant") {
+			const message = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
+			if (message !== entry.message) {
+				const sanitized = { ...entry, message };
+				rawContextEntries.set(sanitized, original);
+				return sanitized;
+			}
+		}
+		return entry;
+	});
+}
+
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
@@ -371,7 +438,8 @@ export type SessionEntry =
 	| SessionInitEntry
 	| ModeChangeEntry
 	| CredentialPinEntry
-	| ResetBoundaryEntry;
+	| ResetBoundaryEntry
+	| ContextRevisionEntry;
 
 /** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
 export function sessionEntryLeafId(entry: SessionEntry): string | null {

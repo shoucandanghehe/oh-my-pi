@@ -49,7 +49,6 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
-	type PruneResult,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
@@ -118,7 +117,7 @@ import {
 	getOpenAiRemoteCompactionPayload,
 	getReadableCompactionEntry,
 } from "./session-context";
-import type { CompactionEntry, SessionEntry } from "./session-entries";
+import { type CompactionEntry, isContextRevisionValue, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
@@ -496,7 +495,7 @@ export interface SessionMaintenanceHost {
 	/** Re-aligns advisors after an in-place prune their own contexts already cover (no re-prime). */
 	rebaseAdvisorPrefix(reason: string): void;
 	rebaseAfterCompaction(): void;
-	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
+	recordAnchoredHistoryRewrite(tokensRemoved: number, branchEntries: readonly SessionEntry[]): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
@@ -756,22 +755,19 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
-	/**
-	 * Durably commit a prune pass, restoring the blanked results when the rewrite
-	 * fails so live context never diverges from the history its derived state
-	 * (advisor prefix, todo phases, provider sessions) was built from.
-	 */
-	async #persistPrune(result: PruneResult): Promise<void> {
-		try {
-			await this.#host.sessionManager.rewriteEntries();
-		} catch (error) {
-			result.undo();
-			throw error;
-		}
+	/** Commit only changed snapshots from an isolated maintenance branch. */
+	async #persistContextRevision(
+		branchEntries: readonly SessionEntry[],
+		sessionId = this.#host.sessionManager.getSessionId(),
+	): Promise<void> {
+		await this.#host.sessionManager.appendContextRevision(branchEntries.filter(isContextRevisionValue), {
+			sessionId,
+			leafId: branchEntries.at(-1)?.id ?? null,
+		});
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const branchEntries = this.#host.sessionManager.getBranchView();
+		const branchEntries = structuredClone(this.#host.sessionManager.getBranchView());
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const model = this.#host.model();
 		const result = pruneToolOutputs(
@@ -793,7 +789,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#persistPrune(result);
+		await this.#persistContextRevision(branchEntries);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-tool-outputs");
@@ -810,15 +806,13 @@ export class SessionMaintenance {
 	 * provider prompt cache is cold), so it is cheap to run every turn. Gated
 	 * on the `compaction.supersedeReads` and `compaction.dropUseless` settings.
 	 *
-	 * Persists via `rewriteEntries` like every other history rewrite — the
-	 * session file must match the live (pruned) context or file-based forks
-	 * (`/fork`, `/tan`) and resume rebuild a divergent prefix and cold-miss the
-	 * provider prompt cache.
+	 * Appends context revisions so forks/resume replay the pruned view while
+	 * rewinding before the revision recovers the original result.
 	 */
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#compactionSettings;
 		if (!supersedeReads && !dropUseless) return undefined;
-		const branchEntries = this.#host.sessionManager.getBranchView();
+		const branchEntries = structuredClone(this.#host.sessionManager.getBranchView());
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const model = this.#host.model();
 		const result = pruneSupersededToolResults(
@@ -843,7 +837,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
-		await this.#persistPrune(result);
+		await this.#persistContextRevision(branchEntries);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.rebaseAdvisorPrefix("prune-stale-tool-results");
@@ -853,13 +847,8 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Strip image content blocks from every message on the current branch and
-	 * persist the rewrite. Walks `SessionManager.getBranch()` in place — both
-	 * `SessionMessageEntry.message` and `CustomMessageEntry.content` arrays
-	 * are mutated, then `rewriteEntries` durably commits the new shape. The
-	 * agent's runtime view is rebuilt from the freshly-mutated entries so any
-	 * provider sessions caching message identity (Codex Responses) are torn
-	 * down to force a clean replay on the next turn.
+	 * Strip images on an isolated branch and append its revised context.
+	 * Rebuild the runtime view only after that revision is durable.
 	 *
 	 * Every stripped block is measured with the active tokenizer so callers can
 	 * report real savings, and the share of those savings that predates the
@@ -871,7 +860,7 @@ export class SessionMaintenance {
 	 * and skips the disk rewrite.
 	 */
 	async dropImages(): Promise<{ removed: number; tokensFreed: number }> {
-		const branchEntries = this.#host.sessionManager.getBranch();
+		const branchEntries = structuredClone(this.#host.sessionManager.getBranch());
 		const countOptions = { excludeEncryptedReasoning: true } as const;
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
@@ -927,8 +916,8 @@ export class SessionMaintenance {
 		if (removed === 0) {
 			return { removed: 0, tokensFreed: 0 };
 		}
-		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
-		await this.#host.sessionManager.rewriteEntries();
+		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved, branchEntries);
+		await this.#persistContextRevision(branchEntries);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("drop-images");
@@ -959,9 +948,8 @@ export class SessionMaintenance {
 	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
 	 *   with short placeholders that embed an `artifact://` recovery link.
 	 *
-	 * Mutates the branch in place, persists via `rewriteEntries`, replays the
-	 * rebuilt context through the agent, and tears down provider sessions that
-	 * cache message identity — same rewrite contract as {@link dropImages}.
+	 * Revises an isolated branch, durably appends the changed snapshots, then
+	 * rebuilds the agent and its provider sessions from the selected context.
 	 *
 	 * No-op (zero counts) when nothing is eligible, and a `thinking` run whose
 	 * every turn is replayed returns without rewriting anything at all.
@@ -982,7 +970,7 @@ export class SessionMaintenance {
 		}
 
 		if (mode === "thinking") {
-			const branchEntries = this.#host.sessionManager.getBranch();
+			const branchEntries = structuredClone(this.#host.sessionManager.getBranch());
 			const latestCompaction = getLatestCompactionEntry(branchEntries);
 			const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
 			const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
@@ -1033,8 +1021,8 @@ export class SessionMaintenance {
 					tokensFreed: 0,
 				};
 			}
-			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
-			await this.#host.sessionManager.rewriteEntries();
+			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved, branchEntries);
+			await this.#persistContextRevision(branchEntries);
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 			this.#host.resetAdvisorRuntimes("shake");
@@ -1053,7 +1041,8 @@ export class SessionMaintenance {
 			if (opts.signal?.aborted || opts.isCurrent?.() === false) throw new CompactionCancelledError();
 		};
 		assertCurrent();
-		const branchEntries = this.#host.sessionManager.getBranch();
+		const sourceSessionId = this.#host.sessionManager.getSessionId();
+		const branchEntries = structuredClone(this.#host.sessionManager.getBranch());
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
@@ -1141,23 +1130,9 @@ export class SessionMaintenance {
 			return { region, replacement, replacementTokens: replacementTokenCount };
 		});
 
-		const entrySnapshots = new Map<SessionEntry, SessionEntry>();
-		for (const { region } of items) {
-			if (!entrySnapshots.has(region.entry)) entrySnapshots.set(region.entry, structuredClone(region.entry));
-		}
-		const anchorEntry = anchorIndex >= 0 ? branchEntries[anchorIndex] : undefined;
-		if (anchorEntry && !entrySnapshots.has(anchorEntry))
-			entrySnapshots.set(anchorEntry, structuredClone(anchorEntry));
 		applyShakeRegions(items);
-		try {
-			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
-			await this.#host.sessionManager.rewriteEntries();
-		} catch (error) {
-			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
-			// The rewrite just failed, so restore the live history without writing to the session.
-			this.#host.agent.replaceMessages(this.#host.buildDisplaySessionContext().messages);
-			throw error;
-		}
+		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved, branchEntries);
+		await this.#persistContextRevision(branchEntries, sourceSessionId);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.replaceMessagesFromSessionContext(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("shake");
@@ -2045,8 +2020,7 @@ export class SessionMaintenance {
 				const warning = this.#compactionDeadEndWarning("clear large tool output");
 				const entry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 				if (entry) {
-					entry.warning = warning;
-					await this.#host.sessionManager.rewriteEntries();
+					await this.#host.sessionManager.appendContextRevision([{ ...entry, warning }]);
 				}
 				this.#host.emitNotice("warning", warning, "compaction");
 				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
@@ -5181,16 +5155,20 @@ export class SessionMaintenance {
 			});
 			return readableView();
 		}
-		const preserveData = entry.preserveData;
+		const current = this.#host.sessionManager.getBranch().find(candidate => candidate.id === entry.id);
+		if (current?.type !== "compaction") return view;
+		const preserveData = current.preserveData;
 		const slot = preserveData?.[snapcompact.PRESERVE_KEY];
-		entry.preserveData = {
-			...preserveData,
-			[snapcompact.PRESERVE_KEY]: { ...(isRecord(slot) ? slot : {}), withoutThinking: view },
+		const revised: CompactionEntry = {
+			...current,
+			preserveData: {
+				...preserveData,
+				[snapcompact.PRESERVE_KEY]: { ...(isRecord(slot) ? slot : {}), withoutThinking: view },
+			},
 		};
 		try {
-			await this.#host.sessionManager.rewriteEntries();
+			await this.#host.sessionManager.appendContextRevision([revised]);
 		} catch (error) {
-			entry.preserveData = preserveData;
 			logger.warn("Persisting the snapcompact archive without reasoning failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});
@@ -5542,8 +5520,9 @@ export class SessionMaintenance {
 					if (deadEndWarning && frameRescueResult) {
 						const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 						if (stampEntry) {
-							stampEntry.warning = deadEndWarning;
-							await this.#host.sessionManager.rewriteEntries();
+							await this.#host.sessionManager.appendContextRevision([
+								{ ...stampEntry, warning: deadEndWarning },
+							]);
 						}
 					}
 					// A successful frame rescue rewrote history and activated a new
@@ -6443,17 +6422,16 @@ export class SessionMaintenance {
 			}
 		}
 
-		if (
-			savedCompactionEntry &&
-			getLatestCompactionEntry(this.#host.sessionManager.getBranch())?.id === savedCompactionEntry.id
-		) {
+		const latestCompactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+		if (savedCompactionEntry && latestCompactionEntry?.id === savedCompactionEntry.id) {
 			const postRescueTokensAfter =
 				isRecord(args.details) && args.details.kind === "experimental-context-rollover"
 					? this.#projectExperimentalContextRolloverTokens(args)
 					: this.#projectCompactedContextTokens(args);
 			if (savedCompactionEntry.tokensAfter !== postRescueTokensAfter) {
-				savedCompactionEntry.tokensAfter = postRescueTokensAfter;
-				await this.#host.sessionManager.rewriteEntries();
+				await this.#host.sessionManager.appendContextRevision([
+					{ ...latestCompactionEntry, tokensAfter: postRescueTokensAfter },
+				]);
 			}
 		}
 		const deadEndWarning = noProgressDeadEnd ? this.#compactionDeadEndWarning("clear large tool output") : undefined;
@@ -6466,8 +6444,7 @@ export class SessionMaintenance {
 			// collapsed transcript badges only the active entry.
 			const stampEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch()) ?? savedCompactionEntry;
 			if (stampEntry) {
-				stampEntry.warning = deadEndWarning;
-				await this.#host.sessionManager.rewriteEntries();
+				await this.#host.sessionManager.appendContextRevision([{ ...stampEntry, warning: deadEndWarning }]);
 			}
 		}
 

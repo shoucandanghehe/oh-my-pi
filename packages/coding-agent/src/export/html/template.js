@@ -172,6 +172,18 @@
           }
           current = byId.get(current.parentId);
         }
+        const positions = new Map();
+        for (const [index, entry] of path.entries()) {
+          if (entry.type === 'context_revision') {
+            for (const revision of entry.revisions) {
+              const position = positions.get(revision.id);
+              if (position === undefined || path[position].type !== revision.type) continue;
+              const original = path[position];
+              path[position] = { ...revision, id: original.id, parentId: original.parentId, timestamp: original.timestamp };
+            }
+          }
+          positions.set(entry.id, index);
+        }
         return path;
       }
 
@@ -379,7 +391,7 @@
           }
 
           // Apply filter mode
-          const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change', 'mode_change', 'ttsr_injection', 'session_init', 'credential_pin'].includes(entry.type);
+          const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change', 'mode_change', 'ttsr_injection', 'session_init', 'credential_pin', 'context_revision'].includes(entry.type);
           let passesFilter = true;
 
           switch (filterMode) {
@@ -1422,6 +1434,8 @@
         currentTargetId = scrollToEntryId || targetId;
         currentTargetAnchorId = scrollTargetDomId;
         const path = getPath(targetId);
+        if (leafChanged) entryCache.clear();
+        sessionContext = { ...sessionContext, entries: path };
         updateLocation();
 
         if (leafChanged) {

@@ -35,6 +35,7 @@
 ### Fixed
 
 - Slash-command argument completions now take priority over mid-prompt skill lookup.
+- Session tree filters now treat context revisions as bookkeeping instead of conversation turns.
 - Local agent panes now route session controls to their own runtime and retain drafts, queue edits, and the selected history across maintenance.
 - Demoted image placeholders now honor reduced row ceilings instead of restoring their previous height.
 - Extension-owned links now support clicks and keyboard hints in app-viewport workspaces.

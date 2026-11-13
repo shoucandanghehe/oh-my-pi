@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added branch-scoped `context_revision` entries so clients can replay reduced context without losing original history.
+
 ## [18.18.6] - 2026-11-09
 
 ### Added

@@ -3154,7 +3154,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			resetAdvisorRuntimes: (reason, options) => this.#advisors.resetAllRuntimes(reason, options),
 			rebaseAdvisorPrefix: reason => this.#advisors.rebaseDeliveredPrefixes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
-			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
+			recordAnchoredHistoryRewrite: (tokensRemoved, branchEntries) =>
+				this.#stats.recordAnchoredHistoryRewrite(tokensRemoved, branchEntries),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
@@ -14599,6 +14600,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					},
 					advertiseParentTools: true,
 					sessionId: providerSessionId,
+					parentSessionId: cacheSessionId,
 					promptCacheKey: this.agent.promptCacheKey ?? cacheSessionId,
 					streamFn: this.#sideStreamFn,
 					convertToLlm,

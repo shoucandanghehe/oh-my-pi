@@ -131,10 +131,26 @@ describe("AgentSession shake", () => {
 			.map(e => (e as { message: ToolResultMessage }).message);
 	}
 
+	function revisedAssistant(original: AssistantMessage): AssistantMessage {
+		const entry = sessionManager
+			.getBranch()
+			.find(
+				candidate =>
+					candidate.type === "message" &&
+					candidate.message.role === "assistant" &&
+					candidate.message.timestamp === original.timestamp,
+			);
+		if (entry?.type !== "message" || entry.message.role !== "assistant")
+			throw new Error("Expected assistant on branch");
+		return entry.message;
+	}
+
 	describe("elide", () => {
 		it("drops the tool result, offloads to an artifact, and embeds the recovery link", async () => {
 			seedHeavyToolResult("X".repeat(4000));
 			appendRecentProtectedTail();
+			const originalEntries = structuredClone(sessionManager.getEntries());
+			const beforeShakeLeaf = sessionManager.getLeafId()!;
 			const replaceSpy = vi.spyOn(session.agent, "replaceMessages");
 
 			const result = await session.shake("elide");
@@ -150,6 +166,42 @@ describe("AgentSession shake", () => {
 			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
 			expect(text).toContain(`artifact://${result.artifactId}`);
 			expect(text).toContain("shaken");
+			expect(sessionManager.getEntries().slice(0, originalEntries.length)).toEqual(originalEntries);
+			sessionManager.branch(beforeShakeLeaf);
+			expect(branchToolResults()[0].content).toEqual([{ type: "text", text: "X".repeat(4000) }]);
+		});
+
+		it("rejects an elide prepared on a branch that was rewound while its artifact was being allocated", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			appendRecentProtectedTail();
+			const beforeRevisionLeaf = sessionManager.getLeafId()!;
+			const user = sessionManager
+				.getBranch()
+				.find(entry => entry.type === "message" && entry.message.role === "user");
+			if (user?.type !== "message" || user.message.role !== "user") throw new Error("Expected user");
+			await sessionManager.appendContextRevision([
+				{ ...user, message: { ...user.message, content: "future branch context" } },
+			]);
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const allocate = sessionManager.allocateArtifactPath.bind(sessionManager);
+			const allocation = vi.spyOn(sessionManager, "allocateArtifactPath").mockImplementation(async toolType => {
+				started.resolve();
+				await release.promise;
+				return allocate(toolType);
+			});
+			try {
+				const shaking = session.shake("elide");
+				await started.promise;
+				sessionManager.branch(beforeRevisionLeaf);
+				release.resolve();
+				await expect(shaking).rejects.toThrow("Active branch changed");
+				expect(branchToolResults()[0].content).toEqual([{ type: "text", text: "X".repeat(4000) }]);
+				expect(sessionManager.getBranch().find(entry => entry.id === user.id)).toEqual(user);
+			} finally {
+				release.resolve();
+				allocation.mockRestore();
+			}
 		});
 
 		it("continues artifact-less when ordinary shake cannot allocate an artifact", async () => {
@@ -193,13 +245,14 @@ describe("AgentSession shake", () => {
 			expect(result.toolResultsDropped).toBe(1);
 			expect(result.imagesDropped).toBeUndefined();
 			expect(result.artifactId).toBeDefined();
-			const placeholder = mixedResult.content[0];
+			const shaken = branchToolResults()[0];
+			const placeholder = shaken.content[0];
 			expect(placeholder?.type).toBe("text");
 			if (placeholder?.type !== "text") throw new Error("Expected shake placeholder text");
 			expect(placeholder.text).toContain("shaken");
 			expect(placeholder.text).toContain(`artifact://${result.artifactId}`);
-			expect(mixedResult.content[1]).toBe(image);
-			expect(mixedResult.content[1]).toEqual(imageSnapshot);
+			expect(shaken.content[1]).toEqual(imageSnapshot);
+			expect(mixedResult.content).toEqual([{ type: "text", text: largeText }, imageSnapshot]);
 
 			const tokenizer = new Tokenizer();
 			const expectedFreed = tokenizer.countTokens(largeText) - tokenizer.countTokens(placeholder.text);
@@ -243,7 +296,7 @@ describe("AgentSession shake", () => {
 
 			const imageResult = await session.shake("images");
 			expect(imageResult.imagesDropped).toBe(1);
-			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
+			expect(branchToolResults()[0].content.some(block => block.type === "image")).toBe(false);
 		});
 
 		it("saves the tokens it elides from an assistant turn with the turn", async () => {
@@ -423,6 +476,8 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			});
 
+			const beforeShakeLeaf = sessionManager.getLeafId()!;
+			const originalEntries = structuredClone(sessionManager.getEntries());
 			const result = await session.shake("images");
 
 			expect(result.mode).toBe("images");
@@ -431,6 +486,11 @@ describe("AgentSession shake", () => {
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
 			expect(content.some(b => b.type === "image")).toBe(false);
+			expect(sessionManager.getEntries().slice(0, originalEntries.length)).toEqual(originalEntries);
+			sessionManager.branch(beforeShakeLeaf);
+			expect(sessionManager.buildSessionContext().messages[0]).toMatchObject({
+				content: [{ type: "text", text: "look" }, png],
+			});
 		});
 
 		it("credits the removed image tokens against the provider-anchored context meter", async () => {
@@ -548,22 +608,26 @@ describe("AgentSession shake", () => {
 			sessionManager.appendMessage(mixed);
 			sessionManager.appendMessage(thinkingOnly);
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const originalEntries = structuredClone(sessionManager.getEntries());
+			const beforeShakeLeaf = sessionManager.getLeafId()!;
 
 			const tokenizer = new Tokenizer();
 			const tokensBefore = tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true });
 			const thinkingOnlyBefore = tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
 
 			const result = await session.shake("thinking");
+			const revisedMixed = revisedAssistant(mixed);
+			const revisedThinkingOnly = revisedAssistant(thinkingOnly);
 
 			expect(result.thinkingBlocksDropped).toBe(3);
-			expect(mixed.content).toEqual([{ type: "text", text: "visible answer" }]);
-			expect(thinkingOnly.content).toEqual([]);
-			expect(tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true })).toBeLessThan(tokensBefore);
+			expect(revisedMixed.content).toEqual([{ type: "text", text: "visible answer" }]);
+			expect(revisedThinkingOnly.content).toEqual([]);
+			expect(tokenizer.countMessage(revisedMixed, { excludeEncryptedReasoning: true })).toBeLessThan(tokensBefore);
 			const measuredSaving =
 				tokensBefore +
 				thinkingOnlyBefore -
-				tokenizer.countMessage(mixed, { excludeEncryptedReasoning: true }) -
-				tokenizer.countMessage(thinkingOnly, { excludeEncryptedReasoning: true });
+				tokenizer.countMessage(revisedMixed, { excludeEncryptedReasoning: true }) -
+				tokenizer.countMessage(revisedThinkingOnly, { excludeEncryptedReasoning: true });
 			expect(measuredSaving).toBeGreaterThan(0);
 			expect(result.tokensFreed).toBe(measuredSaving);
 			expect(formatShakeSummary(result)).toContain(`~${result.tokensFreed} tokens freed`);
@@ -585,6 +649,12 @@ describe("AgentSession shake", () => {
 					);
 				expect(persistedAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
 				expect(persistedAssistants.some(message => message.content.length === 0)).toBe(true);
+				expect(persisted.getEntries().slice(0, originalEntries.length)).toEqual(originalEntries);
+				persisted.branch(beforeShakeLeaf);
+				const originalThinking = persisted
+					.buildSessionContext()
+					.messages.filter((message): message is AssistantMessage => message.role === "assistant");
+				expect(originalThinking.map(message => message.content)).toEqual([mixed.content, thinkingOnly.content]);
 			} finally {
 				await persisted.close();
 			}
@@ -611,8 +681,9 @@ describe("AgentSession shake", () => {
 			const result = await session.shake("thinking");
 
 			expect(result.thinkingBlocksDropped).toBe(1);
-			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(signed, { excludeEncryptedReasoning: true }));
-			expect(result.tokensFreed).toBeLessThan(rawBefore - tokenizer.countMessage(signed));
+			const revised = revisedAssistant(signed);
+			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(revised, { excludeEncryptedReasoning: true }));
+			expect(result.tokensFreed).toBeLessThan(rawBefore - tokenizer.countMessage(revised));
 		});
 
 		it("updates the provider-anchored context meter for earlier thinking", async () => {
@@ -871,9 +942,11 @@ describe("AgentSession shake", () => {
 
 			expect(result.thinkingBlocksDropped).toBe(1);
 			expect(result.thinkingBlocksKept).toBe(0);
-			expect(rebuilt.content).toEqual([{ type: "text", text: "answer" }]);
+			expect(revisedAssistant(rebuilt).content).toEqual([{ type: "text", text: "answer" }]);
 			expect(result.tokensFreed).toBeGreaterThan(0);
-			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+			expect(result.tokensFreed).toBe(
+				before - tokenizer.countMessage(revisedAssistant(rebuilt), { excludeEncryptedReasoning: true }),
+			);
 		});
 
 		it("still drops thinking a cold Responses session rebuilds from content", async () => {
@@ -898,9 +971,11 @@ describe("AgentSession shake", () => {
 
 			expect(result.thinkingBlocksDropped).toBe(1);
 			expect(result.thinkingBlocksKept).toBe(0);
-			expect(rebuilt.content).toEqual([{ type: "text", text: "answer" }]);
+			expect(revisedAssistant(rebuilt).content).toEqual([{ type: "text", text: "answer" }]);
 			expect(result.tokensFreed).toBeGreaterThan(0);
-			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
+			expect(result.tokensFreed).toBe(
+				before - tokenizer.countMessage(revisedAssistant(rebuilt), { excludeEncryptedReasoning: true }),
+			);
 		});
 
 		it("leaves plaintext reasoning a cold session replays in place", async () => {
@@ -964,16 +1039,18 @@ describe("AgentSession shake", () => {
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
 			const tokenizer = session.agent.tokenizer;
 			const before = tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true });
-			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
+			const revisionCommit = vi.spyOn(sessionManager, "appendContextRevision");
 
 			const result = await session.shake("thinking");
 
 			expect(result.thinkingBlocksDropped).toBe(1);
 			expect(result.thinkingBlocksKept).toBe(1);
 			expect(replayed.content.map(block => block.type)).toEqual(["thinking", "text"]);
-			expect(rebuilt.content).toEqual([{ type: "text", text: "second answer" }]);
-			expect(result.tokensFreed).toBe(before - tokenizer.countMessage(rebuilt, { excludeEncryptedReasoning: true }));
-			expect(rewriteEntries).toHaveBeenCalledTimes(1);
+			expect(revisedAssistant(rebuilt).content).toEqual([{ type: "text", text: "second answer" }]);
+			expect(result.tokensFreed).toBe(
+				before - tokenizer.countMessage(revisedAssistant(rebuilt), { excludeEncryptedReasoning: true }),
+			);
+			expect(revisionCommit).toHaveBeenCalledTimes(1);
 			const summary = formatShakeSummary(result);
 			expect(summary).toContain("Dropped 1 thinking block");
 			expect(summary).toContain("1 thinking block");

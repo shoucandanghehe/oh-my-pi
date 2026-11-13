@@ -79,7 +79,7 @@ import {
 } from "./retry-fallback-chains";
 import { describeUsageFallback } from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry, type SessionMessageEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { isUserQueuedMessage } from "./queued-messages";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -1029,6 +1029,7 @@ export class TurnRecovery {
 			branchById.set(entry.id, entry);
 		}
 		const retryErrors: RetryErrorUpdate[] = [];
+		const revisions: SessionMessageEntry[] = [];
 		for (const pending of this.#pendingRetryErrors) {
 			let entry = branchById.get(pending.entryId);
 			if (entry?.type !== "message" || entry.message.role !== "assistant") {
@@ -1067,7 +1068,7 @@ export class TurnRecovery {
 					note: pending.note,
 				};
 			}
-			entry.message.retryRecovery = retryRecovery;
+			revisions.push({ ...entry, message: { ...entry.message, retryRecovery } });
 			retryErrors.push({
 				entryId: entry.id,
 				persistenceKey: pending.persistenceKey,
@@ -1075,9 +1076,7 @@ export class TurnRecovery {
 				retryRecovery,
 			});
 		}
-		if (retryErrors.length > 0) {
-			await this.#host.sessionManager.rewriteEntries();
-		}
+		await this.#host.sessionManager.appendContextRevision(revisions);
 		return retryErrors;
 	}
 
@@ -1359,7 +1358,7 @@ export class TurnRecovery {
 			excludeMediaMethods: options.excludeMediaMethods,
 		});
 		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-		if (result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
+		if (result.historyRewritten !== true && compactionEntryAfter?.id === compactionEntryBefore?.id) {
 			this.#restoreFailedAssistantTurn(assistantMessage);
 		}
 		return result;

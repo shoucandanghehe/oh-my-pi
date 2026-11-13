@@ -10,7 +10,7 @@ Covers:
 - Entry taxonomy and tree semantics (`id`/`parentId` + leaf pointer)
 - Migration/compatibility behavior when loading old or malformed files
 - Context reconstruction (`buildSessionContext`)
-- Persistence guarantees, failure behavior, truncation/blob externalization
+- Persistence guarantees, failure behavior, lossless payload storage and blob externalization
 - Storage abstractions (`FileSessionStorage`, `MemorySessionStorage`) and related utilities
 
 Does not cover `/tree` UI rendering behavior beyond semantics that affect session data.
@@ -22,7 +22,7 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 - [`src/session/session-migrations.ts`](../packages/coding-agent/src/session/session-migrations.ts) — version migrations
 - [`src/session/session-loader.ts`](../packages/coding-agent/src/session/session-loader.ts) — file load + blob-ref resolution
 - [`src/session/session-context.ts`](../packages/coding-agent/src/session/session-context.ts) — `buildSessionContext`
-- [`src/session/session-persistence.ts`](../packages/coding-agent/src/session/session-persistence.ts) — truncation + image blob externalization
+- [`src/session/session-persistence.ts`](../packages/coding-agent/src/session/session-persistence.ts) — lossless storage projection and media blob externalization
 - [`src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts) — on-disk layout, dir encoding, terminal breadcrumbs
 - [`src/session/session-listing.ts`](../packages/coding-agent/src/session/session-listing.ts) — discovery (list/recent/resolve)
 - [`src/session/session-index.ts`](../packages/coding-agent/src/session/session-index.ts) — indexed titles and idle recap journal in `history.db`
@@ -129,6 +129,7 @@ All non-header entries include:
 - `compaction`
 - `branch_summary`
 - `reset_boundary`
+- `context_revision`
 - `custom`
 - `custom_message`
 - `label`
@@ -310,6 +311,22 @@ If branching from root (`branchFromId === null`), `fromId` is the literal string
 
 A payload-free marker appended by `/clear`. The collapsed live transcript and rebuilt model context begin after the latest applicable boundary; full-history transcript export still retains entries before it.
 
+### `context_revision`
+
+A branch-scoped context revision records new model-facing versions of earlier
+`message`, `custom_message`, or `compaction` entries without replacing their
+original journal records. Its `revisions` array contains complete entry snapshots
+with the original target ids and parent links.
+
+Only revisions on the selected root-to-leaf path apply, in path order. Rewinding
+before a revision reconstructs the earlier content; resuming or forking after it
+reconstructs the reduced context. Pruning, shake, image removal, and recovery
+annotations use this mechanism rather than overwriting old records.
+
+Older files without revisions remain readable. A reader that does not implement
+`context_revision` cannot reconstruct a revised model context. Already-truncated
+or overwritten history from earlier versions cannot be recovered by this change.
+
 ### `custom`
 
 Opaque, non-LLM records owned by core subsystems or extensions. `buildSessionContext` does not directly turn them into model messages, but subsystem-specific replay code can consume `customType` values to restore runtime state or diagnose an interrupted turn.
@@ -490,7 +507,7 @@ Applied when header `version < 3`:
 
 - Missing or genuinely empty files initialize a new session at that exact path and materialize its header immediately. `SessionManager.open(..., { throwIfMissing: true })` instead rejects missing/empty input.
 - Non-empty data without a valid leading session header is rejected without modifying the file. An array-only `loadEntriesFromFile()` result of `[]` therefore does not distinguish empty from corrupt input; the manager uses `loadSessionFile()` diagnostics.
-- Valid files are loaded, migrated if needed, blob refs resolved, then indexed. Migrations, skipped malformed records, and loaded OpenAI replay sanitization mark the next persistence operation for a full rewrite.
+- Valid files are loaded, migrated if needed, blob refs resolved, then indexed. Migrations and skipped malformed records mark the next persistence operation for a full rewrite. Loaded provider replay sanitization is a context projection and leaves original journal records intact.
 - A recorded cwd is adopted only when it is enterable. Otherwise runtime cwd stays at the launch/current directory while the transcript remains in its original location; workspace-root edits stay runtime-only until relocation.
 
 ## Tree and Leaf Semantics
@@ -503,7 +520,18 @@ The underlying model is append-only tree + mutable leaf pointer:
 - `resetLeaf()` sets `leafId = null`; next append creates a new root entry (`parentId: null`).
 - `branchWithSummary()` sets leaf to branch target and appends a `branch_summary` entry.
 
-`getEntries()` returns all non-header entries in insertion order. There is no separate persisted leaf field: loading rebuilds the leaf from the last physical entry. Pointer-only `branch()`/`resetLeaf()` changes therefore need a subsequent append to survive reload. `discardEntryDurably()` appends a metadata branch marker and rewrites the journal to make a discarded path durable.
+`getEntries()` returns all original non-header records, including context revisions, in insertion order. There is no separate persisted leaf field: loading rebuilds the leaf from the last physical entry. Pointer-only `branch()`/`resetLeaf()` changes therefore need a subsequent append to survive reload. Discarding a failed turn moves the leaf off that turn and appends a branch marker; the original failed turn remains available on its old branch.
+
+`getEntry()` and `getTree()` also expose original records. `getBranch()` and
+`getBranchView()` expose the effective versions for the selected leaf, including
+its applicable revisions. Use `buildSessionContext()` to produce model messages.
+Returned record objects are not a supported mutation API; internal context
+changes commit through `appendContextRevision()`.
+
+This contract separates normal context maintenance from explicit retention
+operations. Deleting a session still deletes its history; the opt-in
+`omp gc --strip` command still removes old provider replay data as requested.
+Its `gc.strip` setting remains disabled by default.
 
 `createBranchedSession(leafId, { copyArtifacts? })` creates a new identity containing only the selected root-to-leaf path. It drops old label records and recreates the resolved labels for retained entries. Unlike a full fork, it does not inherit the provider prompt-cache key. With `copyArtifacts` (used by `AgentSession.fork(entryId)`), the artifacts directory is copied in the background and the new artifact manager waits for the copy before allocating ids or resolving `artifact://`, as for a move to a sibling file.
 
@@ -518,6 +546,7 @@ Algorithm:
    - explicit `leafId` -> use that entry if found.
    - otherwise fallback to last entry.
 2. Walk `parentId` to root, stopping on a repeated id to bound corrupt cycles, then reverse to root->leaf.
+   Apply `context_revision` snapshots from that path before rebuilding its effective messages; revisions from a later point or another branch do not apply.
 3. Derive runtime state across the path:
    - resolved and configured thinking selectors from latest `thinking_level_change`
    - service tier from latest `service_tier_change`
@@ -562,7 +591,7 @@ Ordinary completed appends update memory and local file storage synchronously on
 - Under `bun test`, the lease directory is `<os temp>/omp-test-session-owners-<uid>` instead of the real state directory. It is exported as `PI_TEST_SESSION_OWNERS_DIR` when `session-storage` loads; a test that spawns an omp process which writes sessions must pass `env: process.env` (Bun's default is the launch environment), or run under `ci-test-ts`, whose children inherit `PI_TEST_RUNTIME=1` and derive the same directory.
 - On the file and memory backends, a `SessionWriteConflictError` on durable bytes during a full rewrite means a writer without the lease (an older omp, an external tool) changed the file. The manager reads it back, keeps the entries it lacks as a side branch (the active leaf stays its own), and retries against the size it read, up to three times per rewrite. If that writer changes the file inside every retry, the session leaves the file to it and moves to a sibling (`reason: "contested"`) rather than re-serializing the transcript on every later write. A deleted file is recreated; a file that no longer reads as this session is left untouched and the session moves to a sibling. Indexed backends keep reporting the conflict, since there it can be the manager racing its own unconfirmed publish.
 - `appendEntriesAtomically()` groups a synchronous callback's appends into one atomic publication. Failure rolls back staged entries and repairs retained concurrent work.
-- Rewrites serve renames, entry rewrites, migrations/sanitization, move/fork, and recovery. Session-title changes normally update the fixed-width title slot and append a `title_change` audit entry instead of rewriting the body.
+- Rewrites serve metadata updates, migrations, move/fork, atomic publication, and storage recovery. They must not replace original message content with a reduced context. Session-title changes normally update the fixed-width title slot and append a `title_change` audit entry instead of rewriting the body; append-only history is not a byte-level immutability guarantee for these indexes.
 
 ### Error behavior
 
@@ -575,14 +604,13 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 Before persisting entries:
 
-- Strings over 500,000 characters are truncated with `"[Session persistence truncated large content]"`, except signed/encrypted provider blocks, signature fields, validated Anthropic native web/tool-search history blocks, Anthropic server-compaction replay carriers, and Cursor server records (`cursorHistory` payloads), which must remain byte-exact for replay.
-- Transient `jsonlEvents` is removed.
-- If an object has both string `content` and numeric `lineCount`, line count is recomputed after truncation.
+- String payloads are stored in full, including unsigned thinking, tool output, and tool-call arguments. Context-size reduction must not truncate the original journal record.
+- Transient `jsonlEvents` is omitted because the subprocess events are already saved to artifact files.
 - Image data URLs in `image_url` fields are always content-addressed in the blob store and replaced with `blob:sha256:<hash>`, regardless of length. Base64 payloads at least 1,024 characters are externalized in image `content` blocks, `images[]`, snapcompact `frames[]`, and image-generation results.
 - Redundant OpenAI Responses `thinkingSignature` copies are omitted when the authoritative reasoning item already exists in `providerPayload`.
 - Spilled MCP tool results omit duplicate `details.structuredContent` when the rendered structured output already lives in their truncation artifact.
 
-These projections leave the live entries unchanged. On load, ordinary persisted image references are resolved back to inline payloads. Snapcompact frames stay lazy until context reconstruction selects them. Archives with frames truncated by older persistence code fall back to their retained text or undamaged frames.
+These storage projections leave the live entries unchanged. On load, ordinary persisted media references are resolved back to inline payloads. Snapcompact frames stay lazy until context reconstruction selects them. Archives with frames truncated by older persistence code fall back to their retained text or undamaged frames; text already truncated by an older version cannot be reconstructed.
 
 ## Storage Abstractions
 

@@ -40,7 +40,7 @@ export type SessionTreeEntry = { id: string; parentId: string | null } & (
 	| { type: "mode_change"; mode: string }
 	| { type: "credential_pin"; provider: string }
 	| { type: "ttsr_injection"; injectedRules: string[] }
-	| { type: "session_init" | "reset_boundary" }
+	| { type: "session_init" | "reset_boundary" | "context_revision" }
 );
 
 /** Session tree shape consumed by the selector. */
@@ -554,6 +554,7 @@ class TreeList implements Component {
 				entry.type === "session_init" ||
 				entry.type === "ttsr_injection" ||
 				entry.type === "mode_change" ||
+				entry.type === "context_revision" ||
 				entry.type === "reset_boundary";
 
 			switch (filterMode) {

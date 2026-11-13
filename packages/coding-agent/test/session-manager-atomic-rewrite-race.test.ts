@@ -1025,6 +1025,61 @@ class ScriptedAtomicFailureStorage extends MemorySessionStorage {
 }
 
 describe("SessionManager atomic entry batches", () => {
+	it("rolls back a published-but-rejected context revision without losing original history or charging twice", async () => {
+		const storage = new ScriptedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		const id = manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "original evidence" }],
+			api: "mock",
+			provider: "mock",
+			model: "mock",
+			stopReason: "stop",
+			timestamp: 1,
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 },
+			},
+		});
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile()!;
+		const original = manager.getEntry(id);
+		if (original?.type !== "message" || original.message.role !== "assistant") throw new Error("Expected assistant");
+		const revised = {
+			...original,
+			message: { ...original.message, content: [{ type: "text" as const, text: "[elided]" }] },
+		};
+		const usage = manager.getUsageStatistics();
+		const before = await storage.readText(sessionFile);
+		storage.behaviors.push({ commit: true, error: new Error("published then rejected") });
+		await expect(manager.appendContextRevision([revised])).rejects.toThrow("published then rejected");
+		expect(manager.getLeafId()).toBe(id);
+		expect(manager.buildSessionContext().messages[0]).toMatchObject({
+			content: [{ type: "text", text: "original evidence" }],
+		});
+		expect(await storage.readText(sessionFile)).toBe(before);
+		await manager.appendContextRevision([revised]);
+		expect(manager.getEntry(id)).toBe(original);
+		expect(manager.buildSessionContext().messages[0]).toMatchObject({
+			content: [{ type: "text", text: "[elided]" }],
+		});
+		expect(manager.getUsageStatistics()).toEqual(usage);
+		const reopened = await SessionManager.open(sessionFile, "/sessions", storage);
+		expect(reopened.buildSessionContext().messages[0]).toMatchObject({
+			content: [{ type: "text", text: "[elided]" }],
+		});
+		reopened.branch(id);
+		expect(reopened.buildSessionContext().messages[0]).toMatchObject({
+			content: [{ type: "text", text: "original evidence" }],
+		});
+		await reopened.close();
+		await manager.close();
+	});
+
 	it("restores the exact active branch when an atomic batch publish fails", async () => {
 		const storage = new GatedAtomicFailureStorage();
 		const manager = SessionManager.create("/cwd", "/sessions", storage);

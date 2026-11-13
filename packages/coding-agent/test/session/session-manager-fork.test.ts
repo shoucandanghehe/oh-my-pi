@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import {
 	CURRENT_SESSION_VERSION,
+	replayContextRevisions,
 	type SessionEntry,
 	type SessionHeader,
 	type SessionMessageEntry,
@@ -437,19 +438,46 @@ describe("SessionManager.forkFrom", () => {
 		};
 		await Bun.write(
 			sourceFile,
-			`${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n${JSON.stringify(taskResultEntry)}\n`,
+			`${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n${JSON.stringify(taskResultEntry)}\n${JSON.stringify(
+				{
+					type: "context_revision",
+					id: "billing-revision",
+					parentId: taskResultEntry.id,
+					timestamp,
+					revisions: [
+						{
+							...assistantEntry,
+							message: {
+								...assistantEntry.message,
+								content: [
+									...assistantEntry.message.content,
+									{ type: "text", text: "Revised assistant context" },
+								],
+							},
+						},
+						{
+							...taskResultEntry,
+							message: { ...taskResultEntry.message, content: [{ type: "text", text: "[elided task result]" }] },
+						},
+					],
+				},
+			)}\n`,
 		);
 		const sourceText = await Bun.file(sourceFile).text();
 		const sourceManager = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
 
 		const findAssistant = async (file: string) => {
-			const entries = await loadEntriesFromFile(file);
+			const entries = replayContextRevisions(
+				(await loadEntriesFromFile(file)).filter((entry): entry is SessionEntry => entry.type !== "session"),
+			);
 			const entry = entries.find((e): e is SessionMessageEntry => e.type === "message");
 			if (entry?.message.role !== "assistant") throw new Error("expected assistant message");
 			return entry.message;
 		};
 		const findTaskDetails = async (file: string): Promise<TaskToolDetails> => {
-			const entries = await loadEntriesFromFile(file);
+			const entries = replayContextRevisions(
+				(await loadEntriesFromFile(file)).filter((entry): entry is SessionEntry => entry.type !== "session"),
+			);
 			const entry = entries.find(
 				(e): e is SessionMessageEntry =>
 					e.type === "message" && e.message.role === "toolResult" && e.message.toolName === "task",

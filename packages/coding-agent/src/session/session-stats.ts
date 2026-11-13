@@ -437,10 +437,9 @@ export class SessionStatsTracker {
 	 * assistant snapshot keeps reloads accurate, and the next successful
 	 * assistant response naturally replaces it with a fresh provider anchor.
 	 */
-	recordAnchoredHistoryRewrite(tokensRemoved: number): void {
+	recordAnchoredHistoryRewrite(tokensRemoved: number, branchEntries: readonly SessionEntry[]): void {
 		if (!Number.isFinite(tokensRemoved) || tokensRemoved <= 0) return;
 
-		const branchEntries = this.#host.sessionManager.getBranchView();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
 		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {

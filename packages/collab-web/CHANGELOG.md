@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Live transcripts now apply branch-local context revisions without overwriting their original history.
+
 ## [18.19.0] - 2026-11-12
 
 ### Fixed

@@ -117,6 +117,7 @@ export interface EntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	activeLeafId?: string | null;
 }
 
 export interface MessageEntry extends EntryBase {
@@ -158,13 +159,19 @@ export interface ThinkingLevelChangeEntry extends EntryBase {
 	thinkingLevel?: string | null;
 }
 
+export interface ContextRevisionEntry extends EntryBase {
+	type: "context_revision";
+	revisions: (MessageEntry | CustomMessageEntry | CompactionEntry)[];
+}
+
 export type SessionEntry =
 	| MessageEntry
 	| CustomMessageEntry
 	| CompactionEntry
 	| BranchSummaryEntry
 	| ModelChangeEntry
-	| ThinkingLevelChangeEntry;
+	| ThinkingLevelChangeEntry
+	| ContextRevisionEntry;
 
 /** customType of collab guest prompts injected on the host. */
 export const COLLAB_PROMPT_MESSAGE_TYPE = "collab-prompt";

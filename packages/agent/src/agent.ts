@@ -169,6 +169,8 @@ export interface AgentOptions {
 	 * Used by providers that support session-based caching (e.g., OpenAI Codex).
 	 */
 	sessionId?: string;
+	/** Parent cache affinity; transport state remains scoped to sessionId. */
+	parentSessionId?: string;
 	/**
 	 * Optional prompt cache key forwarded to LLM providers.
 	 * When omitted, providers may fall back to sessionId.
@@ -379,6 +381,7 @@ export interface AgentOptions {
 export interface AgentChildOptions {
 	initialState?: Partial<AgentState>;
 	sessionId: string;
+	parentSessionId?: string;
 	promptCacheKey?: string;
 	streamFn?: StreamFn;
 	convertToLlm?: AgentOptions["convertToLlm"];
@@ -494,6 +497,7 @@ export class Agent {
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
 	#sessionId?: string;
+	#parentSessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
 	#metadata?: Record<string, unknown>;
@@ -618,6 +622,7 @@ export class Agent {
 		this.#interruptMode = opts.interruptMode || "immediate";
 		this.streamFn = opts.streamFn || streamSimple;
 		this.#sessionId = opts.sessionId;
+		this.#parentSessionId = opts.parentSessionId;
 		this.#deadline = opts.deadline;
 		this.#promptCacheKey = opts.promptCacheKey;
 		this.#providerSessionState = opts.providerSessionState;
@@ -703,6 +708,7 @@ export class Agent {
 			streamFn: options.streamFn ?? this.streamFn,
 			deadline: this.#deadline,
 			sessionId: options.sessionId,
+			parentSessionId: options.parentSessionId,
 			promptCacheKey: options.promptCacheKey ?? this.#promptCacheKey,
 			providerSessionState: options.providerSessionState ?? this.#providerSessionState,
 			getApiKey: options.getApiKey ?? this.getApiKey,
@@ -2159,6 +2165,7 @@ export class Agent {
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
 			sessionId: this.#sessionId,
+			parentSessionId: this.#parentSessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
 			metadata: this.#metadataResolver ? undefined : this.#metadata,

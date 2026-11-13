@@ -4,6 +4,7 @@
  * per-tool literals, so every handler sees the same caller identity.
  */
 import type { ToolSession } from "../tools";
+import { rawSessionEntry } from "../session/session-entries";
 import { getExperimentalContextSession } from "../tools/context-notes";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { ResolveContext, WriteContext } from "./types";
@@ -46,7 +47,7 @@ export function sessionResolveContext(
 		signal: options.signal,
 		sessionFile: session.getSessionFile() ?? undefined,
 		experimentalContextManagement: cfgCompactionExperimentalContextManagement.get(session.settings) === true,
-		getSessionBranch: () => getExperimentalContextSession(session).getBranch(),
+		getSessionBranch: () => getExperimentalContextSession(session).getBranch().map(rawSessionEntry),
 		sessionId: session.sessionManager?.getSessionId?.() ?? session.getSessionId?.() ?? undefined,
 		agentRegistry: session.agentRegistry,
 		localProtocolOptions: contextLocalProtocolOptions(session),

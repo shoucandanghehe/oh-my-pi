@@ -341,6 +341,30 @@ describe("history:// protocol", () => {
 		expect(resource.sourcePath).toBeUndefined();
 	});
 
+	it("reads original branch evidence after the selected model context was revised", async () => {
+		const settings = Settings.isolated();
+		cfgCompactionExperimentalContextManagement.set(settings, true);
+		const manager = SessionManager.inMemory();
+		const id = manager.appendMessage({ role: "user", content: "Original evidence before pruning", timestamp: 1 });
+		const original = manager.getEntry(id);
+		if (original?.type !== "message") throw new Error("Expected original message");
+		await manager.appendContextRevision([
+			{ ...original, message: { role: "user", content: "[elided]", timestamp: 1 } },
+		]);
+		expect(manager.buildSessionContext().messages[0]).toMatchObject({ content: "[elided]" });
+		const tool = new ReadTool(
+			makeToolSession(os.tmpdir(), undefined, {
+				settings,
+				getSessionId: () => manager.getSessionId(),
+				sessionManager: manager,
+			}),
+		);
+		const result = await tool.execute("revised-history", { path: "history://current/full" });
+		const text = result.content.find(block => block.type === "text");
+		expect(text?.type === "text" ? text.text : "").toContain("Original evidence before pruning");
+		expect(formatCurrentBranchFullHistory(manager.getBranch())).toContain("Original evidence before pruning");
+	});
+
 	it("rejects current/full when disabled or without a caller-bound branch", async () => {
 		await expect(
 			InternalUrlRouter.instance().resolve("history://current/full", {

@@ -23,6 +23,8 @@
 ### Fixed
 
 - Paused agents now report readiness after asynchronous credential resolution.
+- Agents can now forward `parentSessionId` to share provider cache affinity without sharing conversation state.
+- Repeated compaction requests now stop when only bookkeeping follows a completed compaction.
 
 ## [18.18.9] - 2026-11-11
 

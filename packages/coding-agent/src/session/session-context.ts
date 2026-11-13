@@ -28,6 +28,7 @@ import {
 	type CompactionEntry,
 	type CustomMessageEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
+	replayContextRevisions,
 	resolveSessionLeafId,
 	type SessionEntry,
 	type SessionMessageEntry,
@@ -319,7 +320,7 @@ export function buildSessionContext(
 
 	// Walk from leaf to root, collecting path. Corrupt/pre-fix files can contain
 	// parent cycles; stop at the first repeat so session load is bounded.
-	const path: SessionEntry[] = [];
+	let path: SessionEntry[] = [];
 	const seenPathIds = new Set<string>();
 	let current: SessionEntry | undefined = leaf;
 	while (current && !seenPathIds.has(current.id)) {
@@ -328,6 +329,7 @@ export function buildSessionContext(
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
 	path.reverse();
+	path = replayContextRevisions(path);
 
 	// Extract settings and find compaction
 	let thinkingLevel: string | undefined = "off";

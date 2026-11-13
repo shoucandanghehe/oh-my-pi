@@ -22,6 +22,7 @@
 - BTW metadata events no longer carry conversation snapshots or full turns; completed requests emit `terminal` events. Existing session journals are unchanged.
 - Removed unused `BTW_THREAD_CUSTOM_TYPE`, `BtwPausedRequest`, `RestoredBtwThread.pausedRequest`, and `CodexSearchParams` exports.
 - `EnhancedPasteHandlers.beginPaste` now returns a delivery object instead of also accepting a completion function.
+- Session readers must replay `context_revision` entries to reconstruct the effective branch context; raw history now retains earlier message versions.
 
 ### Added
 
@@ -37,10 +38,13 @@
 ### Changed
 
 - `worktree.base` and `OMP_WORKTREE_DIR` accept cwd-relative paths such as `.worktrees`; creation and `omp worktree list|clear --cwd` use the owning session or CLI directory. The default stays unchanged.
+- Pruning and shake now preserve original history and append branch-local context revisions, so rewinding before a reduction restores the earlier content.
 
 ### Fixed
 
 - `^model` tags now stay usable for any number of subagent spawns on the session branch, and tagging several models offers a pool to choose from instead of making the agent split work evenly across them.
+- BTW requests now share Main's Codex prompt-cache routing while keeping an independent conversation.
+- Session persistence no longer truncates long original message payloads.
 - Seance consultations now honor `task.agentModelOverrides.seance` as a persistent model default; task `model` and `/seance --model` still take precedence ([#16848](https://github.com/can1357/oh-my-pi/issues/16848)).
 - Nested task worktrees remain recoverable when their parent finishes, is retained, or is retried.
 - Native agent panes stack the first pair beside Main before expanding to a third column, then grow evenly within the two agent columns.
