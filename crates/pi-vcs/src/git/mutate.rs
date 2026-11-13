@@ -3172,9 +3172,10 @@ mod tests {
 		let linked = destination.path().join("linked");
 		let result = repo
 			.worktree_add(&linked, "target", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 
@@ -3226,9 +3227,10 @@ mod tests {
 		let linked = destination.path().join("linked");
 		let result = repo
 			.worktree_add(&linked, "target", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 
@@ -3263,9 +3265,10 @@ mod tests {
 		let linked = destination.path().join("linked");
 		let result = repo
 			.worktree_add(&linked, "target", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
+				exclude_paths: Vec::new(),
 			})
 			.unwrap();
 

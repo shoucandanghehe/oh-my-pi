@@ -947,8 +947,8 @@ function joinReadList(
 	list: ReadList,
 	resultOf: (part: ShapePart<ReadToolDetails>) => AgentToolResult<ReadToolDetails>,
 	hints?: ReadonlyMap<ShapePart<ReadToolDetails>, string>,
-): { content: Array<TextContent | ImageContent>; layout: (string | number)[]; parts: ShapePart<ReadToolDetails>[] } {
-	const content: Array<TextContent | ImageContent> = [];
+): { content: Array<TextContent | MediaContent>; layout: (string | number)[]; parts: ShapePart<ReadToolDetails>[] } {
+	const content: Array<TextContent | MediaContent> = [];
 	const layout: (string | number)[] = [];
 	const parts: ShapePart<ReadToolDetails>[] = [];
 	let block: (string | number)[] = [];

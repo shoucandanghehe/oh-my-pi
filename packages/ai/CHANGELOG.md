@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the unused `validateMessagesMedia` export; use `validateContextMedia`.
+
+### Added
+
+- Added `preferWebsockets: "only"` for Codex requests and streamed compaction, keeping later turns on WebSockets after transport failures instead of falling back to SSE.
+- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
+
 ### Changed
 
 - Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
@@ -9,6 +19,10 @@
 ### Fixed
 
 - Fixed Gemini 4 (Argon, Carbon and Hydrogen) answers longer than one 65,536-token output segment failing with finish reason `CONTINUATION`: Google, Vertex AI, Gemini CLI and Antigravity requests now resume the generation, retrying transient failures, and stream it as one reply ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
+- WebSocket-only Codex requests now reject a busy shared connection without falling back to SSE or interrupting its owner.
+- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
+- Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
+- Image edits can upload reference files to proxy endpoints that require multipart requests.
 
 ## [18.20.0] - 2026-11-12
 
@@ -28,22 +42,6 @@
 - Fixed requests to Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) failing because they were sent in Anthropic's request format ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Added Gemini's `xhigh` thinking level, sent on the Gemini API and Vertex for models whose ladder exposes it (Gemini 4 Hydrogen).
 - Fixed omp failing to start with `ENOTDIR: not a directory, stat '~/.aws/credentials'` when `~/.aws` is a file instead of a directory ([#19083](https://github.com/can1357/oh-my-pi/pull/19083) by [@iamshatter](https://github.com/iamshatter))
-### Breaking Changes
-
-- Removed the unused `validateMessagesMedia` export; use `validateContextMedia`.
-
-### Added
-
-- Added `preferWebsockets: "only"` for Codex requests and streamed compaction, keeping later turns on WebSockets after transport failures instead of falling back to SSE.
-- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
-- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
-
-### Fixed
-
-- WebSocket-only Codex requests now reject a busy shared connection without falling back to SSE or interrupting its owner.
-- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
-- Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
-- Image edits can upload reference files to proxy endpoints that require multipart requests.
 
 ## [18.19.0] - 2026-11-12
 
