@@ -20,6 +20,9 @@
 
 - Added optional picker icons for tooltips and accessible names, plus an option to control the placement of the search interface.
 - Added buttons, menu, and document component kinds, including menu-row action state changes and document text editing, commenting, and uncommenting events.
+### Added
+
+- Added branch-scoped `context_revision` entries so clients can replay reduced context without losing original history.
 
 ## [18.18.6] - 2026-11-09
 

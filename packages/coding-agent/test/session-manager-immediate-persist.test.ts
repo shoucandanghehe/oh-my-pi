@@ -389,41 +389,42 @@ describe("SessionManager JSONL software-crash durability", () => {
 		}
 	});
 
-	it("reparents metadata children and keeps billed usage when durably discarding an entry", async () => {
+	it("preserves failed evidence and copies effective tier metadata onto the durable retry branch", async () => {
 		const cwd = makeTempDir("@pi-discard-metadata-cwd-");
 		const sessionDir = path.join(cwd, "sessions");
 		const manager = SessionManager.create(cwd, sessionDir);
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted session file path");
 
-		const priorId = manager.appendMessage(assistantMessage("prior turn"));
+		const prior = assistantMessage("prior turn");
+		const priorId = manager.appendMessage(prior);
 		const discarded = assistantMessage("");
 		const discardedId = manager.appendMessage(discarded);
-		const serviceTierId = manager.appendServiceTierChange(null);
+		const serviceTierId = manager.appendServiceTierChange({ openai: "priority" });
 		const usageBefore = manager.getUsageStatistics();
+		const originalEntries = structuredClone(manager.getEntries());
 		await manager.discardEntryDurably(discardedId);
 		await manager.close();
 
 		const reloaded = await SessionManager.open(sessionFile, sessionDir);
 		const branch = reloaded.getBranch();
 		expect(branch.some(entry => entry.id === discardedId)).toBe(false);
-		expect(branch).toContainEqual(expect.objectContaining({ id: serviceTierId, parentId: priorId }));
-		expect(branch.some(entry => entry.type === "model_usage")).toBe(false);
-		expect(reloaded.getEntries()).toContainEqual(
+		expect(branch.some(entry => entry.id === serviceTierId)).toBe(false);
+		expect(branch.at(-1)).toMatchObject({
+			type: "service_tier_change",
+			serviceTier: { openai: "priority" },
+		});
+		expect(reloaded.getEntries().slice(0, originalEntries.length)).toEqual(originalEntries);
+		expect(reloaded.getEntry(serviceTierId)).toMatchObject({ parentId: discardedId });
+		expect(reloaded.getEntry(discardedId)).toMatchObject({ type: "message", parentId: priorId, message: discarded });
+		expect(reloaded.buildSessionContext().serviceTier).toEqual({ openai: "priority" });
+		expect(reloaded.buildSessionContext().messages).toEqual([prior]);
+		expect(branch).toContainEqual(
 			expect.objectContaining({
-				type: "model_usage",
-				parentId: serviceTierId,
-				provider: discarded.provider,
-				model: discarded.model,
-				usage: discarded.usage,
+				type: "branch_summary",
+				details: { kind: "discarded-entry-branch", discardedEntryId: discardedId },
 			}),
 		);
-		expect(branch.at(-1)).toMatchObject({
-			type: "branch_summary",
-			summary: "",
-			details: { kind: "discarded-entry-branch", discardedEntryId: discardedId },
-			parentId: serviceTierId,
-		});
 		expect(reloaded.getUsageStatistics()).toEqual(usageBefore);
 		await reloaded.close();
 	});

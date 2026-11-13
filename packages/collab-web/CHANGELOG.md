@@ -19,6 +19,9 @@
 ### Fixed
 
 - Fixed guests retaining stale agents, tool cards, and working state after a failed rejoin; guests now reliably restore the current session state when reconnecting.
+### Fixed
+
+- Live transcripts now apply branch-local context revisions without overwriting their original history.
 
 ## [18.19.0] - 2026-11-12
 

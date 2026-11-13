@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -147,6 +148,10 @@ describe("AgentSession per-turn prune persistence", () => {
 	}
 
 	it("persists the pruned rewrite so a from-disk rebuild matches the live context", async () => {
+		const beforePruneLeaf = sessionManager.getLeafId()!;
+		const originalEntries = structuredClone(sessionManager.getEntries());
+		await sessionManager.flush();
+		const originalFile = await Bun.file(sessionManager.getSessionFile()!).text();
 		const finalAssistant = {
 			role: "assistant" as const,
 			content: [{ type: "text" as const, text: "Continuing." }],
@@ -185,11 +190,42 @@ describe("AgentSession per-turn prune persistence", () => {
 		}
 		const rebuiltText = rebuilt.content.find(block => block.type === "text");
 		expect(rebuiltText?.type === "text" ? rebuiltText.text : undefined).toBe(USELESS_NOTICE);
+		// Pruning changes the selected context, never the already committed evidence.
+		expect(sessionManager.getEntries().slice(0, originalEntries.length)).toEqual(originalEntries);
+		expect(
+			buildSessionContext(sessionManager.getBranch(), beforePruneLeaf).messages.find(
+				message => message.role === "toolResult",
+			),
+		).toMatchObject({ content: [{ type: "text", text: "match line\n".repeat(20000) }] });
+		expect((await Bun.file(sessionFile).text()).startsWith(originalFile)).toBe(true);
+		expect(reloaded.getEntries().slice(0, originalEntries.length)).toEqual(originalEntries);
+		const prunedLeaf = reloaded.getLeafId()!;
+		reloaded.branch(beforePruneLeaf);
+		const restored = reloaded.buildSessionContext().messages.find(message => message.role === "toolResult");
+		expect(restored?.role === "toolResult" ? restored.content : undefined).toEqual([
+			{ type: "text", text: "match line\n".repeat(20000) },
+		]);
+		// A sibling branch must not inherit a revision on the abandoned branch.
+		reloaded.appendMessage({ role: "user", content: "Explore another branch", timestamp: Date.now() });
+		expect(reloaded.buildSessionContext().messages.find(message => message.role === "toolResult")).toEqual(restored);
+		const forkFile = reloaded.createBranchedSession(prunedLeaf)!;
+		const fork = await SessionManager.open(forkFile, tempDir.path());
+		expect(fork.buildSessionContext().messages.find(message => message.role === "toolResult")).toEqual(rebuilt);
+		fork.branch(beforePruneLeaf);
+		expect(fork.buildSessionContext().messages.find(message => message.role === "toolResult")).toEqual(restored);
+		await fork.close();
+		await reloaded.close();
+		await session.navigateTree(beforePruneLeaf, { summarize: false });
+		expect(liveResultText()).toBe("match line\n".repeat(20000));
+		await sessionManager.flush();
+		const rewound = await SessionManager.open(sessionFile, tempDir.path());
+		expect(rewound.buildSessionContext().messages.find(message => message.role === "toolResult")).toEqual(restored);
+		await rewound.close();
 	});
 
 	it("settles the run and restores the result when persisting the prune fails", async () => {
 		const rewriteEntries = vi
-			.spyOn(sessionManager, "rewriteEntries")
+			.spyOn(sessionManager, "appendContextRevision")
 			.mockRejectedValueOnce(new Error("injected rewrite failure"));
 		const runStates: string[] = [];
 		const unsubscribeRunState = session.subscribeRunState(state => runStates.push(state));
@@ -234,8 +270,8 @@ describe("AgentSession per-turn prune persistence", () => {
 				.find(candidate => candidate.type === "message" && candidate.message.role === "toolResult");
 			expect(entry?.type === "message" ? entry.message : undefined).toMatchObject({
 				content: [{ type: "text", text: "match line\n".repeat(20000) }],
-				prunedAt: undefined,
 			});
+			expect(entry?.type === "message" ? entry.message : undefined).not.toHaveProperty("prunedAt");
 		} finally {
 			unsubscribe();
 			unsubscribeRunState();

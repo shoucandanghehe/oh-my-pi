@@ -442,6 +442,7 @@
 
 ### Added
 
+- Extensions can import the form theme, the native span helpers (`styledSpans`, `compactText`, `rowsText` and the rest of the ANSI/span conversions), the `xd://` URL helpers (`parseXdUrl` and friends) and the `cfgExtensionTranscriptPresenters` setting handle from `@oh-my-pi/pi-coding-agent` instead of internal module paths, which stop the extension from loading when a file moves ([#18849](https://github.com/can1357/oh-my-pi/pull/18849) by [@materemias](https://github.com/materemias))
 - `/queue /compact [mode] [focus]` compacts after the current run finishes without interrupting it; queued input remains editable.
 - BTW and local subagent panes now support in-flight steering, queued messages, compaction, and history-tree navigation without affecting Main.
 - BTW and local subagent panes can stop and retry their own runs, show live tool output, and use pane-local clipboard attachments and draft editing without affecting Main.
@@ -482,6 +483,7 @@
 - Enhanced-paste image paths now attach correctly while later keystrokes wait for the paste.
 - Durable BTW conversations now retain image attachments, vision descriptions, and explicit side-command titles across resume and promotion.
 - Tool and system prompts no longer promise behavior the runtime lacks (read/grep/glob limits, edit-mode atomicity, LSP/GitHub/web-search parameters, Eval backends, `proc://` modes, memory and session notices); todo progress now reads `closed (completed or abandoned)` ([#15857](https://github.com/can1357/oh-my-pi/issues/15857)).
+- Non-interrupting TTSR prose reminders no longer claim that completed output was interrupted ([#15861](https://github.com/can1357/oh-my-pi/issues/15861)).
 - New Hindsight mental models use a 4096-token generation budget, configurable with `hindsight.mentalModelMaxTokens`, without changing existing models ([#6300](https://github.com/can1357/oh-my-pi/issues/6300)).
 - Hashline edits preserve required boundary lines when trimming them would break an otherwise valid replacement ([#16799](https://github.com/can1357/oh-my-pi/issues/16799)).
 - Native workspace panes now keep the correct split direction when reopened in background tabs or after resizing Main.
