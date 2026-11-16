@@ -7,7 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
@@ -78,6 +78,7 @@ async function createSession(
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
 			streamFn: main.stream,
+			convertToLlm,
 		}),
 		sessionManager,
 		settings: sessionSettings,
@@ -152,6 +153,163 @@ describe("AgentSession title fork", () => {
 		expect(target.sessionManager.getEntries().filter(entry => entry.type === "title_change")).toEqual([
 			expect.objectContaining({ title: "🧪 FLAKY: Fix flaky park tests", source: "auto" }),
 		]);
+	});
+
+	it.each([undefined, "nextTurn", "aside"] as const)(
+		"titles an opted-in extension task delivered as %s without changing its type or attribution",
+		async deliverAs => {
+			const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+			const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+			const target = await createSession(main, side);
+			const options = { triggerTurn: true, autoTitle: true, deliverAs };
+			const titled = nextTitle(target);
+
+			await target.sendCustomMessage(
+				{ customType: "a2a-inbound", content: FIRST_MESSAGE, display: true, attribution: "agent" },
+				options,
+			);
+			await titled;
+
+			expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
+			expect(target.sessionManager.titleSource).toBe("auto");
+			expect(target.messages[0]).toMatchObject({
+				role: "custom",
+				customType: "a2a-inbound",
+				attribution: "agent",
+			});
+			expect(target.sessionManager.getBranch()).toContainEqual(
+				expect.objectContaining({ type: "custom_message", customType: "a2a-inbound", attribution: "agent" }),
+			);
+			expect(main.calls[0]?.context.messages[0]).toMatchObject({ role: "developer", attribution: "agent" });
+			expect(JSON.stringify(side.calls[0]?.context.messages)).toContain(FIRST_MESSAGE);
+		},
+	);
+
+	it("does not title ordinary extension notifications", async () => {
+		const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side);
+		const titleModel = vi.spyOn(ai, "completeSimple");
+
+		await target.sendCustomMessage(
+			{ customType: "a2a-inbound", content: FIRST_MESSAGE, display: true },
+			{ triggerTurn: true },
+		);
+
+		expect(target.sessionName).toBeUndefined();
+		expect(side.calls).toHaveLength(0);
+		expect(titleModel).not.toHaveBeenCalled();
+	});
+
+	it.each([undefined, "nextTurn"] as const)(
+		"titles an idle appended %s task only when a later turn replies",
+		async deliverAs => {
+			const main = createMockModel({ handler: { content: ["Reading the park tests first."] } });
+			const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+			const target = await createSession(main, side);
+
+			await target.sendCustomMessage(
+				{ customType: "a2a-inbound", content: FIRST_MESSAGE, display: true, attribution: "agent" },
+				{ autoTitle: true, deliverAs },
+			);
+
+			expect(main.calls).toHaveLength(0);
+			expect(side.calls).toHaveLength(0);
+			expect(target.sessionName).toBeUndefined();
+
+			const titled = nextTitle(target);
+			await target.sendCustomMessage("Continue with the task above.", { triggerTurn: true });
+			expect(side.calls).toHaveLength(1);
+			await titled;
+
+			expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
+			expect(JSON.stringify(side.calls[0]?.context.messages)).toContain(FIRST_MESSAGE);
+		},
+	);
+
+	it.each(["steer", "followUp", "nextTurn", "aside"] as const)(
+		"waits for a queued %s task to reach the model before titling",
+		async deliverAs => {
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const main = createMockModel({
+				responses: [
+					async () => {
+						started.resolve();
+						await release.promise;
+						return { content: ["Ready for a task."] };
+					},
+				],
+				handler: { content: ["Reading the park tests first."] },
+			});
+			const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+			const target = await createSession(main, side);
+			const run = target.sendCustomMessage("Waiting for a task.", { triggerTurn: true });
+			await started.promise;
+			const titled = nextTitle(target);
+
+			try {
+				await target.sendCustomMessage(
+					{ customType: "a2a-inbound", content: FIRST_MESSAGE, display: true, attribution: "agent" },
+					{ autoTitle: true, triggerTurn: true, deliverAs },
+				);
+				expect(side.calls).toHaveLength(0);
+			} finally {
+				release.resolve();
+			}
+			await run;
+			await titled;
+			await target.waitForIdle();
+
+			expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
+			expect(side.calls).toHaveLength(1);
+			expect(JSON.stringify(side.calls[0]?.context.messages)).toContain(FIRST_MESSAGE);
+		},
+	);
+
+	it.each(["autoTitle disabled", "PI_NO_TITLE", "manual name"] as const)(
+		"keeps the existing %s gate for opted-in extension tasks",
+		async gate => {
+			const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+			const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+			const target = await createSession(main, side, {}, { autoTitle: gate !== "autoTitle disabled" });
+			if (gate === "PI_NO_TITLE") Bun.env.PI_NO_TITLE = "1";
+			if (gate === "manual name") await target.sessionManager.setSessionName("My session", "user");
+			const titleModel = vi.spyOn(ai, "completeSimple");
+
+			await target.sendCustomMessage(FIRST_MESSAGE, { triggerTurn: true, autoTitle: true });
+
+			expect(target.sessionName).toBe(gate === "manual name" ? "My session" : undefined);
+			expect(side.calls).toHaveLength(0);
+			expect(titleModel).not.toHaveBeenCalled();
+		},
+	);
+
+	it("uses an opted-in task's text blocks with the tiny title generator", async () => {
+		const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side, { "title.generator": "tiny" });
+		const titleInputs: string[] = [];
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+			titleInputs.push(titleRequestInput(context));
+			return createAssistantMessage("<title>Fix flaky park tests</title>");
+		});
+		const titled = nextTitle(target);
+
+		await target.sendCustomMessage(
+			{
+				content: [
+					{ type: "text", text: "fix the " },
+					{ type: "text", text: "flaky park tests" },
+				],
+			},
+			{ triggerTurn: true, autoTitle: true },
+		);
+		await titled;
+
+		expect(target.sessionName).toBe("Fix flaky park tests");
+		expect(titleInputs).toEqual([expect.stringContaining(FIRST_MESSAGE)]);
+		expect(side.calls).toHaveLength(0);
 	});
 
 	it.each<[string, MockResponse, MockResponse]>([

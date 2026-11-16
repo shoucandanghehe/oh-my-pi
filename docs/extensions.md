@@ -389,12 +389,32 @@ export default function (pi: ExtensionAPI) {
 - `deliverAs: "nextTurn"` — kept out of the editable pending-message UI; while streaming it waits for the next turn, and when idle without `triggerTurn` it is appended to context/history without starting a turn
 - `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch, except that it ends a running interruptible `wait` (the wait returns "Wait interrupted by message." and its job keeps running); when idle it normally starts a turn regardless of `triggerTurn`. Plan mode or user-interrupt auto-resume suppression folds it into context instead
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
+- `autoTitle: true` — opts a task-bearing custom message into initial automatic session naming when its reply begins, without changing its `customType` or attribution. Ordinary custom messages remain excluded.
 
 When idle without `triggerTurn`, ordinary `sendMessage` delivery appends the
 message without starting a turn. A `display: true` message is rendered
 immediately; `"nextTurn"` delivery does not emit that immediate display event.
 ACP clients can defer agent-initiated turns, in which case requests that would
 start one are retained as hidden next-turn messages.
+
+`autoTitle` does not start a turn or replace an existing title. It requires automatic
+titles to be enabled for the session (normally the interactive TUI), respects
+`--no-title` / `PI_NO_TITLE`, and uses the existing title generator and low-signal
+input handling. A task appended while idle remains eligible when a later turn
+replies; appending alone makes no title request. It does not opt messages into
+periodic title-drift checks.
+
+```ts
+pi.sendMessage(
+	{
+		customType: "a2a-inbound",
+		content: "Investigate and fix the login regression.",
+		display: true,
+		attribution: "agent",
+	},
+	{ triggerTurn: true, autoTitle: true },
+);
+```
 
 `pi.sendUserMessage(content, { deliverAs })` submits text/images without slash-command
 or prompt-template expansion. Omit `deliverAs` to start a prompt when idle;
