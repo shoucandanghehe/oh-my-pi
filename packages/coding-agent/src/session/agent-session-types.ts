@@ -480,7 +480,7 @@ export interface AgentSessionConfig {
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 	/**
-	 * Name the unnamed session from the operator's messages, once each reply
+	 * Name the unnamed session from the operator's messages or opted-in extension tasks, once each reply
 	 * begins (see `title.generator`). Only the interactive TUI sets this; print,
 	 * RPC, ACP, SDK and subagent sessions stay unnamed. Default: false.
 	 */

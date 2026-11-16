@@ -2177,10 +2177,16 @@ export interface ExtensionAPI {
 	 * `deliverAs: "aside"` injects the message at the next agent step boundary without interrupting
 	 * the in-flight tool batch; when the session is idle it starts a turn regardless of `triggerTurn`
 	 * (plan mode folds it into context instead).
+	 * `autoTitle: true` opts a task message into initial session naming once the model replies.
+	 * It preserves message attribution and requires an unnamed session with automatic titles enabled.
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+			autoTitle?: boolean;
+		},
 	): void;
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
@@ -2421,7 +2427,12 @@ export type SendMessageHandler = <T = unknown>(
 	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
 	 * tool batch, except that it ends a running interruptible `wait`; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
 	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
+	options?: {
+		triggerTurn?: boolean;
+		deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+		/** Opt this task into initial session naming without changing attribution. */
+		autoTitle?: boolean;
+	},
 ) => void;
 
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool

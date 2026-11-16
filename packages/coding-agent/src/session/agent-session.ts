@@ -1364,6 +1364,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Name the session from the operator's messages (see {@link AgentSessionConfig.autoTitle}). */
 	readonly #autoTitle: boolean;
 	#titleGenerationInFlightFor: string | undefined;
+	/** Runtime-only opt-ins follow custom messages through delivery queues without changing their persisted identity. */
+	readonly #autoTitleMessages = new WeakSet<CustomMessage>();
 	/** First-message auto-title that may be retried from conversation context.
 	 *  Once the operator's message has been declined — by the title model (too
 	 *  ambiguous, e.g. a pasted image plus "help"), or before any request by the
@@ -11733,6 +11735,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: {
 			triggerTurn?: boolean;
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+			autoTitle?: boolean;
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
 		},
@@ -11745,6 +11748,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: {
 			triggerTurn?: boolean;
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+			/** Use this task as initial title input once its reply begins; preserves attribution and title-disable gates. */
+			autoTitle?: boolean;
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
 		},
@@ -11771,6 +11776,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			| {
 					triggerTurn?: boolean;
 					deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+					autoTitle?: boolean;
 					queueChipText?: string;
 					acceptTerminalEmptyStop?: boolean;
 			  }
@@ -11840,6 +11846,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				deliverAs: options?.deliverAs === "nextTurn" ? "nextTurn" : undefined,
 			};
 		}
+		if (options?.autoTitle && !normalizedAppMessage.excludeFromContext) {
+			this.#autoTitleMessages.add(normalizedAppMessage);
+		}
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
@@ -11889,6 +11898,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				normalizedAppMessage.timestamp,
 				normalizedAppMessage.excludeFromContext,
 			);
+			if (options?.autoTitle) this.#noteTitleInput(normalizedAppMessage);
 			return false;
 		}
 
@@ -11952,6 +11962,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			normalizedAppMessage.timestamp,
 			normalizedAppMessage.excludeFromContext,
 		);
+		if (options?.autoTitle) this.#noteTitleInput(normalizedAppMessage);
 		if (normalizedAppMessage.display === true) {
 			// Idle display append with no turn: notify session listeners so the interactive
 			// transcript paints it now instead of on the next rebuild. The entry is persisted
@@ -12645,15 +12656,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Record an operator message as the title source while an auto-titled session
-	 * is unnamed. A message {@link isLowSignalTitleInput} declines (a greeting, or
-	 * one that is all attachment or markup) records no input; it arms
+	 * Record an operator message or opted-in extension task as the title source
+	 * while an auto-titled session is unnamed. A message {@link isLowSignalTitleInput}
+	 * declines (a greeting, or one that is all attachment or markup) records no input; it arms
 	 * {@link #deferredTitle} instead, so a session launched from one attached brief
 	 * is still titled from the assistant's reading. An existing deferral is kept.
 	 */
 	#noteTitleInput(message: AgentMessage): void {
 		if (!this.#autoTitle || this.sessionName || $env.PI_NO_TITLE) return;
-		const text = operatorTitleText(message);
+		const text =
+			message.role === "custom" && this.#autoTitleMessages.has(message)
+				? this.#getCustomMessageTextContent(message)
+				: operatorTitleText(message);
 		if (!text) return;
 		const sessionId = this.sessionManager.getSessionId();
 		if (isLowSignalTitleInput(text)) {

@@ -273,10 +273,16 @@ Related APIs:
 - `sendUserMessage(content, { deliverAs?, attribution? })`
 - `steer(text, images?, { attribution? })`
 - `followUp(text, images?, { synthetic?, attribution? })`
-- `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`
+- `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn?, autoTitle? })`
 - `abort()`
 
 `deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. The one exception is a running interruptible `wait` or `vibe_wait`, which an aside ends so the message is not delayed behind it. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
+
+`sendCustomMessage(..., { autoTitle: true })` lets a custom task message supply the
+initial session title without changing its role or attribution. It uses the normal
+reply-start title lifecycle, does not start a turn by itself, and respects existing
+names and title-disable gates. The session must be created with `autoTitle: true`;
+SDK sessions default to disabled.
 
 ## Idle maintenance
 
