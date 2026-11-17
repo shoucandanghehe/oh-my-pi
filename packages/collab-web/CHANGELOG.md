@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed web search cards without a synthesized answer displaying raw numbered result lists; they now show a concise excerpt for each source instead.
+### Fixed
+
+- Live transcripts now apply branch-local context revisions without overwriting their original history.
 
 ## [18.22.0] - 2026-11-16
 
@@ -19,9 +22,6 @@
 ### Fixed
 
 - Fixed guests retaining stale agents, tool cards, and working state after a failed rejoin; guests now reliably restore the current session state when reconnecting.
-### Fixed
-
-- Live transcripts now apply branch-local context revisions without overwriting their original history.
 
 ## [18.19.0] - 2026-11-12
 

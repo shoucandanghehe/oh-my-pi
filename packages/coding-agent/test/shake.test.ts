@@ -185,10 +185,10 @@ describe("AgentSession shake", () => {
 			const started = Promise.withResolvers<void>();
 			const release = Promise.withResolvers<void>();
 			const allocate = sessionManager.allocateArtifactPath.bind(sessionManager);
-			const allocation = vi.spyOn(sessionManager, "allocateArtifactPath").mockImplementation(async toolType => {
+			const allocation = vi.spyOn(sessionManager, "allocateArtifactPath").mockImplementation(async () => {
 				started.resolve();
 				await release.promise;
-				return allocate(toolType);
+				return allocate();
 			});
 			try {
 				const shaking = session.shake("elide");

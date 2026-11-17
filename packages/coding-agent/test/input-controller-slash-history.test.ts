@@ -47,7 +47,11 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 	// Mirrors the real contract: a pending submission is recorded as a local
 	// submission until its canonical user `message_start` lands.
 	const locallySubmittedUserSignatures = new Set<string>();
-	const sessionManager = { sessionId: "session-a", getSessionId: () => sessionManager.sessionId };
+	const sessionManager = {
+		sessionId: "session-a",
+		getSessionId: () => sessionManager.sessionId,
+		getLeafId: () => null,
+	};
 	const ctx = {
 		editor,
 		sessionManager,
@@ -110,7 +114,7 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 function controllerFor(ctx: InteractiveModeContext) {
 	const controller = new InputController(ctx);
 	controller.setupEditorSubmitHandler();
-	ctx.handleQueueCommand = message => controller.handleQueueCommand(message);
+	ctx.handleQueueCommand = (message, detached, origin) => controller.handleQueueCommand(message, detached, origin);
 	return controller;
 }
 

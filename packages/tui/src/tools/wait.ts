@@ -30,7 +30,7 @@ import { describeJobTiles, type JobTile, type JobWidgetView, renderJobTileLines 
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
 import type { IrcDeliveryReceipt } from "./irc";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { card as cardNode, compact, elapsed, keyed, md, node, row, span, text } from "../native/describe";
+import { card as cardNode, compact, elapsed, keyed, md, node, span, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { plainText } from "../native/spans";

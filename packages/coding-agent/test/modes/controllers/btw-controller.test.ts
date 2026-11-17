@@ -13,8 +13,6 @@ import { BtwSessionStore } from "@oh-my-pi/pi-coding-agent/session/btw-session-s
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
-import { type BtwNoteAction, BtwNoteComponent } from "@oh-my-pi/pi-tui/overlays/btw-note";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { cfgBtwInject } from "@oh-my-pi/pi-coding-agent/modes/settings";
@@ -53,6 +51,7 @@ import {
 	TERMINAL,
 	type TUI,
 } from "@oh-my-pi/pi-tui";
+import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 
 const usage: Usage = {
 	input: 0,
@@ -168,8 +167,6 @@ function makeCtx(
 	const journal = SessionManager.inMemory();
 	Object.assign(session, { sessionManager: journal, generateTitle: async () => null });
 	return {
-		chatContainer: new TranscriptContainer(),
-		transcriptMessageComponents: new WeakMap(),
 		ui: {
 			requestRender: vi.fn(notifyBtwProgress),
 			requestComponentRender: vi.fn(notifyBtwProgress),
@@ -260,28 +257,6 @@ function drainBtwRequest(
 	};
 	btwObservers.add(observe);
 	return completion.promise;
-}
-
-/** The transcript notes Tern shows, in transcript order. */
-function notesIn(ctx: InteractiveModeContext): BtwNoteComponent[] {
-	return ctx.chatContainer.children.filter(child => child instanceof BtwNoteComponent);
-}
-
-function noteIn(ctx: InteractiveModeContext): BtwNoteComponent {
-	const [note] = notesIn(ctx);
-	if (!note) throw new Error("expected a /btw note in the transcript");
-	return note;
-}
-
-/** A click on the note (or one of its tools), or a chosen menu entry. */
-function press(note: BtwNoteComponent, act: BtwNoteAction): void {
-	note.handleNativeEvent({ type: "action", key: "", act, mods: [] });
-}
-
-/** The ids of the note's right-click entries. */
-function menuIds(note: BtwNoteComponent): string[] {
-	const menu = note.describe().p?.actions?.menu ?? [];
-	return menu.flatMap(entry => (typeof entry === "object" && "id" in entry ? [entry.id] : []));
 }
 
 describe("BtwPanelComponent", () => {
@@ -1265,7 +1240,7 @@ describe("BtwController", () => {
 		expect(controller.hasActiveRequest()).toBe(false);
 	});
 
-	it("in Tern answers in a transcript note; a click points the composer at it, Esc points it back without cancelling", async () => {
+	it("in Tern keeps focused-agent BTW history streaming when its sheet closes", async () => {
 		const pending = Promise.withResolvers<RunEphemeralTurnResult>();
 		let onTextDelta: ((delta: string) => void) | undefined;
 		const runEphemeralTurn = vi.fn((args: RunEphemeralTurnArgs) => {
@@ -1274,133 +1249,80 @@ describe("BtwController", () => {
 		});
 		const btwContainer = new Container();
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
-		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
-		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
+		Object.assign(ctx, {
+			workspaceEnabled: false,
+			sessionManager: SessionManager.inMemory(),
+			focusedAgentId: "Worker",
+			viewSession: ctx.session,
+		});
+		const hide = vi.fn();
+		const showOverlay = vi.fn((_component: unknown) => ({ hide }));
+		Object.assign(ctx.ui, { nativeRendering: true, showOverlay, setFocus: vi.fn() });
 		const controller = new BtwController(ctx);
+		const promptSpy = vi.spyOn(EphemeralConversation.prototype, "prompt");
+		const sheetAt = (call: number): BtwHistoryPanel => {
+			const sheet = showOverlay.mock.calls[call]?.[0];
+			if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
+			return sheet;
+		};
+		const answerText = (sheet: BtwHistoryPanel): unknown => {
+			const find = (node: NativeChild): NativeNode | undefined => {
+				if (!("k" in node) || typeof node.k !== "string") return undefined;
+				if (node.k === "md" && node.p?.text === "Because streaming.") return node;
+				for (const child of node.c ?? []) {
+					const found = find(child);
+					if (found) return found;
+				}
+				return undefined;
+			};
+			return find(sheet.describe());
+		};
 
 		await controller.start("Why?");
-		// Neither the dock panel nor a sheet: the answer streams in the transcript.
+		await drainBtwRequest(() => runEphemeralTurn.mock.calls.length === 1);
+		// No inline dock panel: Tern clips it, while the sheet body scrolls.
 		expect(btwContainer.children).toHaveLength(0);
-		expect(showOverlay).not.toHaveBeenCalled();
-		const note = noteIn(ctx);
 		onTextDelta?.("Because streaming.");
-		expect(JSON.stringify(note.describe())).toContain("Because streaming.");
+		await drainBtwRequest(() => answerText(sheetAt(0)) !== undefined);
+		expect(answerText(sheetAt(0))).toBeDefined();
+		expect(promptSpy.mock.calls[0]?.[1]?.replyMaxBytes).toBe(Number.POSITIVE_INFINITY);
 
-		expect(controller.hasActiveRequest()).toBe(false);
-		press(note, "btw-focus");
-		expect(controller.isFocused()).toBe(true);
-		expect(note.describe().p?.role).toBe("omp.btw.note.active");
-		expect(controller.hasActiveRequest()).toBe(true);
-		expect(controller.handleEscape()).toBe(true);
-		expect(controller.isFocused()).toBe(false);
-		expect(note.describe().p?.role).toBe("omp.btw.note");
+		sheetAt(0).handleInput("\x1b");
+		expect(hide).toHaveBeenCalledTimes(1);
 		expect(runEphemeralTurn.mock.calls[0]?.[0].signal?.aborted).toBe(false);
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/btw to reopen"), { dim: true });
 
-		// Folding the note it talks to points the composer back too; a click on the line reopens both.
-		press(note, "btw-focus");
-		press(note, "btw-fold");
-		expect(note.folded).toBe(true);
-		expect(controller.isFocused()).toBe(false);
-		press(note, "btw-expand");
-		expect(note.folded).toBe(false);
-		expect(controller.isFocused()).toBe(true);
-
-		pending.resolve({ replyText: "Because streaming.", assistantMessage: createAssistantMessage("x") });
+		// `/btw` lands back on the answer that kept streaming.
+		await controller.start("");
+		expect(answerText(sheetAt(1))).toBeDefined();
+		pending.resolve({
+			replyText: "Because streaming.",
+			assistantMessage: createAssistantMessage("Because streaming."),
+		});
 		await drainBtwRequest();
 		await controller.dispose();
 	});
 
-	it("in Tern sends composer drafts to the clicked note as its follow-ups", async () => {
-		const runEphemeralTurn = vi.fn(async (args: RunEphemeralTurnArgs) => ({
-			replyText: `Answer to ${args.promptText.length}`,
-			assistantMessage: createAssistantMessage("Answer"),
-		}));
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		Object.assign(ctx.ui, { nativeRendering: true });
-		const controller = new BtwController(ctx);
-
-		await controller.start("First?");
-		await drainBtwRequest();
-		const note = noteIn(ctx);
-		// Not pointed at the note: nothing to send to.
-		expect(await controller.submitFollowUp("More?")).toBe(false);
-		press(note, "btw-focus");
-		expect(await controller.submitFollowUp("More?")).toBe(true);
-		await drainBtwRequest();
-
-		expect(runEphemeralTurn).toHaveBeenCalledTimes(2);
-		expect(runEphemeralTurn.mock.calls[1]?.[0].promptText).toContain("More?");
-		// The same note carries the follow-up; no second note.
-		expect(notesIn(ctx)).toEqual([note]);
-		expect(JSON.stringify(note.describe())).toContain("More?");
-		await controller.dispose();
-	});
-
-	it("in Tern branches a completed answer from its note's menu, leaving plain b to the composer", async () => {
+	it("in Tern branches a completed side answer from the inline panel", async () => {
 		const runEphemeralTurn = vi.fn(async () => ({
 			replyText: "Answer",
 			assistantMessage: createAssistantMessage("Answer"),
 		}));
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		Object.assign(ctx.ui, { nativeRendering: true });
+		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
+		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
 		const controller = new BtwController(ctx);
-		const branch = vi.spyOn(controller, "handleBranch");
 
 		await controller.start("Question?");
 		await drainBtwRequest();
 
-		expect(controller.handlesBranchKey()).toBe(false);
-		const note = noteIn(ctx);
-		expect(menuIds(note)).toContain("btw-branch");
-		press(note, "btw-branch");
-		const result = branch.mock.results[0];
-		if (result?.type !== "return") throw new Error("expected the branch operation to return a promise");
-		expect(await result.value).toBe(true);
+		expect(ctx.btwContainer.children).toHaveLength(1);
+		expect(showOverlay).not.toHaveBeenCalled();
+		expect(controller.canBranch()).toBe(true);
+		expect(await controller.handleBranch()).toBe(true);
 		expect(ctx.handleBtwBranch).toHaveBeenCalledTimes(1);
 
 		await controller.dispose();
-	});
-
-	it("in Tern puts notes back after a rebuild: folded, before the first newer message, only on the shown branch", async () => {
-		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-btw-notes-"));
-		const manager = SessionManager.create(directory, directory);
-		const ctx = makeCtx(makeFakeSession(vi.fn()));
-		Object.assign(ctx.ui, { nativeRendering: true });
-		ctx.sessionManager = manager;
-		const controller = new BtwController(ctx);
-		try {
-			manager.appendMessage({ role: "user", content: "First", timestamp: 1_000 });
-			manager.appendMessage(Object.assign(createAssistantMessage("Reply"), { timestamp: 3_000 }));
-			manager.appendMessage({ role: "user", content: "Second", timestamp: 5_000 });
-			await manager.ensureOnDisk();
-			const blocks = manager.getBranch().flatMap(entry => {
-				if (entry.type !== "message") return [];
-				const block = new Container();
-				ctx.transcriptMessageComponents.set(entry.message, block);
-				ctx.chatContainer.addChild(block);
-				return [block];
-			});
-			const [first] = manager.getBranch();
-			const store = await BtwHistoryStore.open(manager.getArtifactsDir()!);
-			const asked = (id: string, leafId: string | null, at: number) =>
-				store.upsert({ id, leafId, question: id, answer: id, status: "complete", createdAt: at, updatedAt: at });
-			await asked("before-all", null, 500);
-			await asked("mid-turn", first!.id, 2_000);
-			await asked("elsewhere", "a-rewound-entry", 2_500);
-			await asked("latest", manager.getLeafId(), 6_000);
-
-			await controller.placeNotes();
-
-			const order = ctx.chatContainer.children.map(child =>
-				child instanceof BtwNoteComponent ? child.record.id : blocks.findIndex(block => block === child),
-			);
-			expect(order).toEqual(["before-all", 0, "mid-turn", 1, 2, "latest"]);
-			expect(notesIn(ctx).every(note => note.folded)).toBe(true);
-		} finally {
-			await controller.dispose();
-			await manager.flush();
-			await fs.rm(directory, { recursive: true, force: true });
-		}
 	});
 
 	it("opens history without a model request when invoked without a question", async () => {
@@ -3234,28 +3156,6 @@ describe("BtwController inject", () => {
 		expect(session.prompt).toHaveBeenCalledTimes(1);
 		expect(session.prompt).toHaveBeenCalledWith(steeringPrompt, expect.anything());
 		expect(JSON.stringify(sheet.describe())).toContain(BTW_INJECTED_LABEL);
-		// The transcript note shows the block sent and offers it no more.
-		const note = noteIn(ctx);
-		expect(JSON.stringify(note.describe())).toContain(BTW_INJECTED_LABEL);
-		expect(menuIds(note)).not.toContain("btw-inject");
-		await controller.dispose();
-	});
-
-	it("in Tern sends from the note's menu, once per answer", async () => {
-		const session = makeInjectSession(steeringTurn());
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
-		Object.assign(ctx.ui, { nativeRendering: true });
-		const controller = new BtwController(ctx);
-
-		await controller.start("Write a steering prompt to stop it");
-		await drainBtwRequest();
-		const note = noteIn(ctx);
-		expect(JSON.stringify(note.describe())).toContain(BTW_INJECT_LABEL);
-		expect(menuIds(note)).toContain("btw-inject");
-		press(note, "btw-inject");
-		press(note, "btw-inject");
-		expect(session.prompt).toHaveBeenCalledTimes(1);
-		expect(session.prompt).toHaveBeenCalledWith(steeringPrompt, expect.anything());
 		await controller.dispose();
 	});
 

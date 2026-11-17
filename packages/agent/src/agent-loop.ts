@@ -130,7 +130,11 @@ export function resolveToolConcurrency(
 	}
 }
 
-async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal, loopId?: symbol): Promise<void> {
+async function waitForProcessPause(
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	loopId: symbol,
+): Promise<void> {
 	try {
 		while (agentPauseGate.paused && !signal?.aborted) {
 			config.onPauseChange?.(true);
@@ -2218,7 +2222,7 @@ async function streamAssistantResponse(
 	// Context shaping and credential resolution above may yield after the loop's
 	// initial gate check. Re-check immediately before the provider call; there is
 	// no async gap after this point where a newly engaged pause could slip through.
-	if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal, loopId);
+	if (agentPauseGate.paused) await waitForProcessPause(config, signal, loopId);
 	if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
 		throw PAUSE_SHUTDOWN_ABORT_REASON;
 	}
@@ -3510,7 +3514,6 @@ async function executeToolCalls(
 		};
 	});
 
-
 	const isToolAborted = (record: (typeof records)[number]): boolean =>
 		signal?.aborted === true ||
 		(record.signal.aborted && !(record.handlesToolInterrupt && record.signal.reason === TOOL_INTERRUPT_ABORT_REASON));
@@ -4006,13 +4009,7 @@ async function executeToolCalls(
 			concurrency === "shared" && sharedEffects.length > 0
 				? Promise.allSettled(sharedEffects).then(() => undefined)
 				: undefined;
-		const task = start.then(async () => {
-			try {
-				await runTool(record, index, earlierEffectsSettled);
-			} finally {
-				refreshPauseState();
-			}
-		});
+		const task = start.then(() => runTool(record, index, earlierEffectsSettled));
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;

@@ -19,6 +19,17 @@
 - Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
 - Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
 - Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
+### Breaking Changes
+
+- `getWorktreesDir(cwd)` and `getWorktreeDir(cwd, segment)` now require the owning operation's cwd.
+
+### Added
+
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
+
+### Changed
+
+- Worktree directory overrides now accept paths relative to the explicitly supplied operation cwd, retaining environment-over-setting priority and the existing default.
 
 ## [18.22.2] - 2026-11-18
 

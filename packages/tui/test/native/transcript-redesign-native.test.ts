@@ -201,8 +201,17 @@ describe("native transcript redesign", () => {
 	});
 
 	it("offers a prompt's turn actions to a phone's long press, each naming the prompt by role and time", async () => {
-		const actions: TranscriptAction[] = [];
-		setTranscriptActionHandler(action => actions.push(action));
+		const actions: Array<
+			{ act: "copy"; text: string } | { act: "turn"; turn: string; message: { role: string; at: number } }
+		> = [];
+		setTranscriptActions({
+			copy: text => {
+				actions.push({ act: "copy", text });
+			},
+			turn: (turn, message) => {
+				actions.push({ act: "turn", turn, message });
+			},
+		});
 		const at = Date.UTC(2026, 0, 1, 12, 30);
 		harness = await TspHarness.start();
 		harness.tui.addChild(new UserMessageComponent("Fix the build", { timestamp: at }));
@@ -229,8 +238,12 @@ describe("native transcript redesign", () => {
 	});
 
 	it("offers a settled answer's turn actions, without Edit, and none before the turn ends", async () => {
-		const actions: TranscriptAction[] = [];
-		setTranscriptActionHandler(action => actions.push(action));
+		const actions: Array<{ act: "turn"; turn: string; message: { role: string; at: number } }> = [];
+		setTranscriptActions({
+			turn: (turn, message) => {
+				actions.push({ act: "turn", turn, message });
+			},
+		});
 		const component = new AssistantMessageComponent({
 			...failed(""),
 			stopReason: "stop",

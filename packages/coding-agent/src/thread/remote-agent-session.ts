@@ -74,6 +74,7 @@ import type {
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
+	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -204,7 +205,7 @@ function emptyViewState(): SessionViewState {
 		isSessionTransitioning: false,
 		hasAdmittedSubmission: false,
 		queuedMessageCount: 0,
-		hasPendingAsyncWork: false,
+		isRunActive: false,
 		autoResolvedThinkingLevel: undefined,
 		configuredThinkingLevel: undefined,
 		availableEffortSelectors: [],
@@ -219,7 +220,6 @@ function emptyViewState(): SessionViewState {
 		queuedMessages: { steering: [], followUp: [], liveSteered: 0 },
 		restorableQueue: { steering: [], followUp: [] },
 		editableQueue: { steering: [], followUp: [] },
-		approvals: { scopes: [], grants: [] },
 		ephemeralMaxTokensPreservesRequest: false,
 		settings: { base: null, layers: [] },
 		activeToolExecutionUpdates: [],
@@ -558,8 +558,8 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#view.queuedMessageCount;
 	}
 
-	hasPendingAsyncWork(): boolean {
-		return this.#view.hasPendingAsyncWork;
+	get isRunActive(): boolean {
+		return this.#view.isRunActive;
 	}
 
 	waitForIdle(): Promise<void> {
@@ -574,8 +574,8 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("waitForSessionTransition");
 	}
 
-	settleAsyncWork(): Promise<void> {
-		return this.#command("settleAsyncWork");
+	waitForRunEnd(): Promise<void> {
+		return this.#command("waitForRunEnd");
 	}
 
 	emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined> {

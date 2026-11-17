@@ -489,9 +489,15 @@ describe("session worktree helpers (ovnfs checkout)", () => {
 				expect.objectContaining({ path: native.path, kind: "pr-checkout" }),
 			]),
 		);
-		expect(await clearWorktrees({ cwd: repo, all: true, json: true, dryRun: true })).toEqual({ removed: 0, failed: 0 });
+		expect(await clearWorktrees({ cwd: repo, all: true, json: true, dryRun: true })).toEqual({
+			removed: 0,
+			failed: 0,
+		});
 		expect(await exists(wt.path)).toBe(true);
-		expect(await clearWorktrees({ cwd: repo, all: true, json: true, dryRun: false })).toEqual({ removed: 2, failed: 0 });
+		expect(await clearWorktrees({ cwd: repo, all: true, json: true, dryRun: false })).toEqual({
+			removed: 2,
+			failed: 0,
+		});
 		expect(await exists(wt.path)).toBe(false);
 		expect(await exists(native.path)).toBe(false);
 

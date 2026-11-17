@@ -72,7 +72,6 @@ function resolveSessionModelSelector(
 	});
 }
 
-
 /** `/fast status` label for the active model: "ultra" for the Ultrafast tier, "on" for priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
 	if (session.isUltrafastModeEnabled()) return "ultra";
@@ -435,6 +434,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.ctx.handleQueueCommand(
 				command.args,
 				runtime.draftDetached ? { ...runtime.input, text: command.text } : undefined,
+				runtime.followUp,
 			);
 		},
 	},

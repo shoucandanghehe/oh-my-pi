@@ -87,12 +87,14 @@ export const BUILTIN_MEDIA_POLICIES: Readonly<Record<KnownApi, MediaTransportPol
 	"bedrock-converse-stream": unsupported(),
 	"google-generative-ai": { user: GOOGLE_MEDIA, toolResult: NONE },
 	"google-gemini-cli": unsupported(),
+	"antigravity-acp": unsupported(),
 	"google-vertex": { user: GOOGLE_MEDIA, toolResult: NONE },
 	"ollama-chat": unsupported(),
 	"cursor-agent": unsupported(),
 	"gitlab-duo-agent": unsupported(),
 	"devin-agent": unsupported(),
 	"factory-droid-agent": unsupported(),
+	"kiro-api": unsupported(),
 });
 
 function policyFor(api: Api): MediaTransportPolicy {

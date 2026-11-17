@@ -19,12 +19,14 @@ const APIS = [
 	"bedrock-converse-stream",
 	"google-generative-ai",
 	"google-gemini-cli",
+	"antigravity-acp",
 	"google-vertex",
 	"ollama-chat",
 	"cursor-agent",
 	"gitlab-duo-agent",
 	"devin-agent",
 	"factory-droid-agent",
+	"kiro-api",
 ] as const satisfies readonly KnownApi[];
 
 type Expected = readonly [user: readonly InputModality[], tools: readonly InputModality[]];
@@ -69,6 +71,10 @@ const EXPECTED: Record<KnownApi, Expected> = {
 		["text", "image"],
 		["text", "image"],
 	],
+	"antigravity-acp": [
+		["text", "image"],
+		["text", "image"],
+	],
 	"google-vertex": [
 		["text", "image", "audio", "video"],
 		["text", "image"],
@@ -90,6 +96,10 @@ const EXPECTED: Record<KnownApi, Expected> = {
 		["text", "image"],
 	],
 	"factory-droid-agent": [
+		["text", "image"],
+		["text", "image"],
+	],
+	"kiro-api": [
 		["text", "image"],
 		["text", "image"],
 	],

@@ -707,6 +707,7 @@ export interface InteractiveModeContext {
 	handleQueueCommand(
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void>;
 	/** `title` heads the side question instead of its text. */
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean>;
@@ -716,10 +717,6 @@ export interface InteractiveModeContext {
 	handleBtwEscape(): boolean;
 	/** Gives the keys to the ask waiting above the composer; false when none waits. */
 	focusAsk(): boolean;
-	/** The composer talks to a `/btw` note (Tern): plain drafts go to its topic as follow-ups. */
-	readonly isBtwFocused: boolean;
-	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */
-	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean>;
 	handlesBtwOpenThreadKey(): boolean;
 	handleBtwOpenThreadKey(): Promise<boolean>;
 	handleBtwBranchKey(): Promise<boolean>;

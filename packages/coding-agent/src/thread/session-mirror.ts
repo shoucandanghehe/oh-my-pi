@@ -180,7 +180,7 @@ export interface SessionViewState {
 	isSessionTransitioning: boolean;
 	hasAdmittedSubmission: boolean;
 	queuedMessageCount: number;
-	hasPendingAsyncWork: boolean;
+	isRunActive: boolean;
 	autoResolvedThinkingLevel: Effort | undefined;
 	configuredThinkingLevel: ConfiguredThinkingLevel | undefined;
 	availableEffortSelectors: ConfiguredThinkingLevel[];
@@ -196,7 +196,6 @@ export interface SessionViewState {
 	restorableQueue: SessionRestorableQueue;
 	/** Ids in displayed chip order, including live steering; edits resolve by identity on home. */
 	editableQueue: { steering: string[]; followUp: string[] };
-	approvals: SessionApprovalState;
 	ephemeralMaxTokensPreservesRequest: boolean;
 	settings: SessionSettingsSource;
 	/**
@@ -256,7 +255,7 @@ export type SessionHostProtocol = {
 	waitForIdle: RpcMethod<[], void>;
 	waitForAdmittedSubmissions: RpcMethod<[], void>;
 	waitForSessionTransition: RpcMethod<[], void>;
-	settleAsyncWork: RpcMethod<[], void>;
+	waitForRunEnd: RpcMethod<[], void>;
 	compact: RpcMethod<[instructions?: string, options?: CompactOptions], CompactionResult>;
 	navigateTree: RpcMethod<
 		[targetId: string, options?: { summarize?: boolean; requireIdle?: boolean }],

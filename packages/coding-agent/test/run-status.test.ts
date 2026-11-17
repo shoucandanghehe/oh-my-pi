@@ -12,6 +12,8 @@ import {
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { TerminalActivityController } from "../src/modes/controllers/terminal-activity-controller";
+import type { TerminalTitleState } from "../src/utils/title-generator";
 
 // OSC 7501 Program Status Protocol reports, as the terminal parses them:
 // https://mitchellh.com/writing/program-status-osc7501
@@ -151,6 +153,30 @@ describe("run status OSC 7501 reporting", () => {
 		]);
 	});
 
+	it("keeps concurrent activity working after the main run and its dialog finish", () => {
+		const titles: TerminalTitleState[] = [];
+		const activity = new TerminalActivityController({
+			isProgressEnabled: () => false,
+			setProgress: () => {},
+			setTitleState: state => titles.push(state),
+		});
+		initProgramStatus({
+			setTitleState: state => {
+				if (state === "idle") activity.release(initProgramStatus);
+				else activity.set(initProgramStatus, state);
+			},
+		});
+		const sideThread = {};
+		activity.set(sideThread, "working");
+		setRunStatus({ state: "working" });
+		const release = holdBlockedStatus({ state: "blocked", kind: "question" });
+		setRunStatus({ state: "done" });
+		release();
+		expect(titles).toEqual(["working", "attention", "working"]);
+		activity.release(sideThread);
+		expect(titles.at(-1)).toBe("idle");
+	});
+
 	it("boots with a command-line prompt as working, never idle, and settles to idle only when no run reported", () => {
 		disposeProgramStatus();
 		writes.length = 0;
@@ -168,8 +194,6 @@ describe("run status OSC 7501 reporting", () => {
 
 		// The prompt fails before its turn starts: the hold goes back to idle.
 		initProgramStatus({ startupRun: true });
-		// The title separator shows the hold too, not only the record.
-		expect(titleGenerator.setTerminalTitleState).toHaveBeenLastCalledWith("working");
 		setProgramStatusEnabled(true);
 		settleStartupRun();
 		expect(writes).toEqual([report("state=working:app=omp"), report("state=idle:app=omp")]);

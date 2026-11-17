@@ -35,8 +35,11 @@ const originalProtocol = TERMINAL.imageProtocol;
 const originalTerminalId = terminal.id;
 const originalGraphics = { ...getKittyGraphics() };
 let originalCellDims: CellDimensions;
+let originalBackend: string | undefined;
 
 beforeEach(() => {
+	originalBackend = Bun.env.PI_TUI_RENDER_BACKEND;
+	Bun.env.PI_TUI_RENDER_BACKEND = "line";
 	originalCellDims = getCellDimensions();
 	setCellDimensions({ widthPx: 10, heightPx: 10 });
 	terminal.imageProtocol = ImageProtocol.Kitty;
@@ -45,6 +48,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	if (originalBackend === undefined) delete Bun.env.PI_TUI_RENDER_BACKEND;
+	else Bun.env.PI_TUI_RENDER_BACKEND = originalBackend;
 	setCellDimensions(originalCellDims);
 	terminal.imageProtocol = originalProtocol;
 	terminal.id = originalTerminalId;
@@ -134,39 +139,60 @@ function image(budget: ImageBudget): Image {
 }
 
 describe("direct placement lifecycle", () => {
-	for (const fullscreen of [false, true]) {
-		it(`removes moved and hidden images from the ${fullscreen ? "alternate" : "normal"} viewport`, async () => {
-			const term = new VirtualTerminal(40, 12);
-			const scheduler = new VirtualRenderScheduler();
-			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
-			const graphic = image(tui.imageBudget);
-			let top = 1;
-			let visible = true;
-			const render = (width: number) => [
-				...Array.from({ length: top }, (_, index) => `prose ${index}`),
-				...(visible ? graphic.render(width) : ["replacement prose"]),
-			];
-			tui.setFrameProvider({ renderFrame: size => ({ viewport: render(size.columns) }), acknowledgeHistory() {} });
-			if (fullscreen) tui.showOverlay({ render, invalidate() {} }, { fullscreen: true, anchor: "top-left" });
-			try {
-				tui.start();
-				await scheduler.settle(term);
-				expect(term.graphicsPlacements().map(placement => placement.row)).toEqual([1]);
+	for (const renderBackend of ["line", "app-viewport"] as const) {
+		for (const fullscreen of [false, true]) {
+			it(`removes moved and hidden images from the ${renderBackend} ${fullscreen ? "alternate" : "normal"} viewport`, async () => {
+				const term = new VirtualTerminal(40, 12);
+				const scheduler = new VirtualRenderScheduler();
+				Bun.env.PI_TUI_RENDER_BACKEND = renderBackend;
+				const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+				const graphic = image(tui.imageBudget);
+				let top = 1;
+				let visible = true;
+				const render = (width: number) => [
+					...Array.from({ length: top }, (_, index) => `prose ${index}`),
+					...(visible ? graphic.render(width) : ["replacement prose"]),
+				];
+				tui.setFrameProvider({
+					renderFrame: size => ({ viewport: render(size.columns) }),
+					acknowledgeHistory() {},
+				});
+				if (renderBackend === "app-viewport") {
+					tui.setAppViewportFrameProvider({
+						renderAppViewportFrame(size) {
+							const viewport = render(size.columns);
+							return {
+								viewport,
+								estimatedTotalRows: viewport.length,
+								offset: 0,
+								stickyRows: 0,
+								cursor: null,
+								rowMap: viewport.map((_line, index) => index),
+							};
+						},
+					});
+				}
+				if (fullscreen) tui.showOverlay({ render, invalidate() {} }, { fullscreen: true, anchor: "top-left" });
+				try {
+					tui.start();
+					await scheduler.settle(term);
+					expect(term.graphicsPlacements().map(placement => placement.row)).toEqual([1]);
 
-				top = 2;
-				tui.requestRender();
-				await scheduler.settle(term);
-				expect(term.graphicsPlacements().map(placement => placement.row)).toEqual([2]);
+					top = 2;
+					tui.requestRender();
+					await scheduler.settle(term);
+					expect(term.graphicsPlacements().map(placement => placement.row)).toEqual([2]);
 
-				visible = false;
-				tui.requestRender();
-				await scheduler.settle(term);
-				expect(term.graphicsPlacements()).toEqual([]);
-				expect(term.getViewport()[2]?.trimEnd()).toBe("replacement prose");
-			} finally {
-				tui.stop();
-			}
-		});
+					visible = false;
+					tui.requestRender();
+					await scheduler.settle(term);
+					expect(term.graphicsPlacements()).toEqual([]);
+					expect(term.getViewport()[2]?.trimEnd()).toBe("replacement prose");
+				} finally {
+					tui.stop();
+				}
+			});
+		}
 	}
 
 	it("deletes a live copy without deleting the same image already committed to scrollback", async () => {

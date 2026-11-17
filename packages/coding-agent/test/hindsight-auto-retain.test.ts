@@ -45,6 +45,7 @@ const makeConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	mentalModelsEnabled: false,
 	mentalModelAutoSeed: false,
 	mentalModelMaxRenderChars: 16_000,
+	mentalModelMaxTokens: undefined,
 	...overrides,
 });
 

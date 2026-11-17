@@ -18,6 +18,7 @@ import type {
 	ExtensionApprovalGrant,
 	ExtensionApprovalPrompt,
 	ExtensionUIContext,
+	ExtensionUIDialogOptions,
 } from "../extensibility/extensions/types";
 
 import {
@@ -883,6 +884,7 @@ export async function requestApproval(
 		grants?: boolean;
 		signal?: AbortSignal;
 	} = {},
+	dialogOptions?: ExtensionUIDialogOptions,
 ): Promise<ExtensionApprovalAnswer> {
 	const { reason, appendix = [], sessionSubject, signal } = options;
 	const header = approvalHeader(tool, reason);
@@ -894,7 +896,7 @@ export async function requestApproval(
 	const listing = folder ? await approvalFolderListing(folder.key, APPROVAL_FOLDER_FULL_LISTING) : undefined;
 	const folderBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_FULL_LISTING);
 	const full = [...header, ...details, ...(folderBlock ? [folderBlock] : []), ...appendix].join("\n");
-	const dialogOptions = signal ? { signal } : undefined;
+	const effectiveDialogOptions = signal ? { ...dialogOptions, signal } : dialogOptions;
 	if (ui.approve) {
 		const summary = approvalSummary(details);
 		const compactBlock = approvalFolderPromptBlock(folder?.label, listing, APPROVAL_FOLDER_COMPACT_LISTING);
@@ -911,7 +913,7 @@ export async function requestApproval(
 				...(session ? { session } : {}),
 				...(grants.length > 0 ? { grants } : {}),
 			},
-			dialogOptions,
+			effectiveDialogOptions,
 		);
 		if (answer === "once" || (answer === "session" && session)) return answer;
 		if (typeof answer === "object" && answer !== null && grants.some(grant => grant.scope === answer.grant)) {
@@ -920,7 +922,10 @@ export async function requestApproval(
 		return "deny";
 	}
 	const choices = { ...(session ? { session } : {}), ...(grants.length > 0 ? { grants } : {}) };
-	return approvalAnswerForChoice(choices, await ui.select(full, approvalChoiceLabels(choices), dialogOptions));
+	return approvalAnswerForChoice(
+		choices,
+		await ui.select(full, approvalChoiceLabels(choices), effectiveDialogOptions),
+	);
 }
 
 /** The approve-this-call-only label: "Approve", or "Approve Once" beside grants that remember more. */

@@ -916,7 +916,7 @@ impl GitRepo {
 			return Err(Error::backend("git worktree add", "source index is missing"));
 		}
 
-		// Omit the destination, sibling worktrees, and explicitly excluded storage.
+		// Keep the destination, siblings, and excluded storage out of clones.
 		let mut holes = self.clone_holes(path)?;
 		holes.extend_from_slice(excluded);
 		clone_tree_with_holes(omp_iso::backend(kind), self.root(), path, &holes, true)
@@ -3727,9 +3727,9 @@ mod tests {
 		let linked = destination.path().join("linked");
 		let result = repo
 			.worktree_add(&linked, "target", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
 				exclude_paths: Vec::new(),
 			})
 			.unwrap();
@@ -3782,9 +3782,9 @@ mod tests {
 		let linked = destination.path().join("linked");
 		let result = repo
 			.worktree_add(&linked, "target", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
 				exclude_paths: Vec::new(),
 			})
 			.unwrap();
@@ -3820,9 +3820,9 @@ mod tests {
 		let linked = destination.path().join("linked");
 		let result = repo
 			.worktree_add(&linked, "target", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
 				exclude_paths: Vec::new(),
 			})
 			.unwrap();
@@ -3890,9 +3890,9 @@ mod tests {
 		let linked = temp.path().join(".worktrees/new");
 		let result = repo
 			.worktree_add(&linked, "new", WorktreeAddOptions {
-				detach:       false,
-				clone:        WorktreeClone::Auto,
-				keep_changes: false,
+				detach:        false,
+				clone:         WorktreeClone::Auto,
+				keep_changes:  false,
 				exclude_paths: Vec::new(),
 			})
 			.unwrap();

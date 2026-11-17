@@ -153,11 +153,11 @@ describe("TSP hello probe", () => {
 				h.writes.length = 0;
 				process.stdin.emit("data", HELLO_REPLY);
 				const switched = h.writes.join("");
-				expect(switched).toContain("\x1b[<u\x1b[?1049l");
+				expect(switched).toContain("\x1b[<u\x1b[?1049l\x1b[=1;1u");
 				if (deferInput) {
-					expect(switched).toContain("\x1b[?1049l\x1b[>1u");
+					expect(switched).toContain("\x1b[?1049l\x1b[=1;1u\x1b[>1u");
 				} else {
-					expect(switched).not.toContain("\x1b[?1049l\x1b[>1u");
+					expect(switched).not.toContain("\x1b[>1u");
 				}
 				expect(h.tui.nativeRendering).toBe(true);
 			} finally {

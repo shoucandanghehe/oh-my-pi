@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
+	ImageContent,
 	MediaContent,
 	Message,
 	MessageAttribution,

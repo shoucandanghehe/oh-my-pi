@@ -2193,7 +2193,7 @@ export class EventController {
 				const isError = asyncJobState(event.partialResult.details) === "failed";
 				component.updateResult({ ...event.partialResult, isError }, true, event.toolCallId);
 			}
-			if (workingLoaderAdded || isTerminal) this.ctx.ui.requestRender();
+			if (workingLoaderAdded || isParkedFinal) this.ctx.ui.requestRender();
 			else this.ctx.ui.requestComponentRender(component);
 		}
 	}
@@ -2688,8 +2688,6 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
 		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();

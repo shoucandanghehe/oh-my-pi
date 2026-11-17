@@ -16,13 +16,7 @@ import { type TspApplyError, TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import { splitTspMessage, type TspHello } from "@oh-my-pi/pi-tui/native/encode";
 import type { Terminal, TerminalAppearance, TerminalStartOptions, TspHelloHandler } from "@oh-my-pi/pi-tui/terminal";
 import { type RenderScheduler, type RenderTimer, TUI, type TUIOptions } from "@oh-my-pi/pi-tui/tui";
-import {
-	TSP_KINDS,
-	type TspEvent,
-	type TspFrame,
-	type TspNode,
-	type TspOpen,
-} from "@oh-my-pi/pi-wire";
+import { TSP_KINDS, type TspEvent, type TspFrame, type TspNode, type TspOpen } from "@oh-my-pi/pi-wire";
 
 export interface TspHarnessOptions {
 	cols?: number;

@@ -316,16 +316,25 @@ function agentPause(yielded: boolean): Extract<AgentSessionEvent, { type: "agent
 
 describe("EventController — terminal title across agent_pause", () => {
 	it("keeps the working title and skips teardown at a pause, but flushes a deferred model switch and queued command output", async () => {
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
-		const ctx = createInteractiveModeContext({ sessionManager: { getSessionName: () => "test-session" } });
+		const stateSpy = vi.fn();
+		const ctx = createInteractiveModeContext({
+			sessionManager: { getSessionName: () => "test-session" },
+			terminalActivity: new TerminalActivityController({
+				isProgressEnabled: () => false,
+				setProgress: vi.fn(),
+				setTitleState: stateSpy,
+			}),
+		});
 		const releaseActivity = vi.spyOn(ctx.terminalActivity, "release");
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const flushPendingModelSwitch = vi.spyOn(ctx, "flushPendingModelSwitch");
 		const flushPendingCommandOutput = vi.spyOn(ctx, "flushPendingCommandOutput");
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
+		releaseActivity.mockClear();
 		await controller.handleEvent(agentPause(false));
 		// The agent's own continuation follows: never drop to `idle`, never run #finishAgentEnd teardown.
-		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(stateSpy.mock.calls.map(call => call[0])).toEqual(["working"]);
 		expect(releaseActivity).not.toHaveBeenCalled();
 		expect(markActivityEnd).not.toHaveBeenCalled();
 		// The automatic continuation must still pick up a queued plan-mode model switch.
@@ -334,15 +343,21 @@ describe("EventController — terminal title across agent_pause", () => {
 	});
 
 	it("keeps the working title at a yielded pause that queued input resumes", async () => {
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const stateSpy = vi.fn();
 		const ctx = createInteractiveModeContext({
 			sessionManager: { getSessionName: () => "test-session" },
+			terminalActivity: new TerminalActivityController({
+				isProgressEnabled: () => false,
+				setProgress: vi.fn(),
+				setTitleState: stateSpy,
+			}),
 			session: { queuedMessageCount: 1, isRunActive: true },
 		});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" } as Extract<AgentSessionEvent, { type: "agent_start" }>);
 		await controller.handleEvent(agentPause(true));
-		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(stateSpy.mock.calls.map(call => call[0])).toEqual(["working"]);
 		expect(markActivityEnd).not.toHaveBeenCalled();
 	});
 

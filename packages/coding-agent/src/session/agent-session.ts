@@ -249,7 +249,7 @@ import sleepModeEndedPrompt from "../prompts/system/sleep-mode-ended.md" with { 
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import sendToMainSessionDescription from "../prompts/tools/send-to-main-session.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import {
 	deobfuscateAssistantContent,
@@ -260,7 +260,7 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { hasLiveOwnedService } from "../launch/services";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -6220,7 +6220,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Cancel scheduled continuations; `reason` labels a continuation already running, as `agent.abort(reason)` does. */
-	async #cancelPostPromptTasks(reason?: string): Promise<void> {
+	async #cancelPostPromptTasks(reason?: unknown): Promise<void> {
 		this.#postPromptTasksAbortController.abort(reason);
 		this.#postPromptTasksAbortController = new AbortController();
 		this.#ttsr.resolveResume();
@@ -7948,16 +7948,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Transcript epoch: advances on `/clear` and `/new`, never when resuming an existing session. */
 	get transcriptEpoch(): number {
 		return this.#transcriptEpoch;
-	}
-
-	/**
-	 * Fold background results into context until the next deliberate prompt instead of
-	 * waking on them. Used when the user ends a background-job wait; a plain `abort` stops
-	 * a run, not a wait, so unattended sessions still wake on their own jobs.
-	 */
-	suppressAutoResumeUntilPrompt(): void {
-		this.#advisors.autoResumeSuppressed = true;
-		this.#turnSettledSinceUserInterrupt = false;
 	}
 
 	/** Interactive input hooks must execute on the session's home thread. */
@@ -10091,7 +10081,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		await this.#prewalk.beginAutoTask();
 		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
 		const autoParallel = message.role === "user" ? this.#autoParallel.start(prompt, signal) : undefined;
-		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued", attachments);
+		const preparation = await this.#prepareAgentStart(
+			message,
+			prompt,
+			images,
+			generation,
+			signal,
+			"queued",
+			attachments,
+		);
 		const decision = await autoPrewalk;
 		const plan = await autoParallel;
 		return {
@@ -11128,7 +11126,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#pushQueuedUserMessage(
 		mode: "steer" | "followUp",
 		companions: readonly AgentMessage[],
-		content: (TextContent | ImageContent)[],
+		content: (TextContent | MediaContent)[],
 		attribution: MessageAttribution,
 		timestamp: number,
 		rawText: string,
@@ -11735,6 +11733,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: {
 			triggerTurn?: boolean;
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+			/** Use this task as initial title input once its reply begins; preserves attribution and title-disable gates. */
 			autoTitle?: boolean;
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
@@ -11748,7 +11747,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		options?: {
 			triggerTurn?: boolean;
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
-			/** Use this task as initial title input once its reply begins; preserves attribution and title-disable gates. */
 			autoTitle?: boolean;
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
@@ -15164,7 +15162,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					transformToolContext: (_context, toolCall) => sideRuntime?.createToolContext(toolCall),
 					resolveFallbackTool: null,
 					getApiKey: requestModel => this.#modelRegistry.resolver(requestModel, cacheSessionId),
-					preferWebsockets: this.preferWebsockets,
+					preferWebsockets: resolveWebsocketPreference(settings, sideModel),
 					serviceTier: this.#models.effectiveServiceTier(model),
 					transformAssistantMessage: message => {
 						if (this.#obfuscator?.hasSecrets()) {
@@ -15931,9 +15929,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		request: BtwPromotionRequest & { messages?: readonly AgentMessage[] },
 		lifecycle?: BtwPromotionLifecycle,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
-		const queued = this.#enterSessionTransition(() =>
-			this.branchFromBtw(question, assistantMessage, leafId, sessionId, images),
-		);
+		const queued = this.#enterSessionTransition(() => this.branchFromBtw(request, lifecycle));
 		if (queued) return queued;
 		using _transition = this.#beginSessionTransition();
 		const { anchorLeafId, sessionId, turns, messages } = request;

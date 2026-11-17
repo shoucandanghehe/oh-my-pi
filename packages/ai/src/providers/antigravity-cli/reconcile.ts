@@ -5,7 +5,7 @@ import type { ContentBlock } from "@oh-my-pi/pi-utils/acp";
 import type {
 	AntigravityCliCheckpoint,
 	DeveloperMessage,
-	ImageContent,
+	MediaContent,
 	Message,
 	TextContent,
 	ToolResultMessage,
@@ -106,6 +106,9 @@ export function replayPrompt(replay: readonly Message[]): ContentBlock[] {
 						case "image":
 							blocks.push({ type: "image", data: part.data, mimeType: part.mimeType });
 							break;
+						case "audio":
+						case "video":
+							throw new Error(`Antigravity CLI does not support ${part.type} input`);
 						case "thinking":
 							blocks.push({ type: "text", text: `<thinking>${part.thinking}</thinking>` });
 							break;
@@ -153,13 +156,13 @@ export function isInputMessage(message: Message): message is InputMessage {
 	return message.role === "user" || message.role === "developer";
 }
 
-function contentBlocks(content: string | readonly (TextContent | ImageContent)[]): ContentBlock[] {
+function contentBlocks(content: string | readonly (TextContent | MediaContent)[]): ContentBlock[] {
 	if (typeof content === "string") return [{ type: "text", text: content }];
-	return content.map(part =>
-		part.type === "text"
-			? { type: "text", text: part.text }
-			: { type: "image", data: part.data, mimeType: part.mimeType },
-	);
+	return content.map(part => {
+		if (part.type === "text") return { type: "text", text: part.text };
+		if (part.type === "image") return { type: "image", data: part.data, mimeType: part.mimeType };
+		throw new Error(`Antigravity CLI does not support ${part.type} input`);
+	});
 }
 
 function messageContent(message: Message): unknown {

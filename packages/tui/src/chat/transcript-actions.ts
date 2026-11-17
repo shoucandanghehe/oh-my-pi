@@ -17,7 +17,6 @@ export interface TurnMessage {
  */
 export type TurnAct = "edit" | "retry" | "rewind" | "fork";
 
-
 /** Commands a transcript's own host supports. Missing commands have no controls. */
 export interface TranscriptActions {
 	copy?: (text: string) => void | Promise<void>;

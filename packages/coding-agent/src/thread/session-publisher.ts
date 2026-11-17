@@ -511,7 +511,7 @@ export class SessionPublisher {
 			isSessionTransitioning: session.isSessionTransitioning,
 			hasAdmittedSubmission: session.hasAdmittedSubmission,
 			queuedMessageCount: session.queuedMessageCount,
-			hasPendingAsyncWork: session.hasPendingAsyncWork(),
+			isRunActive: session.isRunActive,
 			autoResolvedThinkingLevel: session.autoResolvedThinkingLevel(),
 			configuredThinkingLevel: session.configuredThinkingLevel(),
 			availableEffortSelectors: session.getAvailableEffortSelectors(),
@@ -530,10 +530,6 @@ export class SessionPublisher {
 					.filter(isUserAuthoredQueuedMessage)
 					.map(message => queuedEntry(message).id),
 				followUp: followUp.map(message => queuedEntry(message).id),
-			},
-			approvals: {
-				scopes: session.extensionRunner?.sessionApprovalKeys() ?? [],
-				grants: sessionApprovalGrantKeys(session.settings.getAgentDir(), session.sessionManager.getSessionId()),
 			},
 			ephemeralMaxTokensPreservesRequest: session.ephemeralMaxTokensPreservesRequest(),
 			settings: settingsSource(session.settings),
@@ -590,7 +586,7 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	waitForIdle: async publisher => settle(publisher, publisher.session.waitForIdle()),
 	waitForAdmittedSubmissions: async publisher => settle(publisher, publisher.session.waitForAdmittedSubmissions()),
 	waitForSessionTransition: async publisher => settle(publisher, publisher.session.waitForSessionTransition()),
-	settleAsyncWork: async publisher => settle(publisher, publisher.session.settleAsyncWork()),
+	waitForRunEnd: async publisher => settle(publisher, publisher.session.waitForRunEnd()),
 	compact: async (publisher, instructions, options) =>
 		toWireData(await settle(publisher, publisher.session.compact(instructions, options))),
 	navigateTree: async (publisher, id, options) =>

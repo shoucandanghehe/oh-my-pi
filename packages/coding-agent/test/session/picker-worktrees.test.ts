@@ -147,7 +147,7 @@ describe.skipIf(process.platform === "win32")("resume picker across git worktree
 		await $`git worktree remove --force ${worktree.path} && git worktree prune`.cwd(repo).quiet();
 		const listed = (await pickerSessions(cwd)).find(session => session.id === moved.getSessionId())!;
 		expect(listed.cwd).toBe(worktree.path);
-		expect(await SessionManager.isFromRemovedWorktree(listed, cwd)).toBe(true);
+		expect(await SessionManager.isStrandedIn(listed, cwd)).toBe(true);
 	});
 
 	it("keeps a removed worktree's session listed and relocates it into the checkout on resume", async () => {

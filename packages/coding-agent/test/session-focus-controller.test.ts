@@ -41,6 +41,7 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 		async settleInFlightMessagePersistence() {},
 		activeToolExecutionUpdates: () => [],
 		getQueuedMessages: () => queue,
+		getQueuedMessageEditAction: () => undefined,
 	};
 	return {
 		session: stub as unknown as AgentSession,

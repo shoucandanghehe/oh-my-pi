@@ -13,6 +13,9 @@
 - Added tray state and interaction properties, including focus, peek, quiet, main status, item references, card status and actions, and event state.
 - Added layout transition properties to nodes for coordinating layout animations.
 - Added support for folding a dock composer into its compact row.
+### Added
+
+- Added branch-scoped `context_revision` entries so clients can replay reduced context without losing original history.
 
 ## [18.22.0] - 2026-11-16
 
@@ -20,9 +23,6 @@
 
 - Added optional picker icons for tooltips and accessible names, plus an option to control the placement of the search interface.
 - Added buttons, menu, and document component kinds, including menu-row action state changes and document text editing, commenting, and uncommenting events.
-### Added
-
-- Added branch-scoped `context_revision` entries so clients can replay reduced context without losing original history.
 
 ## [18.18.6] - 2026-11-09
 

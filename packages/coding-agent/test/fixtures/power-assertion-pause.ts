@@ -42,6 +42,7 @@ if (!model) throw new Error("Missing bundled test model");
 const mock = createMockModel({
 	responses: [
 		{ content: [{ type: "toolCall", name: "probe", arguments: {} }], stopReason: "toolUse" },
+		{ content: [{ type: "toolCall", name: "probe", arguments: {} }], stopReason: "toolUse" },
 		{ content: ["finished"] },
 	],
 });

@@ -17,7 +17,13 @@ function createContext(options?: { focused?: { pasteText(text: string): void } }
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const ctx = {
-		editor: { pasteText, insertText, insertAtom } as unknown as InteractiveModeContext["editor"],
+		editor: {
+			pasteText,
+			insertText,
+			insertAtom,
+			acceptsImages: true,
+			attachImage: vi.fn(),
+		} as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender, getFocused: () => options?.focused ?? null } as unknown as InteractiveModeContext["ui"],
 		showStatus,
 	} as unknown as InteractiveModeContext;

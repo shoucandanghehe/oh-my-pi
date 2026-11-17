@@ -70,7 +70,6 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 import { approvalAnswerForChoice, approvalChoiceLabels, approvalOnceLabel } from "../../tools/approval";
 
-
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
  * the keys, so the host can't know its bindings: advertise the defaults.
@@ -448,7 +447,9 @@ export class ExtensionUiController {
 		// widget never moves that row out of the retirement baseline.
 		this.ctx.editorTopGapContainer.clear();
 		this.ctx.editorTopGapContainer.addChild(
-			this.#hookWidgets.above.children.length === 0 ? new EditorTopGap(() => this.ctx.statusRowOccupied) : new Spacer(1),
+			this.#hookWidgets.above.children.length === 0
+				? new EditorTopGap(() => this.ctx.statusRowOccupied)
+				: new Spacer(1),
 		);
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerAbove, this.#hookWidgets.above);
 		this.#renderHookWidgetContainer(this.ctx.hookWidgetContainerBelow, this.#hookWidgets.below);
@@ -856,10 +857,10 @@ export class ExtensionUiController {
 
 	/**
 	 * What the composer shows about the ask waiting above it: `pending` while one waits, `skip` while
-	 * sending its draft would skip it; undefined with no ask or with the composer talking to a `/btw` note.
+	 * sending its draft would skip it; undefined with no ask.
 	 */
 	composerAsk(): "pending" | "skip" | undefined {
-		if (!this.#ask || this.ctx.isBtwFocused) return undefined;
+		if (!this.#ask) return undefined;
 		return this.#draftSkipsAsk() ? "skip" : "pending";
 	}
 
@@ -892,11 +893,10 @@ export class ExtensionUiController {
 
 	/**
 	 * Whether sending the composer's draft now skips the ask shown: a plain message, which reaches the
-	 * agent as the user's and closes the ask, not a command, a shell run or a `/btw` follow-up.
+	 * agent as the user's and closes the ask, not a command or a separate input mode.
 	 */
 	#draftSkipsAsk(): boolean {
-		if (!this.#ask || this.ctx.isBtwFocused || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode)
-			return false;
+		if (!this.#ask || this.ctx.isBashMode || this.ctx.isPythonMode || this.ctx.isBtwMode) return false;
 		const draft = this.ctx.editor.getText().trim();
 		return draft.length > 0 && !draft.startsWith("/");
 	}

@@ -60,7 +60,6 @@ import {
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import { stopAgentRun } from "../async/job-control";
 import { IrcBus } from "../irc/bus";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { collectTrayInput, runsInlineAgent, Tray, TrayMainActivity } from "./tray";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
@@ -3224,9 +3223,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			switchModel: () => this.showModelSelector({ temporaryOnly: true }),
 			rewind: () => this.showUserMessageSelector(),
 			turn: (turn, message) => this.#selectorController.runTurnAction(turn, message),
-			resume: sessionPath => this.handleResumeSession(sessionPath, { followContinuation: true }).catch((error: unknown) =>
-				this.showError(error instanceof Error ? error.message : String(error)),
-			),
+			resume: sessionPath =>
+				this.handleResumeSession(sessionPath, { followContinuation: true }).catch((error: unknown) =>
+					this.showError(error instanceof Error ? error.message : String(error)),
+				),
 			copy: text =>
 				copyToClipboard(text).then(
 					() => this.showStatus("Copied to clipboard"),
@@ -3281,7 +3281,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
-		initProgramStatus({ startupRun: options.startupRun });
+		initProgramStatus({
+			startupRun: options.startupRun,
+			setTitleState: state => {
+				if (state === "idle") this.terminalActivity.release(initProgramStatus);
+				else this.terminalActivity.set(initProgramStatus, state);
+			},
+		});
+		if (options.startupRun) this.terminalActivity.set(this, "working");
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		const unsubscribeProgramStatus = this.ui.terminal.onProgramStatusSupport?.(supported => {
 			setProgramStatusSupported(supported);
@@ -5503,7 +5510,6 @@ export class InteractiveMode implements InteractiveModeContext {
 						: dictation
 					: undefined,
 			viewing: this.#viewingLineage(),
-			btw: this.#btwController.isFocused(),
 			ask: this.#extensionUiController.composerAsk(),
 			title: this.sessionManager.getSessionName(),
 		};
@@ -5577,7 +5583,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
-			keepDanglingToolCalls: this.viewSession.isStreaming,
+			keepInFlightToolCalls: this.viewSession.isStreaming,
 		});
 		const preservedLiveTools = new Map(livePendingTools);
 		// Terminal results belong to replay; a background task's initial running
@@ -5650,7 +5656,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.pendingTools.set(id, component);
 		}
 		this.#eventController.reconcileReadGroupAfterRebuild();
-		void this.#btwController.placeNotes();
 		// During the pre-streaming window — after `startPendingSubmission` has
 		// optimistically rendered the user's message but before the user
 		// `message_start` event lands it in `session` entries — any rebuild
@@ -8207,6 +8212,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** End the `working` hold of `init({ startupRun })` once the command-line prompts are dispatched. */
 	settleStartupRun(): void {
 		settleStartupRun();
+		this.terminalActivity.release(this);
 	}
 
 	async #startGoalFromObjective(
@@ -8874,7 +8880,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}): Promise<void> {
 		if (this.#isShuttingDown) {
 			this.#closeAttempt?.abort();
-			return;
+			if (options.disposeSession || !this.#closeAttempt) return;
 		}
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
@@ -8889,7 +8895,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const signal = this.#beginClose(options.status);
 		// Reversible decisions first: nothing has been stopped yet, so a refusal
 		// leaves the session exactly as it was.
-		if (options?.cancellable !== false && !(await this.session.confirmClose(signal))) {
+		const confirmed = options.cancellable === false || (await this.session.confirmClose(signal));
+		if (this.#closeAttempt?.signal !== signal) return;
+		if (!confirmed) {
 			this.#abandonClose();
 			this.showStatus("Session close cancelled");
 			// The refusal covers only this quit, not a pending `ctx.shutdown()`.
@@ -8899,6 +8907,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// A signal teardown or stop() took over while extensions were asked.
 		if ((options.disposeSession && this.session.isDisposed) || this.#dialogLifetime.signal.aborted) return;
 		const worktreePlan = await this.#planOwnedWorktreeExit(signal);
+		if (this.#closeAttempt?.signal !== signal) return;
 		try {
 			await this.#teardown(options.disposeSession);
 		} catch (error) {
@@ -9053,6 +9062,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Shared shutdown/restart teardown: optionally dispose the session, then hand the terminal back. */
 	async #teardown(disposeSession: boolean): Promise<void> {
+		this.#closeAttempt = undefined;
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
@@ -9782,7 +9792,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyExtensionLinks();
 		this.#applyTranscriptPresenters();
 		await this.#uiHelpers.renderInitialMessages(options);
-		void this.#btwController.placeNotes();
 		this.syncRetryHintRow();
 		// A switch or tree move that replays the transcript strands a `/compact` queued for the old position.
 		this.#inputController.releaseStaleYieldCompaction();
@@ -10366,8 +10375,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleQueueCommand(
 		message: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void> {
-		return this.#inputController.handleQueueCommand(message, detached);
+		return this.#inputController.handleQueueCommand(message, detached, origin);
 	}
 
 	handleBtwCommand(question: string, images?: ImageContent[], title?: string): Promise<boolean> {
@@ -10392,14 +10402,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	focusAsk(): boolean {
 		return this.#extensionUiController.focusAsk();
-	}
-
-	get isBtwFocused(): boolean {
-		return this.#btwController.isFocused();
-	}
-
-	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean> {
-		return this.#btwController.submitFollowUp(question, images);
 	}
 
 	/** Reserves plain `Enter` while the inline thread can be opened in the workspace. */

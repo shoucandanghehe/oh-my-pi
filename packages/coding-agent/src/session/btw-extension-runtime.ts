@@ -207,7 +207,7 @@ export class BtwExtensionRuntime {
 							args[0],
 							args[2],
 							args[3],
-							context && !sendsToMain ? { ...context, xdevApproved: true } : context,
+							context && !sendsToMain ? { ...context, xdevPolicyKey: native.name } : context,
 						);
 						return { ...result, details: { xdev: dispatch } };
 					},
@@ -281,11 +281,7 @@ export class BtwExtensionRuntime {
 						logger.warn("BTW extension send failed", { error: String(error) });
 					});
 				},
-				sendUserMessage: (content, sendOptions) => {
-					void session.sendUserMessage(content, sendOptions).catch(error => {
-						logger.warn("BTW extension user send failed", { error: String(error) });
-					});
-				},
+				sendUserMessage: (content, sendOptions) => session.sendUserMessage(content, sendOptions),
 				appendEntry: (customType, data) => {
 					sessionManager.appendCustomEntry(customType, data);
 				},

@@ -33,6 +33,19 @@
 - Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
+### Added
+
+- Added reusable text-wrapping and composable row-count measurements for terminal layouts.
+
+### Changed
+
+- `copyToClipboard` now returns a promise; await it to observe clipboard failures without blocking the calling thread.
+
+### Fixed
+
+- Linux/glibc builds again return unused native heap pages to the OS after tool work goes idle, including memory released later by the JavaScript GC.
+- Fixed the first syntax-highlighted code block freezing the TUI while native grammars initialized.
+- Fixed in-project isolation and cloned worktrees recursively copying their own storage; `isoStart` and `worktreeAdd` now accept exact storage-directory exclusions.
 
 ## [18.22.2] - 2026-11-18
 

@@ -103,15 +103,6 @@ export class BtwController {
 	#storeScope: string | undefined;
 	#historyPanel: BtwHistoryPanel | undefined;
 	#historyOverlay: OverlayHandle | undefined;
-	/** Tern's transcript notes of the store's topics on the shown branch, by topic id. */
-	readonly #notes = new Map<string, BtwNoteComponent>();
-	/** The topic whose note the composer talks to (Tern): drafts become its follow-ups. */
-	#focus: string | undefined;
-	readonly #noteHost: BtwNoteHost = {
-		menu: (record, folded) => this.#noteMenu(record, folded),
-		injectState: (record, turnIndex) => this.#noteInjectState(record, turnIndex),
-		run: (record, action) => this.#runNoteAction(record, action),
-	};
 	readonly #writes = new Set<Promise<boolean>>();
 	/**
 	 * Inject state per answer turn (`getBtwTurnKey`). Only turns answered in this process with
@@ -423,7 +414,6 @@ export class BtwController {
 			if (request && isHistoryRequest(request) && getBtwTurnKey(request.record) === key)
 				request.component.setInjected(sent);
 			this.#refreshHistory();
-			this.#notes.get(record.id)?.refresh();
 			if (sent) return;
 			if (reason) {
 				this.ctx.showError(sanitizeErrorLine(`Cannot inject /btw prompt: ${reason}`));
@@ -612,15 +602,6 @@ export class BtwController {
 		} finally {
 			this.#transitionCount--;
 		}
-	}
-
-	/** Whether the store opened (or opening) is the one of the session view on screen. */
-	#storeMatchesView(): boolean {
-		return (
-			this.#storeSessionId === this.#sessionManager.getSessionId() &&
-			this.#storeArtifactsDir === (this.#sessionManager.getArtifactsDir() ?? undefined) &&
-			this.#storeScope === this.#historyScope
-		);
 	}
 
 	async #loadHistory(): Promise<BtwHistoryStore> {
@@ -855,9 +836,9 @@ export class BtwController {
 				injectEnabled,
 			};
 			this.#activeRequest = request;
-			// Tern draws the topic as a note in its transcript; the text renderer keeps the inline panel.
-			const native = this.ctx.ui.nativeRendering;
-			this.#visible = !native && (!previous || !this.#historyOverlay);
+			// Tern keeps focused-agent answers in a scrolling history sheet.
+			const sheet = this.ctx.ui.nativeRendering;
+			this.#visible = !sheet && (!previous || !this.#historyOverlay);
 			this.ctx.btwContainer.clear();
 			if (this.#visible) this.ctx.btwContainer.addChild(request.component);
 			this.ctx.ui.requestRender();
@@ -884,7 +865,7 @@ export class BtwController {
 				return false;
 			}
 			this.#refreshHistory();
-			if (native) this.#showNote(request.record, { append: !previous });
+			if (sheet && !previous) this.#showHistory(store).showRecord(record.id);
 			this.ctx.terminalActivity.set(request, "working");
 			void this.#runHistoryRequest(request);
 			return true;
@@ -983,7 +964,7 @@ export class BtwController {
 		overlay.hide();
 		focusActiveEditorArea(this.ctx);
 		// Closing while a BTW still answers keeps it running: text mode returns
-		// to its inline panel; Tern answers in its note, or says how to get back.
+		// to its inline panel; Tern says how to reopen the history sheet.
 		const request = this.#activeRequest;
 		if (
 			request &&
@@ -992,9 +973,7 @@ export class BtwController {
 			getBtwLatestTurn(request.record).status === "running"
 		) {
 			if (this.ctx.ui.nativeRendering) {
-				if (!this.#notes.has(request.record.id)) {
-					this.ctx.showStatus("/btw is still answering in the background · /btw to reopen it", { dim: true });
-				}
+				this.ctx.showStatus("/btw is still answering in the background · /btw to reopen it", { dim: true });
 			} else {
 				request.component.setAnswer(getBtwLatestTurn(request.record).answer);
 				this.#visible = true;
@@ -1787,7 +1766,6 @@ export class BtwController {
 					if (this.#isActiveRequest(request)) {
 						if (this.#visible) request.component.appendText(delta);
 						this.#refreshHistory();
-						this.#notes.get(request.record.id)?.update(request.record);
 					}
 				},
 				signal: request.abortController.signal,
@@ -1802,11 +1780,8 @@ export class BtwController {
 			if (this.#isActiveRequest(request)) {
 				request.component.setAnswer(replyText);
 				request.component.markComplete();
-				// Tern: an answer folded away or left only in history says it is ready.
 				if (this.ctx.ui.nativeRendering && !this.#historyOverlay) {
-					const note = this.#notes.get(request.record.id);
-					if (!note) this.ctx.showStatus("/btw answer ready · /btw to read it");
-					else if (note.folded) this.ctx.showStatus("/btw answer ready");
+					this.ctx.showStatus("/btw answer ready · /btw to read it");
 				}
 			}
 		} catch (error) {

@@ -58,10 +58,17 @@ async function createHarness(factory: ExtensionFactory, nativeRendering = false)
 	const prompt = vi.fn(async (_text: string, _options?: PromptOptions) => true);
 	const session = {
 		extensionRunner: runner,
+		emitInteractiveInput: (text: string, images?: ImageContent[]) => runner.emitInput(text, images, "interactive"),
 		sessionManager,
 		isStreaming: true,
 		isCompacting: false,
 		queuedMessageCount: 0,
+		customCommands: [],
+		promptTemplates: [],
+		isRunActive: false,
+		waitForRunEnd: async () => {},
+		waitForIdle: async () => {},
+		waitForAdmittedSubmissions: async () => {},
 		prompt,
 		followUp: vi.fn(async (_text: string, _images?: ImageContent[]) => {}),
 		buildUserSkillPrompt: buildSkillPromptMessage,
@@ -108,11 +115,16 @@ async function createHarness(factory: ExtensionFactory, nativeRendering = false)
 		flushPendingBashComponents: vi.fn(),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
+		showWarning: vi.fn(),
+		runYieldCompaction: vi.fn(),
+		handleCompactCommand: vi.fn(async () => "ok" as const),
+		hasPendingSubmission: () => false,
 		handleClearCommand: vi.fn(),
 		resetDisplayAfterAppearanceRefresh: vi.fn(),
 		shutdown: vi.fn(async () => {}),
 		clearEditor: () => editor.clearDraft(),
 		withLocalSubmission: async <T>(_text: string, submit: () => Promise<T>) => submit(),
+		recordLocalSubmission: () => () => {},
 		isGuidedGoalInterviewActive: () => false,
 	} as unknown as InteractiveModeContext;
 	const queue = sessionCommandQueue(ctx.session);
@@ -137,10 +149,13 @@ async function createHarness(factory: ExtensionFactory, nativeRendering = false)
 		},
 	});
 	const helpers = new UiHelpers(ctx);
+	ctx.flushCompactionQueue = options => helpers.flushCompactionQueue(options);
+	ctx.isKnownSlashCommand = text => helpers.isKnownSlashCommand(text);
 	ctx.queueCompactionMessage = (text, mode, images, options) =>
 		helpers.queueCompactionMessage(text, mode, images, options);
 	const controller = new InputController(ctx);
-	ctx.handleQueueCommand = (message, detached) => controller.handleQueueCommand(message, detached);
+	ctx.handleQueueCommand = (message, detached, origin) => controller.handleQueueCommand(message, detached, origin);
+	ctx.waitForSubmissionDispatches = () => controller.waitForSubmissionDispatches();
 	controller.setupKeyHandlers();
 	controller.setupEditorSubmitHandler();
 	const onSubmit = editor.onSubmit;
@@ -583,6 +598,7 @@ describe("interactive native input ingress", () => {
 		expect(h.prompt).not.toHaveBeenCalled();
 		expect(h.session.followUp).not.toHaveBeenCalled();
 	});
+
 	it("Ctrl+Enter /queue that rejects restores its text and image beside a newer draft", async () => {
 		const h = await createHarness(() => {});
 		const entered = Promise.withResolvers<void>();

@@ -237,7 +237,11 @@ export async function worktreeSessionDirs(
 		const family = await worktreeFamily(cwd, options.settings);
 		if (!family) return [];
 		const { primary, prefix, locations } = family;
-		const owners = new Set([cwd, path.resolve(primary, prefix), ...locations.map(item => path.resolve(item.root, prefix))]);
+		const owners = new Set([
+			cwd,
+			path.resolve(primary, prefix),
+			...locations.map(item => path.resolve(item.root, prefix)),
+		]);
 		const dirs = new Set<string>();
 		for (const owner of owners) {
 			for (const dir of managedWorktreeSessionDirs(primary, prefix, sessionsRoot, owner)) dirs.add(dir);

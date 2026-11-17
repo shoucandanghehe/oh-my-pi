@@ -206,7 +206,6 @@ import {
 } from "./secrets";
 import {
 	AgentSession,
-	type AgentSessionDisposeOptions,
 	type InitialRetryFallbackState,
 	MCP_DISCOVERY_TURN_WAIT_MS,
 	type PlanYolo,
@@ -2790,7 +2789,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
 			getDelegationRole: () =>
-				options.delegationRole && model && getActiveModelString() === formatModelString(model)
+				options.delegationRole && model && getActiveModelString() === formatModelStringWithRouting(model)
 					? options.delegationRole
 					: undefined,
 			getServiceTierByFamily: () => session?.serviceTierByFamily,

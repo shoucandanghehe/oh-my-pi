@@ -424,8 +424,6 @@ describe("EventController loader recovery after overflow maintenance", () => {
 
 		streamState.isStreaming = true;
 		await eventController.handleEvent(AGENT_START);
-		streamState.continuation = undefined;
-		continuation.resolve();
 		streamState.isStreaming = false;
 		await eventController.handleEvent(AGENT_END);
 		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);

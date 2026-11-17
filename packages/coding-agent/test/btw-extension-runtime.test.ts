@@ -7,9 +7,14 @@ import type { Api, ImageContent, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import type { ExtensionFactory, PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionFactory,
+	PreparedExtension,
+	ToolInfo,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { BtwExtensionRuntime } from "@oh-my-pi/pi-coding-agent/session/btw-extension-runtime";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	projectBtwConversation,
@@ -445,8 +450,8 @@ describe("durable BTW extension runtime", () => {
 
 	it("transfers sealed in-memory history and readable artifacts without retaining the disposed runtime", async () => {
 		const manager = SessionManager.inMemory();
-		const artifactId = await manager.saveArtifact("memory-body-sentinel\n", "test");
-		if (!artifactId) throw new Error("Expected an in-memory artifact");
+		const artifactId = await manager.saveArtifact("memory-body-sentinel\n");
+		if (!artifactId) throw new Error("Expected a session-local artifact");
 		const settings = Settings.isolated({ "compaction.enabled": false });
 		const main = new AgentSession({
 			agent: new Agent({ initialState: { model } }),
@@ -459,7 +464,7 @@ describe("durable BTW extension runtime", () => {
 					stream.push({
 						type: "done",
 						reason: "stop",
-						message: createAssistantMessage(`answer artifact://${artifactId}`),
+						message: createAssistantMessage(`answer local://${artifactId}.log`),
 					}),
 				);
 				return stream;
@@ -490,14 +495,15 @@ describe("durable BTW extension runtime", () => {
 			settings,
 			getSessionFile: () => null,
 			getSessionSpawns: () => null,
+			getSessionId: () => retained.getSessionId(),
+			getArtifactsDir: () => retained.getArtifactsDir(),
 			sessionManager: retained,
 		});
-		const artifact = await reader.execute("retained-artifact", { path: `artifact://${artifactId}:raw` });
+		const artifact = await reader.execute("retained-artifact", { path: `local://${artifactId}.log:raw` });
 		expect(artifact.isError).not.toBe(true);
 		expect(artifact.content).toEqual([{ type: "text", text: "memory-body-sentinel\n" }]);
-		const nextArtifact = await retained.saveArtifact("new-body", "test");
+		const nextArtifact = await retained.saveArtifact("new-body");
 		expect(nextArtifact).not.toBe(artifactId);
-		expect(retained.getArtifactContent(artifactId)).toBe("memory-body-sentinel\n");
 		const revived = main.createEphemeralConversation("BTW", undefined, undefined, { sessionManager: retained });
 		try {
 			await revived.prompt("second");

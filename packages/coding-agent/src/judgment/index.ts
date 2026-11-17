@@ -615,7 +615,7 @@ export class ChainJudge implements Judge {
 			const skipped = rejections.get(identity);
 			if (skipped !== undefined) {
 				if (skipped.until > Date.now()) {
-					lastUnavailable = `${identity} ${skipped.reason}`;
+					lastUnavailable = `${identity} ${skipped.reason}${Number.isFinite(skipped.until) ? "" : " recently"}`;
 					continue;
 				}
 				rejections.delete(identity);

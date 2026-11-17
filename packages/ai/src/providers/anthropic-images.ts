@@ -5,7 +5,7 @@
  * the host's limits (`max-image-dimension` / `max-image-payload-bytes`).
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { Context, ImageContent, Message, Model, TextContent } from "../types";
+import type { Context, ImageContent, MediaContent, Message, Model, TextContent } from "../types";
 
 const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
 const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
@@ -175,11 +175,11 @@ async function resizeAnthropicImageBlock(block: ImageContent, caps: AnthropicIma
 }
 
 async function resizeAnthropicImageContent(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	state: { resized: number },
 	limit: ResizeLimiter,
 	caps: AnthropicImageCaps,
-): Promise<(TextContent | ImageContent)[]> {
+): Promise<(TextContent | MediaContent)[]> {
 	let changed = false;
 	const cache = anthropicImageResizeCache(caps);
 	const next = await Promise.all(

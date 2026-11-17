@@ -34,7 +34,6 @@ import type {
 	ExtensionAskDialogResult,
 	ExtensionError,
 	ExtensionUIContext,
-	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -3157,7 +3156,11 @@ describe("ExtensionRunner", () => {
 			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
 			select.mockImplementationOnce(async () => "Approve");
 			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], undefined);
+			expect(select).toHaveBeenLastCalledWith(
+				expect.any(String),
+				["Approve", "Deny"],
+				expect.objectContaining({ toolApproval: { toolName: "dangerous_tool", args: {} } }),
+			);
 			// A new session starts without the grant.
 			await sessionManager.newSession();
 			await run(approvalTool, "call-new-session");

@@ -1549,15 +1549,16 @@ impl PreparedWrap {
 			line_with_prefix.extend_from_slice(line);
 			let line_width = visible_width_u16(&line_with_prefix, self.tab_width);
 			let mut token_state = WrapState::new();
-			for token in split_into_tokens_with_ansi(&line_with_prefix) {
-				self.token_text.extend_from_slice(&token);
+			let tokens = split_into_tokens_with_ansi(&line_with_prefix, self.tab_width);
+			for token in tokens.iter() {
+				self.token_text.extend_from_slice(token);
 				self.tokens.push(WrapMeasureToken {
 					end:            self.token_text.len(),
-					width:          visible_width_u16(&token, self.tab_width),
-					whitespace:     token_is_whitespace(&token),
+					width:          visible_width_u16(token, self.tab_width),
+					whitespace:     token_is_whitespace(token),
 					restore_before: !token_state.sgr.is_empty() || token_state.hyperlink.is_some(),
 				});
-				update_state_from_text(&token, &mut token_state);
+				update_state_from_text(token, &mut token_state);
 			}
 			self
 				.lines

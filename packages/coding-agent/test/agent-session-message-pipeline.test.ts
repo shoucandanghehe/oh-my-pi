@@ -1236,7 +1236,7 @@ describe("AgentSession message pipeline", () => {
 		const model = buildModel({
 			id: "side-stream-model",
 			name: "Side Stream Model",
-			api: "anthropic",
+			api: "openai-codex-responses",
 			provider: "test-provider",
 			baseUrl: "",
 			reasoning: false,

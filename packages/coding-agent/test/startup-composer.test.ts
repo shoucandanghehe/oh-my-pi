@@ -67,14 +67,6 @@ class CountingTerminal extends VirtualTerminal {
 	}
 }
 
-class WriteTrackingTerminal extends CountingTerminal {
-	written = "";
-	override write(data: string): void {
-		this.written += data;
-		super.write(data);
-	}
-}
-
 class ThrowingStartTerminal extends CountingTerminal {
 	override start(): void {
 		this.starts += 1;
@@ -564,9 +556,11 @@ describe("Composer prepaint", () => {
 			terminal.sendInput("\x1b]5522;type=read:status=OK:pw=native-paste\x07");
 			terminal.sendInput("\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;\x07");
 			terminal.sendInput("\x1b]5522;type=read:status=DONE\x07");
-			expect(
-				writes.mock.calls.some(([data]) => data.includes("type=read") && data.includes("mime=aW1hZ2UvcG5n")),
-			).toBe(true);
+			const request = writes.mock.calls.find(
+				([data]) => data.includes("type=read") && data.includes("mime=aW1hZ2UvcG5n"),
+			)?.[0];
+			const requestId = request?.match(/:id=([^:;\x07]+)/)?.[1];
+			expect(requestId).toBeDefined();
 			const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 			const attached = Promise.withResolvers<void>();
 			const onChange = mode.editor.onChange;
@@ -574,8 +568,8 @@ describe("Composer prepaint", () => {
 				onChange?.(text);
 				if (mode.editor.pendingImages.length > 0) attached.resolve();
 			};
-			terminal.sendInput(`\x1b]5522;type=read:status=DATA:mime=aW1hZ2UvcG5n;${png}\x07`);
-			terminal.sendInput("\x1b]5522;type=read:status=DONE\x07");
+			terminal.sendInput(`\x1b]5522;type=read:id=${requestId}:status=DATA:mime=aW1hZ2UvcG5n;${png}\x07`);
+			terminal.sendInput(`\x1b]5522;type=read:id=${requestId}:status=DONE\x07`);
 			await attached.promise;
 			expect(mode.editor.pendingImages).toHaveLength(1);
 			const image = mode.editor.pendingImages[0]!;

@@ -21,6 +21,7 @@ import {
 } from "../../../src/utils/run-status";
 import * as titleGenerator from "../../../src/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { requestApproval } from "../../../src/tools/approval";
 
 afterEach(() => {
 	setKeybindings(KeybindingsManager.inMemory());
@@ -113,7 +114,6 @@ function makeHarness() {
 		setFocus,
 		showOverlay,
 		fakeHandle,
-		ctx,
 		controller,
 		inputController: (readText: () => Promise<string>) =>
 			new InputController(ctx, { readImage: async () => null, readText }),
@@ -141,6 +141,28 @@ function makeHarness() {
 		},
 	};
 }
+
+describe("tool approval cancellation", () => {
+	for (const mode of ["approval", "select"] as const) {
+		it(`restores the composer when an aborted tool dismisses its ${mode} dialog`, async () => {
+			const harness = makeHarness();
+			const ui = await harness.init();
+			const controller = new AbortController();
+			const pending = requestApproval(
+				mode === "approval" ? ui : { select: ui.select },
+				{ name: "bash" },
+				{ command: "echo approval" },
+				undefined,
+				{ signal: controller.signal },
+			);
+			expect(harness.getFocused()).not.toBe(harness.editor);
+			controller.abort();
+			expect(await pending).toBe("deny");
+			expect(harness.getFocused()).toBe(harness.editor);
+			expect(harness.editorContainer.children).toEqual([harness.editor]);
+		});
+	}
+});
 
 describe("ExtensionUiController Ask dialog input", () => {
 	const questions: ExtensionAskDialogQuestion[] = [
@@ -559,7 +581,7 @@ describe("ExtensionUiController editor UI", () => {
 					options: [{ label: "Approve", preview }],
 				},
 			]);
-			const ask = harness.editorContainer.children[0];
+			const ask = harness.askContainer.children[0];
 			expect(ask).toBeInstanceOf(AskDialogComponent);
 			expect(ask?.render?.(80).join("\n")).toContain("PREVIEW-0");
 
@@ -605,9 +627,9 @@ describe("ExtensionUiController editor UI", () => {
 				options: [{ label: "Approve" }, { label: "Reject" }],
 			},
 		]);
-		const ask = harness.editorContainer.children[0];
+		const ask = harness.askContainer.children[0];
 		expect(ask).toBeInstanceOf(AskDialogComponent);
-		ask?.handleInput?.("\x1b");
+		ask?.handleNativeEvent?.({ type: "action", key: "actions/cancel", act: "cancel", mods: [] });
 
 		expect(await pending).toBeUndefined();
 		expect(requestGuestUi).not.toHaveBeenCalled();

@@ -135,23 +135,6 @@ export type TspText = string | readonly TspSpan[];
  */
 export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
 
-/**
- * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
- * `{ header }`, or a row running action `id`, with its `label`, `icon` and `detail` (the hold menu shows it dim
- * at the row's end).
- */
-export type TspMenuEntry =
-	| TspAction
-	| { header: string }
-	| {
-			id: TspAction;
-			label?: string;
-			icon?: string;
-			detail?: string;
-			disabled?: boolean | string;
-			danger?: boolean;
-	  };
-
 /** Props every node accepts. */
 export interface TspCommonProps {
 	role?: string;
@@ -646,34 +629,11 @@ export interface TspButtonProps {
 	busy?: boolean;
 }
 
-export type TspMenuEntry = string | { header: string } | TspMenuItem;
-
-export interface TspMenuItem {
-	id: string;
-	label?: string;
-	icon?: string;
-	keys?: string | readonly string[];
-	detail?: string;
-	checked?: boolean;
-	radio?: string;
-	disabled?: boolean | string;
-	danger?: boolean;
-	items?: readonly TspMenuEntry[];
-}
-
-export interface TspMenuProps {
-	items: readonly TspMenuEntry[];
-	text?: string;
-	icon?: string;
-	trigger?: "default" | "quiet" | "primary";
-	caret?: boolean;
-	size?: "md" | "sm";
-	variant?: "default" | "dense";
-	open?: boolean;
-	active?: string;
-	align?: "start" | "end";
-	disabled?: boolean | string;
-}
+/**
+ * One entry of a menu or hold action list: an action name, `"-"` separator,
+ * dim header, or labeled action row.
+ */
+export type TspMenuEntry = TspMenuItem;
 export interface TspEditorDecoration {
 	from: number;
 	to: number;

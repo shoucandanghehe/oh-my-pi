@@ -41,6 +41,7 @@ import type {
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
+	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -309,8 +310,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	waitForIdle(): Promise<void>;
 	waitForAdmittedSubmissions(): Promise<void>;
 	waitForSessionTransition(): Promise<void>;
-	hasPendingAsyncWork(): boolean;
-	settleAsyncWork(): Promise<void>;
+	readonly isRunActive: boolean;
+	waitForRunEnd(): Promise<void>;
 	/** Run interactive input hooks on the receiving session, not its renderer ancestor. */
 	emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined>;
 	/** Open the model transport while composing. */

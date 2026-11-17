@@ -39,6 +39,12 @@
 - Added a `video` input modality to `Model.input`, the `input-modalities` axis, build-time narrowing, the model-cache row validator, and the dynamic-model input guard ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
 - Added vendor media provenance, separate effective user/tool-result capabilities, per-wire variant evidence, and an exhaustive 14-API encoder policy.
 - Added GPT Image 2.5 and 2.6, including Flare and Sunburst, for image generation and editing through the standalone Codex Images API.
+- Added GPT Image 2.5, Flare, and Sunburst image-model selection for Codex proxies configured with the Images API.
+- Enabled mid-conversation tool changes by default for GPT-6 Responses and Codex, including through proxies. Set `compat.supportsMidConversationToolChanges: false` for incompatible endpoints (based on [#18520](https://github.com/can1357/oh-my-pi/pull/18520) by [@Delije4](https://github.com/Delije4)).
+
+### Fixed
+
+- Fixed GPT-6.2 reasoning loss from routine tool-result pruning on OpenAI Responses and Codex ([#19721](https://github.com/can1357/oh-my-pi/issues/19721))
 
 ## [18.22.2] - 2026-11-18
 

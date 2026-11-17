@@ -139,7 +139,8 @@ describe.each(["native-scrollback", "app-viewport"])("TUI output-backpressure re
 
 			term.pendingBytes = 0;
 			stepRender(scheduler);
-			expect(term.written.join("")).toContain("\x1b[3J");
+			if (backend === "app-viewport") expect(term.written.join("")).not.toContain("\x1b[3J");
+			else expect(term.written.join("")).toContain("\x1b[3J");
 			expect(term.written.join("")).toContain("unchanged");
 		} finally {
 			tui.stop();

@@ -420,7 +420,6 @@ function isVoidNode(described: NativeNode, cx: DescribeContext, depth: number): 
 	}
 	return true;
 }
-
 function canRetire(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
 	return (
@@ -1861,6 +1860,7 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 	override render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		this.#syncEntries();
+		this.#syncVirtualEntries(width);
 		const components: Component[] = [];
 		const blocks: (readonly string[])[] = [];
 		const compact: boolean[] = [];
@@ -1870,10 +1870,6 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			components.push(entry.component);
 			blocks.push(entry.component.render(width));
 			compact.push(isCompact(entry.component));
-			if (entry.state === "committed") {
-				committed = true;
-				this.#releaseRenderCaches(entry);
-			}
 		}
 		const memo = this.#fullRender;
 		if (
@@ -1885,7 +1881,6 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			return memo.rows;
 		}
 		this.#childStartRows.clear();
-		this.#syncVirtualEntries(width);
 		const rows: string[] = [];
 		let above: RowsAbove;
 		for (let index = 0; index < blocks.length; index++) {
@@ -1893,6 +1888,10 @@ export class TranscriptContainer extends Container implements VirtualViewportPro
 			const raw = blocks[index]!;
 			const block = this.#renderEntry(entry, width, raw);
 			this.#recordVirtualMeasurement(index, width, raw, block);
+			if (entry.state === "committed") {
+				committed = true;
+				this.#releaseRenderCaches(entry);
+			}
 			if (block.length === 0) continue;
 			if (separatorRows(above, compact[index]!) > 0) rows.push("");
 			this.#childStartRows.set(components[index]!, rows.length);

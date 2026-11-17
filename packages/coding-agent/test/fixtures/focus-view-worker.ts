@@ -29,7 +29,6 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { authService } from "../../src/thread/services/auth";
 import { identityThreadService } from "../../src/thread/services/identity";
-import { getApprovalGrants } from "../../src/tools/approval-cache";
 import { EventBus } from "../../src/utils/event-bus";
 
 /** What the worker-side session reports about itself. */

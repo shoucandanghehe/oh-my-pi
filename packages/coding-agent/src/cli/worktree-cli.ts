@@ -114,7 +114,9 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 		return;
 	}
 	if (entries.length === 0) {
-		console.log(chalk.dim(`No agent-managed Git worktrees under ${getWorktreesDir(options.cwd)} or managed ovnfs checkouts.`));
+		console.log(
+			chalk.dim(`No agent-managed Git worktrees under ${getWorktreesDir(options.cwd)} or managed ovnfs checkouts.`),
+		);
 		return;
 	}
 	let live = 0;

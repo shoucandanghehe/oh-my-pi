@@ -94,7 +94,7 @@ export class SessionCommandQueue {
 			await host.settleSubmissions();
 			await session.waitForAdmittedSubmissions();
 			if (session.isSessionTransitioning) await session.waitForSessionTransition();
-			if (session.hasPendingAsyncWork()) await session.settleAsyncWork();
+			await session.waitForRunEnd();
 			if (!host.isCurrent()) return;
 			if (this.request !== request) {
 				if (!this.request) {
@@ -111,7 +111,7 @@ export class SessionCommandQueue {
 				!session.isRetrying &&
 				!session.isSessionTransitioning &&
 				!session.hasAdmittedSubmission &&
-				!session.hasPendingAsyncWork() &&
+				!session.isRunActive &&
 				session.queuedMessageCount === 0 &&
 				!host.hasPendingSubmission()
 			)

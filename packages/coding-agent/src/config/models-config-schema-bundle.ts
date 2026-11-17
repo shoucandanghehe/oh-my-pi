@@ -222,8 +222,6 @@ export const getModelsConfigSchemaBundle = once(() => {
 			),
 	);
 
-	const ModelInputSchema = type('("text" | "image" | "audio" | "video")[]');
-
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
 		"api?": ApiSchema,

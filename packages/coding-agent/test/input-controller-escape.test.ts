@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -34,6 +35,7 @@ type FakeEditor = {
 	getText(): string;
 	getExpandedText(): string;
 	clearDraft(historyText?: string): void;
+	restoreDetachedDraft: CustomEditor["restoreDetachedDraft"];
 	addToHistory(text: string): void;
 	setActionKeys(action: string, keys: string[]): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
@@ -142,6 +144,7 @@ function createContext(): {
 			this.pendingImages = [];
 			this.pendingImageLinks = [];
 		},
+		restoreDetachedDraft: CustomEditor.prototype.restoreDetachedDraft,
 		addToHistory: vi.fn(),
 		setActionKeys: vi.fn(),
 		setCustomKeyHandler: vi.fn(),
@@ -612,11 +615,11 @@ describe("InputController escape behavior", () => {
 			withFileCommands(ctx, [sitrep]).session.extensionRunner = {
 				getCommand: () => undefined,
 				hasHandlers: (event: string) => event === "input",
-				emitInput: vi.fn(async () => {
-					editor.setText("typed while the hook ran");
-					return undefined;
-				}),
 			};
+			ctx.session.emitInteractiveInput = vi.fn(async () => {
+				editor.setText("typed while the hook ran");
+				return undefined;
+			});
 			editor.pendingImages = [image];
 			editor.pendingImageLinks = [undefined];
 			const controller = new InputController(ctx);

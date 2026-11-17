@@ -1,4 +1,4 @@
-import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
@@ -90,7 +90,7 @@ async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCo
 	// A switch still applying (or rolling back) decides which conversation is live.
 	if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
 	if (origin && !continuesConversation(ctx.sessionManager, origin)) {
-		restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+		ctx.editor.restoreDetachedDraft(command.text, runtime.input?.images, runtime.input?.imageLinks);
 		ctx.showWarning(`Conversation changed before /${command.name} ran; returned it to the editor`);
 		return;
 	}
@@ -98,7 +98,7 @@ async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCo
 	if (background) {
 		// Background compaction doesn't hold the submission slot or its follow-ups.
 		void ctx.handleCompactCommand(parsed.instructions, parsed.mode);
-	} else if (origin && ctx.session.isStreaming) {
+	} else if (origin && (ctx.session.isStreaming || ctx.session.queuedMessageCount > 0 || ctx.hasPendingSubmission())) {
 		ctx.yieldCompaction = { ...origin, text: command.text, instructions: parsed.instructions, mode: parsed.mode };
 		ctx.updatePendingMessagesDisplay();
 		ctx.showStatus("Queued compaction for when the agent yields");
