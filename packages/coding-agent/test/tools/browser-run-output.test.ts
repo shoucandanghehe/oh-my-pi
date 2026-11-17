@@ -382,7 +382,7 @@ it.skipIf(!(await chromiumAvailable()))(
 			const handle = await page.$("#area");
 			if (!handle) throw new Error("Expected #area");
 			const deadline = new AbortController();
-			const action = typeIntoElement(handle, "abc", deadline.signal);
+			const action = typeIntoElement(handle, "abc", "#area", deadline.signal);
 			await firstDelivered.promise;
 			deadline.abort(new Error("action deadline"));
 			await expect(action).rejects.toMatchObject({
