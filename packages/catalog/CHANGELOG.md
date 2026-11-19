@@ -46,6 +46,10 @@
 
 - Fixed GPT-6.2 reasoning loss from routine tool-result pruning on OpenAI Responses and Codex ([#19721](https://github.com/can1357/oh-my-pi/issues/19721))
 
+### Fixed
+
+- Fixed GPT-6.2 reasoning loss from routine tool-result pruning on OpenAI Responses and Codex ([#19721](https://github.com/can1357/oh-my-pi/issues/19721))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

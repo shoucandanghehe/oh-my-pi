@@ -865,6 +865,23 @@ describe("model thinking derivation", () => {
 		expect(sonnet5Bedrock.thinking?.supportsDisplay).toBe(true);
 	});
 
+	it("binds GPT-6.2 reasoning to its prefix only on the Responses APIs", () => {
+		for (const [provider, api] of [
+			["openai", "openai-responses"],
+			["openai-codex", "openai-codex-responses"],
+		] as const) {
+			for (const id of ["gpt-6.2-sol", "gpt-6.2-astra"]) {
+				expect(createModel({ id, api, provider }).thinking?.prefixBinding).toBe(true);
+			}
+			for (const id of ["gpt-6.1-sol", "gpt-6-astra"]) {
+				expect(createModel({ id, api, provider }).thinking?.prefixBinding).toBeUndefined();
+			}
+		}
+		expect(
+			createModel({ id: "gpt-6.2-sol", api: "openai-completions", provider: "openai" }).thinking?.prefixBinding,
+		).toBeUndefined();
+	});
+
 	it("bakes Fable 5.1 prefix binding and first-party controls", () => {
 		const direct = createModel({
 			id: "claude-fable-5-1",

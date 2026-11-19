@@ -2463,10 +2463,9 @@ export class SessionAdvisors {
 		// advisor's own context hygiene, not a compaction method; it has its own
 		// `advisor.evictStaleResults` switch.
 		//
-		// On a prefix-bound thinking model the `prunedAt` marker also drops the
-		// signed thinking of every assistant after the cut, the latest review
-		// included. What is lost is reasoning its notes and the deltas already
-		// cover.
+		// Eviction changes the prefix of reasoning produced after the cut, even
+		// in the latest review. Claude replay uses the `prunedAt` marker; OpenAI
+		// checks each replayed item itself. The advisor's notes and deltas remain.
 		if (cfgAdvisorEvictStaleResults.get(this.#host.settings)) {
 			const eviction = evictStaleToolResults(agent.state.messages, agent.tokenizer);
 			if (eviction.evicted > 0) {

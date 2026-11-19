@@ -165,8 +165,8 @@ export interface ThinkingConfig {
 	 */
 	supportsDisplay?: boolean;
 	/**
-	 * Thinking signatures bind each block to its preceding conversation prefix.
-	 * Requests that rewrite the prefix must opt into the provider's drop/error control.
+	 * Replayed reasoning is bound to its preceding conversation prefix.
+	 * Anthropic's optional wire controls are separate (`supportsThinkingBindingControls`).
 	 */
 	prefixBinding?: boolean;
 	/**

@@ -53,6 +53,7 @@ import {
 	OPENAI_MAX_OUTPUT_TOKENS,
 	getPremiumServiceTierRequests,
 	parseServiceTier,
+	type ProviderInputTransformation,
 	type ServiceTier,
 	type StopReason,
 	type StreamOptions,
@@ -3485,6 +3486,59 @@ function getOpenAIResponsesTerminalEvent(event: ResponseStreamEvent): OpenAIResp
 		: undefined;
 }
 
+/** Replace the recorded input-rewrite snapshot only when the response supplies a report. */
+export function collectOpenAIResponsesInputTransformations(output: AssistantMessage, response: unknown): void {
+	if (!isRecord(response) || !Array.isArray(response.input_transformations)) return;
+	const transformations: ProviderInputTransformation[] = [];
+	for (const entry of response.input_transformations) {
+		if (
+			isRecord(entry) &&
+			typeof entry.type === "string" &&
+			(entry.reason === undefined || typeof entry.reason === "string")
+		) {
+			transformations.push({ ...entry, type: entry.type });
+		}
+	}
+	output.inputTransformations = transformations;
+}
+
+/** Log once after a successful stream attempt; re-reported removals are diagnostic only. */
+export function logOpenAIResponsesReasoningRemovals(output: AssistantMessage, reportedItemIds?: Set<string>): void {
+	if (!output.inputTransformations) return;
+	reportedItemIds ??= new Set();
+	const removals: Array<{ id?: string; reason?: string }> = [];
+	const countsByReason = new Map<string, number>();
+	let count = 0;
+	let firstItemId: string | undefined;
+	for (const entry of output.inputTransformations) {
+		if (entry.type !== "reasoning" || entry.action !== "removed") continue;
+		const id = typeof entry.id === "string" ? entry.id : undefined;
+		removals.push({ id, reason: entry.reason });
+		if (id !== undefined) {
+			if (reportedItemIds.has(id)) continue;
+			reportedItemIds.add(id);
+		}
+		if (entry.reason === "turn_boundary") continue;
+		count++;
+		firstItemId ??= id;
+		const reason = entry.reason ?? "unspecified";
+		countsByReason.set(reason, (countsByReason.get(reason) ?? 0) + 1);
+	}
+	const { provider, model } = output;
+	if (count > 0) {
+		logger.warn("OpenAI Responses removed input reasoning", {
+			provider,
+			model,
+			count,
+			countsByReason: Object.fromEntries(countsByReason),
+			firstItemId,
+		});
+	}
+	if (removals.length > 0) {
+		logger.debug("OpenAI Responses input reasoning removals", { provider, model, removals });
+	}
+}
+
 export interface ProcessResponsesStreamOptions {
 	onFirstToken?: () => void;
 	onOutputItemDone?: (item: ResponseOutputItem) => void;
@@ -3790,6 +3844,8 @@ export async function processResponsesStream<TApi extends Api>(
 		const terminalEvent = getOpenAIResponsesTerminalEvent(event);
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
+		} else if (event.type === "response.in_progress") {
+			collectOpenAIResponsesInputTransformations(output, event.response);
 		} else if (event.type === "response.output_item.added") {
 			if (!sawFirstToken) {
 				sawFirstToken = true;
@@ -4144,6 +4200,7 @@ export async function processResponsesStream<TApi extends Api>(
 			if (response?.id) {
 				output.responseId = response.id;
 			}
+			collectOpenAIResponsesInputTransformations(output, response);
 			populateResponsesUsageFromResponse(output, response?.usage);
 			calculateCost(model, output.usage, output.timestamp);
 			applyProviderReportedCost(model, output.usage, response?.usage);

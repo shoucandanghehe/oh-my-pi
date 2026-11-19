@@ -25,6 +25,15 @@ export const GOOGLE_THINKING_BUDGETS: Readonly<Record<Effort, number>> = {
  */
 type ApiModel<TApi extends Api = Api> = ModelSpec<TApi> | Model<TApi>;
 
+/** OpenAI validates replayed reasoning items against the request prefix, independently of cache retention. */
+export function usesOpenAIReasoningPrefixBinding(model: Model | undefined): boolean {
+	return (
+		model?.thinking?.prefixBinding === true &&
+		model.identity.class === "openai" &&
+		(model.api === "openai-responses" || model.api === "openai-codex-responses")
+	);
+}
+
 /**
  * Returns the supported thinking efforts declared on the model metadata.
  * Empty for non-reasoning models and for reasoning models without a

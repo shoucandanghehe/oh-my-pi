@@ -222,3 +222,14 @@ class "openai" {
 		}
 	}
 }
+
+// On GPT-6.2 and later, Responses removes a reasoning item if preceding input
+// was edited or inserted. Appends and whole-item deletions don't break the binding.
+// https://developers.openai.com/api/docs/guides/reasoning#reasoning-item-removal-across-requests
+class "openai" {
+	on-api "openai-responses" "openai-codex-responses" {
+		revision ">=6.2 <10" {
+			thinking-prefix-binding #true
+		}
+	}
+}

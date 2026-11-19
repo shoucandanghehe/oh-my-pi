@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { SUPERSEDED_NOTICE } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { AssistantMessage, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -25,14 +26,14 @@ function createPrefixBindingModel(): Model<"anthropic-messages"> {
 	});
 }
 
-function createModel(): Model<"openai-responses"> {
+function createModel(id: string): Model<"openai-responses"> {
 	return buildModel({
-		id: "mock",
-		name: "mock",
+		id,
+		name: id,
 		api: "openai-responses",
 		provider: "openai",
 		baseUrl: "https://example.invalid",
-		reasoning: false,
+		reasoning: true,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 8192,
@@ -75,9 +76,8 @@ function toolResult(toolCallId: string, text: string, timestamp: number): ToolRe
 	};
 }
 
-function newSession(model: Model): AgentSession {
+function newSession(model: Model, now = Date.now()): AgentSession {
 	const sessionManager = SessionManager.inMemory();
-	const now = Date.now();
 	sessionManager.appendMessage({ role: "user", content: "Read the file twice.", timestamp: now - 500 });
 	sessionManager.appendMessage(
 		assistant(
@@ -95,7 +95,10 @@ function newSession(model: Model): AgentSession {
 		),
 	);
 	sessionManager.appendMessage(toolResult("read-new", NEW_RESULT, now - 250));
-	const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
+	const agent = new Agent({
+		initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+		streamFn: createMockModel({ responses: [{ content: ["Done."] }] }).stream,
+	});
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -137,15 +140,34 @@ describe("prefix-bound stale-result pruning", () => {
 		for (const session of sessions.splice(0)) await session.dispose();
 	});
 
-	it("keeps a warm superseded read for prefix binding while the control model prunes it", async () => {
-		const prefixBindingSession = newSession(createPrefixBindingModel());
-		const controlSession = newSession(createModel());
-		sessions.push(prefixBindingSession, controlSession);
+	it("keeps warm superseded reads for prefix-bound Claude and GPT models", async () => {
+		const claudeSession = newSession(createPrefixBindingModel());
+		const gpt62Session = newSession(createModel("gpt-6.2-sol"));
+		const controlSession = newSession(createModel("gpt-6.1-sol"));
+		sessions.push(claudeSession, gpt62Session, controlSession);
 
-		await runMaintenance(prefixBindingSession);
+		await runMaintenance(claudeSession);
+		await runMaintenance(gpt62Session);
 		await runMaintenance(controlSession);
 
-		expect(oldResultText(prefixBindingSession)).toBe(OLD_RESULT);
+		expect(oldResultText(claudeSession)).toBe(OLD_RESULT);
+		expect(oldResultText(gpt62Session)).toBe(OLD_RESULT);
 		expect(oldResultText(controlSession)).toBe(SUPERSEDED_NOTICE);
+	});
+
+	it("keeps a superseded read when an idle GPT-6.2 session resumes after an error", async () => {
+		const now = Date.now() - 2 * 60 * 60 * 1000;
+		const model = createModel("gpt-6.2-sol");
+		const session = newSession(model, now);
+		sessions.push(session);
+		const failure: AssistantMessage = {
+			...assistant(model, [], now),
+			stopReason: "error",
+			errorMessage: "Interrupted",
+		};
+		session.sessionManager.appendMessage(failure);
+		session.agent.appendMessage(failure);
+		await session.prompt("Continue");
+		expect(oldResultText(session)).toBe(OLD_RESULT);
 	});
 });

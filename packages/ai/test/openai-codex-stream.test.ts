@@ -30,6 +30,7 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { sse as responsesSse, textEvents } from "./fixtures/openai-responses-server";
 import { withEnv } from "./helpers";
 
 const { getAgentDir, setAgentDir, TempDir } = piUtils;
@@ -370,6 +371,60 @@ class MockWebSocket {
 }
 
 describe("openai-codex streaming", () => {
+	it("records Codex reports from SSE and WebSocket and shares removal warning state across them", async () => {
+		const removed = { type: "reasoning", action: "removed", id: "rs_1", reason: "prefix_mismatch" };
+		const turnBoundary = { type: "reasoning", action: "removed", reason: "turn_boundary" };
+		const withReport = (id: string, terminalReport?: unknown[]) => [
+			{ type: "response.in_progress", response: { id, input_transformations: [removed] } },
+			...textEvents("answer", id).slice(0, -1),
+			{
+				type: "response.completed",
+				response: { id, status: "completed", input_transformations: terminalReport },
+			},
+		];
+		class ReportWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			override send(): void {
+				for (const event of withReport("resp_ws", [removed, turnBoundary])) this.sendJson(event);
+			}
+		}
+		global.WebSocket = ReportWebSocket as unknown as typeof WebSocket;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const warn = vi.spyOn(piUtils.logger, "warn");
+		const model = createCodexTestModel();
+		try {
+			for (const preferWebsockets of [false, "only"] as const) {
+				const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+					apiKey: createCodexTestToken(),
+					sessionId: "input-transformations",
+					providerSessionState,
+					preferWebsockets,
+					fetch: async () => responsesSse(withReport("resp_sse")),
+				}).result();
+				expect(result.stopReason).toBe("stop");
+				expect(result.responseId).toBe(preferWebsockets ? "resp_ws" : "resp_sse");
+				expect(result.inputTransformations).toEqual(preferWebsockets ? [removed, turnBoundary] : [removed]);
+			}
+			expect(warn.mock.calls.filter(([message]) => message === "OpenAI Responses removed input reasoning")).toEqual([
+				[
+					"OpenAI Responses removed input reasoning",
+					{
+						provider: "openai-codex",
+						model: model.id,
+						count: 1,
+						countsByReason: { prefix_mismatch: 1 },
+						firstItemId: "rs_1",
+					},
+				],
+			]);
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+	});
+
 	it.each(["arguments.done", "output_item.done", "terminal"])(
 		"refuses truncated final JSON via %s",
 		async finalizer => {

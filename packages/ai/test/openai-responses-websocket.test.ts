@@ -11,6 +11,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { logger } from "@oh-my-pi/pi-utils";
 import { endpoint as createEndpoint, send, sse, textEvents } from "./fixtures/openai-responses-server";
 
 const EventedWebSocket = require("ws") as { prototype: WebSocket };
@@ -50,6 +51,63 @@ function endpoint(
 
 // These tests exercise the public provider stream against real Bun HTTP/WS endpoints.
 describe("standard OpenAI Responses WebSocket opt-in", () => {
+	it("logs new reasoning removals once across SSE and WebSocket without hiding later reports", async () => {
+		const inputTransformations = [
+			{ type: "reasoning", action: "removed", id: "rs_1", reason: "prefix_mismatch" },
+			{ type: "reasoning", action: "removed", id: "rs_2", reason: "model_mismatch" },
+			{ type: "reasoning", action: "removed", id: "rs_3", reason: "turn_boundary" },
+			{ type: "reasoning", action: "ignored", id: "rs_4", reason: "prefix_mismatch" },
+		];
+		const withReport = (id: string) => [
+			...textEvents("answer", id).slice(0, -1),
+			{
+				type: "response.completed",
+				response: { id, status: "completed", input_transformations: inputTransformations },
+			},
+		];
+		const fixture = endpoint(socket => send(socket, withReport("resp_ws")), {
+			httpResponse: () => sse(withReport("resp_sse")),
+		});
+		const warn = spyOn(logger, "warn");
+		const debug = spyOn(logger, "debug");
+		try {
+			for (const preferWebsockets of [false, true]) {
+				const result = await streamOpenAIResponses(fixture.model, fixture.context, {
+					...fixture.options,
+					preferWebsockets,
+				}).result();
+				expect(result.stopReason).toBe("stop");
+				expect(result.inputTransformations).toEqual(inputTransformations);
+			}
+			expect(fixture.httpRequests).toHaveLength(1);
+			expect(fixture.requests).toHaveLength(1);
+			expect(warn.mock.calls.filter(([message]) => message === "OpenAI Responses removed input reasoning")).toEqual([
+				[
+					"OpenAI Responses removed input reasoning",
+					{
+						provider: "openai",
+						model: fixture.model.id,
+						count: 2,
+						countsByReason: { prefix_mismatch: 1, model_mismatch: 1 },
+						firstItemId: "rs_1",
+					},
+				],
+			]);
+			expect(debug).toHaveBeenCalledWith("OpenAI Responses input reasoning removals", {
+				provider: "openai",
+				model: fixture.model.id,
+				removals: [
+					{ id: "rs_1", reason: "prefix_mismatch" },
+					{ id: "rs_2", reason: "model_mismatch" },
+					{ id: "rs_3", reason: "turn_boundary" },
+				],
+			});
+		} finally {
+			debug.mockRestore();
+			warn.mockRestore();
+		}
+	});
+
 	it("keeps a gateway on HTTP/SSE without explicit opt-in", async () => {
 		const fixture = endpoint();
 		const result = await streamOpenAIResponses(fixture.model, fixture.context, fixture.options).result();

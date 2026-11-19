@@ -7,6 +7,7 @@ import type {
 	WebSearchServerToolUseBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { THINKING_BINDING_CONTROLS_BETA } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -784,6 +785,50 @@ describe("anthropic-messages encodeResponse", () => {
 			{ type: "text", text: "answer" },
 		]);
 	});
+});
+
+it("only exports input transformation reports from Anthropic-format upstreams", async () => {
+	const anthropicReport = [
+		{ type: "thinking_dropped", reason: "prefix_binding_mismatch", path: "messages.1.content.0" },
+	];
+	const responsesReport = [{ type: "reasoning", action: "removed", reason: "prefix_mismatch", id: "rs_1" }];
+	for (const [api, provider, report] of [
+		["openai-responses", "openai", responsesReport],
+		["anthropic-messages", "anthropic", anthropicReport],
+		["bedrock-converse-stream", "amazon-bedrock", anthropicReport],
+	] as const) {
+		const message: AssistantMessage = {
+			role: "assistant",
+			api,
+			provider,
+			model: "test",
+			content: [{ type: "text", text: "answer" }],
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 1,
+			inputTransformations: report,
+		};
+		const sse = await collectSse(
+			encodeStream(
+				makeStream([
+					{ type: "start", partial: message },
+					{ type: "done", reason: "stop", message },
+				]),
+				"test",
+				{ headers: { "anthropic-beta": THINKING_BINDING_CONTROLS_BETA } },
+			),
+		);
+		expect(sse.map(event => event.event)).toEqual(["message_start", "message_delta", "message_stop"]);
+		const nonStreaming = encodeResponse(message, "test");
+		const expectedStreamReport = api === "openai-responses" ? [] : anthropicReport;
+		if (api === "openai-responses") {
+			expect(nonStreaming).not.toHaveProperty("input_transformations");
+		} else {
+			expect(nonStreaming).toHaveProperty("input_transformations", anthropicReport);
+		}
+		expect(sse[0]!.data.message).toHaveProperty("input_transformations", expectedStreamReport);
+		expect(sse[1]!.data).toHaveProperty("input_transformations", expectedStreamReport);
+	}
 });
 
 describe("anthropic-messages encodeStream", () => {
