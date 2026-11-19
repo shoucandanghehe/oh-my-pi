@@ -2,64 +2,13 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added handling of `features` terminal events to update UI without waiting for a new hello
-
-### Fixed
-
-- Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
-- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-## [19.0.1] - 2026-11-19
-
-### Added
-
-- The native session sheet shows a `Local` report line (the session's `local://` directory) as a copyable field beside the ID and file ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
-
-### Fixed
-
-- Answering a long ask question by question in native terminal hosts such as Tern no longer rescales the whole card body on every move, so the next question animates in without stalling
-- Fixed images from a previous session reappearing at the top-left of the screen after `/new` in herdr-app ([#19749](https://github.com/can1357/oh-my-pi/pull/19749) by [@jaredlyon](https://github.com/jaredlyon))
-- Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends ([#19703](https://github.com/can1357/oh-my-pi/pull/19703) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the usage dashboard rendering exhausted or pressured usage rows without a quota bar (prepaid balances, spent quotas) as dim informational text; they now take the error or warning color their reported status calls for, and a spent quota with no measurable amount reads "exhausted" instead of "no data" ([#19764](https://github.com/can1357/oh-my-pi/issues/19764))
-
-## [19.0.0] - 2026-11-18
-
-### Breaking Changes
-
-- Full-output references and the `[raw output: …]` footer now use `local://N.log` instead of `artifact://N`.
-
-### Added
-
-- Added the `btw` composer mode, including the `btwMode` theme color in all bundled themes.
-- Added feature-gated native docking for runtime children, allowing components to appear only on terminals that advertise the required capability.
-- Added options to preserve intraword underscores when stripping inline Markdown and to open `JobsSheet` on a selected job.
-- Custom message payloads can now be excluded from model context while remaining available in normalized and restored saved entries.
-- Added transcript blocks for output reported by running background jobs and services.
-
-### Changed
-
-- Reworked ask dialogs into a single stacked flow: the active question stays open while answered questions fold into compact summaries with their selected options visible. This applies across terminal and native interfaces and improves keyboard navigation, sizing, and host composer integration.
-- Improved composer behavior while an ask dialog is pending: the composer indicates that typing there will skip the question, folds to a compact state when appropriate, and offers an explicit Skip & send action for drafts that bypass the ask.
-- Added support for folded and faint composer states and clearer visual indication when the interface is awaiting an answer.
-- Model search now supports `provider/model` queries, prioritizing exact provider matches and searching that provider's model IDs first.
-
-### Fixed
-
-- Improved background-job notices in Tern by grouping all output under one header and showing the complete lines.
-- Fixed Tern composer handling of `->` and `=>` so typing them no longer unexpectedly inserts a line break.
-- Fixed web search results without a synthesized answer to show each source once with a concise cleaned excerpt.
-- Fixed long Tern tool-approval prompts so their details scroll within the available window and the choices and Approve/Deny controls remain visible.
-- Fixed table chart unit display and change-factor calculations for measurements with scaled units.
-- Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
-- Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
 ### Breaking Changes
 
 - Removed unused `ChatTranscriptPane.renderWorkspaceHeader` and `setEditorText` interfaces; workspace headers remain on the outer pane, and editors are available through `getPasteTarget()`.
 
 ### Added
 
+- Added handling of `features` terminal events to update UI without waiting for a new hello
 - Components can provide reusable row measurements and stable row anchors for progressive viewport layout.
 - Workspace panes can retain their layout while hidden on small terminals, and nested panes support independent text selection and drag capture.
 - Added estimated-height virtual viewport providers for tall component trees.
@@ -75,6 +24,8 @@
 
 ### Fixed
 
+- Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
+- Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Slash-command argument completions now take priority over mid-prompt skill lookup.
 - Session tree filters now treat context revisions as bookkeeping instead of conversation turns.
 - Local agent panes now route session controls to their own runtime and retain drafts, queue edits, and the selected history across maintenance.
@@ -140,6 +91,50 @@
 - Fixed switching from the app viewport to a Tern inline surface while the alternate screen was still active.
 - Fixed native keyboard transcript scrolling in BTW and agent views.
 - Fixed native pause sheets not updating barrier readiness or offering durable exit.
+
+## [19.0.1] - 2026-11-19
+
+### Added
+
+- The native session sheet shows a `Local` report line (the session's `local://` directory) as a copyable field beside the ID and file ([#19778](https://github.com/can1357/oh-my-pi/pull/19778) by [@farnoy](https://github.com/farnoy))
+
+### Fixed
+
+- Answering a long ask question by question in native terminal hosts such as Tern no longer rescales the whole card body on every move, so the next question animates in without stalling
+- Fixed images from a previous session reappearing at the top-left of the screen after `/new` in herdr-app ([#19749](https://github.com/can1357/oh-my-pi/pull/19749) by [@jaredlyon](https://github.com/jaredlyon))
+- Loop-stall diagnostics (`ui.loop-blocked`) no longer sample the JS thread while no TUI runs, such as in an external editor or after the session ends ([#19703](https://github.com/can1357/oh-my-pi/pull/19703) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the usage dashboard rendering exhausted or pressured usage rows without a quota bar (prepaid balances, spent quotas) as dim informational text; they now take the error or warning color their reported status calls for, and a spent quota with no measurable amount reads "exhausted" instead of "no data" ([#19764](https://github.com/can1357/oh-my-pi/issues/19764))
+
+## [19.0.0] - 2026-11-18
+
+### Breaking Changes
+
+- Full-output references and the `[raw output: …]` footer now use `local://N.log` instead of `artifact://N`.
+
+### Added
+
+- Added the `btw` composer mode, including the `btwMode` theme color in all bundled themes.
+- Added feature-gated native docking for runtime children, allowing components to appear only on terminals that advertise the required capability.
+- Added options to preserve intraword underscores when stripping inline Markdown and to open `JobsSheet` on a selected job.
+- Custom message payloads can now be excluded from model context while remaining available in normalized and restored saved entries.
+- Added transcript blocks for output reported by running background jobs and services.
+
+### Changed
+
+- Reworked ask dialogs into a single stacked flow: the active question stays open while answered questions fold into compact summaries with their selected options visible. This applies across terminal and native interfaces and improves keyboard navigation, sizing, and host composer integration.
+- Improved composer behavior while an ask dialog is pending: the composer indicates that typing there will skip the question, folds to a compact state when appropriate, and offers an explicit Skip & send action for drafts that bypass the ask.
+- Added support for folded and faint composer states and clearer visual indication when the interface is awaiting an answer.
+- Model search now supports `provider/model` queries, prioritizing exact provider matches and searching that provider's model IDs first.
+
+### Fixed
+
+- Improved background-job notices in Tern by grouping all output under one header and showing the complete lines.
+- Fixed Tern composer handling of `->` and `=>` so typing them no longer unexpectedly inserts a line break.
+- Fixed web search results without a synthesized answer to show each source once with a concise cleaned excerpt.
+- Fixed long Tern tool-approval prompts so their details scroll within the available window and the choices and Approve/Deny controls remain visible.
+- Fixed table chart unit display and change-factor calculations for measurements with scaled units.
+- Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
+- Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
 
 ## [18.22.2] - 2026-11-18
 

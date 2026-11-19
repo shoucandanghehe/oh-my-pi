@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `features` terminal event: the terminal's feature list changed (a setting), replacing the `hello` reply's
+- Added branch-scoped `context_revision` entries so clients can replay reduced context without losing original history.
 
 ## [19.0.0] - 2026-11-18
 
@@ -13,9 +14,6 @@
 - Added tray state and interaction properties, including focus, peek, quiet, main status, item references, card status and actions, and event state.
 - Added layout transition properties to nodes for coordinating layout animations.
 - Added support for folding a dock composer into its compact row.
-### Added
-
-- Added branch-scoped `context_revision` entries so clients can replay reduced context without losing original history.
 
 ## [18.22.0] - 2026-11-16
 

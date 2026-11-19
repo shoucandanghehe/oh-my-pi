@@ -2,9 +2,18 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Pass the owning operation's cwd to `getWorktreesDir(cwd)` or `getWorktreeDir(cwd, segment)` to resolve a relative worktree base.
+
 ### Added
 
 - Added `getCodexClientVersionPath()` for the Codex client version cache record, resolving under `$XDG_CACHE_HOME/omp` when that root is initialized ([#19776](https://github.com/can1357/oh-my-pi/pull/19776) by [@Parsifa1](https://github.com/Parsifa1))
+- Added `waitForImmediate()` for yielding background work between event-loop iterations.
+
+### Changed
+
+- Worktree directory overrides now accept paths relative to the explicitly supplied operation cwd, retaining environment-over-setting priority and the existing default.
 
 ## [19.0.0] - 2026-11-18
 
@@ -19,17 +28,6 @@
 - Fixed archive opening so the extraction-size limit is enforced when an oversized member is read rather than preventing access to the entire archive.
 - Fixed `OMP_LOG_LEVEL` so it also controls console output from services such as `omp auth-broker serve`, not just log-file output.
 - Fixed Markdown parsing so emphasis and link labels are not prematurely terminated by marker characters inside code spans, autolinks, inline HTML tags, or link destinations.
-### Breaking Changes
-
-- `getWorktreesDir(cwd)` and `getWorktreeDir(cwd, segment)` now require the owning operation's cwd.
-
-### Added
-
-- Added `waitForImmediate()` for yielding background work between event-loop iterations.
-
-### Changed
-
-- Worktree directory overrides now accept paths relative to the explicitly supplied operation cwd, retaining environment-over-setting priority and the existing default.
 
 ## [18.22.2] - 2026-11-18
 

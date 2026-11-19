@@ -2,12 +2,28 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the unused `validateMessagesMedia` export; use `validateContextMedia`.
+
+### Added
+
+- Added `preferWebsockets: "only"` for Codex requests and streamed compaction, keeping later turns on WebSockets after transport failures instead of falling back to SSE.
+- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
+- OpenAI Responses and Codex now record reasoning removals reported by the API and warn about unexpectedly removed items without repeating warnings on replay ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).
+- Supported GPT-6 Responses and Codex sessions keep earlier tool declarations when tools are added or temporarily disabled.
+
 ### Fixed
 
 - Fixed thinking detection so a failed check of one request style no longer ignores another style that already worked, and the next request no longer repeats a style the server already refused. ([#19758](https://github.com/can1357/oh-my-pi/pull/19758) by [@eggpeat](https://github.com/eggpeat))
 - The auth broker now logs a warning when a transient OAuth refresh failure leaves a login's access token expiring before the next retry; these failures logged only at debug, so a login could stop refreshing and lapse unnoticed ([#19590](https://github.com/can1357/oh-my-pi/pull/19590) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed chat completions dropping reasoning sent only as `reasoning_details` (Bifrost Gemini) ([#19595](https://github.com/can1357/oh-my-pi/pull/19595) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Antigravity CLI quota exhaustion (`RESOURCE_EXHAUSTED`) streaming into replies as "API error" text; the request now fails with a 429 rate-limit error, so omp's retry, credential rotation and model fallback policy applies instead of a thinking-loop retry ([#19382](https://github.com/can1357/oh-my-pi/pull/19382) by [@gimso2x](https://github.com/gimso2x))
+- WebSocket-only Codex requests now reject a busy shared connection without falling back to SSE or interrupting its owner.
+- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
+- Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
+- Image edits can upload reference files to proxy endpoints that require multipart requests.
 
 ## [19.0.1] - 2026-11-19
 
@@ -36,24 +52,6 @@
 - Improved authentication broker compatibility across client and broker versions by tolerating unknown credential, usage, and observed-usage fields and values.
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
-### Breaking Changes
-
-- Removed the unused `validateMessagesMedia` export; use `validateContextMedia`.
-
-### Added
-
-- Added `preferWebsockets: "only"` for Codex requests and streamed compaction, keeping later turns on WebSockets after transport failures instead of falling back to SSE.
-- Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
-- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
-- OpenAI Responses and Codex now record reasoning removals reported by the API and warn about unexpectedly removed items without repeating warnings on replay ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).
-- Supported GPT-6 Responses and Codex sessions keep earlier tool declarations when tools are added or temporarily disabled.
-
-### Fixed
-
-- WebSocket-only Codex requests now reject a busy shared connection without falling back to SSE or interrupting its owner.
-- Fixed native judgments retrying before a long `Retry-After` expires and ignoring cancellation during backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
-- Fixed reasoning-off requests selecting a high thinking tier on routed Antigravity Claude models instead of their mandatory default tier.
-- Image edits can upload reference files to proxy endpoints that require multipart requests.
 
 ## [18.22.2] - 2026-11-18
 

@@ -2,11 +2,6 @@
 
 ## [Unreleased]
 
-## [19.0.0] - 2026-11-18
-
-### Added
-
-- Added support for excluding custom messages from model context and compaction or branch summaries, while allowing queued steering and follow-up messages to continue correctly after excluded messages.
 ### Added
 
 - Added `Agent.createChild()` for isolated child loops that retain provider routing, request shaping, tool schemas, cache configuration, and telemetry without sharing parent lifecycle state.
@@ -25,6 +20,12 @@
 - Paused agents now report readiness after asynchronous credential resolution.
 - Agents can now forward `parentSessionId` to share provider cache affinity without sharing conversation state.
 - Repeated compaction requests now stop when only bookkeeping follows a completed compaction.
+
+## [19.0.0] - 2026-11-18
+
+### Added
+
+- Added support for excluding custom messages from model context and compaction or branch summaries, while allowing queued steering and follow-up messages to continue correctly after excluded messages.
 
 ## [18.22.1] - 2026-11-17
 
