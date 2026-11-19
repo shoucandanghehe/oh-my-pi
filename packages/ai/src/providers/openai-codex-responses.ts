@@ -112,10 +112,12 @@ import {
 export { setCodexAttestationProvider } from "./openai-codex-attestation";
 export type { CodexAttestationProvider } from "./openai-codex-attestation";
 import {
-	type OpenAIEffortControlState,
+	insertOpenAIInputUpdates,
+	type OpenAIRequestControlState,
 	planStableOpenAIEffort,
-	resolveOpenAIEffortControlState,
+	resolveOpenAIRequestControlState,
 } from "./openai-configuration-update";
+import { fingerprintOpenAIToolDeclarations, planStableOpenAITools } from "./openai-tool-additions";
 import type {
 	ResponseComputerToolCall,
 	ResponseCustomToolCall,
@@ -454,8 +456,8 @@ export interface CodexProviderSessionState extends ProviderSessionState {
 	webSocketSessions: Map<string, CodexWebSocketSessionState>;
 	webSocketPublicToPrivate: Map<string, string>;
 	metadataSessions: Map<string, CodexMetadataSessionState>;
-	/** `configuration_update` effort baselines, keyed by model + session. */
-	effortControls: Map<string, OpenAIEffortControlState<ReasoningConfig["effort"]>>;
+	/** Append-only request controls, keyed by endpoint, mode, model, and session. */
+	requestControls: Map<string, OpenAIRequestControlState<ReasoningConfig["effort"], CodexToolPayload>>;
 	/** Reasoning item removals already reported in this provider session. */
 	reportedReasoningRemovalIds: Set<string>;
 }
@@ -1407,15 +1409,15 @@ export async function buildTransformedCodexRequestBody(
 	// everything from `StreamOptions` rather than forwarding any of them.
 	// (#3117 — codex-rs sends none of these either.)
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
-	const hasDeclaredTools = (context.tools?.length ?? 0) > 0;
-	if (hasDeclaredTools) {
-		params.tools = convertOpenAICodexResponsesTools(context.tools ?? [], model);
+	const declaredTools = context.tools?.length ? convertOpenAICodexResponsesTools(context.tools, model) : undefined;
+	if (declaredTools) {
+		params.tools = declaredTools;
 	}
 	// Native `additional_tools` items never land in `context.tools`, but they still
 	// reach the upstream. A caller constraint has to travel with them.
 	const hasNativeAdditionalTools =
 		Array.isArray(params.input) && params.input.some(item => item.type === "additional_tools");
-	if (options?.toolChoice && (hasDeclaredTools || hasNativeAdditionalTools)) {
+	if (options?.toolChoice && (declaredTools || hasNativeAdditionalTools)) {
 		const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools ?? [], model);
 		if (toolChoice) params.tool_choice = toolChoice;
 	}
@@ -1438,38 +1440,73 @@ export async function buildTransformedCodexRequestBody(
 	};
 
 	const body = await transformRequestBody(params, model, codexOptions, { developerMessages });
-	applyCodexStableEffort(model, body, options);
+	applyCodexRequestControls(model, body, declaredTools, options);
 	return body;
 }
 
-/**
- * Keep the request-level effort byte-stable across a conversation and carry
- * later changes as `configuration_update` items (GPT-6 family). Requires a
- * session id and provider session state to remember the baseline; without
- * them every request stands alone and sends its own effort.
- */
-function applyCodexStableEffort(
+/** Plan against the transcript before either kind of update is inserted. */
+function applyCodexRequestControls(
 	model: Model<"openai-codex-responses">,
 	body: RequestBody,
+	declaredTools: CodexToolPayload[] | undefined,
 	options: OpenAICodexResponsesOptions | undefined,
 ): void {
-	if (!model.compat.supportsConfigurationUpdate || options?.codexCompaction) return;
+	if (options?.codexCompaction || !body.input) return;
 	const effort = body.reasoning?.effort;
-	if (effort === undefined || effort === "none" || !body.input) return;
+	const planEffort = model.compat.supportsConfigurationUpdate && effort !== undefined && effort !== "none";
+	const choice = options?.toolChoice;
+	const planTools =
+		model.compat.supportsMidConversationToolChanges &&
+		(choice === undefined || choice === "auto" || choice === "none");
+	if (!planEffort && !planTools) return;
 	const providerState = getCodexProviderSessionState(options?.providerSessionState);
 	const sessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
 	if (!providerState || !sessionId) return;
-	const state = resolveOpenAIEffortControlState(
-		providerState.effortControls,
-		id => `${model.id}\u0000${id}`,
+	const lite = resolveCodexResponsesLite(options?.responsesLite);
+	const parentSessionId = normalizeOpenAIPromptCacheKey(options?.parentSessionId);
+	const state = resolveOpenAIRequestControlState(
+		providerState.requestControls,
+		id => `${model.baseUrl ?? ""}\u0000${lite}\u0000${model.id}\u0000${id}`,
 		sessionId,
-		normalizeOpenAIPromptCacheKey(options?.parentSessionId),
+		parentSessionId,
 	);
-	const lowest = options?.minimizeEffort ? lowestCodexWireEffort(model) : undefined;
-	body.reasoning = {
-		...body.reasoning,
-		effort: planStableOpenAIEffort(state, body.input, effort, lowest === "none" ? undefined : lowest),
-	};
+	const tools = planTools
+		? planStableOpenAITools(
+				(state.tools ??= { additions: [] }),
+				body.input,
+				lite ? (declaredTools ?? []) : declaredTools,
+				{
+					lite,
+					sideRequest: parentSessionId !== undefined && parentSessionId !== sessionId,
+					toolsDisabled: choice === "none",
+				},
+			)
+		: undefined;
+	if (tools) {
+		if (tools.choice) body.tool_choice = tools.choice;
+		if (lite) {
+			body.input[0] = { ...body.input[0], tools: tools.declared };
+		} else if (tools.declared !== undefined) {
+			body.tools = tools.declared;
+		} else {
+			delete body.tools;
+		}
+	}
+	if (planEffort) {
+		const lowest = options?.minimizeEffort ? lowestCodexWireEffort(model) : undefined;
+		body.reasoning = {
+			...body.reasoning,
+			effort: planStableOpenAIEffort(
+				state,
+				body.input,
+				effort,
+				lowest === "none" ? undefined : lowest,
+				tools?.insertions,
+			),
+		};
+	} else if (tools) {
+		insertOpenAIInputUpdates(body.input, tools.insertions);
+	}
 }
 
 async function openInitialCodexEventStream(
@@ -1821,6 +1858,10 @@ async function openCodexWebSocketTransport(
 			...chainedBody,
 			client_metadata: websocketClientMetadata,
 		};
+		const toolDeclarationsBeforeHook =
+			options?.onPayload && model.compat.supportsMidConversationToolChanges
+				? fingerprintOpenAIToolDeclarations(websocketRequest)
+				: undefined;
 		const replacementWebsocketRequest = await options?.onPayload?.(websocketRequest, model);
 		if (replacementWebsocketRequest !== undefined) {
 			websocketRequest = replacementWebsocketRequest as RequestBody;
@@ -1835,6 +1876,14 @@ async function openCodexWebSocketTransport(
 		}
 		recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 		const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
+		if (
+			toolDeclarationsBeforeHook !== undefined &&
+			toolDeclarationsBeforeHook !== fingerprintOpenAIToolDeclarations(websocketRequest)
+		) {
+			// A hook may remove a tool update from the delta. The synthetic full
+			// request then overstates what the server holds.
+			delete requestBodyForState.input;
+		}
 		// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options` or
 		// change `service_tier`); recorded state must reflect what was actually
 		// sent — the sequential-cutoff summary decoder and the served-tier
@@ -2656,14 +2705,18 @@ class CodexStreamProcessor {
 					cloneJsonTree(nativeOutputItems),
 					{ supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal },
 				);
-				if (responseId && replayableResponseItems && replayableResponseItems.length === nativeOutputItems.length) {
+				if (
+					runtime.requestBodyForState.input &&
+					responseId &&
+					replayableResponseItems &&
+					replayableResponseItems.length === nativeOutputItems.length
+				) {
 					state.lastResponseId = responseId;
 					state.lastResponseItems = replayableResponseItems;
 					state.canAppend = rawEvent.type === "response.done" || rawEvent.type === "response.completed" || steered;
 				} else {
-					// No response id, or replay sanitization dropped an item the server
-					// still holds. Sanitization is 1:1-or-fewer, so either case makes the
-					// append baseline untrustworthy; next turn must replay in full.
+					// The sent request, response id, and replayed items must all
+					// establish an exact append baseline.
 					resetCodexWebSocketAppendState(state);
 				}
 			}

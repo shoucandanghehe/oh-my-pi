@@ -571,6 +571,14 @@ export interface OpenAICompat {
 	 */
 	supportsConfigurationUpdate?: boolean;
 	/**
+	 * Allows stable tool declarations across turns using `additional_tools`
+	 * for additions and `tool_choice.allowed_tools` for selective disabling
+	 * on full Responses requests. Defaults to true for GPT-6 using
+	 * `openai-responses` or `openai-codex-responses`. Set false for endpoints
+	 * that do not support these request fields.
+	 */
+	supportsMidConversationToolChanges?: boolean;
+	/**
 	 * Whether the Responses WebSocket accepts `response.steer`, which queues user
 	 * input into the in-flight response (GPT-6 family). Default: rule-detected.
 	 * Set `false` for proxies that reject the event; steering then waits for the
@@ -1108,6 +1116,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
 			| "supportsConfigurationUpdate"
+			| "supportsMidConversationToolChanges"
 			| "supportsSteering"
 			| "stripImageInput"
 			| "whenThinking"
@@ -1150,6 +1159,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * support the item type.
 	 */
 	supportsConfigurationUpdate: boolean;
+	/** Whether append-only tool declarations and request-local restrictions are enabled. */
+	supportsMidConversationToolChanges: boolean;
 	/**
 	 * Whether the WebSocket transport may send `response.steer` to deliver user
 	 * input into the in-flight response. Rule-owned: GPT-6 family.

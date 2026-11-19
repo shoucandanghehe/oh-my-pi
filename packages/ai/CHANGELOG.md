@@ -46,6 +46,7 @@
 - Added native video input on the OpenAI-compatible Chat Completions transport: video blocks serialize as `video_url` content parts for models declaring the `video` input modality ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
 - Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
 - OpenAI Responses and Codex now record reasoning removals reported by the API and warn about unexpectedly removed items without repeating warnings on replay ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).
+- Supported GPT-6 Responses and Codex sessions keep earlier tool declarations when tools are added or temporarily disabled.
 
 ### Fixed
 

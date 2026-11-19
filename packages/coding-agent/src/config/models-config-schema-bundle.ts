@@ -112,6 +112,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
 		"supportsConfigurationUpdate?": "boolean",
+		"supportsMidConversationToolChanges?": "boolean",
 		"supportsSteering?": "boolean",
 		"stripImageInput?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)

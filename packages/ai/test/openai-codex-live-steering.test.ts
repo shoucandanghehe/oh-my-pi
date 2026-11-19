@@ -721,6 +721,12 @@ describe("planSteeredRequest", () => {
 		expect(planSteeredRequest([output, steer], [steer])).toEqual({ kind: "create", input: [output] });
 	});
 
+	it("replays in full if prepending accepted steering would move it ahead of its new tools", () => {
+		const tools = { type: "additional_tools", role: "developer", tools: [{ type: "function", name: "search" }] };
+		expect(planSteeredRequest([output, tools, steer], [steer])).toEqual({ kind: "discard" });
+		expect(planSteeredRequest([output, steer, tools], [steer])).toEqual({ kind: "create", input: [output, tools] });
+	});
+
 	it("discards when the request cannot line up with the server queue", () => {
 		// Extra input would run alongside the automatic successor.
 		expect(planSteeredRequest([steer, other], [steer])).toEqual({ kind: "discard" });

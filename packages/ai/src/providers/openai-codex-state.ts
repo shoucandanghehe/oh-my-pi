@@ -7,7 +7,7 @@ import type {
 	OpenAICodexWebSocketDebugStats,
 } from "./openai-codex-responses";
 import { isOpenAICodexWebSocketPreferred } from "./openai-codex-transport";
-import { releaseOpenAIEffortControlSession } from "./openai-configuration-update";
+import { releaseOpenAIRequestControlSession } from "./openai-configuration-update";
 import { normalizeOpenAIPromptCacheKey } from "./openai-shared";
 
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
@@ -44,7 +44,7 @@ export function createCodexProviderSessionState(): CodexProviderSessionState {
 		webSocketSessions: new Map(),
 		webSocketPublicToPrivate: new Map(),
 		metadataSessions: new Map(),
-		effortControls: new Map(),
+		requestControls: new Map(),
 		reportedReasoningRemovalIds: new Set(),
 		releaseSession: sessionId => {
 			const normalizedSessionId = normalizeOpenAIPromptCacheKey(sessionId);
@@ -58,7 +58,7 @@ export function createCodexProviderSessionState(): CodexProviderSessionState {
 				}
 			}
 			state.metadataSessions.delete(normalizedSessionId);
-			releaseOpenAIEffortControlSession(state.effortControls, normalizedSessionId);
+			releaseOpenAIRequestControlSession(state.requestControls, normalizedSessionId);
 		},
 		close: () => {
 			for (const session of state.webSocketSessions.values()) {
@@ -67,7 +67,7 @@ export function createCodexProviderSessionState(): CodexProviderSessionState {
 			state.webSocketSessions.clear();
 			state.webSocketPublicToPrivate.clear();
 			state.metadataSessions.clear();
-			state.effortControls.clear();
+			state.requestControls.clear();
 			state.reportedReasoningRemovalIds.clear();
 		},
 	};
@@ -83,8 +83,8 @@ function isCodexProviderSessionState(state: ProviderSessionState | undefined): s
 		state.webSocketPublicToPrivate instanceof Map &&
 		"metadataSessions" in state &&
 		state.metadataSessions instanceof Map &&
-		"effortControls" in state &&
-		state.effortControls instanceof Map
+		"requestControls" in state &&
+		state.requestControls instanceof Map
 	);
 }
 

@@ -209,11 +209,16 @@ export function planSteeredRequest(
 	if (!delta) return { kind: "discard" };
 	const rest: InputItem[] = [];
 	let next = 0;
+	let precededByToolAddition = false;
 	for (const item of delta) {
 		if (next < steering.length && steerItemKey(item) === steerItemKey(steering[next]!)) {
+			// The server prepends steering to the create frame. Replay in full
+			// when that would put a user message ahead of its tool declaration.
+			if (precededByToolAddition) return { kind: "discard" };
 			next++;
 			continue;
 		}
+		precededByToolAddition ||= item.type === "additional_tools";
 		rest.push(item);
 	}
 	if (next < steering.length) return { kind: "discard" };

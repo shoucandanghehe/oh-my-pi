@@ -65,6 +65,12 @@ class "openai" {
 	revision ">=6 <7" {
 		supports-configuration-update #true
 	}
+	// Keep earlier tool declarations stable when the set of callable tools changes.
+	on-api "openai-responses" "openai-codex-responses" {
+		revision ">=6 <7" {
+			supports-mid-conversation-tool-changes #true
+		}
+	}
 	// Codex SKUs: the advertised 400K figure includes the output budget; the
 	// true prompt window is 272K. Spark budgets are its own family's.
 	family "codex" {

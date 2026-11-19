@@ -14,13 +14,31 @@
  * Used by both the platform Responses provider and the Codex provider; the
  * state lives in each provider's session state, keyed per conversation. A side
  * request plans against a copy of its parent conversation's state (see
- * {@link resolveOpenAIEffortControlState}), so it sends the parent's prefix.
+ * {@link resolveOpenAIRequestControlState}), so it sends the parent's prefix.
  *
  * Wire constraints (OpenAI reasoning guide): the GPT-6 family supports the item
  * in standard (not `pro`) reasoning mode, adjacent updates are rejected, and
  * `/responses/compact` rejects histories containing them — compaction
  * requests are built outside this planner and never carry the items.
  */
+
+import type { OpenAIToolControlState } from "./openai-tool-additions";
+
+export interface OpenAIInputInsertion<TItem> {
+	index: number;
+	item: TItem;
+}
+
+/** Insert controls in transcript order, keeping the callers' order at equal positions. */
+export function insertOpenAIInputUpdates<TItem>(
+	input: TItem[],
+	insertions: readonly OpenAIInputInsertion<NoInfer<TItem>>[],
+): void {
+	let offset = 0;
+	for (const { index, item } of insertions.toSorted((a, b) => a.index - b.index)) {
+		input.splice(index + offset++, 0, item);
+	}
+}
 
 /** `configuration_update` input item; only `reasoning.effort` is updatable. */
 export interface ConfigurationUpdateItem {
@@ -36,17 +54,18 @@ interface EffortTransition<TEffort extends string> {
 	effort: TEffort;
 }
 
-/** Per-conversation effort baseline and recorded transitions. */
-export interface OpenAIEffortControlState<TEffort extends string = string> {
+/** Per-conversation request controls, planned against the unmodified transcript. */
+export interface OpenAIRequestControlState<TEffort extends string = string, TTool = never> {
 	sessionId: string;
 	baseEffort?: TEffort;
 	currentEffort?: TEffort;
 	transitions: EffortTransition<TEffort>[];
+	tools?: OpenAIToolControlState<TTool>;
 }
 
-export function createOpenAIEffortControlState<TEffort extends string>(
+export function createOpenAIEffortControlState<TEffort extends string, TTool = never>(
 	sessionId: string,
-): OpenAIEffortControlState<TEffort> {
+): OpenAIRequestControlState<TEffort, TTool> {
 	return { sessionId, transitions: [] };
 }
 
@@ -56,18 +75,24 @@ const MAX_EFFORT_CONTROL_STATES = 16;
  * Fetch (or create) the control state for one conversation from a provider's
  * bounded per-session map, refreshing its LRU slot.
  */
-function getOpenAIEffortControlState<TEffort extends string>(
-	states: Map<string, OpenAIEffortControlState<TEffort>>,
-	key: string,
+export function resolveOpenAIRequestControlState<TEffort extends string, TTool>(
+	states: Map<string, OpenAIRequestControlState<TEffort, TTool>>,
+	keyOf: (sessionId: string) => string,
 	sessionId: string,
-): OpenAIEffortControlState<TEffort> {
+	parentSessionId: string | undefined,
+): OpenAIRequestControlState<TEffort, TTool> {
+	if (parentSessionId !== undefined && parentSessionId !== sessionId) {
+		const parent = states.get(keyOf(parentSessionId));
+		return parent ? { ...structuredClone(parent), sessionId } : createOpenAIEffortControlState(sessionId);
+	}
+	const key = keyOf(sessionId);
 	const existing = states.get(key);
 	if (existing) {
 		states.delete(key);
 		states.set(key, existing);
 		return existing;
 	}
-	const created = createOpenAIEffortControlState<TEffort>(sessionId);
+	const created = createOpenAIEffortControlState<TEffort, TTool>(sessionId);
 	states.set(key, created);
 	if (states.size > MAX_EFFORT_CONTROL_STATES) {
 		const oldest = states.keys().next().value;
@@ -76,28 +101,9 @@ function getOpenAIEffortControlState<TEffort extends string>(
 	return created;
 }
 
-/**
- * Control state a Responses or Codex request plans against. A side request
- * (`parentSessionId`) gets a throwaway copy of its parent's state, fresh when
- * the parent has none: it replays the parent's updates, and its own effort
- * change never reaches the parent. Other requests get their session's state.
- */
-export function resolveOpenAIEffortControlState<TEffort extends string>(
-	states: Map<string, OpenAIEffortControlState<TEffort>>,
-	keyOf: (sessionId: string) => string,
-	sessionId: string,
-	parentSessionId: string | undefined,
-): OpenAIEffortControlState<TEffort> {
-	if (parentSessionId === undefined || parentSessionId === sessionId) {
-		return getOpenAIEffortControlState(states, keyOf(sessionId), sessionId);
-	}
-	const parent = states.get(keyOf(parentSessionId));
-	return parent ? { ...structuredClone(parent), sessionId } : createOpenAIEffortControlState(sessionId);
-}
-
-/** Release one conversation's effort state from the Responses and Codex `releaseSession` implementations. */
-export function releaseOpenAIEffortControlSession<TEffort extends string>(
-	states: Map<string, OpenAIEffortControlState<TEffort>>,
+/** Release one routing session's request controls without affecting other sessions. */
+export function releaseOpenAIRequestControlSession<TEffort extends string, TTool>(
+	states: Map<string, OpenAIRequestControlState<TEffort, TTool>>,
 	sessionId: string,
 ): void {
 	for (const [key, state] of states) {
@@ -125,7 +131,7 @@ function effortControlAnchor(input: readonly AnchorableItem[], index: number): s
 	return String(Bun.hash(JSON.stringify(stable)));
 }
 
-function resetOpenAIEffortControlState(state: OpenAIEffortControlState<string>): void {
+function resetOpenAIEffortControlState(state: OpenAIRequestControlState<string, unknown>): void {
 	state.baseEffort = undefined;
 	state.currentEffort = undefined;
 	state.transitions = [];
@@ -138,7 +144,10 @@ function resetOpenAIEffortControlState(state: OpenAIEffortControlState<string>):
  * re-baselines from its own effort, which is what the API asks for after
  * compaction anyway.
  */
-function syncOpenAIEffortControlState(state: OpenAIEffortControlState<string>, input: readonly AnchorableItem[]): void {
+function syncOpenAIEffortControlState(
+	state: OpenAIRequestControlState<string, unknown>,
+	input: readonly AnchorableItem[],
+): void {
 	for (const transition of state.transitions) {
 		if (transition.index > input.length || transition.anchor !== effortControlAnchor(input, transition.index)) {
 			resetOpenAIEffortControlState(state);
@@ -159,15 +168,17 @@ function syncOpenAIEffortControlState(state: OpenAIEffortControlState<string>, i
  * effort to send at the request level (the baseline).
  */
 export function planStableOpenAIEffort<TItem extends AnchorableItem, TEffort extends string>(
-	state: OpenAIEffortControlState<TEffort>,
+	state: OpenAIRequestControlState<TEffort, unknown>,
 	input: Array<TItem | ConfigurationUpdateItem>,
 	requested: TEffort,
 	minimized?: TEffort,
+	toolInsertions: readonly OpenAIInputInsertion<NoInfer<TItem>>[] = [],
 ): TEffort {
 	syncOpenAIEffortControlState(state, input);
 	if (state.baseEffort === undefined) {
 		state.baseEffort = requested;
 		state.currentEffort = requested;
+		insertOpenAIInputUpdates(input, toolInsertions);
 		return requested;
 	}
 	const effort = minimized ?? requested;
@@ -195,15 +206,12 @@ export function planStableOpenAIEffort<TItem extends AnchorableItem, TEffort ext
 		}
 		state.currentEffort = effort;
 	}
-	// Splice in ascending order so each insertion offsets only the ones after it.
-	state.transitions.sort((a, b) => a.index - b.index);
-	let offset = 0;
-	for (const transition of state.transitions) {
-		input.splice(transition.index + offset, 0, {
-			type: "configuration_update",
-			reasoning: { effort: transition.effort },
-		});
-		offset++;
-	}
+	insertOpenAIInputUpdates(input, [
+		...state.transitions.map(({ index, effort }) => ({
+			index,
+			item: { type: "configuration_update" as const, reasoning: { effort } },
+		})),
+		...toolInsertions,
+	]);
 	return state.baseEffort;
 }
