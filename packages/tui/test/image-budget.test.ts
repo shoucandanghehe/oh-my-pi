@@ -1991,14 +1991,16 @@ describe("TUI inline-image budget", () => {
 				tui.resetDisplay();
 				await scheduler.settle(term);
 
-				// ED2/ED3 erase text but leave graphics untouched. d=A also removes
-				// untracked placements; current images must be re-sent and re-placed.
-				// The erases can move scrollback placements on screen before d=A clears them.
+				// Clear untracked placements and replay the current images on both backends.
 				const repaint = writes.join("");
 				const deleteIndex = repaint.indexOf("\x1b_Ga=d,d=A,q=2\x1b\\");
-				const eraseIndex = repaint.indexOf("\x1b[2J\x1b[3J");
-				expect(eraseIndex).toBeGreaterThanOrEqual(0);
-				expect(deleteIndex).toBeGreaterThan(eraseIndex);
+				expect(deleteIndex).toBeGreaterThanOrEqual(0);
+				if (backend === "native") {
+					// Erasing native scrollback can move placements on screen before d=A clears them.
+					const eraseIndex = repaint.indexOf("\x1b[2J\x1b[3J");
+					expect(eraseIndex).toBeGreaterThanOrEqual(0);
+					expect(deleteIndex).toBeGreaterThan(eraseIndex);
+				}
 				const transmitIndex = repaint.indexOf("\x1b_Ga=t", deleteIndex);
 				const placeIndex = repaint.indexOf("\x1b_Ga=p", transmitIndex);
 				expect(transmitIndex).toBeGreaterThan(deleteIndex);
