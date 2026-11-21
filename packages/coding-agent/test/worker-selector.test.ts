@@ -25,6 +25,13 @@ describe("worker selector dispatch", () => {
 		expect(process.exitCode).toBe(1);
 		expect(stderr).toHaveBeenCalledWith("Error: unknown worker selector: __omp_worker_does_not_exist\n");
 	});
+
+	it("dispatches the Windows console selector to its thread entrypoint", async () => {
+		await expect(runCli(["__omp_worker_windows_console_input"])).rejects.toThrow(
+			"Windows console input requires a worker thread",
+		);
+	});
+
 	it("declares workerHostEntry in process entry before dispatching worker selector", async () => {
 		const repoRoot = path.resolve(__dirname, "../../..");
 		const proc = Bun.spawn({

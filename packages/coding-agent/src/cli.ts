@@ -16,6 +16,10 @@ try {
  */
 import type * as WorkerThreads from "node:worker_threads";
 import type { MessagePort } from "node:worker_threads";
+import {
+	runWindowsConsoleInputWorker,
+	WINDOWS_CONSOLE_INPUT_WORKER_ARG,
+} from "@oh-my-pi/pi-tui/driver/process/windows-console-input";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import type * as Postmortem from "@oh-my-pi/pi-utils/postmortem";
 import {
@@ -243,6 +247,10 @@ const TTS_WORKER_ARG = "__omp_worker_tts";
 
 async function runWorkerEntrypoint(args: readonly string[]): Promise<boolean> {
 	const [arg, endpoint] = args;
+	if (arg === WINDOWS_CONSOLE_INPUT_WORKER_ARG) {
+		runWindowsConsoleInputWorker();
+		return true;
+	}
 	if (arg === NATIVE_PANE_WORKER_ARG) {
 		if (!endpoint) throw new Error("Native workspace pane endpoint is required");
 		const { runNativePaneRelay }: typeof NativePaneRelay = require("./modes/native-workspace/relay");

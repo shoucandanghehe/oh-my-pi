@@ -11,6 +11,7 @@
  */
 import { enableConsoleVtInput, restoreConsoleInputMode } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import { isDarkBackground } from "../caps/color";
 import { detectTerminal } from "../caps/detect";
 import { rawBackspaceIsCtrl, synchronizedOutputOverride } from "../caps/env";
@@ -45,6 +46,7 @@ import {
 	tmuxSessionSpeaksTsp,
 	wrapPassthrough,
 } from "../mux/tmux";
+import { startWindowsConsoleInput } from "./windows-console-input";
 
 /** The stdin surface the input half needs (process.stdin satisfies it). */
 export interface TtyInput {
@@ -64,6 +66,7 @@ export interface TtyInput {
 export interface TtyOutput {
 	readonly columns?: number;
 	readonly rows?: number;
+	_refreshSize?(): void;
 	on(event: "resize", listener: () => void): unknown;
 	off(event: "resize", listener: () => void): unknown;
 }
@@ -104,6 +107,7 @@ export interface ProcessInputOptions {
 export interface ConsoleMode {
 	enable(): number | null;
 	restore(mode: number): void;
+	startReader?: typeof startWindowsConsoleInput;
 }
 
 const nativeConsoleMode: ConsoleMode = {
@@ -238,6 +242,7 @@ export class ProcessTerminalInput implements TerminalInput {
 	#tmuxApcTitlesOff = false;
 	/** Console input mode to put back (native Windows console). */
 	#savedConsoleMode: number | null = null;
+	#stopConsoleReader: (() => void) | undefined;
 	#progress = false;
 	#cancelProgress: (() => void) | null = null;
 	/** The cursor shape last written; undefined until one is set (and after a stop restored the user's). */
@@ -290,7 +295,11 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#nativeConsole = options.nativeWindowsConsole ?? (this.#platform === "win32" && !isSsh(env));
 		this.#multiplexer = detected.identity.multiplexer;
 		this.#tmux = options.tmux ?? spawnTmux;
-		this.#consoleMode = options.consoleMode ?? nativeConsoleMode;
+		this.#consoleMode =
+			options.consoleMode ??
+			(this.#platform === "win32" && !options.stdin && !isBunTestRuntime()
+				? { ...nativeConsoleMode, startReader: startWindowsConsoleInput }
+				: nativeConsoleMode);
 		this.#backgroundTrusted = !(this.#platform === "darwin" && hasMultiplexerSession("zellij", env));
 		this.#schemeOwner = multiplexerOwnsColorScheme(env);
 		// A grid-owning multiplexer inside the Herdr terminal (one known only by TERM
@@ -362,17 +371,29 @@ export class ProcessTerminalInput implements TerminalInput {
 	async start(): Promise<void> {
 		if (this.#started) return;
 		this.#started = true;
-		this.#enterRawMode();
-		this.#stdin.on("data", this.#onData);
-		this.#stdin.on("end", this.#onEnd);
-		this.#stdin.on("close", this.#onClose);
-		this.#stdin.on("error", this.#onError);
-		this.#stdin.resume();
+		const raw = this.#enterRawMode();
 		this.#stdout.on("resize", this.#onOsResize);
 		if (this.#platform !== "win32") this.#events.on("SIGWINCH", this.#onOsResize);
 		this.#events.on("exit", this.#onExit);
 		this.#size = this.#osSize();
-		if (this.#nativeConsole) this.#savedConsoleMode = this.#consoleMode.enable();
+		if (raw && this.#nativeConsole) this.#savedConsoleMode = this.#consoleMode.enable();
+		if (this.#savedConsoleMode !== null && this.#consoleMode.startReader) {
+			try {
+				this.#stopConsoleReader = this.#consoleMode.startReader(this.#onData, this.#onConsoleResize, error => {
+					logger.debug("Windows console reader failed", { error: String(error) });
+					this.#onError();
+				});
+			} catch (error) {
+				logger.debug("Windows console reader unavailable; using stdin stream", { error: String(error) });
+			}
+		}
+		if (!this.#stopConsoleReader) {
+			this.#stdin.on("data", this.#onData);
+			this.#stdin.on("end", this.#onEnd);
+			this.#stdin.on("close", this.#onClose);
+			this.#stdin.on("error", this.#onError);
+			this.#stdin.resume();
+		}
 		// tmux forwards paste markers only while the pane's own 2004 flag is set, and may not answer DECRQM 2004.
 		this.#rearmPaste = this.#multiplexer === "tmux";
 		this.#startup = true;
@@ -481,26 +502,35 @@ export class ProcessTerminalInput implements TerminalInput {
 		} finally {
 			this.#drain?.finish();
 			this.#drain = undefined;
-			this.#decoder.clear();
-			this.#stdin.off("data", this.#onData);
-			this.#stdin.off("end", this.#onEnd);
-			this.#stdin.off("close", this.#onClose);
-			this.#stdin.off("error", this.#onError);
-			this.#stdin.pause();
-			this.#stdout.off("resize", this.#onOsResize);
-			if (this.#platform !== "win32") this.#events.off("SIGWINCH", this.#onOsResize);
-			this.#events.off("exit", this.#onExit);
 			try {
-				if (this.#tmuxApcTitlesOff) {
-					setTmuxPaneApcTitles(true, this.#env, this.#tmux);
-					this.#tmuxApcTitlesOff = false;
-				}
-				if (this.#savedConsoleMode !== null) {
-					this.#consoleMode.restore(this.#savedConsoleMode);
-					this.#savedConsoleMode = null;
+				if (this.#stopConsoleReader) {
+					const stop = this.#stopConsoleReader;
+					this.#stopConsoleReader = undefined;
+					stop();
+				} else {
+					this.#stdin.off("data", this.#onData);
+					this.#stdin.off("end", this.#onEnd);
+					this.#stdin.off("close", this.#onClose);
+					this.#stdin.off("error", this.#onError);
+					this.#stdin.pause();
 				}
 			} finally {
-				this.#leaveRawMode();
+				this.#decoder.clear();
+				this.#stdout.off("resize", this.#onOsResize);
+				if (this.#platform !== "win32") this.#events.off("SIGWINCH", this.#onOsResize);
+				this.#events.off("exit", this.#onExit);
+				try {
+					if (this.#tmuxApcTitlesOff) {
+						setTmuxPaneApcTitles(true, this.#env, this.#tmux);
+						this.#tmuxApcTitlesOff = false;
+					}
+					if (this.#savedConsoleMode !== null) {
+						this.#consoleMode.restore(this.#savedConsoleMode);
+						this.#savedConsoleMode = null;
+					}
+				} finally {
+					this.#leaveRawMode();
+				}
 			}
 		}
 
@@ -625,14 +655,16 @@ export class ProcessTerminalInput implements TerminalInput {
 
 	// ── Lifecycle internals ───────────────────────────────────────────────
 
-	#enterRawMode(): void {
+	#enterRawMode(): boolean {
 		const stdin = this.#stdin;
-		if (!stdin.isTTY || !stdin.setRawMode) return;
+		if (!stdin.isTTY || !stdin.setRawMode) return false;
 		this.#wasRaw = stdin.isRaw ?? false;
 		try {
 			stdin.setRawMode(true);
+			return true;
 		} catch (error) {
 			logger.warn("failed to enable raw mode", { error: String(error) });
+			return false;
 		}
 	}
 
@@ -703,6 +735,12 @@ export class ProcessTerminalInput implements TerminalInput {
 
 	readonly #onOsResize = (): void => {
 		this.#resize(this.#osSize());
+	};
+
+	readonly #onConsoleResize = (): void => {
+		// Bun caches the viewport dimensions. Refresh before using the same resize path as stdin.
+		this.#stdout._refreshSize?.();
+		this.#onOsResize();
 	};
 
 	/** The pty size, keeping the current dimension where stdout reports none. */

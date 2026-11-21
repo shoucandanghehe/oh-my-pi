@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { InputEvent, TerminalCapabilities } from "../../src/driver/contract";
 import { type ProcessInputOptions, ProcessTerminalInput } from "../../src/driver/process";
+import { ConsoleInputBatch } from "../../src/driver/process/windows-console-input";
 import { FakeClock } from "./fake-clock";
 
 type Listener = (...args: never[]) => void;
@@ -155,6 +156,107 @@ describe("ProcessTerminalInput lifecycle", () => {
 		h.events.emit("exit");
 		expect(h.out()).toContain("\x1b[?2004l");
 		expect(h.stdin.isRaw).toBe(false);
+	});
+
+	it("owns the console queue exclusively and restores it after split paste, keys, TSP and resize", async () => {
+		const lifecycle: string[] = [];
+		let deliver!: (message: string | null) => void;
+		const h = setup({
+			platform: "win32",
+			conpty: true,
+			env: { TERM_PROGRAM: "tern" },
+			hello: '\x1b_tsp;q;{"q":"hello","v":[1],"app":"omp"}\x1b\\',
+			consoleMode: {
+				enable() {
+					expect(h.stdin.isRaw).toBe(true);
+					lifecycle.push("VT enabled");
+					return 8;
+				},
+				startReader(data, resize) {
+					deliver = message => (message === null ? resize() : data(message));
+					const batch = new ConsoleInputBatch();
+					read = records => batch.process(records, records.byteLength / 20, deliver);
+					return () => {
+						lifecycle.push("reader stopped");
+					};
+				},
+				restore(mode) {
+					expect(h.stdin.isRaw).toBe(true);
+					lifecycle.push(`restored ${mode}`);
+				},
+			},
+		});
+		let read!: (records: DataView) => void;
+		const writeRecords = (text: string, repeat = 1, trailingRecords = false): void => {
+			const records = new DataView(new ArrayBuffer((text.length + (trailingRecords ? 4 : 0)) * 20));
+			for (let i = 0; i < text.length; i++) {
+				const offset = i * 20;
+				records.setUint16(offset, 1, true);
+				records.setInt32(offset + 4, 1, true);
+				records.setUint16(offset + 8, repeat, true);
+				records.setUint16(offset + 14, text.charCodeAt(i), true);
+			}
+			if (trailingRecords) {
+				const offset = text.length * 20;
+				records.setUint16(offset, 1, true); // An ignored key-up.
+				records.setUint16(offset + 8, 1, true);
+				records.setUint16(offset + 14, 113, true);
+				records.setUint16(offset + 20, 1, true);
+				records.setInt32(offset + 24, 1, true);
+				records.setUint16(offset + 28, 1, true);
+				records.setUint16(offset + 30, 0x25, true); // VK_LEFT, no Unicode payload.
+				records.setUint16(offset + 40, 4, true);
+				records.setUint16(offset + 60, 4, true);
+			}
+			read(records);
+		};
+		const started = h.input.start();
+		expect(h.stdin.paused).toBe(true);
+		expect(h.stdin.count("data")).toBe(0);
+		const body = '{"r":"hello","v":1,"term":"tern","kinds":[]}';
+		writeRecords(`\x1b_tsp;r;${body}\x1b\\${DA1.repeat(3)}`);
+		await started;
+		expect(h.input.capabilities.tsp).toBe(true);
+		h.stdout.columns = 96;
+		h.stdout.rows = 32;
+		writeRecords("\x1b[20");
+		writeRecords("0~");
+		for (let i = 0; i < 250; i++) writeRecords("x", 4000);
+		writeRecords("\ud83d");
+		writeRecords("\ude42\x1b[201~", 1, true);
+		expect(h.received).toEqual([
+			{ type: "tsp", verb: "r", params: {}, body },
+			{ type: "paste", paste: { text: `${"x".repeat(1_000_000)}🙂` } },
+			expect.objectContaining({ type: "key", key: expect.objectContaining({ id: "left" }) }),
+		]);
+		expect(h.resizes).toEqual([[96, 32]]);
+
+		h.events.emit("exit");
+		expect(lifecycle).toEqual(["VT enabled", "reader stopped", "restored 8"]);
+		expect(h.stdin.isRaw).toBe(false);
+		const restarted = h.input.start();
+		writeRecords(`${DA1.repeat(3)}z`);
+		await restarted;
+		expect(h.received.at(-1)).toMatchObject({ type: "key", key: { id: "z" } });
+		h.input.stop();
+	});
+
+	it("does not acquire the Windows console if raw mode could not be set", async () => {
+		const h = setup({
+			platform: "win32",
+			consoleMode: {
+				enable: () => {
+					throw new Error("must not switch the console mode");
+				},
+				restore: () => {},
+			},
+		});
+		h.stdin.rawError = Object.assign(new Error("raw mode unavailable"), { code: "EIO" });
+		await Promise.all([h.input.start(), h.settle()]);
+		expect(h.stdin.paused).toBe(false);
+		h.feed("a");
+		expect(h.received.at(-1)).toMatchObject({ type: "key", key: { id: "a" } });
+		h.input.stop();
 	});
 });
 
