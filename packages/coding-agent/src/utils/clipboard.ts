@@ -223,6 +223,18 @@ if ($null -ne $data) {
 			$ms.Dispose()
 			$img.Dispose()
 		}
+	} else {
+		# Some applications register PNG without publishing a Windows bitmap.
+		$png = $data.GetData('PNG', $false)
+		if ($png -is [System.IO.MemoryStream]) {
+			try {
+				$image = [Convert]::ToBase64String($png.ToArray())
+			} finally {
+				$png.Dispose()
+			}
+		} elseif ($png -is [byte[]]) {
+			$image = [Convert]::ToBase64String($png)
+		}
 	}
 	$text = [string]$data.GetData([System.Windows.Forms.DataFormats]::UnicodeText, $true)
 }

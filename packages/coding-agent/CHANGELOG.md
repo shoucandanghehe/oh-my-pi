@@ -88,6 +88,7 @@
 - Built-in Hindsight mental-model seeds now skip rules already written in AGENTS.md, skills, and other rule files.
 - Typing in a focused agent conversation now prewarms that agent's model connection instead of Main's.
 - Fixed consecutive clipboard image pastes being dropped while an earlier paste was still loading.
+- Fixed WSL clipboard paste dropping images provided only as PNG by Windows applications.
 - Fixed typing and input-method commits appearing before clipboard text pasted just ahead of them.
 - The todo tool description now warns that phase-wide `done`/`drop` overwrite already-dropped, blocked, or completed tasks, and that progress `done` counts include dropped tasks.
 - The workflowz notice no longer advertises a per-call `model` option for either `agent()` or `workpool()`; both helpers select through agent names.
