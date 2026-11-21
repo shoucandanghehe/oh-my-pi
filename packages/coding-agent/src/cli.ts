@@ -16,6 +16,7 @@ try {
  */
 import type * as WorkerThreads from "node:worker_threads";
 import type { MessagePort } from "node:worker_threads";
+import { runWindowsConsoleInputWorker, WINDOWS_CONSOLE_INPUT_WORKER_ARG } from "@oh-my-pi/pi-tui/windows-console-input";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import type * as Postmortem from "@oh-my-pi/pi-utils/postmortem";
 import {
@@ -212,6 +213,10 @@ async function runWorkerEntrypoint(arg: string | undefined, endpoint?: string): 
 		if (!endpoint) throw new Error("Native pane relay requires its Main endpoint");
 		const relay: typeof NativePaneRelay = require("./modes/native-workspace/relay");
 		await relay.runNativePaneRelay(endpoint);
+		return true;
+	}
+	if (arg === WINDOWS_CONSOLE_INPUT_WORKER_ARG) {
+		runWindowsConsoleInputWorker();
 		return true;
 	}
 	if (arg === TINY_WORKER_ARG) {

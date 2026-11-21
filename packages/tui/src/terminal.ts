@@ -35,6 +35,7 @@ import { classifyTerminalMultiplexerModule, terminalMultiplexerSessions } from "
 import { setTmuxPaneApcTitles, tmuxSessionSpeaksTsp } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
+import { startWindowsConsoleInput } from "./windows-console-input";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
 
 export { writeTerminalSequence, writeThroughActiveTerminal } from "./active-terminal";
@@ -813,6 +814,7 @@ export class ProcessTerminal implements Terminal {
 	/** Parsed input path shared by direct VT and win32-input-mode relayed text. */
 	#stdinSequenceHandler?: (sequence: string) => void;
 	#stdinDataHandler?: (data: string) => void;
+	#lastDrainedInputAt?: number;
 	#disconnectHandler?: () => void;
 	#stdinEndHandler = () => {
 		this.#markTerminalDisconnected("stdin ended");
@@ -875,6 +877,7 @@ export class ProcessTerminal implements Terminal {
 	#outputDrainListeners = new Set<() => void>();
 
 	#windowsVTInputRestore?: () => void;
+	#stopWindowsInput?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
 	#appearanceCallbacks: Array<
 		(appearance: TerminalAppearance, requestToken?: TerminalAppearanceRequestToken) => void
@@ -1217,11 +1220,6 @@ export class ProcessTerminal implements Terminal {
 			}
 			this.#cookedTypeahead = !this.#wasRaw;
 		}
-		process.stdin.setEncoding("utf8");
-		process.stdin.on("end", this.#stdinEndHandler);
-		process.stdin.on("close", this.#stdinCloseHandler);
-		process.stdin.on("error", this.#stdinErrorHandler);
-		process.stdin.resume();
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		this.#safeWrite("\x1b[?2004h");
@@ -1245,6 +1243,31 @@ export class ProcessTerminal implements Terminal {
 		this.#enableWindowsVTInput();
 		// Every response-eliciting probe goes out inside the leak guard.
 		this.#safeWrite(PROBE_GUARD_BEGIN);
+		this.#setupStdinBuffer();
+		if (this.#windowsVTInputRestore && process.stdin.isTTY && !isBunTestRuntime()) {
+			try {
+				this.#stopWindowsInput = startWindowsConsoleInput(
+					this.#stdinDataHandler!,
+					() => {
+						// The console reader owns resize records now. Let Bun update
+						// the cached dimensions before emitting the usual resize event.
+						const stdout = process.stdout;
+						if ("_refreshSize" in stdout && typeof stdout._refreshSize === "function") stdout._refreshSize();
+					},
+					this.#stdinErrorHandler,
+				);
+			} catch (err) {
+				logger.debug("Windows console reader unavailable; using stdin stream", { err: String(err) });
+			}
+		}
+		if (!this.#stopWindowsInput) {
+			process.stdin.setEncoding("utf8");
+			process.stdin.on("end", this.#stdinEndHandler);
+			process.stdin.on("close", this.#stdinCloseHandler);
+			process.stdin.on("error", this.#stdinErrorHandler);
+			process.stdin.on("data", this.#stdinDataHandler!);
+			process.stdin.resume();
+		}
 		// Query and enable Kitty keyboard protocol
 		// The query handler intercepts input temporarily, then installs the user's handler
 		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
@@ -1917,6 +1940,7 @@ export class ProcessTerminal implements Terminal {
 
 		// Handler that pipes stdin data through the buffer
 		this.#stdinDataHandler = (data: string) => {
+			if (this.#lastDrainedInputAt !== undefined) this.#lastDrainedInputAt = Date.now();
 			if (this.#cookedTypeahead && data) {
 				this.#cookedTypeahead = false;
 				data = restoreCookedEnter(data);
@@ -2326,8 +2350,6 @@ export class ProcessTerminal implements Terminal {
 	 * handles the case where the response arrives split across multiple stdin events.
 	 */
 	#queryAndEnableKittyProtocol(): void {
-		this.#setupStdinBuffer();
-		process.stdin.on("data", this.#stdinDataHandler!);
 		// Progressive enhancement query: CSI ?u asks the terminal for its current
 		// kitty keyboard flags (no side effect on the stack); the DA1 sentinel
 		// guarantees a reply even from terminals that ignore CSI ?u.
@@ -2516,12 +2538,7 @@ export class ProcessTerminal implements Terminal {
 		const previousHandler = this.#inputHandler;
 		this.#inputHandler = undefined;
 
-		let lastDataTime = Date.now();
-		const onData = () => {
-			lastDataTime = Date.now();
-		};
-
-		process.stdin.on("data", onData);
+		this.#lastDrainedInputAt = Date.now();
 		const endTime = Date.now() + maxMs;
 
 		// For an active or pending optimistic TSP session, the terminal may emit
@@ -2549,11 +2566,11 @@ export class ProcessTerminal implements Terminal {
 				const now = Date.now();
 				const timeLeft = endTime - now;
 				if (timeLeft <= 0) break;
-				if (sentinelAnswered && now - lastDataTime >= idleMs) break;
+				if (sentinelAnswered && now - this.#lastDrainedInputAt >= idleMs) break;
 				await new Promise(resolve => setTimeout(resolve, Math.min(idleMs, timeLeft)));
 			}
 		} finally {
-			process.stdin.removeListener("data", onData);
+			this.#lastDrainedInputAt = undefined;
 			this.#inputHandler = previousHandler;
 			// A report head captured while no handler could claim its body is
 			// stale once the TTY is handed back.
@@ -2701,6 +2718,8 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#disableWin32InputMode();
 
+		this.#stopWindowsInput?.();
+		this.#stopWindowsInput = undefined;
 		this.#restoreWindowsVTInput();
 		// Clean up StdinBuffer
 		if (this.#stdinBuffer) {

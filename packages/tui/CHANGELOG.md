@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- Large image and text pastes are faster and keep the terminal responsive on native Windows ([#19783](https://github.com/can1357/oh-my-pi/issues/19783)).
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Slash-command argument completions now take priority over mid-prompt skill lookup.
