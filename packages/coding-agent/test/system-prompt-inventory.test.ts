@@ -515,8 +515,8 @@ describe("system prompt tool inventory", () => {
 			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
 		});
 		const text = systemPrompt.join("\n\n");
-		expect(text).toContain("MUST use `lsp` for definitions");
-		expect(text).toContain("MUST run `lsp` references first");
+		expect(text).toMatch(/`lsp` for definitions/);
+		expect(inventoryNames(text)).not.toContain("lsp");
 	});
 
 	it("renders exactly one of the map-unknown-code, explore and inline-first delegation rules per bias", async () => {
