@@ -145,6 +145,25 @@ describe("createToolCommandHandler", () => {
 		expect(await decoder.images()).toEqual([expect.objectContaining({ mimeType: "image/png", data: image.data })]);
 	});
 
+	it("returns the saved bytes of an audio or video attachment by path", async () => {
+		const bytes = Buffer.from(crypto.randomUUID(), "utf8");
+		const mediaTool = fakeTool([], {
+			async execute() {
+				return { content: [{ type: "audio", mimeType: "audio/wav", data: bytes.toString("base64") }] };
+			},
+		});
+		const handler = createToolCommandHandler({ session: commandSession([mediaTool]), toolCallId: "call" });
+		const reply = await handler(request("fake", ["--flag", "audio"]));
+		expect(reply.exitCode).toBe(0);
+		expect(reply.stdout).toStartWith("Audio saved: ");
+		const file = Bun.file(reply.stdout.trim().slice("Audio saved: ".length));
+		try {
+			expect(Buffer.from(await file.arrayBuffer())).toEqual(bytes);
+		} finally {
+			await file.delete();
+		}
+	});
+
 	it("reports each invocation once, in order, with its mode and exit code", async () => {
 		const dispatches: Array<[ToolCommandDispatch, number]> = [];
 		const handler = createToolCommandHandler({
