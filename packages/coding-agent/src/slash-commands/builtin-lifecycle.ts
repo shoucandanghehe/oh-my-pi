@@ -96,7 +96,14 @@ async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCo
 	if (background) {
 		// Background compaction doesn't hold the submission slot or its follow-ups.
 		void ctx.handleCompactCommand(parsed.instructions, parsed.mode);
-	} else if (origin && ctx.session.isStreaming) {
+	} else if (
+		origin &&
+		(ctx.session.isStreaming ||
+			ctx.session.isRunActive ||
+			ctx.session.hasAdmittedSubmission ||
+			ctx.session.queuedMessageCount > 0 ||
+			ctx.hasPendingSubmission())
+	) {
 		ctx.yieldCompaction = { ...origin, text: command.text, instructions: parsed.instructions, mode: parsed.mode };
 		ctx.updatePendingMessagesDisplay();
 		ctx.showStatus("Queued compaction for when the agent yields");

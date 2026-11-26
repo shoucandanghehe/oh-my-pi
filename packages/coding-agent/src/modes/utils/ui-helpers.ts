@@ -1137,10 +1137,10 @@ export class UiHelpers {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean },
+		options?: { preserveDraft?: boolean; imageLinks?: (string | undefined)[] },
 	): void {
 		const queuedImages = images && images.length > 0 ? images : undefined;
-		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages } as CompactionQueuedMessage);
+		this.ctx.compactionQueuedMessages.push({ text, mode, images: queuedImages, imageLinks: options?.imageLinks });
 		if (options?.preserveDraft) this.ctx.composer.addToHistory(text);
 		else {
 			this.ctx.composer.addToHistory(text);
@@ -1168,7 +1168,7 @@ export class UiHelpers {
 	): Promise<void> {
 		const builtin = await executeBuiltinSlashCommand(message.text, {
 			ctx: this.ctx,
-			input: message.images ? { images: message.images } : undefined,
+			input: message.images ? { images: message.images, imageLinks: message.imageLinks } : undefined,
 		});
 		if (builtin === true) {
 			this.#parkLoopOnLocalConsume(message.text, false);
@@ -1232,21 +1232,30 @@ export class UiHelpers {
 	}
 
 	async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		// Follow-ups queued behind a yield compaction wait for it, not for a pass that lands first.
-		if (this.ctx.yieldCompaction) return;
+		while (!this.ctx.yieldCompaction && this.ctx.compactionQueuedMessages.length > 0) {
+			if (!(await this.#flushCompactionBatch(options))) return;
+		}
+		if (!this.ctx.yieldCompaction) this.ctx.compactionQueueOrigin = undefined;
+	}
+
+	async #flushCompactionBatch(options?: { willRetry?: boolean }): Promise<boolean> {
 		const origin = this.ctx.compactionQueueOrigin;
-		this.ctx.compactionQueueOrigin = undefined;
-		if (this.ctx.compactionQueuedMessages.length === 0) return;
-		// Held behind the queued compaction that just ran: a switch or tree move while it summarized
-		// means they belong to a conversation that is no longer live, so they go back to the editor.
-		if (origin && !continuesConversation(this.ctx.sessionManager, origin)) {
+		const isCurrent = () => !origin || continuesConversation(this.ctx.sessionManager, origin);
+		if (!isCurrent()) {
+			this.ctx.compactionQueueOrigin = undefined;
 			this.ctx.restoreCompactionQueueToEditor();
-			return;
+			return false;
 		}
 
 		const queuedMessages = [...(this.ctx.compactionQueuedMessages as CompactionQueuedMessage[])];
 		this.ctx.compactionQueuedMessages = [] as CompactionQueuedMessage[];
 		this.ctx.updatePendingMessagesDisplay();
+		const checkBranch = (remaining: CompactionQueuedMessage[], from = 0): boolean => {
+			if (isCurrent()) return true;
+			this.ctx.compactionQueuedMessages.unshift(...remaining.slice(from));
+			this.ctx.restoreCompactionQueueToEditor();
+			return false;
+		};
 		// On failure the batch goes back to the compaction queue, so the messages this flush pushed
 		// onto the session queues must leave them. Only those: what other sources queue (an
 		// extension's message, input sent through other paths), before, during or after the flush,
@@ -1282,17 +1291,18 @@ export class UiHelpers {
 			firstLeftOut = firstAdmitted !== undefined && !firstFailed;
 			this.ctx.session.dropQueuedMessages(firstLeftOut ? deliveredByFlush : [...deliveredByFlush, ...firstQueued]);
 			const batch = firstLeftOut ? queuedMessages.filter(message => message !== firstPrompt) : queuedMessages;
-			this.ctx.compactionQueuedMessages = batch;
+			this.ctx.compactionQueuedMessages.unshift(...batch);
 			reportFailure(batch.length, error);
 		};
 
 		try {
 			if (options?.willRetry) {
-				for (const message of queuedMessages) {
+				for (const [index, message] of queuedMessages.entries()) {
+					if (!checkBranch(queuedMessages, index)) return false;
 					await this.#deliverQueuedMessage(message, onDelivered);
 				}
 				this.ctx.updatePendingMessagesDisplay();
-				return;
+				return !restored;
 			}
 
 			let firstPromptIndex = -1;
@@ -1303,10 +1313,11 @@ export class UiHelpers {
 				}
 			}
 			if (firstPromptIndex === -1) {
-				for (const message of queuedMessages) {
+				for (const [index, message] of queuedMessages.entries()) {
+					if (!checkBranch(queuedMessages, index)) return false;
 					await this.#deliverQueuedMessage(message, onDelivered);
 				}
-				return;
+				return !restored;
 			}
 
 			const preCommands = queuedMessages.slice(0, firstPromptIndex);
@@ -1314,18 +1325,21 @@ export class UiHelpers {
 			firstPrompt = first;
 			const rest = queuedMessages.slice(firstPromptIndex + 1);
 
-			for (const message of preCommands) {
+			for (const [index, message] of preCommands.entries()) {
+				if (!checkBranch(queuedMessages, index)) return false;
 				// preCommands are all slash commands; #deliverQueuedMessage handles
 				// that branch (no local-submission marking needed since slash
 				// commands don't generate a matching user message_start).
 				await this.#deliverQueuedMessage(message, onDelivered);
 			}
+			const admission = Promise.withResolvers<void>();
 
 			const onFirstQueued = (queued: readonly AgentMessage[]) => {
 				firstQueued = queued;
 			};
 			const onFirstAdmitted = () => {
 				firstAdmitted = firstQueued;
+				admission.resolve();
 				// Admitted after the batch was already restored with it: the session must not send
 				// it as well. Take a queued prompt back out (the batch keeps it); a prompt whose turn
 				// already started leaves the batch instead.
@@ -1375,6 +1389,7 @@ export class UiHelpers {
 			let promptPromise: Promise<unknown>;
 			if (isKnownSkillCommand(this.ctx, first.text)) {
 				const built = await buildSkillCommandPrompt(this.ctx, first.text, first.mode, first.images);
+				if (!checkBranch([first, ...rest])) return false;
 				promptPromise = built
 					? this.ctx.session
 							.promptCustomMessage(built.message, {
@@ -1387,6 +1402,7 @@ export class UiHelpers {
 							}, onFirstFailed)
 					: Promise.resolve();
 			} else {
+				if (!checkBranch([first, ...rest])) return false;
 				const disposeFirstPrompt = this.ctx.recordLocalSubmission(first.text, first.images?.length ?? 0);
 				promptPromise = this.ctx.session
 					.prompt(first.text, {
@@ -1401,22 +1417,26 @@ export class UiHelpers {
 					});
 			}
 
-			for (const message of rest) {
+			await Promise.race([admission.promise, promptPromise]);
+			if (restored) return false;
+			for (const [index, message] of rest.entries()) {
+				if (!checkBranch(rest, index)) return false;
 				await this.#deliverQueuedMessage(message, onDelivered);
 				// The first prompt failed while the rest was still being delivered: the whole batch is
 				// back in the compaction queue, so take back what was delivered since and stop.
 				if (restored) {
 					this.ctx.session.dropQueuedMessages(deliveredByFlush);
-					return;
+					return false;
 				}
 			}
 			this.ctx.updatePendingMessagesDisplay();
 			// The dispatch above bypasses `getUserInput`, so nothing would schedule
 			// the next loop iteration for a prompt queued during compaction.
 			if (this.ctx.loopModeEnabled) this.ctx.armLoopAutoSubmit();
-			void promptPromise;
+			return true;
 		} catch (error) {
 			restoreQueue(error);
+			return false;
 		}
 	}
 

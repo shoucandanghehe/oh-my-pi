@@ -308,6 +308,15 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly isAutoThinking: boolean;
 	/** Whether a compaction is in progress. */
 	readonly isCompacting: boolean;
+	/** Run lifecycle boundaries on the session's home thread, including prompt setup and suspended runs. */
+	readonly hasAdmittedSubmission: boolean;
+	readonly isSessionTransitioning: boolean;
+	readonly isRunActive: boolean;
+	readonly queuedMessageCount: number;
+	waitForIdle(): Promise<void>;
+	waitForAdmittedSubmissions(): Promise<void>;
+	waitForSessionTransition(): Promise<void>;
+	waitForRunEnd(): Promise<void>;
 	/** Speculative compaction state. */
 	readonly compactionSpeculation: "idle" | "running" | "armed";
 	/** Bumped whenever context usage changes. */

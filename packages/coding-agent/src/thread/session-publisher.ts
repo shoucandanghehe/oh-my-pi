@@ -513,6 +513,10 @@ export class SessionPublisher {
 			retryAttempt: session.retryAttempt,
 			isTtsrAbortPending: session.isTtsrAbortPending,
 			hasInterruptibleInput: session.hasInterruptibleInput,
+			hasAdmittedSubmission: session.hasAdmittedSubmission,
+			isSessionTransitioning: session.isSessionTransitioning,
+			isRunActive: session.isRunActive,
+			queuedMessageCount: session.queuedMessageCount,
 			autoResolvedThinkingLevel: session.autoResolvedThinkingLevel(),
 			configuredThinkingLevel: session.configuredThinkingLevel(),
 			availableEffortSelectors: session.getAvailableEffortSelectors(),
@@ -576,6 +580,10 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	watch: (publisher, on) => publisher.watch(on),
 	settleInFlightMessagePersistence: async publisher =>
 		settle(publisher, publisher.session.settleInFlightMessagePersistence()),
+	waitForIdle: async publisher => settle(publisher, publisher.session.waitForIdle()),
+	waitForAdmittedSubmissions: async publisher => settle(publisher, publisher.session.waitForAdmittedSubmissions()),
+	waitForSessionTransition: async publisher => settle(publisher, publisher.session.waitForSessionTransition()),
+	waitForRunEnd: async publisher => settle(publisher, publisher.session.waitForRunEnd()),
 	compact: async (publisher, instructions, options) =>
 		toWireData(await settle(publisher, publisher.session.compact(instructions, options))),
 	navigateTree: async (publisher, id, options) =>

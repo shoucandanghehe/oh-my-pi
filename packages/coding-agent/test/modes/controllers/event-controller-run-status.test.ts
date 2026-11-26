@@ -83,8 +83,8 @@ describe("EventController run status at turn end", () => {
 });
 
 describe("EventController settle with a queued compaction", () => {
-	function queuedCompactionContext() {
-		const ctx = createInteractiveModeContext();
+	function queuedCompactionContext(focused = false) {
+		const ctx = createInteractiveModeContext(focused ? { viewSession: {} } : undefined);
 		const runYieldCompaction = vi.fn();
 		const restoreCompactionQueueToEditor = vi.fn();
 		Object.assign(ctx, {
@@ -115,5 +115,14 @@ describe("EventController settle with a queued compaction", () => {
 
 		expect(runYieldCompaction).not.toHaveBeenCalled();
 		expect(restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not return Main's queued compaction when the focused worker is interrupted", async () => {
+		const { ctx, runYieldCompaction, restoreCompactionQueueToEditor } = queuedCompactionContext(true);
+		const controller = new EventController(ctx);
+		await controller.handleEvent(agentEnd([assistant("aborted", USER_INTERRUPT_LABEL)]));
+
+		expect(runYieldCompaction).not.toHaveBeenCalled();
+		expect(restoreCompactionQueueToEditor).not.toHaveBeenCalled();
 	});
 });

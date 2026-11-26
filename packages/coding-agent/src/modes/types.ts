@@ -87,6 +87,7 @@ import type { BlockedKind } from "../utils/run-status";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { TranscriptReplica } from "./interactive/transcript-replica";
 import type { EventController } from "./controllers/event-controller";
+import type { CompactionQueuedMessage, YieldCompaction } from "../session/session-command-queue";
 import type { TerminalActivityController } from "./controllers/terminal-activity-controller";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
 import type { ConversationPosition } from "./utils/conversation-position";
@@ -96,23 +97,7 @@ import type { TurnUsageSummary } from "./view-model/overlays/usage-row";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./view-model/status-line/loop";
 import type { ContextUsage } from "./view-model/status-line/types";
 
-export type CompactionQueuedMessage = {
-	text: string;
-	mode: "steer" | "followUp";
-	images?: ImageContent[];
-};
-
-/**
- * `/compact` sent with the follow-up key during a run: it runs once the run settles, while the
- * session's branch still continues from the position it was queued at. A switch or tree
- * navigation hands it back to the editor instead.
- */
-export type YieldCompaction = ConversationPosition & {
-	/** The submitted command, restored to the editor when the request is dequeued. */
-	text: string;
-	instructions?: string;
-	mode?: CompactMode;
-};
+export type { CompactionQueuedMessage, YieldCompaction } from "../session/session-command-queue";
 
 export type SubmittedUserInput = {
 	text: string;
@@ -812,7 +797,7 @@ export interface InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean },
+		options?: { preserveDraft?: boolean; imageLinks?: (string | undefined)[] },
 	): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	/** Start the compaction queued for the next yield, if any; it runs once the session is idle. */

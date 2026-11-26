@@ -204,6 +204,10 @@ function emptyViewState(): SessionViewState {
 		retryAttempt: 0,
 		isTtsrAbortPending: false,
 		hasInterruptibleInput: false,
+		hasAdmittedSubmission: false,
+		isSessionTransitioning: false,
+		isRunActive: false,
+		queuedMessageCount: 0,
 		autoResolvedThinkingLevel: undefined,
 		configuredThinkingLevel: undefined,
 		availableEffortSelectors: [],
@@ -508,6 +512,38 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	get hasInterruptibleInput(): boolean {
 		return this.#view.hasInterruptibleInput;
+	}
+
+	get hasAdmittedSubmission(): boolean {
+		return this.#view.hasAdmittedSubmission;
+	}
+
+	get isSessionTransitioning(): boolean {
+		return this.#view.isSessionTransitioning;
+	}
+
+	get isRunActive(): boolean {
+		return this.#view.isRunActive;
+	}
+
+	get queuedMessageCount(): number {
+		return this.#view.queuedMessageCount;
+	}
+
+	waitForIdle(): Promise<void> {
+		return this.#command("waitForIdle");
+	}
+
+	waitForAdmittedSubmissions(): Promise<void> {
+		return this.#command("waitForAdmittedSubmissions");
+	}
+
+	waitForSessionTransition(): Promise<void> {
+		return this.#command("waitForSessionTransition");
+	}
+
+	waitForRunEnd(): Promise<void> {
+		return this.#command("waitForRunEnd");
 	}
 
 	getSessionStats(): SessionStats {

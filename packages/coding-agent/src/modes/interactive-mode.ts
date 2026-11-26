@@ -134,6 +134,7 @@ import {
 	type WorktreeExitPlan,
 } from "../session/session-worktree";
 import type { SessionWorktree } from "../worktree/backend";
+import { sessionCommandQueue } from "../session/session-command-queue";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -847,9 +848,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	set expandThinkingBlocks(on: boolean) {
 		this.#display.expandThinkingBlocks.set(on);
 	}
-	compactionQueuedMessages: CompactionQueuedMessage[] = [];
-	yieldCompaction: YieldCompaction | undefined = undefined;
-	compactionQueueOrigin: ConversationPosition | undefined = undefined;
+	get compactionQueuedMessages(): CompactionQueuedMessage[] {
+		return sessionCommandQueue(this.session).messages;
+	}
+	set compactionQueuedMessages(messages: CompactionQueuedMessage[]) {
+		sessionCommandQueue(this.session).messages = messages;
+	}
+	get yieldCompaction(): YieldCompaction | undefined {
+		return sessionCommandQueue(this.session).request;
+	}
+	set yieldCompaction(request: YieldCompaction | undefined) {
+		sessionCommandQueue(this.session).request = request;
+	}
+	get compactionQueueOrigin(): ConversationPosition | undefined {
+		return sessionCommandQueue(this.session).origin;
+	}
+	set compactionQueueOrigin(origin: ConversationPosition | undefined) {
+		sessionCommandQueue(this.session).origin = origin;
+	}
 	pendingTools = new Map<string, PendingTool>();
 	transcriptBlocks = new WeakMap<AgentMessage, TranscriptBlock>();
 	bashRun: ExecRun | undefined = undefined;
@@ -7932,13 +7948,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean },
+		options?: { preserveDraft?: boolean; imageLinks?: (string | undefined)[] },
 	): void {
 		this.#uiHelpers.queueCompactionMessage(text, mode, images, options);
 	}
 
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		return this.#uiHelpers.flushCompactionQueue(options);
+		return sessionCommandQueue(this.session).flush(() => this.#uiHelpers.flushCompactionQueue(options));
 	}
 
 	runYieldCompaction(): void {

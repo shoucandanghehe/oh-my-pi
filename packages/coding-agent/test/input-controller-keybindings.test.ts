@@ -7,6 +7,7 @@ import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { ComposerOwner, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { sessionCommandQueue } from "@oh-my-pi/pi-coding-agent/session/session-command-queue";
 import { imageAttachmentSource } from "@oh-my-pi/pi-coding-agent/utils/image-source";
 import type { KeyEvent, UiNode } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -158,6 +159,7 @@ function createContext() {
 		showStatus: vi.fn(),
 		isGuidedGoalInterviewActive,
 		sessionManager: { getSessionId: () => "session", getLeafId: () => null },
+		hasPendingSubmission: () => false,
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -708,8 +710,6 @@ describe("InputController keybinding setup", () => {
 			ctx.compactionQueuedMessages.push({ text, mode });
 		});
 		Object.assign(ctx, {
-			compactionQueuedMessages: [],
-			yieldCompaction: undefined,
 			handleCompactCommand,
 			queueCompactionMessage,
 			runYieldCompaction: vi.fn(),
@@ -717,6 +717,21 @@ describe("InputController keybinding setup", () => {
 				getSessionId: () => "session-1",
 				getLeafId: () => "entry-7",
 				getBranch: () => [{ id: "entry-7" }],
+			},
+		});
+		const queue = sessionCommandQueue(ctx.session);
+		Object.defineProperties(ctx, {
+			compactionQueuedMessages: {
+				get: () => queue.messages,
+				set: (messages: InteractiveModeContext["compactionQueuedMessages"]) => {
+					queue.messages = messages;
+				},
+			},
+			yieldCompaction: {
+				get: () => queue.request,
+				set: (request: InteractiveModeContext["yieldCompaction"]) => {
+					queue.request = request;
+				},
 			},
 		});
 		return { handleCompactCommand, queueCompactionMessage };
@@ -776,6 +791,37 @@ describe("InputController keybinding setup", () => {
 			"sent before the compaction",
 		]);
 		expect(ctx.yieldCompaction).toBeUndefined();
+	});
+
+	it("holds Enter behind the compact barrier shared with another view", async () => {
+		const { ctx, editor, spies } = createContext();
+		withCompactionQueue(ctx);
+		const queue = sessionCommandQueue(ctx.session);
+		queue.request = { text: "/compact", sessionId: "session-1", leafId: "entry-7" };
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		await editor.onSubmit?.("Sent from Main");
+
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(queue.messages).toEqual([{ text: "Sent from Main", mode: "steer" }]);
+	});
+
+	it("treats /queue /compact during a suspended run as a barrier, not model input", async () => {
+		const { ctx, editor, spies } = createContext();
+		const { handleCompactCommand } = withCompactionQueue(ctx);
+		Object.assign(ctx.session, { isRunActive: true });
+		const controller = new InputController(ctx);
+		ctx.handleQueueCommand = (text, detached) => controller.handleQueueCommand(text, detached);
+		controller.setupEditorSubmitHandler();
+
+		await editor.onSubmit?.("/queue /compact soft keep decisions");
+		await editor.onSubmit?.("=> after compact");
+
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(ctx.yieldCompaction).toMatchObject({ mode: "soft", instructions: "keep decisions" });
+		expect(ctx.compactionQueuedMessages.map(message => message.text)).toEqual(["after compact"]);
 	});
 
 	it("still compacts at once for a follow-up /compact while idle", async () => {

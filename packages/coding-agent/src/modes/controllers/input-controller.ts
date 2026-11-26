@@ -49,6 +49,7 @@ import {
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
 } from "../../utils/clipboard";
+import { sessionCommandQueue } from "../../session/session-command-queue";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { htmlToPaste } from "../../utils/html-paste";
@@ -1377,6 +1378,8 @@ export class InputController {
 				return;
 			}
 
+			this.releaseStaleYieldCompaction();
+			const queue = sessionCommandQueue(this.ctx.session);
 			// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
 			// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
 			// During compaction, queue immediately so bash/python/loop-mode branches do
@@ -1387,9 +1390,9 @@ export class InputController {
 				if (this.ctx.loopModeEnabled) {
 					this.ctx.setLoopPrompt(text);
 				}
-				if (this.ctx.session.isCompacting) {
+				if (this.ctx.session.isCompacting || queue.holdsInput) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(text, "steer", images);
+					this.ctx.queueCompactionMessage(text, "steer", images, { imageLinks: inputImageLinks });
 					return;
 				}
 				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
@@ -1444,10 +1447,10 @@ export class InputController {
 				}
 			}
 
-			// Queue input during compaction
-			if (this.ctx.session.isCompacting) {
+			// Enter and the follow-up key both wait behind a deferred compaction.
+			if (this.ctx.session.isCompacting || queue.holdsInput) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(text, "steer", images);
+				this.ctx.queueCompactionMessage(text, "steer", images, { imageLinks: inputImageLinks });
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -2120,27 +2123,15 @@ export class InputController {
 		if (options.detachedText === undefined) this.#clearDraft(options.historyText);
 
 		this.releaseStaleYieldCompaction();
-		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
-			for (let index = 0; index < messages.length; index++) {
-				this.ctx.compactionQueuedMessages.push({
-					text: messages[index] ?? "",
-					mode: "followUp",
-					images: index === 0 ? images : undefined,
-				});
-			}
-			this.ctx.updatePendingMessagesDisplay();
-			this.ctx.showStatus(
-				messages.length === 1
-					? "Queued message for after compaction"
-					: `Queued ${messages.length} messages for after compaction`,
-			);
-			return;
-		}
+		const session = this.ctx.session;
+		const queue = sessionCommandQueue(session);
+		const origin = conversationPosition(this.ctx.sessionManager);
+		const hasCompact = messages.some(message => parseSlashCommand(message)?.name === "compact");
 
 		const startImmediately = !this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount === 0;
 		let queuedCount = 0;
 		try {
-			if (startImmediately) {
+			if (startImmediately && !session.isCompacting && !queue.holdsInput && !hasCompact) {
 				// The session queues the rest when it admits the first, so nothing can run ahead of it,
 				// and hands the whole list back if the first never reaches the agent.
 				const [first = "", ...rest] = messages;
@@ -2176,9 +2167,28 @@ export class InputController {
 			while (queuedCount < messages.length) {
 				const message = messages[queuedCount] ?? "";
 				const queuedImages = queuedCount === 0 ? images : undefined;
-				await this.ctx.withLocalSubmission(message, () => this.ctx.session.followUp(message, queuedImages), {
-					imageCount: queuedImages?.length ?? 0,
-				});
+				const queuedImageLinks = queuedCount === 0 ? imageLinks : undefined;
+				if (session.isCompacting || queue.holdsInput) {
+					this.ctx.compactionQueuedMessages.push({
+						text: message,
+						mode: "followUp",
+						images: queuedImages,
+						imageLinks: queuedImageLinks,
+					});
+				} else if (parseSlashCommand(message)?.name === "compact") {
+					await executeBuiltinSlashCommand(message, {
+						ctx: this.ctx,
+						input: { images: queuedImages, imageLinks: queuedImageLinks },
+						draftDetached: true,
+						followUp: origin,
+					});
+				} else {
+					await this.ctx.withLocalSubmission(
+						message,
+						() => session.followUp(message, queuedImages),
+						{ imageCount: queuedImages?.length ?? 0 },
+					);
+				}
 				queuedCount++;
 			}
 		} catch (error) {
@@ -2200,15 +2210,19 @@ export class InputController {
 		}
 
 		this.ctx.updatePendingMessagesDisplay();
-		if (queuedCount === messages.length) {
+		if (queuedCount === messages.length && !hasCompact) {
 			this.ctx.showStatus(
-				startImmediately
+				session.isCompacting || queue.holdsInput
 					? queuedCount === 1
-						? "Sent queued message"
-						: `Sent first message; queued ${queuedCount - 1} for later yields`
-					: queuedCount === 1
-						? "Queued message for when the agent yields"
-						: `Queued ${queuedCount} messages for when the agent yields`,
+						? "Queued message for after compaction"
+						: `Queued ${queuedCount} messages for after compaction`
+					: startImmediately
+						? queuedCount === 1
+							? "Sent queued message"
+							: `Sent first message; queued ${queuedCount - 1} for later yields`
+						: queuedCount === 1
+							? "Queued message for when the agent yields"
+							: `Queued ${queuedCount} messages for when the agent yields`,
 			);
 		}
 	}
@@ -2238,6 +2252,7 @@ export class InputController {
 		// locally, the session cannot see it; a queued `/compact` waits for it (`waitForSubmissionDispatches`).
 		const dispatch = Promise.withResolvers<void>();
 		this.#submissionDispatches.add(dispatch.promise);
+		sessionCommandQueue(this.ctx.session).trackSubmission(dispatch.promise);
 		const admitted = () => {
 			if (this.#submissionDispatches.delete(dispatch.promise)) dispatch.resolve();
 		};
@@ -2293,7 +2308,7 @@ export class InputController {
 		// A compaction queued for the next yield holds later follow-ups the same
 		// way, so they run after it.
 		this.releaseStaleYieldCompaction();
-		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
+		if (this.ctx.session.isCompacting || sessionCommandQueue(this.ctx.session).holdsInput) {
 			if (
 				text &&
 				!this.#matchesBuiltinSlashCommand(text) &&
@@ -2301,7 +2316,7 @@ export class InputController {
 			) {
 				return;
 			}
-			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
+			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true, imageLinks });
 			return;
 		}
 
@@ -2400,6 +2415,7 @@ export class InputController {
 		this.ctx.compactionQueuedMessages = [];
 		const yieldCompaction = this.ctx.yieldCompaction;
 		this.ctx.yieldCompaction = undefined;
+		this.ctx.compactionQueueOrigin = undefined;
 		const allQueued = [
 			...steering,
 			...compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images })),
@@ -2428,7 +2444,7 @@ export class InputController {
 		this.ctx.compactionQueuedMessages = [];
 		this.#restoreEntriesToEditor([
 			...(request ? [{ text: request.text }] : []),
-			...held.map(e => ({ text: e.text, images: e.images })),
+			...held,
 		]);
 		this.ctx.showStatus(status);
 	}
@@ -2459,6 +2475,7 @@ export class InputController {
 	async #trackSubmission(text: string, dispatch: (text: string) => Promise<void>): Promise<void> {
 		const done = Promise.withResolvers<void>();
 		this.#submissionDispatches.add(done.promise);
+		sessionCommandQueue(this.ctx.session).trackSubmission(done.promise);
 		try {
 			await dispatch(text);
 		} catch (error) {

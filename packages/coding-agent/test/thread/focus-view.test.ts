@@ -17,12 +17,14 @@ import { InputController } from "../../src/modes/controllers/input-controller";
 import { SessionFocusController } from "../../src/modes/controllers/session-focus-controller";
 import { SessionStatusLine } from "../../src/modes/interactive/status-line";
 import type { InteractiveModeContext } from "../../src/modes/types";
+import { conversationPosition } from "../../src/modes/utils/conversation-position";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import type { AgentSessionEvent } from "../../src/session/agent-session-events";
 import type { AgentViewSession } from "../../src/session/agent-session-handle";
 import { AuthStorage } from "../../src/session/auth-storage";
 import type { RestoredQueuedMessage } from "../../src/session/agent-session-types";
+import { sessionCommandQueue } from "../../src/session/session-command-queue";
 import type { SessionEntriesDelta, SessionRestorableQueue } from "../../src/thread/session-mirror";
 import { RemoteAgentSession } from "../../src/thread/remote-agent-session";
 import type { ThreadService } from "../../src/thread/services";
@@ -389,6 +391,71 @@ describe("queued messages of a focused worker-homed session", () => {
 		if (!published) throw new Error("the follow-up never reached the mirror");
 		return { probe, remote, running, applyViewPatch, onViewPatch, published };
 	}
+
+	it("shares one worker-homed compact barrier across views and sends their held input in order", async () => {
+		const probe = await startWorker();
+		const registry = await mainRegistry();
+		await probe.open("W1", registry, {});
+		await probe.open("W2", registry, {});
+		const remote = mirrorOf("W1");
+		const detach = remote.subscribe(() => {});
+		cleanups.push(detach);
+		const running = probe.prompt("W1", "[hold] pre-compaction turn");
+		await waitFor(() => textOf(remote.agent.state.streamMessage) === "Hel");
+		const queue = sessionCommandQueue(remote);
+		queue.request = { ...conversationPosition(remote.sessionManager), text: "/compact soft", mode: "soft" };
+		queue.messages.push({ text: "from first view", mode: "followUp" });
+		const compacting = Promise.withResolvers<void>();
+		const finishCompact = Promise.withResolvers<void>();
+		const restore = vi.fn();
+		const changed = () => {};
+		const execute = vi.fn(async () => {
+			compacting.resolve();
+			await finishCompact.promise;
+		});
+		const host = {
+			settleSubmissions: async () => {},
+			hasPendingSubmission: () => false,
+			isCurrent: () => true,
+			restore,
+			changed,
+			execute,
+			flush: () =>
+				queue.drain(remote, {
+					execute: async message => {
+						await remote.prompt(message.text, { streamingBehavior: message.mode });
+					},
+					restore,
+					changed,
+				}),
+		};
+		const watcher = queue.run(remote, host);
+		detach(); // The original view can go away without dropping the worker mirror or queue.
+		const otherExecute = vi.fn(async () => {});
+		const secondWatcher = sessionCommandQueue(remote).run(remote, { ...host, execute: otherExecute });
+		try {
+			expect((await probe.report("W1")).userTexts).toEqual(["[hold] pre-compaction turn"]);
+			expect(execute).not.toHaveBeenCalled();
+			await probe.release();
+			await running;
+			await Promise.race([watcher, compacting.promise]);
+			expect(queue.holdsInput).toBe(true);
+			queue.messages.push({ text: "from second view", mode: "followUp" });
+			expect((await probe.report("W1")).userTexts).toEqual(["[hold] pre-compaction turn"]);
+		} finally {
+			finishCompact.resolve();
+			await Promise.all([watcher, secondWatcher]);
+		}
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(otherExecute).not.toHaveBeenCalled();
+		expect(restore).not.toHaveBeenCalled();
+		expect((await probe.report("W1")).userTexts).toEqual([
+			"[hold] pre-compaction turn",
+			"from first view",
+			"from second view",
+		]);
+		expect((await probe.report("W2")).userTexts).toEqual([]);
+	});
 
 	it("restores a follow-up popped as the held turn ends, and the worker never delivers it", async () => {
 		const { probe, remote, running } = await followUpBehindHeldTurn("take this back");

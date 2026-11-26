@@ -818,7 +818,12 @@ describe("interactive native input ingress", () => {
 		await h.pressSubmit(FOLLOW_UP);
 
 		expect(h.ctx.compactionQueuedMessages).toEqual([
-			{ text: "/skill:review changed [Image #1]", mode: "followUp", images: [transformedImage] },
+			{
+				text: "/skill:review changed [Image #1]",
+				mode: "followUp",
+				images: [transformedImage],
+				imageLinks: [expect.stringMatching(/^blob:/)],
+			},
 		]);
 		expect(seen).toHaveLength(1);
 		expect(h.prompt).not.toHaveBeenCalled();

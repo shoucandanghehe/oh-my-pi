@@ -2503,13 +2503,14 @@ export class EventController {
 		const stoppedWaiting = this.#stoppedWaiting;
 		this.#stoppedWaiting = false;
 		const view = this.ctx.viewSession;
+		const main = view === this.ctx.session;
 		// A run is open again by the time this event reaches the serialized
 		// dispatch chain: a superseded end, or a subscriber that started the next
 		// run while this one waited. That ended run still owns its teardown, but
 		// it must not report `done`/`idle` now — that tells OSC 7501 receivers
 		// such as Rex the agent finished while it is still working (#17307).
 		const runActive = this.ctx.session.isRunActive;
-		if (view !== this.ctx.session && runActive) {
+		if (!main && runActive) {
 			// A focused worker's run ended while main's run goes on: tear down
 			// only what the viewed worker owns (its working row); main's status stays
 			// `working` until main's own `agent_end`.
@@ -2518,7 +2519,7 @@ export class EventController {
 		}
 		if (stoppedWaiting) {
 			if (!runActive) setRunStatus({ state: "idle" });
-			await this.#finishAgentEnd(event, { interrupted: true });
+			await this.#finishAgentEnd(event, { main, interrupted: true });
 			const running = this.ctx.session.getAsyncJobSnapshot()?.running.length ?? 0;
 			if (running > 0) {
 				this.ctx.showStatus(
@@ -2527,7 +2528,7 @@ export class EventController {
 			}
 		} else {
 			if (!runActive) setRunStatus(this.#settledRunStatus(event));
-			await this.#finishAgentEnd(event);
+			await this.#finishAgentEnd(event, { main });
 		}
 		reportProgramResume();
 		// This run may be extension-started while the main input loop remains
@@ -2603,7 +2604,7 @@ export class EventController {
 
 	async #finishAgentEnd(
 		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
-		options?: { interrupted?: boolean },
+		options: { main: boolean; interrupted?: boolean },
 	): Promise<void> {
 		this.#showingAsyncWait = false;
 		this.ctx.terminalActivity.release(this.#agentTerminalActivityOwner);
@@ -2638,15 +2639,15 @@ export class EventController {
 		this.ctx.syncRetryHintRow();
 		// The run yielded: a `/compact` queued behind it runs now. A run the user stopped (Esc, including
 		// the loop-mode pause) did not yield: the request goes back to the editor like other queued input.
-		if (this.ctx.yieldCompaction) {
+		if (options.main && this.ctx.yieldCompaction) {
 			const last = event.messages.findLast((message): message is AssistantMessage => message.role === "assistant");
-			const userStopped = options?.interrupted || (last?.stopReason === "aborted" && isUserInterruptAbort(last));
+			const userStopped = options.interrupted || (last?.stopReason === "aborted" && isUserInterruptAbort(last));
 			if (userStopped)
 				this.ctx.restoreCompactionQueueToEditor("Run stopped: queued compaction returned to the editor");
 			else this.ctx.runYieldCompaction();
 		}
 		// The user stopped the run themselves: no prediction or toast for it.
-		if (options?.interrupted) return;
+		if (options.interrupted) return;
 		if (this.#settledRunStatus(event).state === "done") this.composerPrediction.request();
 		this.sendErrorNotification(event);
 		this.sendCompletionNotification(event);
@@ -2698,6 +2699,7 @@ export class EventController {
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
+		const main = this.ctx.viewSession === this.ctx.session;
 		this.ctx.terminalActivity.release(this.#maintenanceTerminalActivityOwner);
 		this.ctx.clearWorking("compaction");
 		const isHandoffAction = event.action === "handoff";
@@ -2755,7 +2757,9 @@ export class EventController {
 		} else {
 			this.ctx.showWarning("Auto context-full maintenance failed; continuing without maintenance");
 		}
-		await this.ctx.flushCompactionQueue({ willRetry: event.willRetry });
+		if (main) {
+			await this.ctx.flushCompactionQueue({ willRetry: event.willRetry });
+		}
 		this.#ensureWorkingLoaderWhileStreaming();
 	}
 

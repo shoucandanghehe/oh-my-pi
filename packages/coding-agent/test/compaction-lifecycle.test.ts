@@ -3,6 +3,7 @@ import { CompactionCancelledError, type CompactionResult } from "@oh-my-pi/pi-ag
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { sessionCommandQueue } from "@oh-my-pi/pi-coding-agent/session/session-command-queue";
 
 /**
  * Contract under test: `CommandController.executeCompaction` must not leak
@@ -139,6 +140,7 @@ describe("compaction queued for the next yield", () => {
 			hasAdmittedSubmission: false,
 			queuedMessageCount: 0,
 			isRunActive: false,
+			subscribe: () => () => {},
 			waitForRunEnd: vi.fn(async () => {}),
 			waitForIdle: vi.fn(async () => onWaitForIdle(state)),
 			waitForAdmittedSubmissions: vi.fn(async () => {}),
@@ -160,6 +162,7 @@ describe("compaction queued for the next yield", () => {
 			getBranch: () => sessionManager.branch,
 			getEntries: () => [{ type: "message" }],
 		};
+		Object.assign(session, { sessionManager });
 		const ctx = {
 			session,
 			sessionManager,
@@ -173,6 +176,14 @@ describe("compaction queued for the next yield", () => {
 			waitForSubmissionDispatches: vi.fn(async () => {}),
 			hasPendingSubmission: () => false,
 		} as unknown as InteractiveModeContext;
+		const queue = sessionCommandQueue(ctx.session);
+		queue.request = ctx.yieldCompaction;
+		Object.defineProperty(ctx, "yieldCompaction", {
+			get: () => queue.request,
+			set: (request: InteractiveModeContext["yieldCompaction"]) => {
+				queue.request = request;
+			},
+		});
 		const controller = new CommandController(ctx);
 		const handleCompactCommand = vi.spyOn(controller, "handleCompactCommand");
 		return { state, ctx, sessionManager, controller, handleCompactCommand, flushCompactionQueue, compactingAtFlush };
@@ -293,5 +304,21 @@ describe("compaction queued for the next yield", () => {
 		skillDispatch.resolve();
 		await running;
 		expect(handleCompactCommand).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps a withdrawn request's held input bound to its original branch", async () => {
+		const { ctx, controller, sessionManager, handleCompactCommand, flushCompactionQueue } = buildYieldCtx();
+		const runEnded = Promise.withResolvers<void>();
+		ctx.session.waitForRunEnd = () => runEnded.promise;
+		sessionCommandQueue(ctx.session).messages.push({ text: "For the old branch", mode: "followUp" });
+		const watching = controller.runYieldCompaction();
+		ctx.yieldCompaction = undefined;
+		sessionManager.branch = [{ id: "other-branch" }];
+		runEnded.resolve();
+		await watching;
+
+		expect(ctx.restoreCompactionQueueToEditor).toHaveBeenCalledTimes(1);
+		expect(handleCompactCommand).not.toHaveBeenCalled();
+		expect(flushCompactionQueue).not.toHaveBeenCalled();
 	});
 });

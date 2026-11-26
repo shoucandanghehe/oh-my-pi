@@ -177,6 +177,10 @@ export interface SessionViewState {
 	retryAttempt: number;
 	isTtsrAbortPending: boolean;
 	hasInterruptibleInput: boolean;
+	hasAdmittedSubmission: boolean;
+	isSessionTransitioning: boolean;
+	isRunActive: boolean;
+	queuedMessageCount: number;
 	autoResolvedThinkingLevel: Effort | undefined;
 	configuredThinkingLevel: ConfiguredThinkingLevel | undefined;
 	availableEffortSelectors: ConfiguredThinkingLevel[];
@@ -245,6 +249,10 @@ export type SessionHostProtocol = {
 	/** Start (true) or stop (false) forwarding the full event stream and the view state. */
 	watch: RpcMethod<[on: boolean], void>;
 	settleInFlightMessagePersistence: RpcMethod<[], void>;
+	waitForIdle: RpcMethod<[], void>;
+	waitForAdmittedSubmissions: RpcMethod<[], void>;
+	waitForSessionTransition: RpcMethod<[], void>;
+	waitForRunEnd: RpcMethod<[], void>;
 	compact: RpcMethod<[instructions?: string, options?: CompactOptions], CompactionResult>;
 	navigateTree: RpcMethod<
 		[targetId: string, options?: { summarize?: boolean; requireIdle?: boolean }],
