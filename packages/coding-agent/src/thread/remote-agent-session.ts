@@ -546,6 +546,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("waitForRunEnd");
 	}
 
+	prewarmModelConnection(): void {
+		void this.#command("prewarmModelConnection").catch(() => {});
+	}
+
 	getSessionStats(): SessionStats {
 		return this.#state.sessionStats;
 	}

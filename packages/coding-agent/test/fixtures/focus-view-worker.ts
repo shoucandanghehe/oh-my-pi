@@ -37,6 +37,7 @@ export interface FocusSessionReport {
 	customEntries: Array<{ customType: string; data: unknown }>;
 	userTexts: string[];
 	todoPhases: TodoPhase[];
+	prewarmCount: number;
 }
 
 /** Operations the test drives on the worker. */
@@ -61,6 +62,7 @@ const port = parentPort;
 if (!port) throw new Error("fixture must run in a worker");
 
 const sessions = new Map<string, AgentSession>();
+const prewarmCounts = new Map<string, number>();
 let gate = Promise.withResolvers<void>();
 
 function zeroUsage(): AssistantMessage["usage"] {
@@ -146,6 +148,10 @@ const probe: FocusProbe = {
 			extensionRunner: new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), sessionManager, registry),
 			agentId: id,
 		});
+		// Do not connect to a real provider when the mirror routes a prewarm here.
+		session.prewarmModelConnection = () => {
+			prewarmCounts.set(id, (prewarmCounts.get(id) ?? 0) + 1);
+		};
 		sessions.set(id, session);
 		AgentRegistry.global().register({ id, displayName: id, kind: "sub", session, sessionFile: null, status: "idle" });
 		AgentRegistry.global().syncSessionStatus(id, session);
@@ -169,6 +175,7 @@ const probe: FocusProbe = {
 				.flatMap(entry => (entry.type === "custom" ? [{ customType: entry.customType, data: entry.data }] : [])),
 			userTexts: session.messages.flatMap(message => (message.role === "user" ? [textOf(message.content)] : [])),
 			todoPhases: session.getTodoPhases(),
+			prewarmCount: prewarmCounts.get(id) ?? 0,
 		};
 	},
 	dropFollowUps: async id => {

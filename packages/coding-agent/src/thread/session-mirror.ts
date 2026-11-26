@@ -253,6 +253,7 @@ export type SessionHostProtocol = {
 	waitForAdmittedSubmissions: RpcMethod<[], void>;
 	waitForSessionTransition: RpcMethod<[], void>;
 	waitForRunEnd: RpcMethod<[], void>;
+	prewarmModelConnection: RpcMethod<[], void>;
 	compact: RpcMethod<[instructions?: string, options?: CompactOptions], CompactionResult>;
 	navigateTree: RpcMethod<
 		[targetId: string, options?: { summarize?: boolean; requireIdle?: boolean }],

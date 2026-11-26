@@ -306,6 +306,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly skills: readonly Skill[];
 	/** Whether the effective thinking level is resolved automatically. */
 	readonly isAutoThinking: boolean;
+	/** Best-effort model connection warm-up on the session's home thread. */
+	prewarmModelConnection(): void;
 	/** Whether a compaction is in progress. */
 	readonly isCompacting: boolean;
 	/** Run lifecycle boundaries on the session's home thread, including prompt setup and suspended runs. */

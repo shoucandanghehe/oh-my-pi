@@ -584,6 +584,7 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	waitForAdmittedSubmissions: async publisher => settle(publisher, publisher.session.waitForAdmittedSubmissions()),
 	waitForSessionTransition: async publisher => settle(publisher, publisher.session.waitForSessionTransition()),
 	waitForRunEnd: async publisher => settle(publisher, publisher.session.waitForRunEnd()),
+	prewarmModelConnection: publisher => publisher.session.prewarmModelConnection(),
 	compact: async (publisher, instructions, options) =>
 		toWireData(await settle(publisher, publisher.session.compact(instructions, options))),
 	navigateTree: async (publisher, id, options) =>

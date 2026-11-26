@@ -226,6 +226,18 @@ function composerFor(view: AgentViewSession, focusedAgentId: string) {
 }
 
 describe("focused view of a worker-homed agent session", () => {
+	it("prewarms only the session homed on the targeted worker", async () => {
+		const probe = await startWorker();
+		const registry = await mainRegistry();
+		await probe.open("W1", registry, {});
+		await probe.open("W2", registry, {});
+
+		mirrorOf("W1").prewarmModelConnection();
+
+		expect((await probe.report("W1")).prewarmCount).toBe(1);
+		expect((await probe.report("W2")).prewarmCount).toBe(0);
+	});
+
 	it("attaches, rebuilds the transcript, streams deltas in order, and steers from the composer", async () => {
 		const probe = await startWorker();
 		await probe.open("W1", await mainRegistry(), {});

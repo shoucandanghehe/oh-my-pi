@@ -140,6 +140,7 @@ function createContext(): {
 			isRetrying: false,
 			abortCompaction,
 			abortRetry: vi.fn(),
+			prewarmModelConnection: vi.fn(),
 		} as unknown as InteractiveModeContext["viewSession"],
 		eventController: {
 			isAwaitingAsyncWork,
