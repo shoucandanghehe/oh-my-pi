@@ -45,6 +45,7 @@ export function createCodexProviderSessionState(): CodexProviderSessionState {
 		webSocketPublicToPrivate: new Map(),
 		metadataSessions: new Map(),
 		effortControls: new Map(),
+		reportedReasoningRemovalIds: new Set(),
 		releaseSession: sessionId => {
 			const normalizedSessionId = normalizeOpenAIPromptCacheKey(sessionId);
 			if (!normalizedSessionId) return;
@@ -67,6 +68,7 @@ export function createCodexProviderSessionState(): CodexProviderSessionState {
 			state.webSocketPublicToPrivate.clear();
 			state.metadataSessions.clear();
 			state.effortControls.clear();
+			state.reportedReasoningRemovalIds.clear();
 		},
 	};
 	return state;

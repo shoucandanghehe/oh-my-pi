@@ -115,6 +115,7 @@ import {
 	isOpenAIResponsesRefusedEncryptedReasoningError,
 	isOpenAIResponsesStalePreviousResponseError,
 	isStrictToolsDisabledForScope,
+	logOpenAIResponsesReasoningRemovals,
 	markOpenAIPromptCacheBoundaries,
 	readOpenRouterRawMetadata,
 	type OpenAIPromptCacheBoundary,
@@ -456,6 +457,8 @@ export interface OpenAIResponsesProviderSessionState
 	chains: Map<string, OpenAIResponsesChainState>;
 	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
 	effortControls: Map<string, OpenAIEffortControlState<ResponsesStableEffort>>;
+	/** Reasoning item removals already reported in this provider session. */
+	reportedReasoningRemovalIds: Set<string>;
 	transports?: OpenAIResponsesTransportSessions;
 }
 
@@ -513,6 +516,7 @@ function createOpenAIResponsesProviderSessionState(
 		closeCount: 0,
 		chains: new Map(),
 		effortControls: new Map(),
+		reportedReasoningRemovalIds: new Set(),
 		releaseSession: sessionId => {
 			const normalizedSessionId = normalizeOpenAIPromptCacheKey(sessionId);
 			if (!normalizedSessionId) return;
@@ -527,6 +531,7 @@ function createOpenAIResponsesProviderSessionState(
 			state.closeCount++;
 			state.chains.clear();
 			state.effortControls.clear();
+			state.reportedReasoningRemovalIds.clear();
 			state.transports?.close();
 			state.transports = undefined;
 			clearOpenAIStrictToolsState(state);
@@ -1393,6 +1398,7 @@ const streamOpenAIResponsesOnce = (
 							const deadUpstreamModel = output.upstreamModel;
 							const deadUpstreamProvider = output.upstreamProvider;
 							const deadStopDetails = output.stopDetails;
+							const deadInputTransformations = output.inputTransformations;
 							// The replay re-emits every output item, including any reasoning
 							// item that already hit `output_item.done` before the drop; keep a
 							// copy and start empty so no id is recorded twice for chaining.
@@ -1458,6 +1464,7 @@ const streamOpenAIResponsesOnce = (
 								output.upstreamModel = deadUpstreamModel;
 								output.upstreamProvider = deadUpstreamProvider;
 								output.stopDetails = deadStopDetails;
+								output.inputTransformations = deadInputTransformations;
 								nativeOutputItems.length = 0;
 								nativeOutputItems.push(...deadNativeItems);
 								attemptStream.queue.length = deadQueueLength;
@@ -1498,6 +1505,7 @@ const streamOpenAIResponsesOnce = (
 					output.errorStatus = undefined;
 					output.errorId = undefined;
 					output.stopDetails = undefined;
+					output.inputTransformations = undefined;
 					output.providerPayload = undefined;
 					output.usage = retryOutput.usage;
 					if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;
@@ -1519,6 +1527,7 @@ const streamOpenAIResponsesOnce = (
 				}
 			}
 
+			logOpenAIResponsesReasoningRemovals(output, providerSessionState?.reportedReasoningRemovalIds);
 			const historyPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
 			// Persisted with the turn so later requests, even after a restart, omit the refused blobs.
 			if (attemptContext.dropEncryptedReasoning) historyPayload.encryptedReasoningFloor = true;

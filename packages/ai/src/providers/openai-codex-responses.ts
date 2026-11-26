@@ -140,6 +140,7 @@ import {
 	applyOpenAIServiceTier,
 	applyReasoningSummaryDone,
 	buildResponsesDeltaInput,
+	collectOpenAIResponsesInputTransformations,
 	computerCallMetadata,
 	convertResponsesAssistantMessage,
 	convertResponsesInputContent,
@@ -155,6 +156,7 @@ import {
 	finalizeToolCallArgumentsDone,
 	getOpenAIPromptCacheKey,
 	hasExecutableIncompleteResponsesToolCalls,
+	logOpenAIResponsesReasoningRemovals,
 	mapOpenAIResponsesStopReason,
 	normalizeOpenAIPromptCacheKey,
 	pickUnrecordedResponsesToolCalls,
@@ -455,6 +457,8 @@ export interface CodexProviderSessionState extends ProviderSessionState {
 	metadataSessions: Map<string, CodexMetadataSessionState>;
 	/** `configuration_update` effort baselines, keyed by model + session. */
 	effortControls: Map<string, OpenAIEffortControlState<ReasoningConfig["effort"]>>;
+	/** Reasoning item removals already reported in this provider session. */
+	reportedReasoningRemovalIds: Set<string>;
 }
 
 /** Request classification encoded in Codex turn metadata. */
@@ -2179,6 +2183,7 @@ class CodexStreamProcessor {
 					await this.#settleSteering(false);
 					throw error;
 				}
+				output.inputTransformations = undefined;
 				stream.push({ type: "start", partial: output });
 			}
 		}
@@ -2191,6 +2196,11 @@ class CodexStreamProcessor {
 
 		if (eventType === "response.created") {
 			this.#startSteering(rawEvent);
+			return firstTokenTime;
+		}
+
+		if (eventType === "response.in_progress") {
+			collectOpenAIResponsesInputTransformations(output, rawEvent.response);
 			return firstTokenTime;
 		}
 
@@ -2627,6 +2637,7 @@ class CodexStreamProcessor {
 		runtime.sawTerminalEvent = true;
 		const rawResponse = rawEvent.response;
 		const response = rawResponse && typeof rawResponse === "object" ? rawResponse : undefined;
+		collectOpenAIResponsesInputTransformations(output, response);
 		const responseId = response && "id" in response && typeof response.id === "string" ? response.id : undefined;
 		const usage = response && "usage" in response ? parseCodexResponseUsage(response.usage) : undefined;
 		const serviceTier = response && "service_tier" in response ? parseServiceTier(response.service_tier) : undefined;
@@ -3221,6 +3232,11 @@ class CodexStreamProcessor {
 		if (output.stopReason === "aborted" || output.stopReason === "error") {
 			throw new CodexProviderStreamError("Codex response failed", false);
 		}
+
+		logOpenAIResponsesReasoningRemovals(
+			output,
+			this.requestContext.providerSessionState?.reportedReasoningRemovalIds,
+		);
 
 		output.providerPayload = createOpenAIResponsesHistoryPayload(
 			this.model.provider,

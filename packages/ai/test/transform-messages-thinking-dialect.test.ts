@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { getDialectDefinition, renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
+import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { Api, AssistantMessage, Message, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -128,6 +130,69 @@ describe("transformMessages cross-provider thinking demotion → canonical diale
 		// Reasoning is still preserved inside the neutral block.
 		expect(text).toContain("<think>");
 		expect(text).toContain(REASONING);
+	});
+
+	it("leaves GPT's native reasoning to Responses and keeps foreign plaintext after a prefix edit", () => {
+		const before = { type: "reasoning" as const, id: "rs_before", encrypted_content: "before", summary: [] };
+		const after = { ...before, id: "rs_after", encrypted_content: "after" };
+		for (const target of [
+			makeModel("openai-responses", "openai", "gpt-6.2-sol"),
+			makeModel("openai-codex-responses", "openai-codex", "gpt-6.2-sol"),
+		]) {
+			const gptTurn = (item: typeof before): AssistantMessage => ({
+				...anthropicThinkingTurn(),
+				api: target.api,
+				provider: target.provider,
+				model: target.id,
+				content: [
+					{ type: "thinking", thinking: "", thinkingSignature: JSON.stringify(item) },
+					{ type: "text", text: "GPT answer." },
+				],
+			});
+			const context = {
+				messages: [
+					gptTurn(before),
+					{ ...user("Rewritten earlier input"), historyRewriteAt: 100 },
+					gptTurn(after),
+					user("What did Claude say?"),
+					anthropicThinkingTurn(),
+					user("Continue"),
+				],
+			};
+			const input =
+				target.api === "openai-codex-responses"
+					? convertCodexResponsesMessages(target, context)
+					: buildResponsesInput({
+							model: target,
+							context,
+							strictResponsesPairing: true,
+							supportsImageDetailOriginal: false,
+						});
+			expect(input.filter(item => item.type === "reasoning")).toEqual([before, after]);
+			expect(input).toContainEqual(
+				expect.objectContaining({
+					role: "assistant",
+					content: [{ type: "output_text", text: renderDemotedThinking(target.id, REASONING), annotations: [] }],
+				}),
+			);
+		}
+	});
+
+	it("still drops invalidated Claude thinking when a gateway serves Claude over Responses", () => {
+		const target = makeModel("openai-responses", "gateway", "claude-fable-5-1");
+		const input = buildResponsesInput({
+			model: target,
+			context: {
+				messages: [{ ...user("Edited"), historyRewriteAt: 100 }, anthropicThinkingTurn(), user("Continue")],
+			},
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: false,
+		});
+		expect(input.filter(item => "role" in item && item.role === "assistant")).toEqual([
+			expect.objectContaining({
+				content: [{ type: "output_text", text: "Checking the forecast.", annotations: [] }],
+			}),
+		]);
 	});
 
 	it("renders demoted foreign reasoning as bare assistant prose for every Anthropic-dialect Claude target", () => {

@@ -57,6 +57,73 @@ async function* makeStream(events: unknown[]): AsyncIterable<ResponseStreamEvent
 type EmittedEvent = { type?: string } & Record<string, unknown>;
 
 describe("processResponsesStream: terminal events", () => {
+	const removedWithoutId = { type: "reasoning", action: "removed", reason: "prefix_mismatch" };
+	const progressReport = [{ type: "reasoning", action: "removed", id: "rs_progress" }];
+
+	test("replaces a progress snapshot with the terminal report, retaining distinct id-less entries", async () => {
+		const future = { type: "other_item", id: 5, details: { retained: true } };
+		const output = makeOutput();
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.in_progress", response: { input_transformations: progressReport } },
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_1",
+						status: "completed",
+						input_transformations: [
+							removedWithoutId,
+							{ ...removedWithoutId },
+							future,
+							null,
+							[],
+							{},
+							{ type: "reasoning", reason: 5 },
+						],
+					},
+				},
+			]),
+			output,
+			new AssistantMessageEventStream(),
+			makeModel(),
+		);
+		expect(output.inputTransformations).toEqual([removedWithoutId, removedWithoutId, future]);
+	});
+
+	test.each([
+		["absent", {}, progressReport],
+		["empty", { input_transformations: [] }, []],
+	] as const)("resolves a progress report when the terminal report is %s", async (_label, fields, expected) => {
+		const output = makeOutput();
+		await processResponsesStream(
+			makeStream([
+				{ type: "response.in_progress", response: { input_transformations: progressReport } },
+				{ type: "response.completed", response: { id: "resp_1", status: "completed", ...fields } },
+			]),
+			output,
+			new AssistantMessageEventStream(),
+			makeModel(),
+		);
+		expect(output.inputTransformations).toEqual([...expected]);
+	});
+
+	test.each([
+		["absent", {}],
+		["null", { input_transformations: null }],
+		["non-array", { input_transformations: { type: "reasoning", action: "removed" } }],
+	] as const)("completes with no input transformations when the report is %s", async (_label, fields) => {
+		const output = makeOutput();
+		await processResponsesStream(
+			makeStream([{ type: "response.completed", response: { id: "resp_1", status: "completed", ...fields } }]),
+			output,
+			new AssistantMessageEventStream(),
+			makeModel(),
+		);
+		expect(output.responseId).toBe("resp_1");
+		expect(output.stopReason).toBe("stop");
+		expect(output).not.toHaveProperty("inputTransformations");
+	});
+
 	test.each(["arguments.done", "output_item.done", "terminal"])(
 		"refuses truncated final JSON via %s",
 		async finalizer => {

@@ -63,6 +63,14 @@
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.
 - Corrected Claude usage reporting to label Team premium seats as “Team 5x” rather than “Max 5x”.
 
+### Removed
+
+- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
+- Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
+- The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
+- Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
+- Preserve prefix-bound GPT-6.2 reasoning during routine pruning and report provider-dropped reasoning items on Responses and Codex ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).
+
 ## [19.2.1] - 2026-11-25
 
 ### Added

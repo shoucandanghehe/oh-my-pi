@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { usesOpenAIReasoningPrefixBinding } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
@@ -933,7 +934,10 @@ export function transformMessages<TApi extends Api>(
 
 	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages, model);
 	const invalidBoundThinkingAssistantIndexes = new Set<number>();
-	if (model.thinking?.prefixBinding) {
+	// OpenAI checks each native reasoning item against its actual wire prefix. A
+	// transcript rewrite timestamp cannot locate the affected items in a native
+	// snapshot, and foreign thinking demoted to text is not a reasoning item.
+	if (model.thinking?.prefixBinding && !usesOpenAIReasoningPrefixBinding(model)) {
 		let latestRewriteAt: number | undefined;
 		for (let index = 0; index < messages.length; index++) {
 			const message = messages[index]!;

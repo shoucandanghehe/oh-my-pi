@@ -635,6 +635,14 @@ function encodeUsage(message: AssistantMessage): Record<string, unknown> {
 	};
 }
 
+// Transformation reports describe the upstream's wire input, not a translated request.
+function getAnthropicInputTransformations(
+	message: AssistantMessage | undefined,
+): AssistantMessage["inputTransformations"] {
+	if (message?.api !== "anthropic-messages" && message?.api !== "bedrock-converse-stream") return undefined;
+	return message.inputTransformations;
+}
+
 export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
 		throw new AIError.ProviderResponseError(
@@ -645,6 +653,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 			},
 		);
 	}
+	const inputTransformations = getAnthropicInputTransformations(message);
 	return {
 		id: message.responseId ?? newMessageId(),
 		type: "message",
@@ -656,7 +665,7 @@ export function encodeResponse(message: AssistantMessage, requestedModelId: stri
 		// `AssistantMessage.stopReason` carries the matched string. Intentionally
 		// `null` for now (Anthropic schema allows it).
 		stop_sequence: null,
-		...(message.inputTransformations ? { input_transformations: message.inputTransformations } : {}),
+		...(inputTransformations ? { input_transformations: inputTransformations } : {}),
 		usage: encodeUsage(message),
 	};
 }
@@ -765,7 +774,7 @@ export function encodeStream(
 							// once pi-ai propagates it.
 							stop_sequence: null,
 							...(bindingControlsRequested
-								? { input_transformations: partial?.inputTransformations ?? [] }
+								? { input_transformations: getAnthropicInputTransformations(partial) ?? [] }
 								: {}),
 							usage: partial ? encodeUsage(partial) : ZERO_WIRE_USAGE,
 						},
@@ -972,7 +981,7 @@ export function encodeStream(
 										stop_sequence: null,
 									},
 									...(bindingControlsRequested
-										? { input_transformations: ev.message.inputTransformations ?? [] }
+										? { input_transformations: getAnthropicInputTransformations(ev.message) ?? [] }
 										: {}),
 									usage: encodeUsage(ev.message),
 								}),
