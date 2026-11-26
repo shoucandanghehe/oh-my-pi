@@ -157,8 +157,8 @@ providers:
 The catalog's `supports-websockets` KDL rule marks capability, not enablement.
 It covers OpenAI `openai-responses`, including custom providers that inherit that
 provider type. Copilot, OpenRouter and other unmarked provider/API combinations
-remain on HTTP/SSE. The independent `providers.openaiWebsockets: auto|off|on` setting
-and `PI_CODEX_WEBSOCKET` continue to govern Codex only.
+remain on HTTP/SSE. The independent `providers.openaiWebsockets: auto|off|on|only` setting
+and `PI_CODEX_WEBSOCKET` govern Codex only. `only` never falls back to SSE.
 
 Model and request `preferWebsockets` can only narrow OMP's setting: **either explicit
 `false` disables WS**, even if the other is `true`. Turning the setting off cannot
@@ -927,7 +927,7 @@ Related settings:
 - `enabledModels` (scoped pattern list)
 - `modelProviderOrder` (provider precedence when equivalent concrete choices share an id)
 - `providers.kimiApiFormat` (`auto|openai|anthropic`; `auto` follows server-declared model metadata)
-- `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
+- `providers.openaiWebsockets` (`auto|off|on|only` for OpenAI Codex; `only` never falls back to SSE)
 - `providers.openaiResponsesWebsockets` (opt-in standard Responses transport; see [Standard Responses WebSockets](#standard-responses-websockets))
 - `providers.openaiLiveSteering` (deliver mid-response user messages into GPT-6 responses over the Codex WebSocket)
 

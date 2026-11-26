@@ -531,7 +531,7 @@ export interface SessionAdvisorsHost {
 	imageDescriptions: ImageDescriptions | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
 	/** Per-model WebSocket preference from the live transport settings (Codex and standard Responses). */
-	preferWebsockets(model: Model): boolean | undefined;
+	preferWebsockets(model: Model): SimpleStreamOptions["preferWebsockets"];
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;

@@ -43,8 +43,8 @@ import {
 export function resolveWebsocketPreference(
 	settings: Settings,
 	model: Model | undefined,
-	requestPreference?: boolean,
-): boolean | undefined {
+	requestPreference?: SimpleStreamOptions["preferWebsockets"],
+): SimpleStreamOptions["preferWebsockets"] {
 	if (model?.api === "openai-responses") {
 		return (
 			cfgProvidersOpenaiResponsesWebsockets.get(settings) &&
@@ -54,6 +54,7 @@ export function resolveWebsocketPreference(
 	}
 	if (model?.api !== "openai-codex-responses") return requestPreference;
 	const setting = cfgProvidersOpenaiWebsockets.get(settings);
+	if (setting === "only") return "only";
 	return requestPreference ?? (setting === "on" ? true : setting === "off" ? false : undefined);
 }
 

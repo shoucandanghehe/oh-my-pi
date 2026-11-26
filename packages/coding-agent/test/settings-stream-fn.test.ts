@@ -97,10 +97,10 @@ function replayedReasoningContext(producer: Model): Context {
 
 describe("createSettingsAwareStreamFn", () => {
 	it("keeps the WebSocket setting exclusive to Codex", () => {
-		for (const setting of ["auto", "on", "off"] as const) {
+		for (const setting of ["auto", "on", "off", "only"] as const) {
 			const settings = Settings.isolated({ "providers.openaiWebsockets": setting });
 			expect(resolveWebsocketPreference(settings, stubCodexModel)).toBe(
-				setting === "on" ? true : setting === "off" ? false : undefined,
+				setting === "on" ? true : setting === "off" ? false : setting === "only" ? "only" : undefined,
 			);
 			for (const api of ["openrouter", "anthropic-messages"] as const) {
 				expect(resolveWebsocketPreference(settings, { api } as Model)).toBeUndefined();
@@ -108,6 +108,14 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(resolveWebsocketPreference(settings, stubResponsesModel)).toBe(false);
 			expect(resolveWebsocketPreference(settings, undefined)).toBeUndefined();
 		}
+	});
+
+	it("requires Codex WebSockets on the next request even if the caller prefers SSE", () => {
+		const settings = Settings.isolated({ "providers.openaiWebsockets": "only" });
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(settings, base);
+		wrapped(stubCodexModel, stubContext, { preferWebsockets: false });
+		expect(calls[0]?.options?.preferWebsockets).toBe("only");
 	});
 
 	it("treats standard Responses settings, model and request false as independent vetoes", () => {
