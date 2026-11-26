@@ -23,6 +23,7 @@ import type {
 	Model,
 	ModelSpec,
 	ProviderSessionState,
+	Tool,
 } from "@oh-my-pi/pi-ai/types";
 import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -31,7 +32,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { sse as responsesSse, textEvents } from "./fixtures/openai-responses-server";
-import { withEnv } from "./helpers";
+import { createCodexModel, withEnv } from "./helpers";
 
 const { getAgentDir, setAgentDir, TempDir } = piUtils;
 
@@ -371,6 +372,79 @@ class MockWebSocket {
 }
 
 describe("openai-codex streaming", () => {
+	it("replays a tool that a Codex WebSocket payload hook withheld from the previous turn", async () => {
+		const sent: Array<{ input: Array<{ type?: string }>; previous_response_id?: string; tool_choice?: unknown }> = [];
+		class ToolHookWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+			override send(data: string): void {
+				sent.push(JSON.parse(data));
+				this.emitCodexResponse({
+					messageId: `msg_${sent.length}`,
+					responseId: `resp_${sent.length}`,
+					text: "Answer",
+					terminalType: "response.completed",
+					includeCreated: true,
+				});
+			}
+		}
+		global.WebSocket = ToolHookWebSocket as unknown as typeof WebSocket;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const model = createCodexModel("gpt-6.2-sol", { baseUrl: "https://chatgpt.com/backend-api" });
+		const history: Context["messages"] = [];
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const lookup = { ...read, name: "lookup" };
+		try {
+			for (const [index, tools] of [[read], [read, lookup], [read, lookup], [lookup]].entries()) {
+				history.push({ role: "user", content: `Turn ${index + 1}`, timestamp: index + 1 });
+				const result = await streamOpenAICodexResponses(
+					model,
+					{
+						systemPrompt: ["Test tool continuation"],
+						messages: history,
+						tools,
+					},
+					{
+						apiKey: createCodexTestToken(),
+						sessionId: "ws-tool-hook",
+						providerSessionState,
+						preferWebsockets: "only",
+						responsesLite: false,
+						onPayload:
+							index === 1
+								? payload => {
+										const frame = payload as (typeof sent)[number];
+										expect(frame.input.some(item => item.type === "additional_tools")).toBe(true);
+										return { ...frame, input: frame.input.filter(item => item.type !== "additional_tools") };
+									}
+								: undefined,
+					},
+				).result();
+				expect(result.stopReason).toBe("stop");
+				history.push(result);
+			}
+			expect(sent.map(frame => frame.previous_response_id)).toEqual([undefined, "resp_1", undefined, undefined]);
+			expect(sent[2]?.input).toContainEqual(
+				expect.objectContaining({
+					type: "additional_tools",
+					tools: [expect.objectContaining({ name: "lookup" })],
+				}),
+			);
+			expect(sent[3]?.tool_choice).toEqual({
+				type: "allowed_tools",
+				mode: "auto",
+				tools: [{ type: "function", name: "lookup" }],
+			});
+			expect(sent[3]?.input.filter(item => item.type === "additional_tools")).toEqual(
+				sent[2]!.input.filter(item => item.type === "additional_tools"),
+			);
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+	});
+
 	it("records Codex reports from SSE and WebSocket and shares removal warning state across them", async () => {
 		const removed = { type: "reasoning", action: "removed", id: "rs_1", reason: "prefix_mismatch" };
 		const turnBoundary = { type: "reasoning", action: "removed", reason: "turn_boundary" };

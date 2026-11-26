@@ -21,6 +21,7 @@
 - Added routed audio and video input where both the model and provider wire support it, with early errors for unsupported attachments.
 - Added multipart image edits for Codex image models served by compatible proxies.
 - Added `preferWebsockets: "only"` for Codex streaming and streamed compaction. Connection failures and busy session sockets no longer fall back to SSE in this mode.
+- Supported GPT-6 Responses and Codex sessions keep prior tool declarations when tools are added or temporarily disabled.
 
 ### Removed
 

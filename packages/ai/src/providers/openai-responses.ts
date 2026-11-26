@@ -63,10 +63,11 @@ import {
 } from "../utils/tool-choice";
 import { compactGrammarDefinition } from "./grammar";
 import {
-	type OpenAIEffortControlState,
+	insertOpenAIInputUpdates,
+	type OpenAIRequestControlState,
 	planStableOpenAIEffort,
-	releaseOpenAIEffortControlSession,
-	resolveOpenAIEffortControlState,
+	releaseOpenAIRequestControlSession,
+	resolveOpenAIRequestControlState,
 } from "./openai-configuration-update";
 import {
 	applyOpenAIReasoningEffortFallback,
@@ -80,6 +81,7 @@ import {
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
 import { markMissingCopilotUsageFrame } from "./github-copilot-billing";
+import { fingerprintOpenAIToolDeclarations, planStableOpenAITools } from "./openai-tool-additions";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import { OpenAIResponsesRequestRejection } from "./openai-request-error";
 import type {
@@ -455,8 +457,8 @@ export interface OpenAIResponsesProviderSessionState
 	closeCount: number;
 	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
-	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
-	effortControls: Map<string, OpenAIEffortControlState<ResponsesStableEffort>>;
+	/** Append-only request controls, keyed by baseUrl/model/session. */
+	requestControls: Map<string, OpenAIRequestControlState<ResponsesStableEffort, OpenAITool>>;
 	/** Reasoning item removals already reported in this provider session. */
 	reportedReasoningRemovalIds: Set<string>;
 	transports?: OpenAIResponsesTransportSessions;
@@ -515,7 +517,7 @@ function createOpenAIResponsesProviderSessionState(
 		nativeHistoryReplayWarmed: !model.compat.connectionBoundNativeHistory,
 		closeCount: 0,
 		chains: new Map(),
-		effortControls: new Map(),
+		requestControls: new Map(),
 		reportedReasoningRemovalIds: new Set(),
 		releaseSession: sessionId => {
 			const normalizedSessionId = normalizeOpenAIPromptCacheKey(sessionId);
@@ -523,14 +525,14 @@ function createOpenAIResponsesProviderSessionState(
 			for (const [key, chain] of state.chains) {
 				if (chain.sessionId === normalizedSessionId) state.chains.delete(key);
 			}
-			releaseOpenAIEffortControlSession(state.effortControls, normalizedSessionId);
+			releaseOpenAIRequestControlSession(state.requestControls, normalizedSessionId);
 			state.transports?.releaseSession(normalizedSessionId);
 		},
 		close: () => {
 			state.nativeHistoryReplayWarmed = false;
 			state.closeCount++;
 			state.chains.clear();
-			state.effortControls.clear();
+			state.requestControls.clear();
 			state.reportedReasoningRemovalIds.clear();
 			state.transports?.close();
 			state.transports = undefined;
@@ -887,10 +889,17 @@ const streamOpenAIResponsesOnce = (
 				}
 				return fallbackKey;
 			};
+			let toolDeclarationsChangedByHook = false;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
+				const before =
+					options?.onPayload && model.compat.supportsMidConversationToolChanges
+						? fingerprintOpenAIToolDeclarations(requestParams)
+						: undefined;
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
 				const payload =
 					replacementPayload !== undefined ? (replacementPayload as OpenAIResponsesSamplingParams) : requestParams;
+				toolDeclarationsChangedByHook =
+					before !== undefined && before !== fingerprintOpenAIToolDeclarations(payload);
 				applyReasoningEffortFallbackForRequest(payload);
 				return payload;
 			};
@@ -906,6 +915,7 @@ const streamOpenAIResponsesOnce = (
 					strictToolsScope,
 					disableStrictTools,
 					attemptContext.dropEncryptedReasoning,
+					resolvedBaseUrl,
 				);
 				const { params, trailingScaffoldingItems } = builtParams;
 				wireToolNames = builtParams.toolNamesByWire;
@@ -1216,6 +1226,7 @@ const streamOpenAIResponsesOnce = (
 								strictToolsScope,
 								forceDisableStrictTools,
 								attemptContext.dropEncryptedReasoning,
+								resolvedBaseUrl,
 							);
 							const currentParams = currentBuilt.params;
 							// Only ZDR forces `store: false` (the org never persists responses). A
@@ -1555,7 +1566,11 @@ const streamOpenAIResponsesOnce = (
 							: activeParams,
 					);
 					chainState.lastPromptCacheBreakpointPolicy = promptCacheBreakpointPolicy;
-					if (output.responseId && replayableResponseItems.length === nativeOutputItems.length) {
+					if (
+						!toolDeclarationsChangedByHook &&
+						output.responseId &&
+						replayableResponseItems.length === nativeOutputItems.length
+					) {
 						chainState.lastResponseId = output.responseId;
 						chainState.lastResponseItems = replayableResponseItems;
 						chainState.canAppend = true;
@@ -1563,9 +1578,8 @@ const streamOpenAIResponsesOnce = (
 						// full-context success must not mask categorical rejection.
 						if (sentPreviousResponseId) chainState.staleFailures = 0;
 					} else {
-						// No response id, or replay sanitization dropped an item the server
-						// still holds. Sanitization is 1:1-or-fewer, so either case makes the
-						// append baseline untrustworthy; next turn must replay in full.
+						// A hook changed tool declarations, or we cannot prove the server's
+						// response is fully replayable. Start the next request from full input.
 						chainState.canAppend = false;
 						chainState.lastResponseId = undefined;
 						chainState.lastResponseItems = undefined;
@@ -1745,6 +1759,7 @@ export function buildParams(
 	strictToolsScope?: OpenAIStrictToolsScope,
 	disableStrictToolsOverride = false,
 	dropEncryptedReasoning = false,
+	effectiveBaseUrl = model.baseUrl,
 ): {
 	params: OpenAIResponsesSamplingParams;
 	trailingScaffoldingItems: number;
@@ -1927,7 +1942,7 @@ export function buildParams(
 	if (model.reasoningMode && !options?.forceReasoningOff) {
 		params.reasoning = { ...params.reasoning, mode: model.reasoningMode };
 	}
-	applyResponsesStableEffort(model, params, messages, options, providerSessionState);
+	applyResponsesRequestControls(model, params, messages, options, providerSessionState, effectiveBaseUrl);
 
 	if (model.compat.isVercelGatewayHost) {
 		applyVercelResponsesCacheControls(params, model.compat, cacheRetention);
@@ -1952,37 +1967,63 @@ export function buildParams(
 	return { params, trailingScaffoldingItems, strictToolsApplied, toolNamesByWire: wireToolNames };
 }
 
-/**
- * Keep the request-level effort byte-stable across a conversation and carry
- * later changes as `configuration_update` items (GPT-6 family, standard
- * reasoning mode). Requires a routing session id and provider session state to
- * remember the baseline; without them every request stands alone and sends its
- * own effort.
- */
-function applyResponsesStableEffort(
+/** Plan tool additions and effort changes in the same original input coordinates. */
+function applyResponsesRequestControls(
 	model: Model<"openai-responses">,
 	params: OpenAIResponsesSamplingParams,
 	input: ResponseInput,
 	options: OpenAIResponsesOptions | undefined,
 	providerSessionState: OpenAIResponsesProviderSessionState | undefined,
+	effectiveBaseUrl: string | undefined,
 ): void {
-	if (!model.compat.supportsConfigurationUpdate || model.reasoningMode === "pro" || !providerSessionState) return;
+	if (!providerSessionState) return;
+	const extraBody = options?.extraBody;
+	const planTools =
+		model.compat.supportsMidConversationToolChanges &&
+		(params.tool_choice === undefined || params.tool_choice === "auto" || params.tool_choice === "none") &&
+		!["tools", "tool_choice", "input", "previous_response_id"].some(
+			key => extraBody && Object.hasOwn(extraBody, key),
+		);
 	const reasoning = params.reasoning;
-	if (!reasoning || !("effort" in reasoning)) return;
-	const effort = reasoning.effort;
-	if (effort === undefined || effort === null || effort === "none") return;
+	const effort = reasoning?.effort;
+	const planEffort =
+		model.compat.supportsConfigurationUpdate &&
+		model.reasoningMode !== "pro" &&
+		typeof effort === "string" &&
+		isResponsesStableEffort(effort);
+	if (!planTools && !planEffort) return;
 	const sessionId = getOpenAIResponsesRoutingSessionId(options);
 	if (!sessionId) return;
-	const state = resolveOpenAIEffortControlState(
-		providerSessionState.effortControls,
-		id => `${model.baseUrl ?? ""}\u0000${model.id}\u0000${id}`,
+	const parentSessionId = normalizeOpenAIPromptCacheKey(options?.parentSessionId);
+	const state = resolveOpenAIRequestControlState(
+		providerSessionState.requestControls,
+		id => `${effectiveBaseUrl ?? ""}\u0000${model.id}\u0000${id}`,
 		sessionId,
-		normalizeOpenAIPromptCacheKey(options?.parentSessionId),
+		parentSessionId,
 	);
-	params.reasoning = {
-		...reasoning,
-		effort: planStableOpenAIEffort(state, input, effort, minimizedResponsesEffort(model, options)),
-	};
+	const tools = planTools
+		? planStableOpenAITools((state.tools ??= { additions: [] }), input, params.tools, {
+				sideRequest: parentSessionId !== undefined && parentSessionId !== sessionId,
+				toolsDisabled: options?.toolChoice === "none",
+			})
+		: undefined;
+	if (tools?.declared !== undefined) params.tools = tools.declared;
+	else if (tools) delete params.tools;
+	if (tools?.choice) params.tool_choice = tools.choice;
+	if (planEffort) {
+		params.reasoning = {
+			...reasoning,
+			effort: planStableOpenAIEffort(
+				state,
+				input,
+				effort,
+				minimizedResponsesEffort(model, options),
+				tools?.insertions,
+			),
+		};
+	} else if (tools) {
+		insertOpenAIInputUpdates(input, tools.insertions);
+	}
 }
 
 /** The model's lowest effort on the wire when the caller asked to minimize it (`minimizeEffort`). */

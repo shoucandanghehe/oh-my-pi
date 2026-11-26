@@ -5,7 +5,7 @@ import {
 	planStableOpenAIEffort,
 } from "@oh-my-pi/pi-ai/providers/openai-configuration-update";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import type { Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -173,6 +173,160 @@ describe("openai-codex configuration_update", () => {
 		(input ?? []).flatMap<unknown>(item =>
 			item.type === "configuration_update" ? [item] : item.role === "user" ? ["user"] : [],
 		);
+
+	it.each([false, true])("keeps tool and effort updates at their original wire positions (Lite: %s)", async lite => {
+		const model = createCodexModel("gpt-6-astra", { baseUrl: "https://chatgpt.com/backend-api" });
+		const options = {
+			apiKey: "token",
+			sessionId: "tool-and-effort",
+			responsesLite: lite,
+			providerSessionState: new Map<string, ProviderSessionState>(),
+		};
+		const read: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: { type: "object", properties: {} } as Tool["parameters"],
+		};
+		const search: Tool = { ...read, name: "search", description: "Search the project" };
+		const first = await buildTransformedCodexRequestBody(
+			model,
+			{ ...turnContext([firstUser]), tools: [read] },
+			{ ...options, reasoning: "high" },
+		);
+		const second = await buildTransformedCodexRequestBody(
+			model,
+			{ ...turnContext([firstUser, firstAssistant, secondUser]), tools: [search, read] },
+			{ ...options, reasoning: "medium" },
+		);
+		const third = await buildTransformedCodexRequestBody(
+			model,
+			{
+				...turnContext([
+					firstUser,
+					firstAssistant,
+					secondUser,
+					secondAssistant,
+					{ ...secondUser, content: "three" },
+				]),
+				tools: [read],
+			},
+			{ ...options, reasoning: "medium", minimizeEffort: true },
+		);
+		const firstDeclaration = lite ? first.input?.[0]?.tools : first.tools;
+		expect(lite ? second.input?.[0]?.tools : second.tools).toEqual(firstDeclaration);
+		expect(second.input?.slice(-3)).toEqual([
+			update("medium"),
+			expect.objectContaining({
+				type: "additional_tools",
+				role: "developer",
+				tools: [expect.objectContaining({ name: "search" })],
+			}),
+			expect.objectContaining({ role: "user" }),
+		]);
+		expect(third.reasoning?.effort).toBe("high");
+		expect(shape(third.input)).toEqual(["user", update("medium"), "user", update("low"), "user"]);
+		const added = second.input?.slice(-2, -1) ?? [];
+		expect(third.input?.slice(lite ? 1 : 0).filter(item => item.type === "additional_tools")).toEqual(
+			lite ? [] : added,
+		);
+		expect(third.tool_choice).toEqual(
+			lite ? "auto" : { type: "allowed_tools", mode: "auto", tools: [{ type: "function", name: "read" }] },
+		);
+	});
+
+	it("preserves the position of caller-owned tool declarations on full Codex", async () => {
+		const model = createCodexModel("gpt-6-astra", { baseUrl: "https://chatgpt.com/backend-api" });
+		const options = {
+			apiKey: "token",
+			sessionId: "native-tool-declarations",
+			responsesLite: false,
+			providerSessionState: new Map<string, ProviderSessionState>(),
+		};
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const nativeItem = {
+			type: "additional_tools",
+			role: "developer",
+			tools: [{ type: "function", name: "remote_a" }],
+		};
+		const extend = { ...nativeItem, tools: [...nativeItem.tools, { type: "function", name: "remote_b" }] };
+		const search = { ...read, name: "search" };
+		const first = await buildTransformedCodexRequestBody(
+			model,
+			{ messages: [firstUser], tools: [read, search] },
+			options,
+			undefined,
+			[nativeItem],
+		);
+		const second = await buildTransformedCodexRequestBody(
+			model,
+			{ messages: [firstUser, firstAssistant, secondUser], tools: [read] },
+			options,
+			undefined,
+			[extend],
+		);
+		expect(second.tools).toEqual([expect.objectContaining({ name: "read" })]);
+		expect(second.tool_choice).toBeUndefined();
+		expect(first.tools).toHaveLength(2);
+		expect(second.input?.filter(item => item.type === "additional_tools")).toEqual([extend]);
+		expect(second.input?.[0]).toEqual(extend);
+		expect(extend.tools.map(tool => tool.name)).toEqual(["remote_a", "remote_b"]);
+	});
+
+	it("starts a new tool declaration when history rewinds past an earlier addition", async () => {
+		const model = createCodexModel("gpt-6-astra", { baseUrl: "https://chatgpt.com/backend-api" });
+		const options = {
+			apiKey: "token",
+			sessionId: "rewound-tools",
+			responsesLite: false,
+			providerSessionState: new Map<string, ProviderSessionState>(),
+		};
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const search: Tool = { ...read, name: "search" };
+		const write: Tool = { ...read, name: "write" };
+		await buildTransformedCodexRequestBody(model, { messages: [firstUser], tools: [read] }, options);
+		const thirdUser = { ...secondUser, content: "three", timestamp: 5 };
+		const added = await buildTransformedCodexRequestBody(
+			model,
+			{ messages: [firstUser, secondUser, thirdUser], tools: [read, search] },
+			options,
+		);
+		expect(added.input?.at(-2)?.type).toBe("additional_tools");
+		const rewound = await buildTransformedCodexRequestBody(
+			model,
+			{ messages: [firstUser, secondUser], tools: [read, search, write] },
+			options,
+		);
+		expect((rewound.tools as Array<{ name: string }>).map(tool => tool.name)).toEqual(["read", "search", "write"]);
+		expect(rewound.input?.some(item => item.type === "additional_tools")).toBe(false);
+	});
+
+	it("keeps reduced side-request tool scopes separate from the parent's declarations", async () => {
+		const model = createCodexModel("gpt-6-astra", { baseUrl: "https://chatgpt.com/backend-api" });
+		const state = new Map<string, ProviderSessionState>();
+		const options = { sessionId: "parent", providerSessionState: state, responsesLite: false };
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const search = { ...read, name: "search" };
+		const parent = await buildTransformedCodexRequestBody(
+			model,
+			{ messages: [firstUser], tools: [read, search] },
+			options,
+		);
+		const reduced = { messages: [firstUser, firstAssistant, secondUser], tools: [read] };
+		const side = await buildTransformedCodexRequestBody(model, reduced, {
+			...options,
+			sessionId: "side",
+			parentSessionId: "parent",
+		});
+		expect(side.tools).toEqual([expect.objectContaining({ name: "read" })]);
+		expect(side.tool_choice).toBeUndefined();
+		const next = await buildTransformedCodexRequestBody(model, reduced, options);
+		expect(next.tools).toEqual(parent.tools);
+		expect(next.tool_choice).toEqual({
+			type: "allowed_tools",
+			mode: "auto",
+			tools: [{ type: "function", name: "read" }],
+		});
+	});
 
 	it("plans side requests against a copy of the parent's updates", async () => {
 		const model = createCodexModel("gpt-6-astra");

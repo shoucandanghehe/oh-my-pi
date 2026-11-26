@@ -1268,6 +1268,51 @@ describe("Responses configuration_update compat", () => {
 	});
 });
 
+describe("Responses additional_tools compat", () => {
+	it.each([
+		["openai-responses", "openai", "https://api.openai.com/v1"],
+		["openai-codex-responses", "openai-codex", "https://chatgpt.com/backend-api/codex/responses"],
+	] as const)("defaults to GPT-6 on %s", (api, provider, baseUrl) => {
+		const spec = { ...responsesSpec({ id: "gpt-6.2-sol", reasoning: true }), api, provider, baseUrl };
+		expect(buildModel(spec).compat.supportsMidConversationToolChanges).toBe(true);
+		expect(buildModel({ ...spec, baseUrl: "" }).compat.supportsMidConversationToolChanges).toBe(true);
+		for (const id of ["gpt-5.6-sol", "gpt-7-sol"]) {
+			expect(buildModel({ ...spec, id }).compat.supportsMidConversationToolChanges).toBe(false);
+		}
+	});
+
+	it.each([
+		["openai-responses", "openai"],
+		["openai-codex-responses", "openai-codex"],
+	] as const)("defaults to GPT-6 on proxied %s and respects an explicit opt-out", (api, provider) => {
+		const spec = {
+			...responsesSpec({ id: "gpt-6.2-sol", reasoning: true }),
+			api,
+			provider,
+			baseUrl: "https://proxy.example/v1",
+		};
+		expect(buildModel(spec).compat.supportsMidConversationToolChanges).toBe(true);
+		expect(buildModel({ ...spec, provider: "custom" }).compat.supportsMidConversationToolChanges).toBe(true);
+		const optedOut = buildModel({ ...spec, compat: { supportsMidConversationToolChanges: false } });
+		expect(optedOut.compat.supportsMidConversationToolChanges).toBe(false);
+	});
+
+	it("ignores tool-addition overrides outside the supported Responses adapters", () => {
+		const spec = responsesSpec({
+			id: "gpt-6-astra",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			compat: { supportsMidConversationToolChanges: true },
+		});
+		expect(buildModel({ ...spec, api: "openai-completions" }).compat).not.toHaveProperty(
+			"supportsMidConversationToolChanges",
+		);
+		for (const api of ["azure-openai-responses", "openrouter"] as const) {
+			expect(buildModel({ ...spec, api }).compat.supportsMidConversationToolChanges).toBe(false);
+		}
+	});
+});
+
 describe("OpenRouter model discovery", () => {
 	it("keeps refreshed OpenRouter models on the OpenRouter pseudo API", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-openrouter-refresh-"));

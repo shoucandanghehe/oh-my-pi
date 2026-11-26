@@ -19,6 +19,7 @@ import type {
 	FetchImpl,
 	ModelSpec,
 	ProviderSessionState,
+	Tool,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -536,6 +537,71 @@ describe("openai-codex fresh execution input shaping", () => {
 });
 
 describe("openai-codex Responses Lite and client metadata wire format", () => {
+	it.each([
+		{ mode: "Full by default", lite: false, disabled: false },
+		{ mode: "Lite by default", lite: true, disabled: false },
+		{ mode: "Full with explicit opt-out", lite: false, disabled: true },
+	])("sends the tool availability supported by proxied Codex SSE ($mode)", async ({ lite, disabled }) => {
+		const model = createCodexModel("gpt-6.2-sol", {
+			baseUrl: "https://proxy.example/backend-api",
+			...(disabled ? { compat: { supportsMidConversationToolChanges: false } } : {}),
+		});
+		const history: Context["messages"] = [];
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const write = { ...read, name: "write" };
+		const requests: CapturedCodexRequest[] = [];
+		const options = {
+			apiKey: createCodexTestToken(),
+			fetch: createCodexFetchMock(createCodexSse(COMPLETED_CODEX_EVENTS), request => requests.push(request)),
+			sessionId: "dynamic-tool-availability",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			preferWebsockets: false,
+			responsesLite: lite,
+		};
+		for (const [index, tools] of [[read, write], [read], [], [read, write]].entries()) {
+			history.push({ role: "user", content: `Turn ${index + 1}`, timestamp: index + 1 });
+			const result = await streamOpenAICodexResponses(model, { tools, messages: history }, options).result();
+			expect(result.stopReason).toBe("stop");
+			history.push(result);
+		}
+		const declarations = requests.map(({ body }) => (lite ? (body.input as InputItem[])[0]?.tools : body.tools));
+		const names = (declaration: unknown) =>
+			(declaration as Array<{ name: string }> | undefined)?.map(tool => tool.name);
+		if (disabled) {
+			expect(declarations.map(names)).toEqual([["read", "write"], ["read"], undefined, ["read", "write"]]);
+			expect(requests.map(({ body }) => body.tool_choice)).toEqual([undefined, undefined, undefined, undefined]);
+			return;
+		}
+		expect(declarations.map(names)).toEqual(
+			lite
+				? [["read", "write"], ["read"], ["read"], ["read"]]
+				: [
+						["read", "write"],
+						["read", "write"],
+						["read", "write"],
+						["read", "write"],
+					],
+		);
+		expect(requests.map(({ body }) => body.tool_choice)).toEqual(
+			lite
+				? ["auto", "auto", "none", "auto"]
+				: [
+						undefined,
+						{ type: "allowed_tools", mode: "auto", tools: [{ type: "function", name: "read" }] },
+						"none",
+						undefined,
+					],
+		);
+		if (lite) {
+			expect((requests[3]!.body.input as InputItem[]).slice(1)).toContainEqual(
+				expect.objectContaining({
+					type: "additional_tools",
+					tools: [expect.objectContaining({ name: "write" })],
+				}),
+			);
+		}
+	});
+
 	it("sends canonical Codex metadata and protects reserved fields over SSE", async () => {
 		const model = createCodexModel("gpt-5.1-codex");
 		const context = createCodexTestContext();

@@ -770,6 +770,7 @@ function resolveOpenAIResponsesPolicy(
 		statefulResponses: undefined,
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
+		supportsMidConversationToolChanges: false,
 		supportsSteering: false,
 		uncachedInstructions: false,
 		requiresReasoningOffJuiceInstruction: false,
@@ -841,6 +842,9 @@ function resolveOpenAIResponsesPolicy(
 	};
 	applyWireAxes(compat, axes.wire, api);
 	applyCompatOverrides(compat, spec.compat);
+	if (api !== "openai-responses" && api !== "openai-codex-responses") {
+		compat.supportsMidConversationToolChanges = false;
+	}
 	overlayEffortMapAxis(compat, axes, spec.compat);
 	if (isXaiHost && "reasoningEffortMap" in axes.wire) {
 		// The rules carry the canonical first-party xAI effort map; re-assert it
@@ -889,6 +893,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		connectionBoundNativeHistory: compat.connectionBoundNativeHistory,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
+		supportsMidConversationToolChanges: compat.supportsMidConversationToolChanges,
 		supportsSteering: compat.supportsSteering,
 		uncachedInstructions: compat.uncachedInstructions,
 		officialEndpoint: compat.officialEndpoint,

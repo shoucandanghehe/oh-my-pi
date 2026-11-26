@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
@@ -8,12 +8,14 @@ import type {
 	Model,
 	ModelSpec,
 	ProviderSessionState,
+	Tool,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import * as utils from "@oh-my-pi/pi-utils";
 
 const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
@@ -155,6 +157,147 @@ function createCapturingFetch(sentRequests: Array<Record<string, unknown>>): Fet
 
 describe("openai-responses stateful chaining", () => {
 	const systemPrompt = ["You are a helpful assistant."];
+
+	it.each([false, true])("replays an added tool if a hook withheld it from the prior delta (%s)", async withhold => {
+		const gpt = getBundledModel("openai", "gpt-6.2-sol") as Model<"openai-responses">;
+		const requests: Array<Record<string, unknown>> = [];
+		const history: Context["messages"] = [];
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const search: Tool = { ...read, name: "search", description: "Search" };
+		const options = {
+			apiKey: "test-key",
+			sessionId: "tool-continuation",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			statefulResponses: true,
+			preferWebsockets: false,
+			fetch: createCapturingFetch(requests),
+		};
+		const added = {
+			type: "additional_tools",
+			role: "developer",
+			tools: [expect.objectContaining({ name: "search" })],
+		};
+		for (const [index, content] of ["one", "two", "three"].entries()) {
+			history.push({ role: "user", content, timestamp: index + 1 });
+			const onPayload: OpenAIResponsesOptions["onPayload"] =
+				withhold && index === 1
+					? payload => {
+							const request = payload as { input: Array<{ type?: string }> };
+							expect(request.input).toContainEqual(added);
+							return { ...request, input: request.input.filter(item => item.type !== "additional_tools") };
+						}
+					: undefined;
+			const result = await streamOpenAIResponses(
+				gpt,
+				{ systemPrompt, messages: history, tools: index === 0 ? [read] : [read, search] },
+				{ ...options, onPayload },
+			).result();
+			expect(result.stopReason).toBe("stop");
+			history.push(result);
+		}
+		expect(requests.map(request => (request.tools as Array<{ name: string }>).map(tool => tool.name))).toEqual([
+			["read"],
+			["read"],
+			["read"],
+		]);
+		expect(requests.map(request => request.previous_response_id)).toEqual([
+			undefined,
+			"resp_1",
+			withhold ? undefined : "resp_2",
+		]);
+		const carriesAddition = (request: Record<string, unknown>) =>
+			(request.input as Array<{ type?: string }>).filter(item => item.type === "additional_tools");
+		expect(carriesAddition(requests[1]!)).toEqual(withhold ? [] : [added]);
+		expect(carriesAddition(requests[2]!)).toEqual(withhold ? [added] : []);
+	});
+
+	it("disables and restores tools without changing historical declarations through a Responses proxy", async () => {
+		const gpt = buildModel({
+			...toModelSpec(getBundledModel<"openai-responses">("openai", "gpt-6.2-sol")),
+			baseUrl: "https://proxy.example/v1",
+		});
+		const requests: Array<Record<string, unknown>> = [];
+		const history: Context["messages"] = [];
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const search = { ...read, name: "search" };
+		const changedSearch = { ...search, description: "Updated description" };
+		const options = {
+			apiKey: "test-key",
+			sessionId: "dynamic-tool-availability",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			statefulResponses: true,
+			preferWebsockets: false,
+			fetch: createCapturingFetch(requests),
+		};
+		for (const [index, tools] of [
+			[read],
+			[read, search],
+			[search],
+			[],
+			[read, search],
+			[read, changedSearch],
+		].entries()) {
+			history.push({ role: "user", content: `Turn ${index + 1}`, timestamp: index + 1 });
+			const result = await streamOpenAIResponses(gpt, { systemPrompt, messages: history, tools }, options).result();
+			expect(result.stopReason).toBe("stop");
+			history.push(result);
+		}
+		for (const request of requests.slice(0, 5)) expect(request.tools).toEqual(requests[0]?.tools);
+		expect(requests.map(request => request.tool_choice)).toEqual([
+			undefined,
+			undefined,
+			{ type: "allowed_tools", mode: "auto", tools: [{ type: "function", name: "search" }] },
+			"none",
+			undefined,
+			undefined,
+		]);
+		expect(requests.map(request => request.previous_response_id)).toEqual([
+			undefined,
+			"resp_1",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+		]);
+		const addition = (request: Record<string, unknown>) =>
+			(request.input as Array<{ type?: string }>).filter(item => item.type === "additional_tools");
+		expect(addition(requests[1]!)).toEqual([
+			expect.objectContaining({ tools: [expect.objectContaining({ name: "search" })] }),
+		]);
+		for (const request of requests.slice(2, 5)) expect(addition(request)).toEqual(addition(requests[1]!));
+		expect(addition(requests[5]!)).toEqual([]);
+		expect(requests[5]?.tools).toEqual([
+			expect.objectContaining({ name: "read" }),
+			expect.objectContaining({ name: "search", description: "Updated description" }),
+		]);
+	});
+
+	it("does not expose tools excluded by an explicit raw tool declaration", async () => {
+		const gpt = getBundledModel("openai", "gpt-6.2-sol") as Model<"openai-responses">;
+		const requests: Array<Record<string, unknown>> = [];
+		const history: Context["messages"] = [];
+		const read: Tool = { name: "read", description: "Read", parameters: { type: "object" } as Tool["parameters"] };
+		const rawTools = [{ type: "function", name: "read", parameters: { type: "object" } }];
+		const options = {
+			apiKey: "test-key",
+			sessionId: "raw-tools",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			preferWebsockets: false,
+			fetch: createCapturingFetch(requests),
+		};
+		for (const [index, content] of ["one", "two"].entries()) {
+			history.push({ role: "user", content, timestamp: index + 1 });
+			const result = await streamOpenAIResponses(
+				gpt,
+				{ systemPrompt, messages: history, tools: index === 0 ? [read] : [read, { ...read, name: "excluded" }] },
+				{ ...options, extraBody: index === 0 ? undefined : { tools: rawTools } },
+			).result();
+			expect(result.stopReason).toBe("stop");
+			history.push(result);
+		}
+		expect(requests[1]?.tools).toEqual(rawTools);
+		expect(requests[1]?.input).not.toContainEqual(expect.objectContaining({ type: "additional_tools" }));
+	});
 
 	it("chains turns with previous_response_id, delta input, and store: true", async () => {
 		const sentRequests: Array<Record<string, unknown>> = [];

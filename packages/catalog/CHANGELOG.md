@@ -31,6 +31,8 @@
 - Added Factory Droid's Gemini 4 Neon (`gemini-4-neon`), listed once the account's `gemini_4_neon` feature flag enables it, with low, medium, high and xhigh thinking levels (default high), a 1,048,576-token context, Google's list price and Factory's 1.2× input credit rate ([#19841](https://github.com/can1357/oh-my-pi/issues/19841))
 - Added Factory Droid's Gemini 4 Hydrogen (`gemini-4-hydrogen`), listed once the account's `gemini_4_hydrogen` feature flag enables it, with low, medium, high and xhigh thinking levels (default high), a 1,000,000-token context, Google's list price and Factory's 0.6× input credit rate ([#19173](https://github.com/can1357/oh-my-pi/issues/19173))
 
+- Enabled mid-conversation tool updates for GPT-6 Responses and Codex by default. Set `compat.supportsMidConversationToolChanges: false` for incompatible endpoints (based on [#18520](https://github.com/can1357/oh-my-pi/pull/18520) by [@Delije4](https://github.com/Delije4)).
+
 ### Changed
 
 - Seeded models now remain available even when their provider applies model exclusions.
