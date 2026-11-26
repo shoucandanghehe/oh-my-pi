@@ -330,9 +330,20 @@ describe("searchCodex model selection", () => {
 	});
 
 	it("uses email-only OAuth credentials without an account header", async () => {
-		delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
+		const model = { ...codexModel("gpt-5.6-luna"), useResponsesLite: true };
+		const response = JSON.stringify({
+			output: "Example Article (https://example.com/article)\nSearch result snippet.",
+			results: [
+				{
+					type: "text_result",
+					title: "Example Article",
+					url: "https://example.com/article",
+					snippet: "Search result snippet.",
+				},
+			],
+		});
 		const result = await searchCodex({
-			...makeSearchParams("email-only Codex search", mockCodexFetch("gpt-5.6-luna")),
+			...makeSearchParams("email-only Codex search", mockCodexFetch(model.id, response), model),
 			authStorage: emailOnlyAuthStorage,
 			modelRegistry: new ModelRegistry(emailOnlyAuthStorage, modelsYmlPath()),
 		});

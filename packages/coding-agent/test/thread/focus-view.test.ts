@@ -162,6 +162,8 @@ function focusHarness(): FocusHarness {
 				events.push(event);
 			},
 			resetTranscriptAnchors() {},
+			resetTerminalActivity() {},
+			async syncAssistantMessage() {},
 			restorePendingToolResults() {},
 			runSerialized: (run: () => Promise<void>) => run(),
 			markViewIdle() {},
