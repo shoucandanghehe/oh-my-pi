@@ -495,6 +495,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * command name is recoverable; never a dispatch source.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
+	/** Provider declarations only; dispatch still uses the executable tools in context. */
+	advertisedTools?: (model: Model) => AgentTool[];
 
 	/**
 	 * Enable intent tracing for tool calls.

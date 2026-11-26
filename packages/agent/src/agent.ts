@@ -43,7 +43,7 @@ import {
 	steeringQueueState,
 	unpairedToolCallTail,
 } from "./agent-loop";
-import type { AppendOnlyContextManager } from "./append-only-context";
+import { AppendOnlyContextManager } from "./append-only-context";
 import { agentPauseGate } from "./pause";
 import { filterProviderReplayMessages } from "./replay-policy";
 import { SentToolDefinitions } from "./sent-tool-definitions";
@@ -175,6 +175,8 @@ export interface AgentOptions {
 	 * Used by providers that support session-based caching (e.g., OpenAI Codex).
 	 */
 	sessionId?: string;
+	/** Parent lineage used to replay provider request controls without sharing a child conversation. */
+	parentSessionId?: string;
 	/**
 	 * Optional prompt cache key forwarded to LLM providers.
 	 * When omitted, providers may fall back to sessionId.
@@ -284,6 +286,8 @@ export interface AgentOptions {
 	 * suggest a target when a call misses.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
+	/** Provider declarations may exceed the tools this agent can execute. */
+	advertisedTools?: AgentLoopConfig["advertisedTools"];
 
 	/** Enable intent tracing schema injection/stripping in the harness. */
 	intentTracing?: boolean;
@@ -381,6 +385,34 @@ export interface AgentOptions {
 	appendOnlyContext?: AppendOnlyContextManager;
 }
 
+export interface AgentChildOptions {
+	initialState?: Partial<AgentState>;
+	sessionId: string;
+	parentSessionId?: string;
+	promptCacheKey?: string;
+	streamFn?: StreamFn;
+	convertToLlm?: AgentOptions["convertToLlm"];
+	transformContext?: AgentOptions["transformContext"];
+	transformProviderContext?: AgentOptions["transformProviderContext"];
+	providerSessionState?: AgentOptions["providerSessionState"];
+	getApiKey?: AgentOptions["getApiKey"];
+	onPayload?: AgentOptions["onPayload"];
+	onResponse?: AgentOptions["onResponse"];
+	onSseEvent?: AgentOptions["onSseEvent"];
+	preferWebsockets?: AgentOptions["preferWebsockets"];
+	serviceTier?: AgentOptions["serviceTier"];
+	beforeToolCall?: AgentLoopConfig["beforeToolCall"];
+	/** `null` disables the parent's unadvertised-tool resolver in an isolated child. */
+	resolveFallbackTool?: AgentOptions["resolveFallbackTool"] | null;
+	/** Keep the parent's provider tool prefix, then declare any child-only tools. Execution stays child-scoped. */
+	advertiseParentTools?: boolean;
+	afterToolCall?: AgentLoopConfig["afterToolCall"];
+	transformAssistantMessage?: AgentLoopConfig["transformAssistantMessage"];
+	/** Override the execution context when the child has its own host. */
+	getToolContext?: AgentOptions["getToolContext"];
+	cwdResolver?: AgentOptions["cwdResolver"];
+}
+
 export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
 }
@@ -469,6 +501,7 @@ export class Agent {
 	#followUpMode: "all" | "one-at-a-time";
 	#interruptMode: "immediate" | "wait";
 	#sessionId?: string;
+	#parentSessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
 	#metadata?: Record<string, unknown>;
@@ -508,6 +541,7 @@ export class Agent {
 	#speculativeToolExecution?: SpeculativeToolExecutionConfig;
 	#resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 	#suggestFallbackToolNames?: () => Iterable<string>;
+	#advertisedTools?: AgentLoopConfig["advertisedTools"];
 	#intentTracing: boolean;
 	#intentDescription?: string;
 	#pruneToolDescriptions: boolean;
@@ -593,6 +627,7 @@ export class Agent {
 		this.#interruptMode = opts.interruptMode || "immediate";
 		this.streamFn = opts.streamFn || streamSimple;
 		this.#sessionId = opts.sessionId;
+		this.#parentSessionId = opts.parentSessionId;
 		this.#deadline = opts.deadline;
 		this.#promptCacheKey = opts.promptCacheKey;
 		this.#providerSessionState = opts.providerSessionState;
@@ -629,6 +664,7 @@ export class Agent {
 		this.#speculativeToolExecution = opts.speculativeToolExecution;
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
 		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
+		this.#advertisedTools = opts.advertisedTools;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#intentDescription = opts.intentDescription;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
@@ -646,6 +682,87 @@ export class Agent {
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
 		this.#transformProviderContext = opts.transformProviderContext;
+	}
+
+	/**
+	 * Fork provider-facing configuration into an isolated agent loop.
+	 *
+	 * The child gets an independent transcript, queues, abort controller, and
+	 * append-only cache state. Provider routing, request shaping, credentials,
+	 * sampling, tool schemas, and telemetry retain the parent's configuration.
+	 * Lifecycle hooks and server-executed Cursor tools are intentionally not
+	 * inherited because they belong to the parent session.
+	 */
+	createChild(options: AgentChildOptions): Agent {
+		const child: Agent = new Agent({
+			initialState: {
+				...this.#state,
+				...options.initialState,
+				messages: options.initialState?.messages ?? this.#state.messages,
+				isStreaming: false,
+				streamMessage: null,
+				pendingToolCalls: new Set(),
+				error: undefined,
+			},
+			convertToLlm: options.convertToLlm ?? this.#convertToLlm,
+			transformContext: options.transformContext ?? this.#transformContext,
+			transformProviderContext: options.transformProviderContext ?? this.#transformProviderContext,
+			steeringMode: this.#steeringMode,
+			followUpMode: this.#followUpMode,
+			interruptMode: this.#interruptMode,
+			kimiApiFormat: this.#kimiApiFormat,
+			preferWebsockets: options.preferWebsockets ?? this.#preferWebsockets,
+			streamFn: options.streamFn ?? this.streamFn,
+			deadline: this.#deadline,
+			sessionId: options.sessionId,
+			parentSessionId: options.parentSessionId,
+			promptCacheKey: options.promptCacheKey ?? this.#promptCacheKey,
+			providerSessionState: options.providerSessionState,
+			getApiKey: options.getApiKey ?? this.getApiKey,
+			onPayload: options.onPayload ?? this.#onPayload,
+			onResponse: options.onResponse ?? this.#onResponse,
+			onSseEvent: options.onSseEvent ?? this.#onSseEvent,
+			onHarmonyLeak: this.#onHarmonyLeak,
+			thinkingBudgets: this.#thinkingBudgets,
+			temperature: this.#temperature,
+			topP: this.#topP,
+			topK: this.#topK,
+			minP: this.#minP,
+			presencePenalty: this.#presencePenalty,
+			repetitionPenalty: this.#repetitionPenalty,
+			serviceTier: options.serviceTier ?? this.#serviceTier,
+			serviceTierResolver: this.#serviceTierResolver,
+			hideThinkingSummary: this.#hideThinkingSummary,
+			maxRetryDelayMs: this.#maxRetryDelayMs,
+			getToolContext: options.getToolContext ?? this.#getToolContext,
+			transformToolCallArguments: this.#transformToolCallArguments,
+			resolveFallbackTool:
+				options.resolveFallbackTool === null
+					? undefined
+					: (options.resolveFallbackTool ?? this.#resolveFallbackTool),
+			advertisedTools: options.advertiseParentTools
+				? model => {
+						const parentTools = this.#toolsForModel(model);
+						const parentNames = new Set(parentTools.map(tool => tool.name));
+						return [...parentTools, ...child.#toolsForModel(model).filter(tool => !parentNames.has(tool.name))];
+					}
+				: undefined,
+			intentTracing: this.#intentTracing,
+			intentDescription: this.#intentDescription,
+			pruneToolDescriptions: this.#pruneToolDescriptions,
+			dialect: this.#dialect,
+			dialectResolver: this.#dialectResolver,
+			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
+			cwd: this.#cwd,
+			cwdResolver: options.cwdResolver ?? this.#cwdResolver,
+			beforeToolCall: options.beforeToolCall,
+			afterToolCall: options.afterToolCall,
+			transformAssistantMessage: options.transformAssistantMessage,
+			telemetry: this.#telemetry,
+			appendOnlyContext: this.#appendOnlyContext ? new AppendOnlyContextManager() : undefined,
+		});
+		child.setMetadataResolver(provider => this.metadataForProvider(provider));
+		return child;
 	}
 
 	/**
@@ -2079,6 +2196,7 @@ export class Agent {
 			interruptMode: this.#interruptMode,
 			detachSignal: detachController.signal,
 			sessionId: this.#sessionId,
+			parentSessionId: this.#parentSessionId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
 			metadata: this.#metadataResolver ? undefined : this.#metadata,
@@ -2128,6 +2246,7 @@ export class Agent {
 			speculativeToolExecution: this.#speculativeToolExecution,
 			resolveFallbackTool: this.#resolveFallbackTool,
 			suggestFallbackToolNames: this.#suggestFallbackToolNames,
+			advertisedTools: this.#advertisedTools,
 			intentTracing: this.#intentTracing,
 			intentDescription: this.#intentDescription,
 			pruneToolDescriptions: this.#pruneToolDescriptions,

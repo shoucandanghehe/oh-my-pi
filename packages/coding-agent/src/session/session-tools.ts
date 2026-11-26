@@ -45,6 +45,7 @@ import {
 	denyError,
 	resolveApproval,
 	resolveApprovalFromContext,
+	resolveToolTier,
 	restrictedFolderReason,
 } from "../tools/approval";
 import { getApprovalGrants } from "../tools/approval-cache";
@@ -431,6 +432,23 @@ interface PendingNoticePreview<T> {
 interface ToolCommandMountNoticeProjection {
 	notice: CustomMessage<ToolCommandMountNoticeDetails> | undefined;
 	announcedMounts: Set<string>;
+}
+
+// A "read" approval tier alone is insufficient: other tools mutate local session state.
+const BTW_INVESTIGATION_TOOLS = new Set(["read", "glob", "grep", "ast_grep", "web_search", "recall", "reflect"]);
+
+export function isBtwInvestigationTool(name: string): boolean {
+	return BTW_INVESTIGATION_TOOLS.has(name) || name === "lsp" || name === "github";
+}
+
+export function isBtwReadOnlyToolCall(tool: AgentTool, args: Record<string, unknown>): boolean {
+	if (BTW_INVESTIGATION_TOOLS.has(tool.name)) return true;
+	if (tool.name !== "lsp" && tool.name !== "github") return false;
+	try {
+		return resolveToolTier(tool, args) === "read";
+	} catch {
+		return false;
+	}
 }
 
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */

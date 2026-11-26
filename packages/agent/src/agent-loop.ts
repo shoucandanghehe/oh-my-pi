@@ -2151,10 +2151,11 @@ async function prepareProviderCall(
 		intentDescription: config.intentDescription,
 		pruneDescriptions: !!config.pruneToolDescriptions && !ownedDialect,
 	};
+	const providerToolContext = config.advertisedTools ? { ...context, tools: config.advertisedTools(model) } : context;
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
-		llmContext = config.appendOnlyContext.build(context, {
+		llmContext = config.appendOnlyContext.build(providerToolContext, {
 			intentTracing: toolOptions.injectIntent,
 			intentDescription: toolOptions.intentDescription,
 			pruneToolDescriptions: toolOptions.pruneDescriptions,
@@ -2163,7 +2164,7 @@ async function prepareProviderCall(
 		llmContext = {
 			systemPrompt: context.systemPrompt,
 			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, toolOptions),
+			tools: normalizeTools(providerToolContext.tools, toolOptions),
 		};
 	}
 	// Before the transform too, so a request-size clamp in it measures the withdrawn definitions the provider

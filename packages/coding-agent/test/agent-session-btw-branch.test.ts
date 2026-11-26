@@ -167,6 +167,60 @@ describe("AgentSession.branchFromBtw", () => {
 		expectSanitizedBtwAssistant(promoted);
 	});
 
+	it("promotes a durable topic at its frozen anchor and keeps paired tool messages", async () => {
+		const activeSession = await createSession();
+		const manager = activeSession.sessionManager;
+		const anchor = manager.appendMessage({ role: "user", content: "original context", timestamp: 1 });
+		manager.appendMessage({ role: "user", content: "Main advanced independently", timestamp: 2 });
+		await manager.ensureOnDisk();
+		const childCall: AssistantMessage = {
+			...createBtwAssistant(),
+			content: [{ type: "toolCall", id: "btw-read", name: "read", arguments: { path: "README.md" } }],
+			stopReason: "toolUse",
+			timestamp: 4,
+		};
+		const result = await activeSession.branchFromBtw({
+			sessionId: manager.getSessionId(),
+			anchorLeafId: anchor,
+			turns: [],
+			messages: [
+				{ role: "user", content: "check this file", timestamp: 3 },
+				childCall,
+				{
+					role: "toolResult",
+					toolCallId: "btw-read",
+					toolName: "read",
+					content: [{ type: "text", text: "The file exists." }],
+					isError: false,
+					timestamp: 5,
+				},
+				{ ...createBtwAssistant(), timestamp: 6 },
+			],
+		});
+		expect(result.cancelled).toBe(false);
+		await manager.flush();
+		const reopened = await SessionManager.open(result.sessionFile!);
+		try {
+			const messages = reopened.buildSessionContext().messages;
+			expect(messages.filter(message => message.role === "user").map(message => message.content)).toEqual([
+				"original context",
+				"check this file",
+			]);
+			expect(messages[2]).toMatchObject({
+				role: "assistant",
+				content: [{ type: "toolCall", id: "btw-read", name: "read" }],
+			});
+			expect(messages[3]).toMatchObject({
+				role: "toolResult",
+				toolCallId: "btw-read",
+				content: [{ type: "text", text: "The file exists." }],
+			});
+			expect(messages[2]?.role === "assistant" && messages[2].providerPayload).toBeUndefined();
+		} finally {
+			await reopened.close();
+		}
+	});
+
 	it.each([
 		["a vision model", ["text", "image"]],
 		["a text-only model, with a vision description", ["text"]],

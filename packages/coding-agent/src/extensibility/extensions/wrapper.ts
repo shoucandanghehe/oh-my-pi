@@ -238,6 +238,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		applyToolProxy(tool, this);
 	}
 
+	/** Rebind the underlying tool to an independent approval and lifecycle runner. */
+	unwrap(): AgentTool<TParameters, TDetails> {
+		return this.tool;
+	}
+
 	/**
 	 * Forward browser mode changes when available.
 	 */

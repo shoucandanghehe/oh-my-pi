@@ -186,6 +186,10 @@ export interface BuildSessionContextOptions {
 	 * mid-turn rebuild keeps the in-flight assistant turn; the loop appends their results.
 	 */
 	inFlightToolCallIds?: ReadonlySet<string>;
+	/** A BTW child can restore its own interrupted text without changing Main replay. */
+	preserveInterruptedMessages?: boolean;
+	/** In a BTW transcript, hide inherited entries without changing the selected branch or compaction. */
+	excludeEntryIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 	/** Archive frame bytes the LLM context attaches: the active model's {@link snapcompact.frameDataBytesBudget}
@@ -202,7 +206,10 @@ export interface BuildSessionContextOptions {
 }
 
 /** Options for `AgentSession.buildTranscriptSessionContext` (via `SessionProviderBoundary`). */
-export interface TranscriptSessionContextOptions extends Pick<BuildSessionContextOptions, "collapseCompactedHistory"> {
+export interface TranscriptSessionContextOptions extends Pick<
+	BuildSessionContextOptions,
+	"collapseCompactedHistory" | "excludeEntryIds"
+> {
 	/**
 	 * Keep the unpaired tool calls of the turn the agent loop is still executing,
 	 * so a mid-turn rebuild keeps them routable. Calls left unpaired by earlier
@@ -478,6 +485,7 @@ export function buildSessionContext(
 	}
 
 	const appendMessage = (entry: SessionEntry) => {
+		if (options?.excludeEntryIds?.has(entry.id)) return;
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
 			if (
@@ -835,7 +843,7 @@ export function buildSessionContext(
 	// Keep the interrupted-thinking continuity pair: convertToLlm strips the
 	// unsafe trailing thinking from that assistant and sends the hidden
 	// continuity note instead.
-	if (!options?.transcript) {
+	if (!options?.transcript && !options?.preserveInterruptedMessages) {
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
 			if (message?.role !== "assistant") continue;

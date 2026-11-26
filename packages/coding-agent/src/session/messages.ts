@@ -63,12 +63,13 @@ import {
 import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type { AssistantMessage, MediaContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, escapeXmlText, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import liveEndedTemplate from "../live/prompts/live-ended.md" with { type: "text" };
 import voiceRequestTemplate from "../live/prompts/voice-request.md" with { type: "text" };
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
+import btwSummaryTemplate from "../prompts/system/btw-summary.md" with { type: "text" };
 import { cleanTinyMessage, formatTitleConversationContext, type TitleConversationTurn } from "../tiny/message-preproc";
 
 export {
@@ -83,6 +84,38 @@ import { formatExitCodeNotice } from "../tools/details/bash";
 import { formatOutputNotice } from "../tools/output-meta-format";
 import { titleTextFromSkillPrompt } from "./transcript/skill-title-input";
 
+export const BTW_SUMMARY_MESSAGE_TYPE = "btw:summary";
+
+export interface BtwSummarySource {
+	threadKey: string;
+	threadTitle: string;
+}
+
+export interface BtwSummary extends BtwSummarySource {
+	summary: string;
+}
+
+export interface BtwSummaryMessageDetails {
+	summaries: BtwSummary[];
+}
+
+export function createBtwSummaryMessage(summaries: BtwSummary[]): CustomMessage<BtwSummaryMessageDetails> {
+	return {
+		role: "custom",
+		customType: BTW_SUMMARY_MESSAGE_TYPE,
+		content: prompt.render(btwSummaryTemplate, {
+			summaries: summaries.map(entry => ({
+				threadKey: escapeXmlAttribute(entry.threadKey),
+				threadTitle: escapeXmlAttribute(entry.threadTitle),
+				summary: escapeXmlText(entry.summary),
+			})),
+		}),
+		display: true,
+		details: { summaries },
+		attribution: "agent",
+		timestamp: Date.now(),
+	};
+}
 /**
  * Logs provider-error turns so their actual cause is available outside the
  * session transcript. No-op for non-error stop reasons.
@@ -129,6 +162,33 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 		content.push(block);
 	}
 	return { ...message, content, providerPayload: undefined };
+}
+
+/** Replace a displayed reply without retaining replay-bound payloads or reasoning signatures. */
+export function assistantMessageWithReplyText(assistantMessage: AssistantMessage, replyText: string): AssistantMessage {
+	const content: AssistantMessage["content"] = [];
+	let replacedText = false;
+	for (const part of assistantMessage.content) {
+		if (part.type === "thinking") {
+			content.push({
+				type: "thinking",
+				thinking: part.thinking,
+				...(part.summary !== undefined && { summary: part.summary }),
+				...(part.narration && { narration: true }),
+			});
+			continue;
+		}
+		if (part.type === "redactedThinking") continue;
+		if (part.type !== "text") {
+			content.push(part);
+			continue;
+		}
+		if (replacedText) continue;
+		content.push({ type: "text", text: replyText });
+		replacedText = true;
+	}
+	if (!replacedText) content.push({ type: "text", text: replyText });
+	return { ...assistantMessage, content, providerPayload: undefined };
 }
 
 /**

@@ -707,6 +707,7 @@ export class ExtensionRunner {
 	#suspensionListeners = new Set<() => void>();
 	/** Fail-open wrappers of transcript presenters, kept so their identity is stable. */
 	#guardedPresenters = new WeakMap<TranscriptPresenter, TranscriptPresenter>();
+	#fileFallbacksEnabled = true;
 	/** Main runner whose suspensions this runner's drawing follows; see {@link followSuspension}. */
 	#suspensionParent: ExtensionRunner | undefined;
 	/**
@@ -988,6 +989,7 @@ export class ExtensionRunner {
 		commandContextActions?: ExtensionCommandContextActions,
 		uiContext?: ExtensionHostUIContext,
 		mode: ExtensionMode = "print",
+		options?: { installFileFallbacks?: boolean; registerProviders?: boolean },
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
@@ -1009,9 +1011,11 @@ export class ExtensionRunner {
 		this.runtime.getSessionName = actions.getSessionName;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.registerProvider = (name, config, sourceId) => {
+			if (options?.registerProviders === false) throw new Error("Provider registration is disabled in this session");
 			this.modelRegistry.registerProvider(name, config, sourceId);
 		};
 		this.runtime.unregisterProvider = name => {
+			if (options?.registerProviders === false) throw new Error("Provider registration is disabled in this session");
 			this.modelRegistry.unregisterProvider(name);
 		};
 
@@ -1057,6 +1061,7 @@ export class ExtensionRunner {
 		// accumulate duplicate global registrations — drop the prior generation before
 		// installing this one's trampolines.
 		this.disposeFileFallbacks();
+		this.#fileFallbacksEnabled = options?.installFileFallbacks !== false;
 		// Suspended extensions keep a (gated) trampoline so resuming them needs no rewire.
 		for (const ext of this.getLoadedExtensions()) this.#installFileFallbacks(ext);
 
@@ -1262,6 +1267,7 @@ export class ExtensionRunner {
 	 * contract and registration order for a backup-handler setup.
 	 */
 	#installFileFallbacks(ext: Extension): void {
+		if (!this.#fileFallbacksEnabled) return;
 		if (ext.fileWriteFallbackHandlers.length > 0) {
 			this.#fileFallbackDisposers.push(
 				addFileWriteFallback(async req => {

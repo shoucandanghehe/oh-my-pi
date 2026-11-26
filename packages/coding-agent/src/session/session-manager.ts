@@ -1,6 +1,7 @@
 import type { Settings } from "../config/settings";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
 	MediaContent,
@@ -3745,6 +3746,16 @@ export class SessionManager {
 	}
 
 	/**
+	 * Import a frozen, already-materialized message. Summary messages already
+	 * carry their replay metadata and must not enact a second context rewrite.
+	 */
+	appendMaterializedContextMessage(message: AgentMessage): string {
+		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/**
 	 * Append to a non-active branch without changing the current leaf.
 	 * Used by work that retains ownership of a branch across tree navigation.
 	 *
@@ -4432,9 +4443,15 @@ export class SessionManager {
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = new FileSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: { suppressBreadcrumb?: boolean },
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
+		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 		manager.#resetToNewSession();
 		return manager;
 	}
