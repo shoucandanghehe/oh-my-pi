@@ -50,6 +50,9 @@ import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
+import { NATIVE_PANE_WORKER_ARG } from "./modes/native-workspace/protocol";
+import type * as NativePaneRelay from "./modes/native-workspace/relay";
+import type * as NativePaneSmoke from "./modes/native-workspace/smoke";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
 import { captureProgramResumeToken } from "./utils/program-resume-token";
 
@@ -221,6 +224,8 @@ async function runSmokeTest(): Promise<void> {
 		await smokeTestMnemopiEmbedWorker();
 		await smokeTestDaemon();
 		await smokeTestSubagentWorker();
+		const { smokeTestNativePaneRelay }: typeof NativePaneSmoke = require("./modes/native-workspace/smoke");
+		await smokeTestNativePaneRelay();
 	} finally {
 		await cleanupDaemon();
 	}
@@ -236,7 +241,14 @@ const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 
-async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
+async function runWorkerEntrypoint(args: readonly string[]): Promise<boolean> {
+	const [arg, endpoint] = args;
+	if (arg === NATIVE_PANE_WORKER_ARG) {
+		if (!endpoint) throw new Error("Native workspace pane endpoint is required");
+		const { runNativePaneRelay }: typeof NativePaneRelay = require("./modes/native-workspace/relay");
+		await runNativePaneRelay(endpoint);
+		return true;
+	}
 	if (arg === TINY_WORKER_ARG) {
 		await runTinyWorker();
 		return true;
@@ -547,7 +559,7 @@ export async function runCli(argv: string[]): Promise<void> {
 	if (isWorker) {
 		// Invoke dispatch first so its inbox is installed before asynchronous
 		// process-name setup yields; neither dependency belongs in prepaint.
-		const [dispatched] = await Promise.all([runWorkerEntrypoint(workerSelector), setFullProcessName()]);
+		const [dispatched] = await Promise.all([runWorkerEntrypoint(resolvedArgv), setFullProcessName()]);
 		if (!dispatched) {
 			process.stderr.write(`Error: unknown worker selector: ${workerSelector}\n`);
 			process.exitCode = 1;
