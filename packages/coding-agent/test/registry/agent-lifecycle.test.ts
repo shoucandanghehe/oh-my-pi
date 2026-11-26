@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -141,6 +142,42 @@ describe("AgentLifecycleManager", () => {
 		expect(ref?.session).toBeNull();
 		expect(ref?.sessionFile).toBe("/tmp/1-Sub.jsonl");
 		expect(lifecycle.has("1-Sub")).toBe(true);
+	});
+
+	it("leaves a pane's session live during manual compaction and starts a fresh idle TTL after it", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		let listener: ((event: AgentSessionEvent) => void) | undefined;
+		let compacting = false;
+		Object.defineProperties(stub.session, {
+			isCompacting: { get: () => compacting },
+			activeToolExecutionUpdates: { value: () => [] },
+			subscribe: {
+				value: (next: typeof listener) => {
+					listener = next;
+					return () => {
+						listener = undefined;
+					};
+				},
+			},
+		});
+		registerIdleSub("Compact-Sub", stub.session);
+		lifecycle.adopt("Compact-Sub", { idleTtlMs: TTL });
+		vi.advanceTimersByTime(TTL - 1);
+		compacting = true;
+		listener?.({ type: "manual_compaction_start" });
+		vi.advanceTimersByTime(2 * TTL);
+		await flushAsync();
+		expect(registry.get("Compact-Sub")?.status).toBe("idle");
+		expect(stub.disposeCalls()).toBe(0);
+		compacting = false;
+		listener?.({ type: "manual_compaction_end", aborted: false });
+		vi.advanceTimersByTime(TTL - 1);
+		await flushAsync();
+		expect(stub.disposeCalls()).toBe(0);
+		vi.advanceTimersByTime(1);
+		await flushAsync();
+		expect(registry.get("Compact-Sub")?.status).toBe("parked");
 	});
 
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {
