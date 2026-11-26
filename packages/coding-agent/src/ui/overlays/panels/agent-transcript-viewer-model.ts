@@ -10,8 +10,9 @@
  * read-only.
  */
 import type * as fs from "node:fs";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type Accessor, signal, untrack } from "@oh-my-pi/pi-tui";
+import { type Accessor, batch, signal, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../../config/settings";
 import { formatModelString } from "../../../config/model-resolver";
@@ -29,6 +30,7 @@ import {
 import { resolveEditToolMode } from "../../../utils/edit-mode";
 import { ToolCall, type ToolCallOptions, type ToolCallResult } from "../../transcript/tool-block";
 import type { LineValue } from "./common";
+import type { AgentViewSession } from "../../../session/agent-session-handle";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 
 export type ViewerAgentStatus = "running" | "idle" | "parked" | "aborted";
@@ -66,6 +68,8 @@ export interface AgentTranscriptViewerDeps {
 	readonly agentId: string;
 	readonly transcript: AgentTranscriptSource;
 	readonly registry: { get(id: string): ViewerAgentRef | undefined };
+	/** Independent panes can follow the active branch and uncommitted reply of a live agent. */
+	readonly liveSession?: () => AgentViewSession | undefined;
 	/** Collab guest: the host serves the transcript. */
 	readonly remote?: AgentHubRemote;
 	/** Progress snapshot source for the stats row. */
@@ -203,6 +207,7 @@ export class AgentTranscriptViewerModel {
 	/** Bumped on every change either face shows. */
 	readonly rev = signal(0);
 	readonly blocks = signal<readonly ViewerBlock[]>([]);
+	readonly streaming = signal<AssistantMessage | undefined>(undefined);
 	/** Tools and thinking expanded (Ctrl+O). */
 	readonly expanded = signal(false);
 	/** Model of the transcript (first assistant reply, else the last model change). */
@@ -227,6 +232,16 @@ export class AgentTranscriptViewerModel {
 	#remoteToken = 0;
 
 	#local: LocalState | undefined;
+	#live:
+		| {
+				session: AgentViewSession;
+				leaf: string | null;
+				count: number;
+				streaming: boolean;
+				messages: readonly AgentMessage[];
+		  }
+		| undefined;
+	#liveToolResults = new Map<string, unknown>();
 	#localUnavailable = "";
 	#loading = false;
 	#idlePolls = 0;
@@ -320,6 +335,16 @@ export class AgentTranscriptViewerModel {
 			this.#fetchRemote();
 			return;
 		}
+		const live = this.deps.liveSession?.();
+		if (live) {
+			this.#refreshLive(live);
+			return;
+		}
+		if (this.#live) {
+			this.#live = undefined;
+			this.#local = undefined;
+			this.streaming.set(undefined);
+		}
 		if (this.#loading) return;
 		const file = this.ref()?.sessionFile;
 		if (!file) {
@@ -349,6 +374,50 @@ export class AgentTranscriptViewerModel {
 		this.#loadFull(file, stat, allowAsync);
 	}
 
+	#refreshLive(session: AgentViewSession): void {
+		const live = session.agent.state.streamMessage;
+		this.streaming.set(live?.role === "assistant" ? live : undefined);
+		const leaf = session.sessionManager.getLeafId();
+		const count = session.messages.length;
+		const streaming = session.isStreaming;
+		const old = this.#live;
+		if (!(old?.session === session && old.leaf === leaf && old.count === count && old.streaming === streaming)) {
+			const messages = session.buildTranscriptSessionContext({
+				collapseCompactedHistory: true,
+				keepInFlightToolCalls: true,
+			}).messages;
+			const previous = old?.session === session ? old.messages : [];
+			const extendsBranch =
+				previous.length > 0 &&
+				previous.length <= messages.length &&
+				previous.every((message, index) => message === messages[index]);
+			const start = extendsBranch ? previous.length : 0;
+			const entries = messages.slice(start).map((message, index): SessionMessageEntryLike => ({
+				type: "message",
+				id: `live:${start + index}`,
+				parentId: null,
+				timestamp: "",
+				message,
+			}));
+			this.#live = { session, leaf, count, streaming, messages };
+			this.model = session.model?.id;
+			if (extendsBranch) this.#append(entries);
+			else {
+				this.#liveToolResults.clear();
+				batch(() => this.#rebuild(entries));
+			}
+		}
+		const updates = session.activeToolExecutionUpdates();
+		const active = new Map<string, unknown>();
+		for (const update of updates) {
+			active.set(update.toolCallId, update.partialResult);
+			if (this.#liveToolResults.get(update.toolCallId) !== update.partialResult) {
+				this.#tools.get(update.toolCallId)?.updateResult(update.partialResult as ToolCallResult, true);
+			}
+		}
+		this.#liveToolResults = active;
+	}
+
 	#clearLocal(reason: string): void {
 		if (!this.#local && this.#localUnavailable === reason) return;
 		this.#local = undefined;
@@ -375,7 +444,9 @@ export class AgentTranscriptViewerModel {
 				.readFile(file)
 				.then(data => {
 					this.#loading = false;
-					if (!this.#disposed) this.#applyFull(file, stat, data);
+					if (!this.#disposed && !this.deps.liveSession?.() && this.ref()?.sessionFile === file) {
+						this.#applyFull(file, stat, data);
+					}
 				})
 				.catch((error: unknown) => {
 					// The state stays: the next poll retries.

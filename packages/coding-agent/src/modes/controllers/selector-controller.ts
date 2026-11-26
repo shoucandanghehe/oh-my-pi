@@ -2783,6 +2783,9 @@ export class SelectorController {
 						initialSection: options?.initialSection,
 						rows: () => size().rows,
 						focusAgent: id => this.ctx.focusAgentSession(id),
+						openAgentPane: this.ctx.canOpenAgentWorkspacePane?.()
+							? id => this.ctx.openAgentWorkspacePane(id)
+							: undefined,
 						openTranscript,
 						remote,
 						sessionFile,

@@ -458,7 +458,7 @@ export class TermBackend {
 						copy:
 							options.onAppViewportSelectionCopy ??
 							(text => options.driver.writeRaw(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`)),
-						...(options.onAppViewportPasteRequest ? { paste: options.onAppViewportPasteRequest } : {}),
+						...(mount.onAppViewportPasteRequest ? { paste: mount.onAppViewportPasteRequest } : {}),
 					}),
 				options.ansiWorkspaceMainMinimum,
 			);

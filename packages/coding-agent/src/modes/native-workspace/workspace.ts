@@ -1,4 +1,4 @@
-import { createRoot, HELLO_CONFIRM_MS, type Host, type KeyEvent, type Surface, type UiNode } from "@oh-my-pi/pi-tui";
+import { createRoot, HELLO_CONFIRM_MS, type Host, type UiNode, type WorkspaceSurface } from "@oh-my-pi/pi-tui";
 import type { InputEvent, TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
 import { CURSOR_HIDE } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { NativeSurfaces, TspConnection } from "@oh-my-pi/pi-tui/native/index";
@@ -10,14 +10,7 @@ import { RemoteTerminal } from "./remote-terminal";
 import { type CellSize, SplitLayout } from "./split-layout";
 import { TernPaneClient, type TernPaneControls, type TernPanePlacement, type TernSplitPane } from "./tern-panes";
 
-export interface NativeWorkspaceSurface {
-	readonly surface: Surface;
-	readonly onKey?: (key: KeyEvent) => boolean;
-	/** Consume decoded input at this pane before it reaches the focused node. */
-	readonly intercept?: (event: InputEvent) => boolean;
-	/** Release application resources in addition to the surface, which the workspace disposes. */
-	readonly dispose?: () => void;
-}
+export type NativeWorkspaceSurface = WorkspaceSurface;
 
 export interface NativeWorkspaceView extends NativeWorkspaceSurface {
 	readonly driver: TerminalDriver;

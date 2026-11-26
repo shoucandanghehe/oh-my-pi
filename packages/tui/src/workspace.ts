@@ -8,6 +8,8 @@ export interface WorkspaceSurface {
 	readonly onKey?: (key: KeyEvent) => boolean;
 	/** Consume decoded input before it reaches this surface's focused node. Pointer cells are pane-local. */
 	readonly intercept?: (event: InputEvent) => boolean;
+	/** Right-click clipboard request from this pane when there is no selection to copy. */
+	readonly onAppViewportPasteRequest?: () => void;
 	/** Release application resources in addition to the surface, which the workspace disposes. */
 	readonly dispose?: () => void;
 }

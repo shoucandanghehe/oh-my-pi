@@ -100,8 +100,9 @@ import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type:
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../registry/agent-registry";
 import { isSessionTreeRef } from "../registry/persisted-agents";
+import { AgentPaneDraft, type AgentWorkspaceSurface, mountAgentWorkspacePane } from "./agent-workspace-pane";
 import type { AgentTreeSpend } from "./view-model/overlays/agent-hub-projection";
 import {
 	type AgentSession,
@@ -229,6 +230,8 @@ import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
+import { NativeAgentPanes } from "./controllers/native-agent-panes";
+import { NativeWorkspace } from "./native-workspace/workspace";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TerminalActivityController } from "./controllers/terminal-activity-controller";
@@ -1348,10 +1351,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.sessionName;
 	}
 	focusAgentSession(id: string): Promise<void> {
-		// Viewing an agent may revive it, passing its registry status through `running`: the
-		// tray must not read that as work (cards would regroup, a quiet tray would wake).
-		// Off a tray host, or for an agent already at work, it is simply viewed.
-		if (!this.#trayShown() || AgentRegistry.global().get(id)?.status === "running") {
+		// Viewing a parked agent can briefly report `running` during its revival.
+		// That is not work: neither the tray nor the workspace should auto-open.
+		if ((!this.#trayShown() && !this.#agentPanes) || AgentRegistry.global().get(id)?.status === "running") {
 			return this.#focusController.focusAgent(id);
 		}
 		this.#trayReviving.add(id);
@@ -1368,6 +1370,69 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	invalidatePendingFocus(): void {
 		this.#focusController.invalidatePendingFocus();
+	}
+
+	get nativeWorkspace(): NativeWorkspace | undefined {
+		return this.shell.native() ? this.#nativeWorkspace : undefined;
+	}
+
+	get #agentPanes(): NativeAgentPanes | undefined {
+		return this.nativeWorkspace ? this.#nativeAgentPanes : this.#ansiAgentPanes;
+	}
+
+	canOpenAgentWorkspacePane(): boolean {
+		return this.#agentPanes !== undefined;
+	}
+
+	async openAgentWorkspacePane(id: string): Promise<void> {
+		const panes = this.#agentPanes;
+		if (!panes) throw new Error("Agent panes require a workspace renderer");
+		if (!this.#agentPaneRef(id)) throw new Error(`Agent ${id} is not available in this session`);
+		await panes.open(id);
+	}
+
+	#agentPaneRef(id: string) {
+		if (id === MAIN_AGENT_ID) return undefined;
+		const registry = this.collabGuest?.agentRegistry ?? AgentRegistry.global();
+		const ref = registry.get(id);
+		if (ref && (this.collabGuest || isSessionTreeRef(ref, this.sessionManager.getSessionFile()))) return ref;
+		return undefined;
+	}
+
+	createAgentWorkspaceSurface(
+		agentId: string,
+		close: () => void,
+		rows: () => number,
+		writeRaw?: (data: string) => void,
+	): AgentWorkspaceSurface {
+		if (!this.#agentPaneRef(agentId)) throw new Error(`Agent ${agentId} is not available in this session`);
+		const owner = this.sessionManager.getSessionId();
+		const registry = this.collabGuest?.agentRegistry ?? AgentRegistry.global();
+		const remote = this.collabGuest?.hubRemote;
+		let draft = this.#agentPaneDrafts.get(agentId);
+		if (!draft) this.#agentPaneDrafts.set(agentId, (draft = new AgentPaneDraft()));
+		return mountAgentWorkspacePane({
+			agentId,
+			close,
+			rows,
+			writeRaw,
+			registry: { get: id => this.#agentPaneRef(id) },
+			remote,
+			lifecycle: this.collabGuest ? undefined : AgentLifecycleManager.global(),
+			draft,
+			isCurrent: () =>
+				this.sessionManager.getSessionId() === owner &&
+				(this.collabGuest?.agentRegistry ?? AgentRegistry.global()) === registry,
+			settings: this.settings,
+			knownCommand: text => this.isKnownSlashCommand(text),
+		});
+	}
+
+	#handleNativeAgentEvent(event: RegistryEvent): void {
+		if (event.ref.status === "running" && this.#trayReviving.has(event.ref.id) && event.type !== "removed") return;
+		if (event.type === "removed" || this.#agentPaneRef(event.ref.id)) {
+			this.#agentPanes?.handle(event);
+		}
 	}
 
 	/** Rebuild the pinned jump list for a `display.pinnedAgents` change. */
@@ -1437,6 +1502,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	#inspectableSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
+	#agentPaneOwner?: string;
+	readonly #agentPaneDrafts = new Map<string, AgentPaneDraft>();
+	#nativeWorkspace?: NativeWorkspace;
+	#nativeAgentPanes?: NativeAgentPanes;
+	#ansiAgentPanes?: NativeAgentPanes;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
@@ -1838,6 +1908,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		const host = this.shell.host;
 		if (!host) return;
+		const workspace = NativeWorkspace.fromEnvironment(this.sessionManager.getCwd(), host);
+		if (workspace) {
+			this.#nativeWorkspace = workspace;
+			this.#nativeAgentPanes = new NativeAgentPanes({
+				workspace,
+				create: (id, close, rows, writeRaw) => this.createAgentWorkspaceSurface(id, close, rows, writeRaw),
+				isRunning: id => this.#agentPaneRef(id)?.status === "running",
+				error: error =>
+					this.showError(`Native agent pane failed: ${error instanceof Error ? error.message : String(error)}`),
+			});
+		}
 		const updateFigureCell = (): void => {
 			const caps = host.driver.capabilities;
 			const next = caps.images ? (caps.cell ?? DEFAULT_FIGURE_CELL) : undefined;
@@ -1873,12 +1954,36 @@ export class InteractiveMode implements InteractiveModeContext {
 			untrack(() => this.shell.host?.replayHistory());
 		});
 		this.shell.setInlineMouse(this.#mouseCapture ? "any" : "off");
+		this.#effect(() => {
+			const ansi = host.ansiWorkspace;
+			if (!ansi) return;
+			ansi.active();
+			untrack(() => this.#inputController.enableEnhancedPaste());
+		});
 		// Tern routes link clicks and draws the tray itself: follow it as it comes and goes.
 		this.#effect(() => {
-			this.shell.native();
+			const native = this.shell.native();
+			const ansi = host.ansiWorkspace;
 			untrack(() => {
 				this.#syncExtensionLinkClicks();
 				this.#syncTrayHost();
+				if (!native) this.#nativeAgentPanes?.reset();
+				if (ansi !== this.#ansiAgentPanes?.options.workspace) {
+					this.#ansiAgentPanes?.reset();
+					this.#ansiAgentPanes = ansi
+						? new NativeAgentPanes({
+								workspace: ansi,
+								create: (id, close, rows) => this.createAgentWorkspaceSurface(id, close, rows),
+								isRunning: id => this.#agentPaneRef(id)?.status === "running",
+								error: error =>
+									this.showError(
+										`Agent pane failed: ${error instanceof Error ? error.message : String(error)}`,
+									),
+							})
+						: undefined;
+				}
+				const registry = this.collabGuest?.agentRegistry ?? AgentRegistry.global();
+				for (const ref of registry.list()) this.#handleNativeAgentEvent({ type: "registered", ref });
 			});
 		});
 		// Tern reads and shows this session's checkout itself: nothing to read here while it does.
@@ -3999,14 +4104,21 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	syncRunningSubagentBadge(): boolean {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
-		if (this.#agentRegistrySubscriptionTarget !== registry) {
+		const owner = this.sessionManager.getSessionId();
+		if (this.#agentRegistrySubscriptionTarget !== registry || this.#agentPaneOwner !== owner) {
 			this.#agentRegistryUnsubscribe?.();
+			this.#nativeAgentPanes?.reset();
+			this.#ansiAgentPanes?.reset();
+			this.#agentPaneDrafts.clear();
+			this.#agentPaneOwner = owner;
 			this.#agentRegistrySubscriptionTarget = registry;
-			this.#agentRegistryUnsubscribe = registry.onChange(() => {
+			this.#agentRegistryUnsubscribe = registry.onChange(event => {
 				// Restoring a roster emits one event per agent. Rebuild the badge and
 				// lists once per burst through the observer scheduler.
 				this.#scheduleObserverUiSync();
+				this.#handleNativeAgentEvent(event);
 			});
+			for (const ref of registry.list()) this.#handleNativeAgentEvent({ type: "registered", ref });
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		if (this.#runningSubagentCount !== agentIds.length) {
@@ -6967,6 +7079,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#agentRegistryUnsubscribe?.();
 		this.#agentRegistryUnsubscribe = undefined;
 		this.#agentRegistrySubscriptionTarget = undefined;
+		this.#nativeAgentPanes?.reset();
+		this.#ansiAgentPanes?.reset();
+		this.#ansiAgentPanes = undefined;
+		this.#nativeWorkspace?.dispose();
+		this.#agentPaneDrafts.clear();
 		this.#eventController.dispose();
 		this.#fireworks?.close();
 		this.statusLine.dispose();

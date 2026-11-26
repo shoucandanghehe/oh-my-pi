@@ -1100,7 +1100,7 @@ export class InputController {
 			}),
 		);
 		// A terminal already started (the startup frame) takes the mode now; one started later gets it then.
-		enhancedPaste.enable();
+		this.enableEnhancedPaste();
 	}
 
 	/**
@@ -1109,6 +1109,13 @@ export class InputController {
 	 * starts, and back from a suspend or an external program, whose handoff turned the mode off.
 	 */
 	enableEnhancedPaste(): void {
+		const active = this.ctx.shell.host?.ansiWorkspace?.active();
+		if (active !== undefined && active !== "main") {
+			// Enhanced notifications have no pane address. Side panes use bracketed paste.
+			this.#heldInput.length = 0;
+			this.#enhancedPaste?.disable();
+			return;
+		}
 		this.#enhancedPaste?.enable();
 	}
 

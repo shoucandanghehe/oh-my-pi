@@ -93,7 +93,7 @@ function liveAgentSession(manager: SessionManager, model: Model, modelRegistry: 
 	});
 }
 
-function makeHub(focusAgent: (id: string) => Promise<void>) {
+function makeHub(focusAgent: (id: string) => Promise<void>, openAgentPane?: (id: string) => Promise<void>) {
 	const agents = new AgentRegistry();
 	agents.register({
 		id: AGENT_ID,
@@ -118,6 +118,7 @@ function makeHub(focusAgent: (id: string) => Promise<void>) {
 		registry: agents,
 		irc: new IrcBus(agents),
 		focusAgent,
+		openAgentPane,
 	});
 	return { hub, doneCalls: () => doneCalls, done: done.promise };
 }
@@ -182,6 +183,30 @@ describe("Agent hub Enter activation", () => {
 		expect(focusedIds).toEqual([AGENT_ID]);
 		expect(doneCalls()).toBe(1);
 		hub.dispose();
+	});
+
+	it("p opens the independent pane while Enter still selects the Main focus view", async () => {
+		for (const [key, expected] of [
+			["p", "pane"],
+			["enter", "focus"],
+		] as const) {
+			const calls: string[] = [];
+			const { hub, done } = makeHub(
+				async id => {
+					calls.push(`focus:${id}`);
+				},
+				async id => {
+					calls.push(`pane:${id}`);
+				},
+			);
+			try {
+				hub.press(key);
+				await done;
+				expect(calls).toEqual([`${expected}:${AGENT_ID}`]);
+			} finally {
+				hub.dispose();
+			}
+		}
 	});
 
 	it("a focus failure keeps the hub open and shows the error as a notice", async () => {

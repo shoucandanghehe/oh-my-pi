@@ -158,6 +158,8 @@ export interface AgentHubProps<T extends AgentRecordLike = AgentRecordLike> {
 	readonly rows: Accessor<number>;
 	/** Focus the main view on an agent's live session (reviving it); absent: Enter opens its transcript. */
 	readonly focusAgent?: (id: string) => Promise<void>;
+	/** Open or pin an independent workspace pane without replacing Main's view. */
+	readonly openAgentPane?: (id: string) => Promise<void>;
 	/** Open an agent's transcript (at an entry). */
 	readonly openTranscript?: (id: string, entryId?: string) => void;
 	readonly remote?: AgentHubRemote;
@@ -554,6 +556,23 @@ export function AgentHub<T extends AgentRecordLike>(
 		touch();
 	};
 
+	const openPane = (): void => {
+		const ref = rows[selectedRow];
+		if (!ref || !props.openAgentPane) return;
+		notice = undefined;
+		void props.openAgentPane(ref.id).then(
+			() => {
+				if (!disposed) props.onDone();
+			},
+			(error: unknown) => {
+				if (disposed) return;
+				notice = error instanceof Error ? error.message : String(error);
+				touch();
+			},
+		);
+		touch();
+	};
+
 	const revive = (): void => {
 		const ref = rows[selectedRow];
 		if (!ref) return;
@@ -783,6 +802,9 @@ export function AgentHub<T extends AgentRecordLike>(
 				if (ref) activate(ref);
 				return true;
 			}
+			case "p":
+				openPane();
+				return true;
 			case "r":
 				revive();
 				return true;
@@ -883,6 +905,10 @@ export function AgentHub<T extends AgentRecordLike>(
 					if (ref) activate(ref);
 				}
 				return;
+		}
+		if (!activity && act === "agent-pane") {
+			openPane();
+			return;
 		}
 		if (activity) {
 			if (act === "follow") toggleFollow();
@@ -1187,6 +1213,16 @@ export function AgentHub<T extends AgentRecordLike>(
 					primary: true,
 					disabled: selected ? undefined : true,
 				},
+				...(props.openAgentPane
+					? [
+							{
+								id: "agent-pane",
+								label: "Open or pin pane",
+								keys: ["p"],
+								disabled: selected ? undefined : (true as const),
+							},
+						]
+					: []),
 				{
 					id: "revive",
 					label: "Revive",
@@ -1318,6 +1354,7 @@ export function AgentHub<T extends AgentRecordLike>(
 			counts: statusCounts,
 			aggregate,
 			notice,
+			canOpenPane: props.openAgentPane !== undefined,
 			loading,
 			filter: { ...filter },
 			entries: lazyEntries(rows, at),

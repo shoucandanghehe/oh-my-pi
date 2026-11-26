@@ -192,6 +192,7 @@ export class Shell {
 			intercept: event => this.#intercept(event, this.#interceptors.length - 1),
 			onAppViewportSelectionCopy: text => void copyToClipboard(text),
 			onAppViewportPasteRequest: () => this.onAppViewportPasteRequest?.(),
+			ansiWorkspaceMainMinimum: { minWidth: 40, minHeight: 8 },
 			...(options.native === undefined ? {} : { native: options.native }),
 			...(options.driver ? { driver: options.driver } : {}),
 			...(options.frameInterval !== undefined ? { frameInterval: options.frameInterval } : {}),

@@ -121,6 +121,60 @@ function Stats(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
 	);
 }
 
+/** Main region of a standalone agent pane. The pane's scrollback belongs to its renderer. */
+export function AgentWorkspaceTranscript(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
+	const { model } = props;
+	return (
+		<>
+			<TranscriptBlocks>
+				<For each={model.blocks}>{block => <Block model={model} block={block} />}</For>
+			</TranscriptBlocks>
+			<AssistantMessageBlock
+				model={{ message: model.streaming, finalized: false, expandThinking: model.expanded }}
+			/>
+			{() => {
+				model.rev();
+				return model.blocks().length === 0 && !model.streaming() ? (
+					<text key="empty" tone="muted" text={sanitizeErrorLine(model.placeholder(), NATIVE_LINE_WIDTH)} />
+				) : undefined;
+			}}
+		</>
+	);
+}
+
+export function AgentWorkspaceStatus(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
+	const { model } = props;
+	return (
+		<>
+			<row
+				key="agent"
+				gap="sm"
+				align="center"
+				onAction={act => {
+					if (act === "close") model.deps.onClose();
+				}}
+			>
+				<text text={model.deps.agentId} tone="accent" grow={1} truncate="end" />
+				{() => {
+					model.rev();
+					const status = model.ref()?.status;
+					return status && <badge text={status} tone={STATUS_TONE[status]} />;
+				}}
+				<EscCloseButton />
+			</row>
+			{() => {
+				model.rev();
+				const notice = model.shownNotice();
+				return (
+					notice && (
+						<text key="notice" text={sanitizeErrorLine(notice, NATIVE_LINE_WIDTH)} tone="error" wrap="word" />
+					)
+				);
+			}}
+		</>
+	);
+}
+
 export function AgentTranscriptViewer(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
 	const { model } = props;
 	const id = model.deps.agentId;

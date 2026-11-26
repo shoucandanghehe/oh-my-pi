@@ -121,6 +121,7 @@ export interface HubAgentsView {
 	readonly counts: Readonly<Record<AgentStatus, number>>;
 	readonly aggregate: AggregateMetrics;
 	readonly notice?: string;
+	readonly canOpenPane?: boolean;
 	/** The saved-agent scan still runs. */
 	readonly loading: boolean;
 	readonly filter: HubField;
@@ -628,19 +629,20 @@ function keyHints(pen: Pen, view: HubAgentsView, narrowDetails: boolean, inner: 
 	const esc = bindingGlyph("tui.select.cancel", "escape", theme);
 	const pages = `${bindingGlyph("tui.select.pageUp", "pageUp", theme)}/${bindingGlyph("tui.select.pageDown", "pageDown", theme)}`;
 	const tab = keyLabel(theme, "tab");
+	const pane = view.canOpenPane ? "  p:pane" : "";
 	if (narrowDetails)
 		return pen.theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  ${tab}:roster  ${pages}:scroll  ${ok}:open  t:${next}  ${esc}:roster`,
+			`${filter}1:agents  2:activity  ${tab}:roster  ${pages}:scroll  ${ok}:open${pane}  t:${next}  ${esc}:roster`,
 		);
 	if (inner < FULL_HINTS_WIDTH)
 		return pen.theme.fg(
 			"dim",
-			`${filter}j/k:select  ${ok}:open  t:${next}  ${tab}:details  r/x:manage  ${esc}:close`,
+			`${filter}j/k:select  ${ok}:open${pane}  t:${next}  ${tab}:details  r/x:manage  ${esc}:close`,
 		);
 	return pen.theme.fg(
 		"dim",
-		`${filter}1:agents  2:activity  j/k/wheel:select  ${pages}:details  ${ok}/click:open  t:${next}  r:revive  x:kill  ${esc}:close`,
+		`${filter}1:agents  2:activity  j/k/wheel:select  ${pages}:details  ${ok}/click:open${pane}  t:${next}  r:revive  x:kill  ${esc}:close`,
 	);
 }
 
