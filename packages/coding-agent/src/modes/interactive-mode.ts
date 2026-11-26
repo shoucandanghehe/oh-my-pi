@@ -112,7 +112,9 @@ import {
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
 import type { AgentSessionHandle, AgentViewSession } from "../session/agent-session-handle";
+import type { PausedExitParticipant } from "../session/agent-session-types";
 import { type AiuTotals, sessionAiu } from "../session/aiu-billing";
+import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../session/btw-thread";
 import type { TranscriptEntryLike } from "../session/transcript/transcript-entry";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../session/transcript/messages";
 import type { CompactMode } from "../session/compact-modes";
@@ -1777,7 +1779,26 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 
 		this.#uiHelpers = new UiHelpers(this);
-		this.#btwController = new BtwController(this);
+		this.#btwController = new BtwController(this, {
+			available: () => Boolean(this.nativeWorkspace || this.shell.host?.ansiWorkspace),
+			open: async create => {
+				const workspace = this.nativeWorkspace;
+				if (workspace) {
+					await workspace.open(
+						"btw",
+						"BTW",
+						close => create(close, () => workspace.get("btw")?.driver.rows ?? this.shell.size().rows),
+						() => {},
+					);
+					return true;
+				}
+				return this.shell.host?.ansiWorkspace?.open("btw", create, { label: "BTW", target: "main" }) ?? false;
+			},
+			close: () => {
+				this.#nativeWorkspace?.close("btw");
+				this.shell.host?.ansiWorkspace?.close("btw");
+			},
+		});
 		this.#tanCommandController = new TanCommandController(this);
 		this.#omfgController = new OmfgController(this);
 		this.#cleanseController = new CleanseCommandController(this);
@@ -2236,7 +2257,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: async reason => {
 				if (this.#pausedExitRequested) {
-					await this.session.disposeForPausedExit();
+					await this.session.disposeForPausedExit(this.getPausedExitParticipants());
 					return;
 				}
 				await this.#btwController.dispose();
@@ -7395,7 +7416,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				await this.#signalTeardown();
 			} else if (this.#pausedExitRequested) {
 				await this.sessionManager.saveDraft(this.#inputController.getDraftText());
-				await this.session.disposeForPausedExit();
+				await this.session.disposeForPausedExit(this.getPausedExitParticipants());
 			} else {
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
@@ -8613,6 +8634,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.handleBranch();
 	}
 
+	handleBtwOpenThreadKey(): boolean {
+		if (!this.#btwController.handlesOpenThreadKey()) return false;
+		void this.#btwController.handleOpenThread();
+		return true;
+	}
+
+	getPausedExitParticipants(): readonly PausedExitParticipant[] {
+		return this.#btwController.getPausedExitParticipants();
+	}
+
 	canCopyBtw(): boolean {
 		return this.#btwController.canCopy();
 	}
@@ -8661,6 +8692,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			this.showError(`Cannot branch /btw: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	async handleBtwPromotion(request: BtwPromotionRequest, lifecycle: BtwPromotionLifecycle): Promise<boolean> {
+		const result = await this.session.branchFromBtw(request, lifecycle);
+		if (result.cancelled) return false;
+		this.#omfgController.dispose();
+		this.#cleanseController.dispose();
+		await this.renderInitialMessages({ clearTerminalHistory: true });
+		this.updateEditorBorderColor();
+		this.showStatus(result.sessionFile ? `Branched /btw to ${path.basename(result.sessionFile)}` : "Branched /btw");
+		return true;
 	}
 
 	handleOmfgCommand(complaint: string): Promise<void> {

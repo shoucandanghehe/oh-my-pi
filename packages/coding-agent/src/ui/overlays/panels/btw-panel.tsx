@@ -84,6 +84,7 @@ export interface BtwPanelProps {
 	onBranch?(): void;
 	onInject?(): void;
 	onFollowUp?(): void;
+	onOpenThread?(): void;
 }
 
 /** What the footer says beside its hints. */
@@ -99,26 +100,27 @@ function footerOf(props: BtwPanelProps): Footer {
 	const status = state.status();
 	const copied = state.copied();
 	const hasText = state.answer().trim() !== "";
+	const open = props.onOpenThread ? [{ keys: ["enter"], label: "to open thread" }] : [];
 	const symbols = currentTheme().symbols;
 	return untrack(() => {
 		switch (status) {
 			case "streaming":
-				return { hints: [{ keys: interruptKbd(), label: "to cancel" }] };
+				return { hints: [...open, { keys: interruptKbd(), label: "to cancel" }] };
 			case "branching":
 				return { hints: [], note: { s: "muted", t: `${symbols.symbol("status.pending")} Branching to chat…` } };
 			case "aborted":
 				return {
 					status: { s: "warning", t: `${symbols.symbol("status.warning")} Cancelled` },
-					hints: [{ keys: interruptKbd(), label: "to close" }],
+					hints: [...open, { keys: interruptKbd(), label: "to close" }],
 				};
 			case "error":
 				return {
 					status: { s: "error", t: `${symbols.symbol("status.error")} Error` },
-					hints: [{ keys: interruptKbd(), label: "to close" }],
+					hints: [...open, { keys: interruptKbd(), label: "to close" }],
 				};
 		}
-		if (!hasText) return { hints: [{ keys: interruptKbd(), label: "to close" }] };
-		const hints: KeyHint[] = [];
+		if (!hasText) return { hints: [...open, { keys: interruptKbd(), label: "to close" }] };
+		const hints: KeyHint[] = [...open];
 		if (props.canInject?.()) hints.push({ keys: ["alt", "i"], label: "to inject" });
 		hints.push({ keys: ["c"], label: copied ? "to copy again" : "to copy" });
 		if (props.canBranch?.() ?? true) hints.push({ keys: ["b"], label: "to branch" });
@@ -172,6 +174,7 @@ export function BtwPanel(props: BtwPanelProps): JSXNode {
 				return { title: title ?? `/btw ${props.question}`, copied };
 			}}
 			onKey={key => {
+				if (key.kind === "release") return false;
 				const status = untrack(state.status);
 				if (matchesAppInterrupt(key)) {
 					if (status === "streaming") props.onCancel?.();
@@ -179,6 +182,10 @@ export function BtwPanel(props: BtwPanelProps): JSXNode {
 					return true;
 				}
 				switch (key.id) {
+					case "enter":
+						if (!props.onOpenThread || status === "branching") return false;
+						props.onOpenThread();
+						return true;
 					case "c":
 						if (status !== "complete") return false;
 						props.onCopy?.();

@@ -1,8 +1,12 @@
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import { serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage, ImageContent, Message } from "@oh-my-pi/pi-ai";
 import { jsx, type KeyEvent, type PasteEvent, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "../../utils/text-width";
 import type { TspMenuEntry } from "@oh-my-pi/pi-wire";
-import { logger, toError, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, prompt, Snowflake, toError, withTimeout } from "@oh-my-pi/pi-utils";
+import btwConversationPrompt from "../../prompts/system/btw-conversation.md" with { type: "text" };
+import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
+import type { AgentSession } from "../../session/agent-session";
 import {
 	type BtwHistoryRecord,
 	type BtwHistoryTurn,
@@ -14,12 +18,25 @@ import {
 	getBtwTurns,
 } from "../../session/btw-history";
 import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
+import { BtwManager, type BtwThread } from "../../session/btw-manager";
+import { BtwSessionStore } from "../../session/btw-session-store";
+import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../../session/btw-thread";
+import { projectBtwMessages } from "../../session/ephemeral-conversation";
+import { parseCompactArgs } from "../../session/compact-modes";
+import { type CompactionQueuedMessage, sessionCommandQueue } from "../../session/session-command-queue";
+import { lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel, btwHistorySheet } from "../../ui/overlays/panels/btw-history-panel";
 import { BtwHistoryModel } from "../../ui/overlays/panels/btw-history-panel-model";
 import { BtwPanel, BtwPanelState } from "../../ui/overlays/panels/btw-panel";
 import { BtwNote } from "../../ui/overlays/panels/btw-note";
+import {
+	BtwConversationPane,
+	type BtwPaneDraft,
+	type BtwQueueEdit,
+} from "../../ui/overlays/panels/btw-conversation-pane";
 import type { OverlayHandle, TranscriptBlock } from "../../ui/shell";
 import { actionKey } from "../../ui/keys/hints";
 import { canonicalKeyId } from "../../config/keybindings/key-id";
@@ -28,9 +45,44 @@ import { BTW_INJECT_LABEL, type BtwInjectState } from "../view-model/overlays/bt
 import { type BtwNoteAction, type BtwNoteHost } from "../view-model/overlays/btw-note";
 import { sanitizeErrorLine } from "../view-model/chrome/error-block";
 import type { AgentViewSession, AgentViewSessionManager } from "../../session/agent-session-handle";
-import type { DroppedPrompt } from "../../session/agent-session-types";
+import type { DroppedPrompt, PausedExitParticipant } from "../../session/agent-session-types";
 import { cfgBtwInject } from "../settings";
+import type { NativeWorkspaceSurface } from "../native-workspace/workspace";
+import { conversationPosition } from "../utils/conversation-position";
+import { shiftImageMarkers } from "../view-model/prompt/composer-attachments";
+import { parseQueueShorthand, splitQueuedMessages } from "../view-model/prompt/queue-input";
 import type { InteractiveModeContext } from "../types";
+
+export interface BtwWorkspaceAdapter {
+	available?(): boolean;
+	open(create: (close: () => void, rows: () => number) => NativeWorkspaceSurface): Promise<boolean>;
+	close(): void;
+}
+
+type BtwHost = InteractiveModeContext & {
+	handleBtwPromotion?(request: BtwPromotionRequest, lifecycle: BtwPromotionLifecycle): Promise<boolean>;
+};
+
+interface DurableWorkspace {
+	readonly owner: AgentSession;
+	readonly sessionId: string;
+	readonly artifactsDir: string | null;
+	readonly manager: BtwManager;
+}
+
+interface BtwSubmissionState {
+	tail: Promise<void>;
+	generation: number;
+}
+
+interface QuickAnswer {
+	readonly workspace: DurableWorkspace;
+	readonly key: string;
+	readonly panel: BtwPanelState;
+}
+
+const memoryStores = new WeakMap<object, { sessionId: string; store: BtwSessionStore }>();
+const threadSubmissions = new WeakMap<BtwThread, BtwSubmissionState>();
 
 interface BtwRequest {
 	/** The inline panel's state (also drives copy/branch eligibility). */
@@ -150,7 +202,27 @@ export class BtwController {
 	/** Turns whose send waits for startup-deferred extensions; `dispose()` cancels them back to ready. */
 	readonly #awaitingExtensions = new Set<string>();
 
-	constructor(private readonly ctx: InteractiveModeContext) {}
+	#durable: DurableWorkspace | undefined;
+	#openingDurable: Promise<DurableWorkspace> | undefined;
+	#pane: BtwConversationPane | undefined;
+	#quick: QuickAnswer | undefined;
+	readonly #durableRevision = signal(0);
+	readonly #pausedExit: PausedExitParticipant = {
+		label: "BTW",
+		prepareForPausedExit: () => {
+			this.#pane?.saveDraft();
+			this.#durable?.manager.prepareForPausedExit();
+		},
+		continuePaused: async () => (await this.#durableWorkspace()).manager.continuePaused(),
+	};
+	constructor(
+		private readonly ctx: BtwHost,
+		private readonly workspace?: BtwWorkspaceAdapter,
+	) {}
+
+	getPausedExitParticipants(): readonly PausedExitParticipant[] {
+		return this.workspace ? [this.#pausedExit] : [];
+	}
 
 	/** /btw asks about the transcript on screen: the focused agent's session, else main. */
 	get #sessionManager(): AgentViewSessionManager {
@@ -164,7 +236,7 @@ export class BtwController {
 
 	/** Whether /btw owns Escape: the inline panel, or a note the composer talks to. */
 	hasActiveRequest(): boolean {
-		return this.#visible || this.#focus() !== undefined;
+		return this.#quick !== undefined || this.#visible || this.#focus() !== undefined;
 	}
 
 	/** Whether the composer talks to a note: its drafts go to {@link submitFollowUp}. */
@@ -179,6 +251,7 @@ export class BtwController {
 	}
 
 	canBranch(): boolean {
+		if (this.#quick) return isCopyable(this.#quick.panel) && this.#canPromote(this.#quick.workspace, this.#quick.key);
 		return this.#branchUnavailableReason() === undefined;
 	}
 
@@ -189,6 +262,7 @@ export class BtwController {
 
 	/** Whether plain `b` is currently reserved for a completed or pending branch action. */
 	handlesBranchKey(): boolean {
+		if (this.#quick) return this.canBranch();
 		if (this.#branchInFlight) return true;
 		const request = this.#activeRequest;
 		if (!this.#answerShown() || !request || !isCopyable(request.panel)) return false;
@@ -227,6 +301,7 @@ export class BtwController {
 	}
 
 	canCopy(): boolean {
+		if (this.#quick) return !this.#copyInFlight && isCopyable(this.#quick.panel);
 		return (
 			this.#visible &&
 			!this.#copyInFlight &&
@@ -258,11 +333,19 @@ export class BtwController {
 	}
 
 	async handleCopy(): Promise<boolean> {
+		const quick = this.#quick;
+		if (quick && this.canCopy()) {
+			const copied = await this.#copyAnswer(visibleAnswer(quick.panel));
+			if (copied && this.#quick === quick) quick.panel.markCopied();
+			return copied;
+		}
 		if (!this.canCopy() || this.#lastCopyText === undefined) return false;
 		return this.#copyAnswer(this.#lastCopyText);
 	}
 
 	async handleBranch(): Promise<boolean> {
+		const quick = this.#quick;
+		if (quick) return this.#promote(quick.workspace, quick.key);
 		const unavailableReason = this.#branchUnavailableReason();
 		if (unavailableReason) {
 			this.ctx.showStatus(`/btw branch unavailable: ${unavailableReason}`, { dim: true });
@@ -293,6 +376,10 @@ export class BtwController {
 	handleEscape(): boolean {
 		if (this.#branchInFlight) {
 			this.ctx.showStatus("/btw branch is in progress", { dim: true });
+			return true;
+		}
+		if (this.#quick) {
+			this.#dismissQuick(true);
 			return true;
 		}
 		if (this.#focus.peek() !== undefined) {
@@ -475,6 +562,11 @@ export class BtwController {
 	}
 
 	handleCancel(): boolean {
+		const quick = this.#quick;
+		if (quick?.workspace.manager.thread(quick.key)?.phase === "running") {
+			void quick.workspace.manager.abort(quick.key).catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+			return true;
+		}
 		const request = this.#activeRequest;
 		if (!request || getBtwLatestTurn(request.record).status !== "running") return false;
 		this.#updateRequest(request, { status: "cancelled", updatedAt: Date.now() });
@@ -493,10 +585,12 @@ export class BtwController {
 		this.#awaitingExtensions.clear();
 		this.#transitionCount++;
 		try {
+			await this.#openingDurable?.catch(() => undefined);
 			this.handleCancel();
 			// A timeout must stop the caller before it moves/deletes the old path.
 			// Keep the current view/store available until outstanding writes settle.
 			await this.flush();
+			await this.#disposeDurable();
 			this.#closeHistory();
 			this.#hideInline();
 			this.#setFocus(undefined);
@@ -516,7 +610,7 @@ export class BtwController {
 
 	async flush(timeoutMs = 10_000): Promise<void> {
 		await withTimeout(
-			this.#drainWrites(),
+			Promise.all([this.#drainWrites(), this.#durable?.manager.flushEvents()]).then(() => undefined),
 			timeoutMs,
 			"BTW history is still being saved. The session operation was stopped; retry when storage responds.",
 		);
@@ -545,6 +639,7 @@ export class BtwController {
 			this.#starting ||
 			this.#branchInFlight ||
 			this.#transitionCount > 0 ||
+			(this.#durable && this.#hasDurableWork(this.#durable)) ||
 			(this.#activeRequest && getBtwLatestTurn(this.#activeRequest.record).status === "running")
 		) {
 			this.ctx.showStatus("Wait for the current /btw answer to finish or cancel it before moving.", { dim: true });
@@ -578,7 +673,21 @@ export class BtwController {
 		const artifactsDir = this.#sessionManager.getArtifactsDir() ?? undefined;
 		const scope = this.#historyScope;
 		if (!this.#storeMatchesView()) {
-			await this.dispose();
+			this.#generation++;
+			if (this.#activeRequest && getBtwLatestTurn(this.#activeRequest.record).status === "running")
+				this.handleCancel();
+			await this.flush();
+			this.#closeHistory();
+			if (this.#activeRequest) {
+				this.#hideInline();
+				this.#activeRequest.panel.close();
+				this.#activeRequest = undefined;
+			}
+			this.#setFocus(undefined);
+			this.#notes.clear();
+			this.#clearCompletedState();
+			this.#store = undefined;
+			this.#storePromise = undefined;
 			if (
 				this.#sessionManager.getSessionId() !== sessionId ||
 				(this.#sessionManager.getArtifactsDir() ?? undefined) !== artifactsDir ||
@@ -607,7 +716,770 @@ export class BtwController {
 	 * `title` heads the topic instead of the question, e.g. `/sitrep` rather than its expanded template.
 	 */
 	start(question: string, images?: ImageContent[], title?: string): Promise<boolean> {
-		return this.#start(question, undefined, undefined, images, title);
+		const input = question.trim();
+		if (input === "--history") return this.#start("").then(opened => opened && !images?.length);
+		if (!this.workspace || this.workspace.available?.() === false || this.ctx.focusedAgentId || this.ctx.collabGuest)
+			return this.#start(question, undefined, undefined, images, title);
+		return this.#startDurable(input, images, title);
+	}
+
+	async #durableWorkspace(): Promise<DurableWorkspace> {
+		const owner = this.ctx.session;
+		const sessionManager = owner.sessionManager;
+		const sessionId = sessionManager.getSessionId();
+		const artifactsDir = sessionManager.getArtifactsDir();
+		const current = this.#durable;
+		if (current?.owner === owner && current.sessionId === sessionId && current.artifactsDir === artifactsDir)
+			return current;
+		if (this.#openingDurable) return this.#openingDurable;
+		const opening = (async () => {
+			await this.#disposeDurable();
+			const memory = memoryStores.get(sessionManager);
+			const store =
+				!artifactsDir && memory?.sessionId === sessionId
+					? memory.store
+					: await BtwSessionStore.open(
+							artifactsDir ?? undefined,
+							sessionManager.getCwd(),
+							sessionManager.getEntries(),
+						);
+			try {
+				if (owner !== this.ctx.session || sessionId !== sessionManager.getSessionId())
+					throw new Error("Main session changed while opening BTW");
+				const manager = new BtwManager({
+					restoredThreads: store.getRecords(),
+					appendEvent: event => store.appendEvent(event),
+					removeSession: key => store.removeSession(key),
+					flushEvents: () => store.flush(),
+					closeEvents: () => store.close(),
+					createConversation: (ref, checkpoint, sideOptions) => {
+						const active = owner.model;
+						const model =
+							active?.provider === ref.provider && active.id === ref.id
+								? active
+								: owner.findModel(ref.provider, ref.id);
+						if (!model) throw new Error(`BTW model is unavailable: ${ref.provider}/${ref.id}`);
+						return owner.createEphemeralConversation(btwConversationPrompt, checkpoint, model, sideOptions);
+					},
+					createSideOptions: key => ({
+						sessionManager: store.getSessionManager(key),
+						onSessionClosed: closed => store.adoptClosedSession(key, closed),
+						approveSummary: (summary, signal) => this.#approveSummary(workspace, key, summary, signal),
+						sendToMainSession: summary => {
+							if (!this.#owns(workspace)) throw new Error("Main session changed before BTW summary delivery");
+							return owner.publishBtwSummary({
+								threadKey: key,
+								threadTitle: manager.thread(key)?.title ?? "BTW",
+								summary,
+							});
+						},
+					}),
+					generateTitle: input => owner.generateTitle(input),
+					nextKey: () => `btw-${Snowflake.next()}`,
+					now: Date.now,
+					onChange: () => {
+						this.#refreshDurable();
+						this.#pane?.syncDraft();
+						if (this.#transitionCount > 0) return;
+						for (const thread of manager.children) {
+							const session = thread.conversation.session;
+							if (!session || session.isCompacting) continue;
+							const queue = sessionCommandQueue(session);
+							if (queue.messages.length && !queue.holdsInput)
+								void this.#flushThreadQueue(workspace, thread, session);
+						}
+					},
+				});
+				const workspace = { owner, sessionId, artifactsDir, manager };
+				if (!artifactsDir) memoryStores.set(sessionManager, { sessionId, store });
+				this.#durable = workspace;
+				return workspace;
+			} catch (error) {
+				await store.close();
+				throw error;
+			}
+		})();
+		this.#openingDurable = opening;
+		try {
+			return await opening;
+		} finally {
+			if (this.#openingDurable === opening) this.#openingDurable = undefined;
+		}
+	}
+
+	#owns(workspace: DurableWorkspace): boolean {
+		return (
+			this.#durable === workspace &&
+			this.ctx.session === workspace.owner &&
+			workspace.owner.sessionManager.getSessionId() === workspace.sessionId
+		);
+	}
+
+	#refreshDurable(): void {
+		this.#durableRevision.set(this.#durableRevision.peek() + 1);
+	}
+
+	closeView(): void {
+		this.workspace?.close();
+	}
+
+	async #disposeDurable(): Promise<void> {
+		const workspace = this.#durable;
+		if (!workspace) return;
+		this.#dismissQuick(false);
+		this.closeView();
+		for (const thread of workspace.manager.children) {
+			const session = thread.conversation.session;
+			if (session) this.#restoreThreadQueue(workspace, thread.key, session);
+		}
+		if (this.#owns(workspace)) await workspace.manager.dispose();
+		else await workspace.manager.abandon();
+		if (this.#durable === workspace) this.#durable = undefined;
+	}
+
+	async #startDurable(input: string, images?: ImageContent[], title?: string): Promise<boolean> {
+		if (this.#starting || this.#branchInFlight || this.#transitionCount > 0) return false;
+		const legacy = this.#activeRequest;
+		if (legacy && getBtwLatestTurn(legacy.record).status === "running") {
+			this.ctx.showStatus("A /btw question is still running. Wait for it or cancel it first.", { dim: true });
+			return false;
+		}
+		if (input === "--clear" || input === "clear") {
+			this.#dismissQuick(true);
+			if (this.ctx.shell.native()) this.closeView();
+			this.ctx.showStatus("Dismissed the inline BTW panel; the thread is kept", { dim: true });
+			return !images?.length;
+		}
+		this.#starting = true;
+		const generation = this.#generation;
+		try {
+			await this.ctx.sessionManager.ensureOnDisk();
+			if (generation !== this.#generation) return false;
+			const workspace = await this.#durableWorkspace();
+			if (generation !== this.#generation || !this.#owns(workspace)) return false;
+			this.#closeHistory();
+			this.#setFocus(undefined);
+			if (!input && !images?.length) return await this.#openDurable(workspace, this.#quick?.key);
+			const { manager } = workspace;
+			const previous = manager.activeKey;
+			this.#dismissQuick(true);
+			const key = this.#createThread(workspace, input, title);
+			if (!key) return false;
+			if (this.#pane && previous) manager.select(previous);
+			const quick = { workspace, key, panel: new BtwPanelState(title) };
+			this.#quick = quick;
+			this.#hideInline();
+			this.ctx.shell.dock.slot("btw").set(() =>
+				BtwPanel({
+					question: input,
+					state: quick.panel,
+					canFollowUp: () => false,
+					canBranch: () => this.canBranch(),
+					onOpenThread: () => void this.handleOpenThread(),
+					onClose: () => this.handleEscape(),
+					onCancel: () => this.handleEscape(),
+					onCopy: () => void this.handleCopy(),
+					onBranch: () => void this.handleBranch(),
+				}),
+			);
+			this.ctx.terminalActivity.set(quick, "working");
+			const turn = manager.prompt(key, input, delta => quick.panel.appendText(delta), undefined, images);
+			void turn
+				.then(
+					result => {
+						if (!result) return;
+						quick.panel.setAnswer(result.replyText);
+						quick.panel.markComplete();
+						if (this.#quick === quick || (manager.activeKey === key && this.#pane)) manager.markRead(key);
+					},
+					error => {
+						if (manager.thread(key)?.phase === "error") quick.panel.markError(toError(error).message);
+						else quick.panel.markAborted();
+					},
+				)
+				.finally(() => this.ctx.terminalActivity.release(quick));
+			await manager.flushEvents();
+			return true;
+		} catch (error) {
+			this.ctx.showError(sanitizeErrorLine(`Cannot open /btw: ${toError(error).message}`));
+			return false;
+		} finally {
+			this.#starting = false;
+		}
+	}
+
+	handlesOpenThreadKey(): boolean {
+		return this.#quick !== undefined && !this.#branchInFlight;
+	}
+
+	async handleOpenThread(): Promise<boolean> {
+		const quick = this.#quick;
+		return quick && this.handlesOpenThreadKey() ? this.#openDurable(quick.workspace, quick.key) : false;
+	}
+
+	#dismissQuick(cancel: boolean): void {
+		const quick = this.#quick;
+		if (!quick) return;
+		if (cancel) this.handleCancel();
+		this.#quick = undefined;
+		this.ctx.terminalActivity.release(quick);
+		quick.panel.close();
+		this.ctx.shell.dock.slot("btw").clear();
+	}
+
+	async #openDurable(workspace: DurableWorkspace, key?: string): Promise<boolean> {
+		if (!this.workspace || !this.#owns(workspace)) return false;
+		const { manager } = workspace;
+		try {
+			if (key && !manager.select(key)) return false;
+			const opened = await this.workspace.open((close, rows) => {
+				const pane = new BtwConversationPane({
+					cwd: workspace.owner.sessionManager.getCwd(),
+					rows,
+					keybindings: this.ctx.keybindings,
+					revision: this.#durableRevision,
+					threads: () => manager.children,
+					selected: () => (manager.activeKey === undefined ? undefined : manager.thread(manager.activeKey)),
+					select: key => {
+						manager.select(key);
+						manager.markRead(key);
+					},
+					setDraft: (key, draft) => manager.setDraft(key, draft.text, draft.images, draft.imageLinks),
+					persistDraft: key => manager.persistDraft(key),
+					submit: (key, input, mode) => this.#sendThreadInput(workspace, key, input, mode),
+					newThread: () => void this.#createThread(workspace, ""),
+					cancel: key => this.#stopThread(workspace, key),
+					dequeue: key => this.#dequeueThread(workspace, key),
+					editQueued: (key, message) => this.#editThreadQueue(workspace, key, message),
+					delete: key => void this.#deleteThread(workspace, key),
+					copy: key => {
+						const reply = manager.thread(key)?.turns.at(-1)?.replyText;
+						if (reply) void this.#copyAnswer(reply);
+					},
+					canPromote: key => this.#canPromote(workspace, key),
+					promote: key => void this.#promote(workspace, key),
+					close,
+					showError: error => this.ctx.showError(sanitizeErrorLine(error)),
+					dictation: this.ctx.dictationSpaceHold ? target => this.ctx.dictationSpaceHold(target) : undefined,
+					hideThinking: () => this.ctx.hideThinkingBlock,
+					proseOnlyThinking: () => this.ctx.proseOnlyThinking,
+				});
+				this.#pane = pane;
+				return {
+					surface: pane.surface,
+					onKey: pane.onKey,
+					intercept: pane.intercept,
+					onAppViewportPasteRequest: pane.onAppViewportPasteRequest,
+					dispose: () => {
+						if (this.#pane === pane) this.#pane = undefined;
+						pane.dispose();
+						void manager.flushEvents().catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+					},
+				};
+			});
+			if (!opened || !this.#owns(workspace) || !this.#pane) return false;
+			this.#dismissQuick(false);
+			if (manager.activeKey) manager.markRead(manager.activeKey);
+			return true;
+		} catch (error) {
+			if (this.#owns(workspace))
+				this.ctx.showError(sanitizeErrorLine(`Could not open BTW pane: ${toError(error).message}`));
+			return false;
+		}
+	}
+
+	#createThread(workspace: DurableWorkspace, input: string, title?: string): string | undefined {
+		if (!this.#owns(workspace) || this.#branchInFlight || this.#transitionCount > 0) return undefined;
+		const model = workspace.owner.model;
+		const leafId = workspace.owner.sessionManager.getLeafId();
+		if (!model || !leafId) {
+			this.ctx.showError(!model ? "No active model available for BTW." : "Cannot start BTW before Main has a leaf");
+			return undefined;
+		}
+		return workspace.manager.createChild(input, leafId, { provider: model.provider, id: model.id }, title);
+	}
+
+	async #deleteThread(workspace: DurableWorkspace, key: string): Promise<void> {
+		if (!this.#owns(workspace) || this.#branchInFlight || this.#transitionCount > 0) return;
+		try {
+			if ((await workspace.manager.remove(key, "deleted")) && this.#owns(workspace)) {
+				if (this.#quick?.key === key) this.#dismissQuick(false);
+				if (workspace.manager.children.length === 0) this.closeView();
+			}
+		} catch (error) {
+			this.ctx.showError(sanitizeErrorLine(`Could not delete BTW thread: ${toError(error).message}`));
+		}
+	}
+
+	#sendThreadInput(
+		workspace: DurableWorkspace,
+		source: string | undefined,
+		input: BtwPaneDraft,
+		mode: "steer" | "followUp",
+	): boolean {
+		if (!this.#owns(workspace) || this.#branchInFlight || this.#transitionCount > 0) return false;
+		const text = input.text.trim();
+		if (!text && !input.images.length) return false;
+		const { manager } = workspace;
+		const command = parseSlashCommand(text);
+		let key = source;
+		let question = text;
+		if (command?.name === "new") {
+			if (source) {
+				manager.setDraft(source, "");
+				manager.persistDraft(source);
+			}
+			question = command.args;
+			key = this.#createThread(workspace, question);
+			if (!key) return false;
+			if (!question && !input.images.length) return true;
+		} else if (command) {
+			switch (command.name) {
+				case "help":
+					this.ctx.showStatus(
+						"BTW: /new · /queue · /stop · /retry · /compact · /tree · /continue · /handoff · /promote · /delete",
+					);
+					return false;
+				case "queue":
+				case "compact":
+				case "tree":
+					break;
+				case "delete":
+					if (!key) return false;
+					void this.#deleteThread(workspace, key);
+					return true;
+				case "stop":
+					if (!key) return false;
+					this.#stopThread(workspace, key);
+					return true;
+				case "continue":
+					void this.#pausedExit
+						.continuePaused()
+						.then(result => {
+							this.ctx.showStatus(`Resumed ${result.continued} paused BTW threads`);
+							if (result.skipped.length) this.ctx.showError(result.skipped.join("; "));
+						})
+						.catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+					return true;
+				case "retry":
+					if (!key) return false;
+					void manager
+						.session(key)
+						.then(session => session.retry())
+						.catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+					return true;
+				case "handoff":
+					if (!key) return false;
+					void this.#handoff(workspace, key, command.args);
+					return true;
+				case "promote":
+					if (!key || !this.#canPromote(workspace, key)) return false;
+					void this.#promote(workspace, key);
+					return true;
+				default:
+					if (lookupBuiltinSlashCommand(command.name) || this.ctx.isKnownSlashCommand(text)) {
+						this.ctx.showError(`This command is not available in BTW: /${command.name}`);
+						return false;
+					}
+			}
+		}
+		if (!key && (command?.name === "tree" || command?.name === "compact")) return false;
+		key ??= this.#createThread(workspace, question);
+		const thread = key && manager.thread(key);
+		if (!thread) return false;
+		const shorthand = parseQueueShorthand(question);
+		const queueBody = command?.name === "queue" ? command.args : shorthand;
+		const parts = queueBody === undefined ? [question] : splitQueuedMessages(queueBody);
+		if (!parts.length && input.images.length) parts.push("");
+		if (!parts.length) {
+			this.ctx.showError("Usage: /queue <message>");
+			return false;
+		}
+		const messages: CompactionQueuedMessage[] = parts.map((part, index) => ({
+			text: part,
+			mode: queueBody === undefined ? mode : "followUp",
+			images: index === 0 ? input.images : undefined,
+			imageLinks: index === 0 ? input.imageLinks : undefined,
+		}));
+		for (const message of messages) {
+			const parsed = parseSlashCommand(message.text);
+			if (!parsed) continue;
+			if (parsed.name === "compact") {
+				const compact = parseCompactArgs(parsed.args);
+				const error =
+					"error" in compact
+						? compact.error
+						: message.images?.length
+							? "/compact does not accept attachments"
+							: undefined;
+				if (error) {
+					this.ctx.showError(error);
+					return false;
+				}
+			} else if (parsed.name === "tree" && queueBody === undefined && message.mode === "steer") {
+				if (parsed.args || message.images?.length) {
+					this.ctx.showError("Usage: /tree");
+					return false;
+				}
+			} else if (
+				queueBody !== undefined &&
+				(lookupBuiltinSlashCommand(parsed.name) || this.ctx.isKnownSlashCommand(message.text))
+			) {
+				this.ctx.showError(`This command cannot be queued in BTW: /${parsed.name}`);
+				return false;
+			}
+		}
+		const state = threadSubmissions.get(thread) ?? { tail: Promise.resolve(), generation: 0 };
+		threadSubmissions.set(thread, state);
+		const generation = state.generation;
+		const stillCurrent = () =>
+			this.#owns(workspace) &&
+			this.#transitionCount === 0 &&
+			manager.thread(thread.key) === thread &&
+			generation === state.generation;
+		const dispatch = state.tail.then(async () => {
+			if (!stillCurrent()) throw new Error("BTW input interrupted before submission");
+			const session = await manager.session(thread.key);
+			if (!stillCurrent()) throw new Error("BTW input interrupted before submission");
+			for (const [index, message] of messages.entries()) {
+				try {
+					if (!stillCurrent()) throw new Error("BTW input interrupted before submission");
+					await this.#dispatchThread(workspace, thread, session, message);
+				} catch (error) {
+					if (index === 0) throw error;
+					for (const remaining of messages.slice(index).reverse())
+						this.#restoreThreadDraft(workspace, thread.key, remaining);
+					this.ctx.showError(sanitizeErrorLine(error));
+					return;
+				}
+			}
+		});
+		state.tail = dispatch.catch(error => {
+			this.#restoreThreadDraft(workspace, thread.key, input);
+			if (this.#owns(workspace)) this.ctx.showError(sanitizeErrorLine(error));
+		});
+		return true;
+	}
+
+	#restoreThreadDraft(
+		workspace: DurableWorkspace,
+		key: string,
+		input: { text: string; images?: ImageContent[]; imageLinks?: (string | undefined)[] },
+	): void {
+		const { manager } = workspace;
+		const thread = manager.thread(key);
+		if (!this.#owns(workspace) || !thread) return;
+		const images = input.images ?? [];
+		manager.setDraft(
+			key,
+			[shiftImageMarkers(input.text, thread.draftImages.length, images.length), thread.draft]
+				.filter(Boolean)
+				.join("\n\n"),
+			[...thread.draftImages, ...images],
+			[...thread.draftImageLinks, ...(input.imageLinks ?? images.map(() => undefined))],
+		);
+		manager.persistDraft(key);
+		this.#pane?.restoreDraft(key);
+	}
+
+	async #dispatchThread(
+		workspace: DurableWorkspace,
+		thread: BtwThread,
+		session: AgentSession,
+		message: CompactionQueuedMessage,
+		draining = false,
+	): Promise<void> {
+		const queue = sessionCommandQueue(session);
+		const command = parseSlashCommand(message.text);
+		if (command?.name === "tree") {
+			if (message.mode !== "steer" || session.isStreaming || session.isCompacting || queue.holdsInput)
+				throw new Error("Wait for this BTW thread before navigating its tree");
+			if (
+				!this.#pane?.showTree(thread.key, session, draft => {
+					if (draft) this.#restoreThreadDraft(workspace, thread.key, draft);
+					this.#refreshDurable();
+				})
+			)
+				throw new Error("Open this BTW thread to navigate its tree");
+			return;
+		}
+		if (!draining && (queue.holdsInput || session.isCompacting)) {
+			queue.origin ??= conversationPosition(session.sessionManager);
+			queue.messages.push(message);
+			this.#refreshDurable();
+			return;
+		}
+		if (command?.name === "compact") {
+			const args = parseCompactArgs(command.args);
+			if ("error" in args) throw new Error(args.error);
+			const position = conversationPosition(session.sessionManager);
+			if (message.mode === "followUp" || draining) {
+				queue.request = { ...position, text: message.text, ...args };
+				this.#refreshDurable();
+				this.#watchThreadQueue(workspace, thread, session);
+			} else {
+				queue.origin = position;
+				void session.compact(args.instructions, { mode: args.mode }).then(
+					() => this.#flushThreadQueue(workspace, thread, session),
+					error => {
+						this.#restoreThreadQueue(workspace, thread.key, session);
+						this.#restoreThreadDraft(workspace, thread.key, message);
+						this.ctx.showError(sanitizeErrorLine(error));
+					},
+				);
+				this.#refreshDurable();
+			}
+			return;
+		}
+		await this.#admitThread(workspace, thread, message);
+	}
+
+	#admitThread(workspace: DurableWorkspace, thread: BtwThread, message: CompactionQueuedMessage): Promise<void> {
+		const { manager } = workspace;
+		if (!this.#owns(workspace) || this.#transitionCount > 0 || manager.thread(thread.key) !== thread)
+			return Promise.reject(new Error("BTW input interrupted before submission"));
+		const admitted = Promise.withResolvers<void>();
+		this.ctx.terminalActivity.set(thread, "working");
+		let accepted = false;
+		void manager
+			.prompt(
+				thread.key,
+				message.text,
+				undefined,
+				undefined,
+				message.images,
+				message.mode,
+				() => {
+					accepted = true;
+					admitted.resolve();
+				},
+				false,
+			)
+			.then(
+				() => {
+					admitted.resolve();
+					if (this.#pane && manager.activeKey === thread.key) manager.markRead(thread.key);
+				},
+				error => {
+					admitted.reject(error);
+					if (accepted && this.#owns(workspace)) this.ctx.showError(sanitizeErrorLine(error));
+				},
+			)
+			.finally(() => this.ctx.terminalActivity.release(thread));
+		return admitted.promise;
+	}
+
+	#watchThreadQueue(workspace: DurableWorkspace, thread: BtwThread, session: AgentSession): void {
+		const queue = sessionCommandQueue(session);
+		if (queue.isRunning) return;
+		const state = threadSubmissions.get(thread);
+		void queue
+			.run(session, {
+				settleSubmissions: () => state?.tail ?? Promise.resolve(),
+				hasPendingSubmission: () => false,
+				isCurrent: () =>
+					this.#owns(workspace) && workspace.manager.thread(thread.key)?.conversation.session === session,
+				restore: () => this.#restoreThreadQueue(workspace, thread.key, session),
+				changed: () => this.#refreshDurable(),
+				execute: async request => {
+					try {
+						await session.compact(request.instructions, { mode: request.mode });
+					} catch (error) {
+						this.#restoreThreadQueue(workspace, thread.key, session);
+						this.#restoreThreadDraft(workspace, thread.key, { text: `/queue ${request.text}` });
+						throw error;
+					}
+				},
+				flush: () => this.#flushThreadQueue(workspace, thread, session),
+			})
+			.catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+	}
+
+	async #flushThreadQueue(workspace: DurableWorkspace, thread: BtwThread, session: AgentSession): Promise<void> {
+		try {
+			await sessionCommandQueue(session).drain(session, {
+				execute: message => this.#dispatchThread(workspace, thread, session, message, true),
+				restore: () => this.#restoreThreadQueue(workspace, thread.key, session),
+				changed: () => this.#refreshDurable(),
+			});
+		} catch (error) {
+			this.#restoreThreadQueue(workspace, thread.key, session);
+			this.ctx.showError(sanitizeErrorLine(error));
+		}
+	}
+
+	#restoreThreadQueue(workspace: DurableWorkspace, key: string, session: AgentSession): void {
+		const { request, messages } = sessionCommandQueue(session).takeForRestore();
+		for (const message of messages.reverse()) this.#restoreThreadDraft(workspace, key, message);
+		if (request) this.#restoreThreadDraft(workspace, key, { text: `/queue ${request.text}` });
+		this.#refreshDurable();
+	}
+
+	#stopThread(workspace: DurableWorkspace, key: string): void {
+		const thread = workspace.manager.thread(key);
+		if (!this.#owns(workspace) || !thread) return;
+		const state = threadSubmissions.get(thread);
+		if (state) state.generation++;
+		const session = thread.conversation.session;
+		if (session) this.#restoreThreadQueue(workspace, key, session);
+		void workspace.manager.abort(key).catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+	}
+
+	#dequeueThread(workspace: DurableWorkspace, key: string): void {
+		const session = workspace.manager.thread(key)?.conversation.session;
+		if (!this.#owns(workspace) || !session) return;
+		const queue = sessionCommandQueue(session);
+		if (queue.isFlushing) return;
+		const held = queue.messages.pop();
+		const request = held ? undefined : queue.request;
+		if (request) queue.request = undefined;
+		const message = held ?? (request ? { text: `/queue ${request.text}` } : session.popLastQueuedMessage());
+		if (message) this.#restoreThreadDraft(workspace, key, message);
+		this.#refreshDurable();
+	}
+
+	#editThreadQueue(workspace: DurableWorkspace, key: string, edit: BtwQueueEdit): void {
+		const session = workspace.manager.thread(key)?.conversation.session;
+		if (!this.#owns(workspace) || !session) return;
+		const queue = sessionCommandQueue(session);
+		switch (edit.kind) {
+			case "held": {
+				const index = queue.messages.indexOf(edit.message);
+				if (index < 0 || (index === 0 && queue.isFlushing)) return;
+				queue.messages.splice(index, 1);
+				this.#restoreThreadDraft(workspace, key, edit.message);
+				break;
+			}
+			case "compact":
+				if (queue.request !== edit.request) return;
+				queue.request = undefined;
+				this.#restoreThreadDraft(workspace, key, { text: `/queue ${edit.request.text}` });
+				break;
+			case "steering":
+			case "followUp": {
+				const message = session.takeQueuedMessage(edit.text, edit.kind);
+				if (message) this.#restoreThreadDraft(workspace, key, message);
+				break;
+			}
+		}
+		this.#refreshDurable();
+	}
+
+	#completedMessages(thread: BtwThread) {
+		if (thread.phase !== "ready") return undefined;
+		const messages = projectBtwMessages(thread.conversation.sessionManager, thread.conversation.session);
+		if (!messages.some(message => message.role === "user")) return undefined;
+		const last = messages.findLast(message => message.role === "user" || message.role === "assistant");
+		return last?.role === "assistant" && (last.stopReason === "stop" || last.stopReason === "length")
+			? messages
+			: undefined;
+	}
+
+	async #approveSummary(
+		workspace: DurableWorkspace,
+		key: string,
+		summary: string,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		if (signal?.aborted || !this.#owns(workspace) || workspace.owner.getSleepModeState()) return false;
+		if (!(await this.#openDurable(workspace, key))) return false;
+		const thread = workspace.manager.thread(key);
+		if (!thread || !this.#owns(workspace) || workspace.owner.getSleepModeState()) return false;
+		const approved = await this.#pane?.approve(thread.title, summary, signal);
+		return approved === true && !signal?.aborted && this.#owns(workspace) && !workspace.owner.getSleepModeState();
+	}
+
+	async #handoff(workspace: DurableWorkspace, key: string, instruction: string): Promise<void> {
+		const thread = workspace.manager.thread(key);
+		const messages = thread && this.#completedMessages(thread);
+		if (!messages) {
+			this.ctx.showError("Wait for a completed BTW reply before handing off to Main");
+			return;
+		}
+		const transcript: Message[] = [];
+		for (const message of messages) {
+			if (message.role === "user") transcript.push(message);
+			else if (message.role === "assistant")
+				transcript.push({ ...message, content: message.content.filter(block => block.type === "text") });
+		}
+		const handoff = prompt.render(btwHandoffPrompt, {
+			conversation: serializeConversation(transcript),
+			instruction: instruction || undefined,
+		});
+		try {
+			if (!(await this.#approveSummary(workspace, key, handoff))) return;
+			await workspace.owner.sendUserMessage(handoff, { deliverAs: "followUp" });
+			this.ctx.showStatus("Handed BTW context to Main", { dim: true });
+		} catch (error) {
+			this.ctx.showError(sanitizeErrorLine(`Failed to hand off BTW context: ${toError(error).message}`));
+		}
+	}
+
+	#canPromote(workspace: DurableWorkspace, key: string): boolean {
+		if (
+			!this.ctx.handleBtwPromotion ||
+			!this.#owns(workspace) ||
+			this.ctx.focusedAgentId ||
+			this.#branchInFlight ||
+			this.#transitionCount > 0 ||
+			workspace.owner.isStreaming ||
+			this.#hasDurableWork(workspace)
+		)
+			return false;
+		const thread = workspace.manager.thread(key);
+		return (
+			thread !== undefined &&
+			this.#completedMessages(thread) !== undefined &&
+			workspace.owner.sessionManager.getEntry(thread.anchorLeafId) !== undefined
+		);
+	}
+
+	#hasDurableWork(workspace: DurableWorkspace): boolean {
+		return workspace.manager.children.some(thread => {
+			const session = thread.conversation.session;
+			return (
+				thread.phase === "running" ||
+				Boolean(session && (session.isCompacting || sessionCommandQueue(session).holdsInput))
+			);
+		});
+	}
+
+	async #promote(workspace: DurableWorkspace, key: string): Promise<boolean> {
+		if (!this.#canPromote(workspace, key)) return false;
+		const { manager } = workspace;
+		const thread = manager.thread(key)!;
+		const messages = this.#completedMessages(thread)!;
+		const quick = this.#quick;
+		this.#branchInFlight = true;
+		quick?.panel.markBranching();
+		try {
+			await this.flush();
+			const promoted = await this.ctx.handleBtwPromotion?.(
+				{ anchorLeafId: thread.anchorLeafId, sessionId: workspace.sessionId, turns: [...thread.turns], messages },
+				{
+					prepare: async () => {
+						if (!manager.preparePromotion(key)) throw new Error("BTW thread is no longer promotable");
+						await manager.flushEvents();
+					},
+					rollback: async () => {
+						if (manager.rollbackPromotion(key)) await manager.flushEvents();
+					},
+				},
+			);
+			if (!promoted) return false;
+			try {
+				await manager.completePromotion(key);
+			} finally {
+				await this.#disposeDurable();
+			}
+			return true;
+		} catch (error) {
+			this.ctx.showError(sanitizeErrorLine(`Cannot branch /btw: ${toError(error).message}`));
+			return false;
+		} finally {
+			this.#branchInFlight = false;
+			if (quick && this.#quick === quick) quick.panel.markComplete();
+		}
 	}
 
 	async startFollowUp(
@@ -616,7 +1488,7 @@ export class BtwController {
 		signal?: AbortSignal,
 		images?: ImageContent[],
 	): Promise<boolean> {
-		if (!question.trim()) return false;
+		if (!question.trim() && !images?.length) return false;
 		return this.#start(question, recordId, signal, images);
 	}
 
@@ -644,7 +1516,7 @@ export class BtwController {
 				);
 				return false;
 			}
-			if (trimmedQuestion && active.sessionId === this.#sessionManager.getSessionId()) {
+			if ((trimmedQuestion || images?.length) && active.sessionId === this.#sessionManager.getSessionId()) {
 				this.ctx.showStatus("A /btw question is still running. Open /btw to view it or cancel it first.", {
 					dim: true,
 				});
@@ -658,7 +1530,8 @@ export class BtwController {
 			const generation = this.#generation;
 			const sessionId = this.#sessionManager.getSessionId();
 			if (signal?.aborted || store !== this.#store || sessionId !== originalSessionId) return false;
-			if (!trimmedQuestion) {
+			if (!trimmedQuestion && !images?.length) {
+				this.#dismissQuick(false);
 				const panel = this.#showHistory(store);
 				// Tern: reopening lands on the side question put away while it answered.
 				const active = this.#activeRequest;
@@ -688,6 +1561,7 @@ export class BtwController {
 			await this.#sessionManager.ensureOnDisk();
 			if (signal?.aborted || generation !== this.#generation || sessionId !== this.#sessionManager.getSessionId())
 				return false;
+			this.#dismissQuick(false);
 			if (!previous) this.#closeHistory();
 			this.#activeRequest?.panel.close();
 			this.#clearCompletedState();

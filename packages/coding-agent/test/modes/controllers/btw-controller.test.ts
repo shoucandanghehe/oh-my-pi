@@ -1,29 +1,40 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { setImmediate as yieldToIo } from "node:timers/promises";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/btw-inject";
-import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
+import { BtwController, type BtwWorkspaceAdapter } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
+import type { NativeWorkspaceSurface } from "@oh-my-pi/pi-coding-agent/modes/native-workspace/workspace";
 import { cfgBtwInject } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { BtwSessionStore } from "@oh-my-pi/pi-coding-agent/session/btw-session-store";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { replaceTabs } from "@oh-my-pi/pi-coding-agent/utils/text-width";
 import { Shell, type TranscriptBlock } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
 import { jsx, type UiNode } from "@oh-my-pi/pi-tui";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 import {
 	btwShellMembers,
 	historySheet,
 	inlineText,
 	isNoteBlock,
+	nodeText,
 	noteIn,
 	notesIn,
 	setNative,
 } from "../../helpers/btw-ui";
+import { keyEvent } from "../../helpers/input-harness";
 import { nativeShell } from "../../helpers/native-shell";
 
 const usage: Usage = {
@@ -1361,4 +1372,212 @@ describe("BtwController inject", () => {
 		expect(ctx.showError).not.toHaveBeenCalledWith(expect.stringContaining("Cannot inject"));
 		expect(prompt).toHaveBeenCalledTimes(1);
 	});
+});
+
+it("opens a durable BTW pane, continues a quick answer once, and restores each draft without routing to Main", async () => {
+	using temp = TempDir.createSync("@pi-btw-workspace-");
+	const cwd = temp.path();
+	const auth = createInMemoryAuthStorage();
+	const registry = new ModelRegistry(auth, path.join(cwd, "models.yml"));
+	auth.keys.setRuntime("anthropic", "test-key");
+	const model = registry.find("anthropic", "claude-sonnet-4-5")!;
+	const releaseReply = Promise.withResolvers<void>();
+	const releaseCompaction = Promise.withResolvers<void>();
+	const compactionStarted = Promise.withResolvers<AgentSession>();
+	const mock = createMockModel({
+		handler: async context => {
+			const input = context.messages.findLast(message => message.role === "user")?.content;
+			const text =
+				typeof input === "string"
+					? input
+					: input?.flatMap(part => (part.type === "text" ? [part.text] : [])).join("");
+			if (text === "wait before yielding") await releaseReply.promise;
+			return { content: [`reply for ${text}`] };
+		},
+	});
+	const sessionManager = SessionManager.create(cwd, cwd, undefined, { suppressBreadcrumb: true });
+	sessionManager.appendMessage({ role: "user", content: "Only Main sees this", timestamp: 1 });
+	const main = new AgentSession({
+		agent: new Agent({ initialState: { model, systemPrompt: ["Main instructions"] } }),
+		sessionManager,
+		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+		modelRegistry: registry,
+		sideStreamFn: mock.stream,
+	});
+	vi.spyOn(main, "generateTitle").mockResolvedValue(null);
+	const compact = vi.spyOn(AgentSession.prototype, "compact").mockImplementation(async function (this: AgentSession) {
+		compactionStarted.resolve(this);
+		await releaseCompaction.promise;
+		return { summary: "test summary", tokensBefore: 100, firstKeptEntryId: this.sessionManager.getLeafId()! };
+	});
+	const delivered = Promise.withResolvers<void>();
+	const handoff = vi.spyOn(main, "sendUserMessage").mockImplementation(async () => delivered.resolve());
+	const ctx = { ...makeCtx(main), sessionManager };
+	let mounted: NativeWorkspaceSurface | undefined;
+	const adapter: BtwWorkspaceAdapter = {
+		async open(create) {
+			mounted ??= create(
+				() => adapter.close(),
+				() => 24,
+			);
+			return true;
+		},
+		close() {
+			const view = mounted;
+			mounted = undefined;
+			view?.surface.dispose();
+			view?.dispose?.();
+		},
+	};
+	const press = (id: string, more?: { afterPaste?: boolean }): boolean => {
+		const key = keyEvent(id, more);
+		return mounted?.intercept?.({ type: "key", key }) || mounted?.surface.focused()?.handlers.onKey?.(key) || false;
+	};
+	const send = (text: string) => {
+		mounted?.surface.focused()?.handlers.onSend?.(text, { type: "send", key: "", text });
+	};
+	const draw = () =>
+		[...(mounted?.surface.main() ?? []), ...(mounted?.surface.dock() ?? []), ...(mounted?.surface.layer() ?? [])]
+			.map(node => nodeText(node))
+			.join("\n");
+	const drawn = async (text: string, expectSettled = false): Promise<void> => {
+		const deadline = performance.now() + 1500;
+		while (performance.now() < deadline) {
+			const view = draw();
+			if (view.includes(text) && (!expectSettled || !view.includes("Stop"))) break;
+			await yieldToIo();
+		}
+		if (expectSettled) expect(draw()).not.toContain("Stop");
+		expect(draw()).toContain(text);
+	};
+	let controller = new BtwController(ctx, adapter);
+	try {
+		expect(await controller.start("")).toBe(true);
+		expect(draw()).toContain("Ask a side question without interrupting Main");
+		controller.closeView();
+		expect(mounted).toBeUndefined();
+
+		expect(await controller.start("quick question", undefined, "First topic")).toBe(true);
+		expect(inlineText(ctx.shell)).toContain("to open thread");
+		expect(await controller.handleOpenThread()).toBe(true);
+		await drawn("reply for quick question");
+		expect(mock.calls).toHaveLength(1);
+		expect(inlineText(ctx.shell)).toBe("");
+
+		send("follow-up in the first topic");
+		await drawn("reply for follow-up in the first topic", true);
+		send("/handoff");
+		await drawn("Send to Main");
+		expect(press("enter", { afterPaste: true })).toBe(true);
+		expect(handoff).not.toHaveBeenCalled();
+		press("escape");
+		expect(handoff).not.toHaveBeenCalled();
+		send("/handoff");
+		await drawn("Send to Main");
+		expect(press("enter")).toBe(true);
+		await delivered.promise;
+		await drawn("reply for follow-up in the first topic");
+		expect(handoff).toHaveBeenCalledTimes(1);
+		expect(handoff).toHaveBeenCalledWith(expect.stringContaining("quick question"), { deliverAs: "followUp" });
+
+		send("wait before yielding");
+		await drawn("Stop");
+		send("->\n1. keep this\n2. edit this");
+		await drawn("After yield · edit this");
+		expect(press("shift+up")).toBe(true);
+		await drawn("edit this");
+		expect(draw()).not.toContain("After yield · edit this");
+		send("/queue /compact inspect");
+		await drawn("Compaction queued · /compact inspect");
+		send("held after compact");
+		await drawn("After compaction · held after compact");
+		expect(compact).not.toHaveBeenCalled();
+		releaseReply.resolve();
+		const child = await compactionStarted.promise;
+		expect(child).not.toBe(main);
+		expect(compact).toHaveBeenCalledTimes(1);
+		expect(compact.mock.calls[0]?.[0]).toBe("inspect");
+		expect(draw()).toContain("reply for keep this");
+		expect(draw()).not.toContain("reply for held after compact");
+		const newer = "unsent while compacting";
+		mounted?.surface.focused()?.handlers.onEdit?.({
+			from: 0,
+			to: 0,
+			text: newer,
+			cursor: newer.length,
+			len: 0,
+			type: "edit",
+			key: "",
+		});
+		await drawn(newer);
+		controller.closeView();
+		releaseCompaction.resolve();
+		const sendDeadline = performance.now() + 1500;
+		while (mock.calls.length < 5 && performance.now() < sendDeadline) await yieldToIo();
+		expect(mock.calls).toHaveLength(5);
+		await child.waitForIdle();
+		expect(await controller.start("")).toBe(true);
+		await drawn("reply for held after compact", true);
+		await drawn(newer);
+		expect(handoff).toHaveBeenCalledTimes(1);
+
+		send("/tree");
+		await drawn("Session Tree");
+		expect(draw()).not.toContain("Only Main sees this");
+		expect(mounted?.surface.focused()?.kind).toBe("picker");
+		const earlier = child.sessionManager
+			.getBranch()
+			.find(entry => entry.type === "message" && entry.message.role === "assistant");
+		expect(earlier).toBeDefined();
+		mounted?.surface.focused()?.handlers.onActivate?.(earlier!.id, { type: "activate", key: "", item: earlier!.id });
+		const deadline = performance.now() + 1500;
+		while (
+			(child.sessionManager.getLeafId() !== earlier!.id || draw().includes("reply for held after compact")) &&
+			performance.now() < deadline
+		)
+			await yieldToIo();
+		expect(child.sessionManager.getLeafId()).toBe(earlier!.id);
+		await drawn("reply for quick question", true);
+		expect(draw()).not.toContain("Session Tree");
+		expect(draw()).not.toContain("reply for held after compact");
+		expect(handoff).toHaveBeenCalledTimes(1);
+
+		const draft = "draft only in first";
+		send("/new second question");
+		await drawn("reply for second question");
+		expect(draw()).not.toContain("reply for quick question");
+		expect(mock.calls).toHaveLength(6);
+		press("tab");
+		await drawn("reply for quick question");
+		mounted?.surface
+			.focused()
+			?.handlers.onEdit?.({ from: 0, to: 0, text: draft, cursor: draft.length, len: 0, type: "edit", key: "" });
+		await controller.dispose();
+		expect(mounted).toBeUndefined();
+		controller = new BtwController(ctx, adapter);
+		expect(await controller.start("")).toBe(true);
+		await drawn(draft);
+		press("alt+t");
+		await drawn("second question");
+		press("escape");
+		press("alt+shift+d");
+		await drawn("reply for second question");
+		expect(draw()).not.toContain("First topic");
+		await controller.dispose();
+		const records = await BtwSessionStore.readRecords(sessionManager.getArtifactsDir()!, cwd);
+		expect(records.map(record => record.turns.map(turn => turn.input))).toEqual([["second question"]]);
+		expect(
+			sessionManager
+				.getBranch()
+				.flatMap(entry => (entry.type === "message" && entry.message.role === "user" ? [entry.message] : [])),
+		).toEqual([expect.objectContaining({ content: "Only Main sees this" })]);
+		expect(ctx.showError).not.toHaveBeenCalled();
+	} finally {
+		releaseReply.resolve();
+		releaseCompaction.resolve();
+		compact.mockRestore();
+		await controller.dispose();
+		await main.dispose();
+		auth.close();
+	}
 });

@@ -8,8 +8,8 @@ import {
 	type AssistantMessage,
 	COLLAB_PROMPT_MESSAGE_TYPE,
 	type ImageContent,
+	type MessageContentBlock,
 	type SessionEntry,
-	type TextContent,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-wire";
 import { describeStep, type StepDescription } from "./describe";
@@ -60,7 +60,7 @@ export function isStep(row: Step | Thought): row is Step {
 	return "name" in row;
 }
 
-function splitContent(content: string | readonly (TextContent | ImageContent)[]): {
+function splitContent(content: string | readonly MessageContentBlock[]): {
 	text: string;
 	images: ImageContent[];
 } {

@@ -348,6 +348,7 @@ export class BtwManager {
 		images?: ImageContent[],
 		streamingBehavior: "steer" | "followUp" = "steer",
 		onPromptAdmitted?: () => void,
+		consumeDraft = true,
 	): Promise<EphemeralTurnResult | undefined> {
 		const thread = this.#threads.get(key);
 		if (!thread) throw new Error(`Unknown BTW thread: ${key}`);
@@ -364,8 +365,10 @@ export class BtwManager {
 				runCommands: false,
 				onPromptAdmitted,
 			});
-			this.setDraft(key, "");
-			this.persistDraft(key);
+			if (consumeDraft) {
+				this.setDraft(key, "");
+				this.persistDraft(key);
+			}
 			this.#onChange?.();
 			return undefined;
 		}
@@ -373,8 +376,10 @@ export class BtwManager {
 		if (!trimmed && !images?.length) throw new Error("BTW input must not be empty");
 		const requestImages = images?.length ? [...images] : undefined;
 		if (!thread.titleExplicit && thread.turns.length === 0 && trimmed) void this.#nameThread(thread, trimmed);
-		this.setDraft(key, "");
-		this.persistDraft(key);
+		if (consumeDraft) {
+			this.setDraft(key, "");
+			this.persistDraft(key);
+		}
 		const admission = Promise.withResolvers<void>();
 		void admission.promise.catch(() => {});
 		const request: BtwThreadRequest = {

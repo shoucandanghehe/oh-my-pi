@@ -180,7 +180,8 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	}
 
 	async function send(input: Draft, mode: "steer" | "followUp", submittedGeneration: number): Promise<void> {
-		let { text, images } = input;
+		let { text } = input;
+		const { images } = input;
 		let command = parseSlashCommand(text);
 		const queued = command?.name === "queue" ? command.args : parseQueueShorthand(text);
 		let followUps: string[] | undefined;

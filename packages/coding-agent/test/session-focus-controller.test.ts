@@ -123,6 +123,8 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			resetTranscriptAnchors: () => {
 				resetTranscriptAnchors++;
 			},
+			resetTerminalActivity() {},
+			async syncAssistantMessage() {},
 			restorePendingToolResults() {},
 			runSerialized: (run: () => Promise<void>) => run(),
 			markViewIdle() {},

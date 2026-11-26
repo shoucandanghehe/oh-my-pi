@@ -474,6 +474,13 @@ export class InputController {
 			return true;
 		}
 		if (empty && key.kind === "press") {
+			if (
+				key.id === "enter" &&
+				this.ctx.composer.pendingImages.length === 0 &&
+				this.ctx.handleBtwOpenThreadKey?.()
+			) {
+				return true;
+			}
 			if (key.id === "b" && this.ctx.handlesBtwBranchKey()) {
 				void this.ctx.handleBtwBranchKey();
 				return true;
@@ -2183,11 +2190,9 @@ export class InputController {
 						followUp: origin,
 					});
 				} else {
-					await this.ctx.withLocalSubmission(
-						message,
-						() => session.followUp(message, queuedImages),
-						{ imageCount: queuedImages?.length ?? 0 },
-					);
+					await this.ctx.withLocalSubmission(message, () => session.followUp(message, queuedImages), {
+						imageCount: queuedImages?.length ?? 0,
+					});
 				}
 				queuedCount++;
 			}
@@ -2442,10 +2447,7 @@ export class InputController {
 		if (!request && held.length === 0) return;
 		this.ctx.yieldCompaction = undefined;
 		this.ctx.compactionQueuedMessages = [];
-		this.#restoreEntriesToEditor([
-			...(request ? [{ text: request.text }] : []),
-			...held,
-		]);
+		this.#restoreEntriesToEditor([...(request ? [{ text: request.text }] : []), ...held]);
 		this.ctx.showStatus(status);
 	}
 
