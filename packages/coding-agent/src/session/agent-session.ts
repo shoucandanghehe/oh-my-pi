@@ -371,6 +371,7 @@ import type {
 	PromptOptions,
 	ResetSessionContextResult,
 	ResolvedRoleModel,
+	RestoredQueuedInput,
 	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
@@ -12070,10 +12071,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  `forInterrupt` also withdraws input the run already dequeued but never recorded — live-steered
 	 *  into the aborted response, or taken for its next model call — and treats it as queued ahead of
 	 *  the rest (it was queued first). */
-	clearQueue(options?: { forInterrupt?: boolean }): {
-		steering: RestoredQueuedMessage[];
-		followUp: RestoredQueuedMessage[];
-	} {
+	clearQueue(options?: { forInterrupt?: boolean }): RestoredQueuedInput {
 		const withdrawn = options?.forInterrupt ? this.agent.withdrawUndeliveredQueuedMessages() : undefined;
 		const steeringAll = [...(withdrawn?.steering ?? []), ...this.agent.peekSteeringQueue()];
 		const followUpAll = [...(withdrawn?.followUp ?? []), ...this.agent.peekFollowUpQueue()];
@@ -12113,6 +12111,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
 		this.#reconcileQueuedMessageDrain();
 		return { steering, followUp };
+	}
+
+	/** Take the input back before abort can start delivering it again. */
+	async interruptAndRestoreQueue(
+		restore: (input: RestoredQueuedInput) => void | Promise<void>,
+		hasHeldInput = false,
+	): Promise<void> {
+		const input = this.clearQueue({ forInterrupt: true });
+		const restoring = restore(input);
+		await Promise.all([
+			restoring,
+			this.abort({
+				reason: USER_INTERRUPT_LABEL,
+				detachTools: hasHeldInput || input.steering.length > 0 || input.followUp.length > 0,
+			}),
+		]);
 	}
 
 	/** Number of messages that can wake a session, plus advisor cards parked for abort replay.

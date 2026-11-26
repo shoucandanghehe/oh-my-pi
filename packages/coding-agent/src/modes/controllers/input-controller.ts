@@ -49,7 +49,7 @@ import {
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
 } from "../../utils/clipboard";
-import { sessionCommandQueue } from "../../session/session-command-queue";
+import { queueEntriesForDraft, sessionCommandQueue } from "../../session/session-command-queue";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { htmlToPaste } from "../../utils/html-paste";
@@ -84,7 +84,12 @@ import { type ConversationPosition, continuesConversation, conversationPosition 
 import { materializeImageChipLinks } from "../utils/ui-helpers";
 import { compactImageMarkers, formatVisionMarker, shiftImageMarkers } from "../view-model/prompt/composer-attachments";
 import { extractImagePastePathsFromText, extractImagePathFromText } from "../view-model/prompt/custom-editor";
-import { formatQueueShorthand, parseQueueShorthand, splitQueuedMessages } from "../view-model/prompt/queue-input";
+import {
+	formatQueueShorthand,
+	mergeQueueEntries,
+	parseQueueShorthand,
+	splitQueuedMessages,
+} from "../view-model/prompt/queue-input";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
 const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
@@ -2407,30 +2412,15 @@ export class InputController {
 
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
 		this.ctx.locallySubmittedUserSignatures.clear();
-		// On Esc (abort) the abort below records queued extension/agent messages in the
-		// transcript without a turn, so the post-abort drain can't auto-resume on them;
-		// plain Alt+Up dequeue leaves them queued for the continuing stream.
-		const { steering, followUp } = this.ctx.session.clearQueue({ forInterrupt: options?.abort });
-		// Messages typed while compacting live in `compactionQueuedMessages`, not the
-		// agent queue `clearQueue()` drains — but the pending bar shows the same
-		// "Alt+Up to edit" hint for them (ui-helpers `updatePendingMessagesDisplay`).
-		// Drain them here too so the restore recovers every message the hint
-		// advertises; otherwise a skill/text queued during compaction is stranded.
-		const compactionQueued = this.ctx.compactionQueuedMessages;
+		const queued = this.ctx.session.clearQueue({ forInterrupt: options?.abort });
+		const held = { request: this.ctx.yieldCompaction, messages: this.ctx.compactionQueuedMessages };
 		this.ctx.compactionQueuedMessages = [];
-		const yieldCompaction = this.ctx.yieldCompaction;
 		this.ctx.yieldCompaction = undefined;
 		this.ctx.compactionQueueOrigin = undefined;
-		const allQueued = [
-			...steering,
-			...compactionQueued.filter(e => e.mode === "steer").map(e => ({ text: e.text, images: e.images })),
-			...followUp,
-			...(yieldCompaction ? [{ text: yieldCompaction.text }] : []),
-			...compactionQueued.filter(e => e.mode === "followUp").map(e => ({ text: e.text, images: e.images })),
-		];
-		const restored = this.#restoreEntriesToEditor(allQueued, { currentText: options?.currentText });
+		const entries = queueEntriesForDraft(queued, held);
+		const restored = this.#restoreEntriesToEditor(entries, { currentText: options?.currentText });
 		if (options?.abort) {
-			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, detachTools: allQueued.length > 0 });
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL, detachTools: entries.length > 0 });
 		}
 		return restored;
 	}
@@ -2507,29 +2497,11 @@ export class InputController {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
 		}
-		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
-		// (legacy drafts may still carry a trailing `attachment://N`). Each queued
-		// message numbered its references against its own local image list
-		// (1..K). Because we prepend the queued text but append the queued images
-		// to `pendingImages`, any existing draft images (M of them) — plus images
-		// already pulled in by earlier queued messages — shift the slot index that
-		// every reference must point to. Bumping each message's marker and URI
-		// indices by the running offset keeps the merged text aligned with the merged
-		// `pendingImages` order; draft markers stay valid because draft images
-		// keep their original positions.
-		const queuedImages = entries.flatMap(e => e.images ?? []);
-		let queuedText: string;
-		if (queuedImages.length > 0) {
-			const parts: string[] = [];
-			let imageOffset = this.ctx.composer.pendingImages.length;
-			for (const entry of entries) {
-				parts.push(shiftImageMarkers(entry.text, imageOffset));
-				if (entry.images && entry.images.length > 0) imageOffset += entry.images.length;
-			}
-			queuedText = parts.join("\n\n");
-		} else {
-			queuedText = entries.map(e => e.text).join("\n\n");
-		}
+		const {
+			text: queuedText,
+			images: queuedImages,
+			imageLinks,
+		} = mergeQueueEntries(entries, this.ctx.composer.pendingImages.length);
 		const current = options?.currentText ?? this.ctx.composer.text();
 		const queuedDraft = options?.queued ? (current.trim() ? parseQueueShorthand(current) : "") : undefined;
 		const combinedText =
@@ -2542,7 +2514,7 @@ export class InputController {
 		// collapse only recognizes indices within the merged pendingImages range.
 		if (queuedImages.length > 0) {
 			this.ctx.composer.pendingImages.push(...queuedImages);
-			this.ctx.composer.pendingImageLinks.push(...queuedImages.map(() => undefined));
+			this.ctx.composer.pendingImageLinks.push(...imageLinks);
 		}
 		this.ctx.composer.setCollapsedText(combinedText);
 		this.ctx.updatePendingMessagesDisplay();

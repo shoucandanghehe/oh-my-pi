@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type ConversationPosition, continuesConversation } from "../modes/utils/conversation-position";
 import type { AgentViewSession } from "./agent-session-handle";
+import type { RestoredQueuedInput, RestoredQueuedMessage } from "./agent-session-types";
 import type { CompactMode } from "./compact-modes";
 
 export interface CompactionQueuedMessage {
@@ -15,6 +16,19 @@ export interface YieldCompaction extends ConversationPosition {
 	text: string;
 	instructions?: string;
 	mode?: CompactMode;
+}
+
+export function queueEntriesForDraft(
+	{ steering, followUp }: RestoredQueuedInput,
+	{ request, messages }: Pick<SessionCommandQueue, "request" | "messages">,
+): (RestoredQueuedMessage & { imageLinks?: (string | undefined)[] })[] {
+	return [
+		...steering,
+		...messages.filter(message => message.mode === "steer"),
+		...followUp,
+		...(request ? [{ text: request.text }] : []),
+		...messages.filter(message => message.mode === "followUp"),
+	];
 }
 
 interface CommandQueueHost {

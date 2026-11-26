@@ -10,7 +10,11 @@ import type { AgentRef } from "../registry/agent-registry";
 import { type AgentViewSession, isAgentViewSession } from "../session/agent-session-handle";
 import { parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { type CompactionQueuedMessage, sessionCommandQueue } from "../session/session-command-queue";
+import {
+	type CompactionQueuedMessage,
+	queueEntriesForDraft,
+	sessionCommandQueue,
+} from "../session/session-command-queue";
 import { lookupBuiltinSlashCommand } from "../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../slash-commands/helpers/draft";
 import { parseSlashCommand } from "../slash-commands/helpers/parse";
@@ -28,7 +32,7 @@ import { firstOfKind } from "./controllers/selector-views";
 import type { NativeWorkspaceSurface } from "./native-workspace/workspace";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import { compactImageMarkers, shiftImageMarkers } from "./view-model/prompt/composer-attachments";
-import { parseQueueShorthand, splitQueuedMessages } from "./view-model/prompt/queue-input";
+import { mergeQueueEntries, parseQueueShorthand, splitQueuedMessages } from "./view-model/prompt/queue-input";
 import { materializeImageChipLinks } from "./utils/ui-helpers";
 import { conversationPosition } from "./utils/conversation-position";
 
@@ -179,6 +183,25 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		);
 	}
 
+	async function stop(session: AgentViewSession | undefined): Promise<void> {
+		generation++;
+		if (!session) return;
+		if (!session.isStreaming) {
+			await session.abort({ reason: USER_INTERRUPT_LABEL });
+			return;
+		}
+		const queue = sessionCommandQueue(session);
+		await session.interruptAndRestoreQueue(
+			input => {
+				const entries = queueEntriesForDraft(input, queue.takeForRestore());
+				if (!entries.length) return;
+				const { text, images, imageLinks } = mergeQueueEntries(entries, 0);
+				draft.restore({ text, images, links: imageLinks });
+			},
+			queue.request !== undefined || queue.messages.length > 0,
+		);
+	}
+
 	async function send(input: Draft, mode: "steer" | "followUp", submittedGeneration: number): Promise<void> {
 		let { text } = input;
 		const { images } = input;
@@ -211,8 +234,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		}
 		if (command?.name === "stop") {
 			if (command.args.trim() || images?.length) throw new Error("Usage: /stop");
-			generation++;
-			await current()?.abort({ reason: USER_INTERRUPT_LABEL });
+			await stop(current());
 			return;
 		}
 		if (
@@ -371,17 +393,13 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		if (key.id === "escape") {
 			const session = current();
 			if (session?.isStreaming || session?.isCompacting || session?.isRetrying) {
-				generation++;
-				void session.abort({ reason: USER_INTERRUPT_LABEL }).catch(error => notice(String(error)));
+				void stop(session).catch(error => notice(String(error)));
 			} else if (composer.text() || composer.pendingImages.length) composer.clearDraft();
 			else close();
 			return true;
 		}
 		if (matchesAppInterrupt(key)) {
-			generation++;
-			void current()
-				?.abort({ reason: USER_INTERRUPT_LABEL })
-				.catch(error => notice(String(error)));
+			void stop(current()).catch(error => notice(String(error)));
 			return true;
 		}
 		if (sendable && matchesAnyKey(key, appFollowUpKeys(keybindings))) {

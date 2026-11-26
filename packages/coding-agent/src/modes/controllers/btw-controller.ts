@@ -22,8 +22,13 @@ import { BtwManager, type BtwThread } from "../../session/btw-manager";
 import { BtwSessionStore } from "../../session/btw-session-store";
 import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../../session/btw-thread";
 import { projectBtwMessages } from "../../session/ephemeral-conversation";
+import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { parseCompactArgs } from "../../session/compact-modes";
-import { type CompactionQueuedMessage, sessionCommandQueue } from "../../session/session-command-queue";
+import {
+	type CompactionQueuedMessage,
+	queueEntriesForDraft,
+	sessionCommandQueue,
+} from "../../session/session-command-queue";
 import { lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { TRUNCATE_LENGTHS } from "../../utils/render-utils";
@@ -50,7 +55,7 @@ import { cfgBtwInject } from "../settings";
 import type { NativeWorkspaceSurface } from "../native-workspace/workspace";
 import { conversationPosition } from "../utils/conversation-position";
 import { shiftImageMarkers } from "../view-model/prompt/composer-attachments";
-import { parseQueueShorthand, splitQueuedMessages } from "../view-model/prompt/queue-input";
+import { mergeQueueEntries, parseQueueShorthand, splitQueuedMessages } from "../view-model/prompt/queue-input";
 import type { InteractiveModeContext } from "../types";
 
 export interface BtwWorkspaceAdapter {
@@ -1262,7 +1267,9 @@ export class BtwController {
 				},
 				error => {
 					admitted.reject(error);
-					if (accepted && this.#owns(workspace)) this.ctx.showError(sanitizeErrorLine(error));
+					if (accepted && this.#owns(workspace) && toError(error).message !== USER_INTERRUPT_LABEL) {
+						this.ctx.showError(sanitizeErrorLine(error));
+					}
 				},
 			)
 			.finally(() => this.ctx.terminalActivity.release(thread));
@@ -1321,7 +1328,14 @@ export class BtwController {
 		const state = threadSubmissions.get(thread);
 		if (state) state.generation++;
 		const session = thread.conversation.session;
-		if (session) this.#restoreThreadQueue(workspace, key, session);
+		if (session?.isStreaming) {
+			const held = sessionCommandQueue(session).takeForRestore();
+			const entries = queueEntriesForDraft(session.clearQueue({ forInterrupt: true }), held);
+			if (entries.length) this.#restoreThreadDraft(workspace, key, mergeQueueEntries(entries, 0));
+			this.#refreshDurable();
+		} else if (session) {
+			this.#restoreThreadQueue(workspace, key, session);
+		}
 		void workspace.manager.abort(key).catch(error => this.ctx.showError(sanitizeErrorLine(error)));
 	}
 

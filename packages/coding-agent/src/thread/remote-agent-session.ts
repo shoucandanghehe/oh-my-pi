@@ -77,6 +77,7 @@ import type {
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
+	RestoredQueuedInput,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -912,6 +913,10 @@ export class RemoteAgentSession implements AgentViewSession {
 	abort(options?: SessionAbortOptions): Promise<void> {
 		if (this.#closed !== undefined) return Promise.resolve();
 		return this.#command("abort", options);
+	}
+
+	interruptAndRestoreQueue(restore: (input: RestoredQueuedInput) => void, hasHeldInput?: boolean): Promise<void> {
+		return this.#command("interruptAndRestoreQueue", restore, hasHeldInput);
 	}
 
 	applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState> {

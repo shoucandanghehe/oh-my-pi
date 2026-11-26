@@ -77,10 +77,23 @@ function zeroUsage(): AssistantMessage["usage"] {
 }
 
 /** A turn whose newest user message says `[hold]` streams "Hel", holds for the gate, then "lo"; others answer "ok". */
-function heldStream(model: Model<Api>, context: Context, _options?: SimpleStreamOptions): AssistantMessageEventStream {
+function heldStream(model: Model<Api>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	const lastUser = context.messages.findLast(message => message.role === "user");
-	const hold = textOf(lastUser?.content).includes("[hold]");
+	const prompt = textOf(lastUser?.content);
+	const hold = prompt.includes("[hold]");
+	if (prompt.includes("[live]")) {
+		const live = options?.liveSteering;
+		const signal = options?.signal;
+		if (!live || !signal) throw new Error("live steering was not offered");
+		signal.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
+		void live
+			.wait(signal)
+			.then(() => live.claim(signal))
+			.catch(error => {
+				if (!signal.aborted) stream.fail(error);
+			});
+	}
 	void (async () => {
 		const text: TextContent = { type: "text", text: "" };
 		const partial: AssistantMessage = {
@@ -100,6 +113,7 @@ function heldStream(model: Model<Api>, context: Context, _options?: SimpleStream
 			text.text = "Hel";
 			stream.push({ type: "text_delta", contentIndex: 0, delta: "Hel", partial });
 			await gate.promise;
+			if (options?.signal?.aborted) return;
 			text.text = "Hello";
 			stream.push({ type: "text_delta", contentIndex: 0, delta: "lo", partial });
 		} else {

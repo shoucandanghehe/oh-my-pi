@@ -13,6 +13,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { IrcBus } from "../../src/irc/bus";
+import { AgentPaneDraft, mountAgentWorkspacePane } from "../../src/modes/agent-workspace-pane";
 import { InputController } from "../../src/modes/controllers/input-controller";
 import { SessionFocusController } from "../../src/modes/controllers/session-focus-controller";
 import { SessionStatusLine } from "../../src/modes/interactive/status-line";
@@ -469,6 +470,55 @@ describe("queued messages of a focused worker-homed session", () => {
 			"from second view",
 		]);
 		expect((await probe.report("W2")).userTexts).toEqual([]);
+	});
+
+	it("takes live steering back into the interrupted worker pane without touching another pane's queue", async () => {
+		const probe = await startWorker();
+		const registry = await mainRegistry();
+		await probe.open("W1", registry, {});
+		await probe.open("W2", registry, {});
+		const first = mirrorOf("W1");
+		const second = mirrorOf("W2");
+		cleanups.push(
+			first.subscribe(() => {}),
+			second.subscribe(() => {}),
+		);
+		const pane = mountAgentWorkspacePane({
+			agentId: "W1",
+			close: () => {},
+			rows: () => 24,
+			registry: AgentRegistry.global(),
+			lifecycle: AgentLifecycleManager.global(),
+			settings: Settings.instance,
+			draft: new AgentPaneDraft(),
+			isCurrent: () => true,
+			knownCommand: () => false,
+		});
+		cleanups.push(() => {
+			pane.surface.dispose();
+			pane.dispose?.();
+		});
+		const running = probe.prompt("W1", "[hold] [live]");
+		const other = probe.prompt("W2", "[hold] another pane");
+		try {
+			await waitFor(() => first.isStreaming && second.isStreaming);
+			await first.prompt("change direction", { streamingBehavior: "steer" });
+			await waitFor(() => first.getQueuedMessages().liveSteered === 1);
+			await first.prompt("later follow-up", { streamingBehavior: "followUp" });
+			await second.prompt("belongs to the second pane", { streamingBehavior: "followUp" });
+			const draft = "keep typing here";
+			const editor = pane.surface.focused()!;
+			editor.handlers.onEdit?.({ type: "edit", key: "", from: 0, to: 0, text: draft, cursor: draft.length, len: 0 });
+			expect(pane.onKey?.({ id: "escape", raw: "\x1b", kind: "press" })).toBe(true);
+			await running;
+			expect(editor.props()).toMatchObject({ text: "change direction\n\nlater follow-up\n\nkeep typing here" });
+			expect(await probe.report("W1")).toMatchObject({ userTexts: ["[hold] [live]"], steering: [], followUp: [] });
+			expect(second.isStreaming).toBe(true);
+			expect((await probe.report("W2")).followUp).toEqual(["belongs to the second pane"]);
+		} finally {
+			await probe.release();
+			await Promise.allSettled([running, other]);
+		}
 	});
 
 	it("restores a follow-up popped as the held turn ends, and the worker never delivers it", async () => {

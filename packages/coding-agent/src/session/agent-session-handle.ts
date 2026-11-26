@@ -42,6 +42,7 @@ import type {
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
+	RestoredQueuedInput,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -413,6 +414,7 @@ export interface AgentViewSession extends AgentSessionHandle {
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number };
 	/** Remove and return the newest queued message with the queue it came from. */
 	popLastQueuedMessage(): DequeuedMessage | undefined;
+	interruptAndRestoreQueue(restore: (input: RestoredQueuedInput) => void, hasHeldInput?: boolean): Promise<void>;
 	/** Resume an interrupted turn. */
 	resume(): Promise<void>;
 	/** Retry the last failed turn. */

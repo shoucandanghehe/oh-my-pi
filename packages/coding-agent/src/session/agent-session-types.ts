@@ -710,6 +710,11 @@ export type RestoredQueuedMessage = {
 	video?: VideoContent[];
 };
 
+export interface RestoredQueuedInput {
+	steering: RestoredQueuedMessage[];
+	followUp: RestoredQueuedMessage[];
+}
+
 /** A queued message the dequeue key took back, tagged with the queue it left so the editor can restore its delivery. */
 export type DequeuedMessage = RestoredQueuedMessage & { queue: "steering" | "followUp" };
 

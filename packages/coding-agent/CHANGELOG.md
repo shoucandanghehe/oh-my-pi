@@ -306,6 +306,7 @@
 - A refused or failed turn that had emitted tool calls is now dropped from the model's context together with its placeholder tool results, instead of being replayed on the next prompt or retry ([#7932](https://github.com/can1357/oh-my-pi/issues/7932))
 - Tern keeps its native display when app viewport is enabled and returns to the ANSI workspace if negotiation fails ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2)).
 - Clipboard paste keeps the attachment and subsequent keystrokes in the originating pane, including PNG-only Windows clipboard images pasted into WSL.
+- Interrupting a BTW or subagent reply returns uncommitted steering and queued input to that pane's draft, just as in Main.
 - Subagents retain their scoped MCP tools when browser settings change.
 - HTML exports from preview binaries embed the matching viewer for offline use.
 - Resuming an idle GPT-6.2 session retains earlier reasoning across superseded tool results ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).

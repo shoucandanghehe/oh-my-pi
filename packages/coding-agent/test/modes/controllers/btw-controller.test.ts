@@ -1382,6 +1382,7 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 	auth.keys.setRuntime("anthropic", "test-key");
 	const model = registry.find("anthropic", "claude-sonnet-4-5")!;
 	const releaseReply = Promise.withResolvers<void>();
+	const releaseInterrupted = Promise.withResolvers<void>();
 	const releaseCompaction = Promise.withResolvers<void>();
 	const compactionStarted = Promise.withResolvers<AgentSession>();
 	const mock = createMockModel({
@@ -1392,6 +1393,7 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 					? input
 					: input?.flatMap(part => (part.type === "text" ? [part.text] : [])).join("");
 			if (text === "wait before yielding") await releaseReply.promise;
+			if (text === "wait before interruption") await releaseInterrupted.promise;
 			return { content: [`reply for ${text}`] };
 		},
 	});
@@ -1412,7 +1414,8 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 	});
 	const delivered = Promise.withResolvers<void>();
 	const handoff = vi.spyOn(main, "sendUserMessage").mockImplementation(async () => delivered.resolve());
-	const ctx = { ...makeCtx(main), sessionManager };
+	const showError = vi.fn();
+	const ctx = { ...makeCtx(main), sessionManager, showError };
 	let mounted: NativeWorkspaceSurface | undefined;
 	const adapter: BtwWorkspaceAdapter = {
 		async open(create) {
@@ -1542,11 +1545,21 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(draw()).not.toContain("reply for held after compact");
 		expect(handoff).toHaveBeenCalledTimes(1);
 
+		send("wait before interruption");
+		await drawn("Stop");
+		send("/queue pending to take back");
+		await drawn("After yield · pending to take back");
+		expect(press("escape")).toBe(true);
+		releaseInterrupted.resolve();
+		await drawn("pending to take back", true);
+		expect(nodeText(mounted!.surface.focused()!)).toContain("pending to take back");
+		expect(draw()).not.toContain("After yield · pending to take back");
+
 		const draft = "draft only in first";
 		send("/new second question");
 		await drawn("reply for second question");
 		expect(draw()).not.toContain("reply for quick question");
-		expect(mock.calls).toHaveLength(6);
+		expect(mock.calls).toHaveLength(7);
 		press("tab");
 		await drawn("reply for quick question");
 		mounted?.surface
@@ -1571,8 +1584,9 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 				.getBranch()
 				.flatMap(entry => (entry.type === "message" && entry.message.role === "user" ? [entry.message] : [])),
 		).toEqual([expect.objectContaining({ content: "Only Main sees this" })]);
-		expect(ctx.showError).not.toHaveBeenCalled();
+		expect(showError.mock.calls).toEqual([]);
 	} finally {
+		releaseInterrupted.resolve();
 		releaseReply.resolve();
 		releaseCompaction.resolve();
 		compact.mockRestore();

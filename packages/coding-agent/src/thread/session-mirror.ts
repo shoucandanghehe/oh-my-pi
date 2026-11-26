@@ -52,6 +52,7 @@ import type {
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
+	RestoredQueuedInput,
 	RestoredQueuedMessage,
 	RoleModelCycleResult,
 	SessionStats,
@@ -240,6 +241,7 @@ export type SessionHostProtocol = {
 	continuePausedTurn: RpcMethod<[], PausedTurnContinuation>;
 	steer: RpcMethod<[text: string, images?: ImageContent[], options?: SteerOptions], void>;
 	abort: RpcMethod<[options?: SessionAbortOptions], void>;
+	interruptAndRestoreQueue: RpcMethod<[restore: (input: RestoredQueuedInput) => void, hasHeldInput?: boolean], void>;
 	dispose: RpcMethod<[options?: AgentSessionDisposeOptions], void>;
 	deliverIrcMessage: RpcMethod<[msg: IrcMessage], "injected" | "woken">;
 	waitForIrcReplies: RpcMethod<[], void>;

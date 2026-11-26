@@ -571,6 +571,8 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	continuePausedTurn: async publisher => settle(publisher, publisher.session.continuePausedTurn()),
 	steer: async (publisher, text, images, options) => settle(publisher, publisher.session.steer(text, images, options)),
 	abort: async (publisher, options) => settle(publisher, publisher.session.abort(options)),
+	interruptAndRestoreQueue: (publisher, restore, hasHeldInput) =>
+		settle(publisher, publisher.session.interruptAndRestoreQueue(restore, hasHeldInput)),
 	dispose: async (publisher, options) => settle(publisher, publisher.session.dispose(options)),
 	deliverIrcMessage: async (publisher, msg) => settle(publisher, publisher.session.deliverIrcMessage(msg)),
 	waitForIrcReplies: async publisher => settle(publisher, publisher.session.waitForIrcReplies()),

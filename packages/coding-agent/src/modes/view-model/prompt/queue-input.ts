@@ -1,3 +1,6 @@
+import type { RestoredQueuedMessage } from "../../../session/agent-session-types";
+import { shiftImageMarkers } from "./composer-attachments";
+
 const QUEUE_PREFIXES: readonly string[] = ["->", "=>"];
 
 /** A list item's indent, marker and punctuation (`  2.`, `b)`). */
@@ -67,6 +70,24 @@ export function queueShorthandMarks(text: string): QueueShorthandMarks | undefin
 export function formatQueueShorthand(messages: readonly string[]): string {
 	if (messages.length === 1) return `=> ${messages[0]}`;
 	return `=>\n${messages.map((message, index) => `${index + 1}. ${message.replaceAll("\n", "\n   ")}`).join("\n")}`;
+}
+
+/** Combine oldest-first restored entries without renumbering the images already in the draft. */
+export function mergeQueueEntries(
+	entries: readonly (RestoredQueuedMessage & { imageLinks?: (string | undefined)[] })[],
+	imageOffset: number,
+) {
+	const hasImages = entries.some(entry => entry.images?.length);
+	const images = entries.flatMap(entry => entry.images ?? []);
+	const imageLinks = entries.flatMap(entry => entry.images?.map((_, index) => entry.imageLinks?.[index]) ?? []);
+	const text = entries
+		.map(entry => {
+			const text = hasImages ? shiftImageMarkers(entry.text, imageOffset) : entry.text;
+			imageOffset += entry.images?.length ?? 0;
+			return text;
+		})
+		.join("\n\n");
+	return { text, images, imageLinks };
 }
 
 function parseEnumeratedItem(line: string, lineIndex: number, offset: number): EnumeratedItem | undefined {
