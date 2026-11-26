@@ -65,6 +65,7 @@ import {
 import { type ContextRevisionValue, type SessionEntry } from "../session/session-entries";
 import { isRpcProxy, type RpcServe } from "./rpc";
 import {
+	captureStreamedToolArgs,
 	SESSION_STATE_READERS as read,
 	type SessionBridgeClient,
 	type SessionEntriesDelta,
@@ -335,7 +336,8 @@ export class SessionPublisher {
 		}
 		if (!tick || this.#scheduled) this.flush();
 		try {
-			this.#bridge.remote.notify("event", this.#key, toWireData(event));
+			const streamArgs = event.type === "message_update" ? captureStreamedToolArgs(event.message) : undefined;
+			this.#bridge.remote.notify("event", this.#key, toWireData(event), streamArgs);
 		} catch (error) {
 			logger.warn("SessionPublisher failed to forward an event", {
 				key: this.#key,
@@ -440,7 +442,13 @@ export class SessionPublisher {
 				...next,
 				activeToolExecutionUpdates: toWireData([...this.session.activeToolExecutionUpdates()]),
 			};
-			this.#bridge.remote.notify("view", this.#key, state, this.#entriesDelta());
+			this.#bridge.remote.notify(
+				"view",
+				this.#key,
+				state,
+				this.#entriesDelta(),
+				captureStreamedToolArgs(this.session.agent.state.streamMessage),
+			);
 			return;
 		}
 		const patch: Partial<SessionViewState> = {};
@@ -493,6 +501,19 @@ export class SessionPublisher {
 			agentEffort: session.agent.state.thinkingLevel,
 			tools,
 			toolNames: previous && reuse("toolNames") ? previous.toolNames : [...sources.toolNames],
+			toolRenderMetadata: Object.fromEntries(
+				sources.toolNames.flatMap(wireName => {
+					const tool = session.getToolByName(wireName);
+					return tool
+						? [
+								[
+									wireName,
+									{ name: tool.name, label: tool.label, builtIn: session.hasBuiltInTool(tool.name) },
+								] as const,
+							]
+						: [];
+				}),
+			),
 			builtInTools:
 				previous && reuse("toolNames")
 					? previous.builtInTools

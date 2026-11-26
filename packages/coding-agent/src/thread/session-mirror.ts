@@ -22,6 +22,11 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ServiceTierByFamily, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	clearStreamingPartialJson,
+	getStreamingPartialJson,
+	setStreamingPartialJson,
+} from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { IrcMessage } from "../irc/irc-types";
 import type { TodoPhase } from "../tools/details/todo";
@@ -39,6 +44,7 @@ import type {
 	AgentModelSelectionState,
 	AgentSessionAdvisorOverview,
 	AgentSessionHandle,
+	AgentViewToolRenderMetadata,
 	AgentViewToolSchema,
 	ToolExecutionUpdateEvent,
 } from "../session/agent-session-handle";
@@ -158,6 +164,8 @@ export interface SessionViewState {
 	tools: AgentViewToolSchema[];
 	/** Every registered tool name (active or not), which `getToolByName` can answer for. */
 	toolNames: string[];
+	/** The worker's canonical names and labels; its render functions are not cloneable. */
+	toolRenderMetadata?: Record<string, AgentViewToolRenderMetadata>;
 	/** The registered names that came from a built-in factory. */
 	builtInTools: string[];
 	pendingToolResults: ToolResultMessage[];
@@ -306,13 +314,16 @@ export type SessionBridgeProtocol = {
 	opened: RpcMethod<[opened: SessionOpened], void>;
 	patch: RpcMethod<[key: string, patch: Partial<SessionMirrorState>], void>;
 	messages: RpcMethod<[key: string, delta: SessionMessagesDelta], void>;
-	event: RpcMethod<[key: string, event: AgentSessionEvent], void>;
+	event: RpcMethod<[key: string, event: AgentSessionEvent, streamArgs?: StreamedToolArgs], void>;
 	runState: RpcMethod<[key: string, state: SessionRunState], void>;
 	/**
 	 * Watch started: the full view state, and what main's entry list (kept across
 	 * watches) lacks; undefined when it is current.
 	 */
-	view: RpcMethod<[key: string, state: SessionViewState, entries: SessionEntriesDelta | undefined], void>;
+	view: RpcMethod<
+		[key: string, state: SessionViewState, entries: SessionEntriesDelta | undefined, streamArgs?: StreamedToolArgs],
+		void
+	>;
 	viewPatch: RpcMethod<[key: string, patch: Partial<SessionViewState>], void>;
 	/**
 	 * Synchronous, from the agent's queued-message gate: queued entries `ids` are
@@ -342,6 +353,31 @@ export type SessionBridgeProtocol = {
 /** Worker-side proxy of the main thread's bridge (remote-object kind `"agent-session-bridge"`). */
 export class SessionBridgeClient {
 	constructor(readonly remote: RemoteObject<SessionBridgeProtocol>) {}
+}
+
+/** Explicit worker wire fields for temporary provider symbols, not part of a saved message. */
+export type StreamedToolArgs = readonly (readonly [index: number, json: string])[];
+
+export function captureStreamedToolArgs(message: AgentMessage | null): StreamedToolArgs | undefined {
+	if (message?.role !== "assistant") return undefined;
+	const args: [number, string][] = [];
+	for (const [index, part] of message.content.entries()) {
+		if (part.type !== "toolCall") continue;
+		const json = getStreamingPartialJson(part);
+		if (json !== undefined) args.push([index, json]);
+	}
+	return args.length ? args : undefined;
+}
+
+export function restoreStreamedToolArgs(message: AgentMessage | null, args: StreamedToolArgs | undefined): void {
+	if (message?.role !== "assistant") return;
+	const indexed = args ? new Map(args) : undefined;
+	for (const [index, part] of message.content.entries()) {
+		if (part.type !== "toolCall") continue;
+		const json = indexed?.get(index);
+		if (json === undefined) clearStreamingPartialJson(part);
+		else setStreamingPartialJson(part, json);
+	}
 }
 
 /** Readers of every {@link PeerStateField} on any handle, returning wire-safe data. */

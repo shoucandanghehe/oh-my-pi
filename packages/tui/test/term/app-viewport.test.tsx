@@ -15,6 +15,7 @@ import {
 import { ALT_ENTER, ALT_LEAVE } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { type MemoryTerminal, memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
 import { KittyTerminal } from "kitty-vt-wasm";
 
@@ -39,9 +40,10 @@ async function withHost(
 		shell?: string;
 		columns?: number;
 		rows?: number;
+		theme?: HostOptions["theme"];
 	} = {},
 ): Promise<void> {
-	const { inline, shell, columns = COLUMNS, rows = ROWS, ...callbacks } = options;
+	const { inline, shell, columns = COLUMNS, rows = ROWS, theme, ...callbacks } = options;
 	const term = KittyTerminal.createSync({ columns, rows, scrollback: 100 });
 	if (shell) term.write(`${shell}\r\n`);
 	const memory = memoryTerminal({
@@ -54,7 +56,7 @@ async function withHost(
 		...callbacks,
 		surface,
 		driver: memory.options,
-		theme: () => PLAIN_THEME,
+		theme: theme ?? (() => PLAIN_THEME),
 		separator: () => 0,
 		native: false,
 	});
@@ -125,38 +127,39 @@ it("scrolls only main, anchoring to the same text through upstream growth and re
 	await withHost(
 		surface,
 		async ({ host, memory, term, screen }) => {
+			const transcript = () => screen().map(row => row.replace(/[│█▽]$/u, "").trimEnd());
 			expect(host.renderBackend).toBe("app-viewport");
 			expect(surface.main().some(node => host.retired(node))).toBe(false);
-			expect(screen()).toEqual(["live4", "live5", "live6", "live7", "dock"]);
+			expect(transcript()).toEqual(["live4", "live5", "live6", "live7", "dock"]);
 			expect(memory.output.join("")).toContain("\x1b[?1002h");
 			await afterFrame(host, () => memory.feed("\x1b[<64;1;2M"));
-			expect(screen()).toEqual(["live1", "live2", "live3", "live4", "dock"]);
+			expect(transcript()).toEqual(["live1", "live2", "live3", "live4", "dock"]);
 			await afterFrame(host, () => memory.feed("\x1b[1;3H\x1b[6~")); // Alt+Home, then PgDown in one read.
-			expect(screen()).toEqual(["02abc 03abc", "04abc 05abc", "06abc 07abc", "live0", "dock"]);
+			expect(transcript()).toEqual(["02abc 03abc", "04abc 05abc", "06abc 07abc", "live0", "dock"]);
 			await afterFrame(host, () => {
 				prefix.set(["added", "old0", "old1"]);
 				output.set([...output(), "live8"]);
 			});
-			expect(screen()[0]).toBe("02abc 03abc");
+			expect(transcript()[0]).toBe("02abc 03abc");
 			await afterFrame(host, () => {
 				term.resize(6, ROWS);
 				memory.resize(6, ROWS);
 			});
-			expect(screen()).toEqual(["02abc", "03abc", "04abc", "05abc", "dock"]);
+			expect(transcript()).toEqual(["02abc", "03abc", "04abc", "05abc", "dock"]);
 			await afterFrame(host, () => modal.set(true));
 			expect(screen()[1]).not.toContain("03abc");
 			await afterFrame(host, () => memory.feed("\x1b[1;3F\x1b[<65;1;2M")); // Alt+End and wheel under the layer.
 			await afterFrame(host, () => modal.set(false));
-			expect(screen()).toEqual(["02abc", "03abc", "04abc", "05abc", "dock"]);
+			expect(transcript()).toEqual(["02abc", "03abc", "04abc", "05abc", "dock"]);
 			await host.suspend(async () => {
 				expect(term.isMainScreen).toBe(true);
 				expect(screen()).toEqual(["shell", "", "", "", ""]);
 			});
-			expect(screen()).toEqual(["02abc", "03abc", "04abc", "05abc", "dock"]);
+			expect(transcript()).toEqual(["02abc", "03abc", "04abc", "05abc", "dock"]);
 			await afterFrame(host, () => memory.feed("\x1b[1;3F"));
-			expect(screen()).toEqual(["live5", "live6", "live7", "live8", "dock"]);
+			expect(transcript()).toEqual(["live5", "live6", "live7", "live8", "dock"]);
 			await afterFrame(host, () => output.set([...output(), "live9"]));
-			expect(screen()).toEqual(["live6", "live7", "live8", "live9", "dock"]);
+			expect(transcript()).toEqual(["live6", "live7", "live8", "live9", "dock"]);
 			await host.stop();
 			const outputBytes = memory.output.join("");
 			expect(outputBytes.split(ALT_ENTER)).toHaveLength(3);
@@ -165,6 +168,99 @@ it("scrolls only main, anchoring to the same text through upstream growth and re
 			expect(screen()).toEqual(["shell", "", "", "", ""]);
 		},
 		{ shell: "shell" },
+	);
+});
+
+it("shows the tail before refining distant history, also after a width resize", async () => {
+	const count = 512;
+	const painted = new Map<number, number[]>();
+	const surface = createSurface(() => ({
+		main: Array.from({ length: count }, (_, i) => (
+			<canvas
+				key={`${i}`}
+				paint={width => {
+					let calls = painted.get(width);
+					if (!calls) painted.set(width, (calls = []));
+					calls.push(i);
+					return [`block${i}`];
+				}}
+			/>
+		)),
+		dock: <text>dock</text>,
+	}));
+	await withHost(surface, async ({ host, memory, term, screen }) => {
+		const tail = ["block508", "block509", "block510", "block511"];
+		const visibleTranscript = () =>
+			screen()
+				.slice(0, 4)
+				.map(row => row.split(" ")[0]);
+		const initial = [...painted.values()][0]!;
+		expect(visibleTranscript()).toEqual(tail);
+		expect(initial).not.toContain(0);
+		expect(initial.length).toBeLessThan(count / 8);
+		const first = initial.length;
+		await afterFrame(host, () => {}); // Continuation requested by the viewport, not by an input event.
+		expect(initial.length).toBeGreaterThan(first);
+		expect(initial.length - first).toBeLessThan(count / 8);
+		expect(initial.filter(index => index === 511)).toEqual([511]); // Same-width cached tail.
+		expect(visibleTranscript()).toEqual(tail);
+		await afterFrame(host, () => {
+			term.resize(20, ROWS);
+			memory.resize(20, ROWS);
+		});
+		const resized = [...painted.values()].at(-1)!;
+		expect(resized).not.toBe(initial);
+		expect(resized).not.toContain(0);
+		expect(resized.length).toBeLessThan(count / 8);
+		expect(visibleTranscript()).toEqual(tail);
+	});
+});
+
+it("drags the transcript thumb across content and returns to a live tail from the rail", async () => {
+	const lines = signal(Array.from({ length: 16 }, (_, i) => `item${i}`));
+	const surface = createSurface(() => ({
+		main: <rows lines={lines} />,
+		dock: <text>dock</text>,
+	}));
+	await withHost(surface, async ({ host, memory, screen }) => {
+		expect(screen()[0]).toMatch(/^item12\b/);
+		expect(screen()[3]).toMatch(/█$/u);
+		await afterFrame(host, () => memory.feed("\x1b[<0;12;4M"));
+		expect(screen()[0]).toMatch(/^item12\b/);
+		await afterFrame(host, () => memory.feed("\x1b[<32;2;2M\x1b[<0;2;2m"));
+		expect(screen()[0]).toMatch(/^item4\b/);
+		expect(screen()[3]).toMatch(/▽$/u);
+		await afterFrame(host, () => lines.set([...lines(), "item16"]));
+		expect(screen()[0]).toMatch(/^item4\b/);
+		await afterFrame(host, () => memory.feed("\x1b[<0;12;4M\x1b[<0;12;4m"));
+		expect(screen()[3]).toMatch(/^item16\s+█$/u);
+		await afterFrame(host, () => lines.set([...lines(), "item17"]));
+		expect(screen()[3]).toMatch(/^item17\s+█$/u);
+		expect(screen()[4]).toBe("dock");
+	});
+});
+
+it("keeps the selected text across a transcript rewrap", async () => {
+	const copied: string[] = [];
+	const surface = createSurface(() => ({
+		main: <text>alpha bravo ch x</text>,
+		dock: <text>dock</text>,
+	}));
+	await withHost(
+		surface,
+		async ({ host, memory, term, screen }) => {
+			await afterFrame(host, () => memory.feed("\x1b[<0;7;1M\x1b[<32;11;1M\x1b[<0;11;1m"));
+			memory.feed("\x03");
+			expect(copied).toEqual(["bravo"]);
+			await afterFrame(host, () => {
+				term.resize(7, ROWS);
+				memory.resize(7, ROWS);
+			});
+			expect(screen()[1]).toBe("bravo");
+			memory.feed("\x03");
+			expect(copied).toEqual(["bravo", "bravo"]);
+		},
+		{ onAppViewportSelectionCopy: text => copied.push(text) },
 	);
 });
 
@@ -302,14 +398,14 @@ it("composes a recursive workspace, scopes scrolling and attachments, and closes
 			expect(workspace.active()).toBe("b");
 			expect(sizes).toEqual({ b: 4, c: 4 });
 			expect(screen()[0]).toMatch(/Main\s+│› Agent B/);
-			expect(screen()[1]).toMatch(/^main3\s+│b9/);
+			expect(screen()[1]).toMatch(/^main3\s+[│█]│b9/);
 			expect(screen()[4]).toContain("b dock");
 			expect(screen()[6]).toContain("Agent C");
 			expect(screen()[10]).toContain("c dock");
 			expect(term.cursor.y).toBe(4);
 			await afterFrame(host, () => memory.feed("\x1b[<64;43;8M")); // Wheel in C, while B is active.
-			expect(screen()[7]).toMatch(/│c6$/);
-			expect(screen()[1]).toMatch(/│b9$/);
+			expect(screen()[7]).toMatch(/│c6\s+[│█▽]$/u);
+			expect(screen()[1]).toMatch(/│b9\s+[│█]$/u);
 			expect(workspace.active()).toBe("b");
 			memory.feed("qX\x1b[200~pasted\x1b[201~");
 			expect(edits).toEqual(["b:intercept", "b"]);
@@ -398,6 +494,7 @@ it("clamps sash drags and parks panes through a too-small resize without losing 
 });
 
 it("previews and redocks a dragged pane without remounting it", async () => {
+	const theme = loadThemeSync("dark");
 	const surface = createSurface(() => ({ main: <text>main body</text> }));
 	const body = signal("side before");
 	let released = 0;
@@ -411,6 +508,7 @@ it("previews and redocks a dragged pane without remounting it", async () => {
 						"side",
 						() => ({
 							surface: createSurface(() => ({ main: <text text={body} /> })),
+							intercept: event => event.type === "key" && event.key.id === "escape",
 							dispose: () => released++,
 						}),
 						{ label: "Side" },
@@ -418,18 +516,100 @@ it("previews and redocks a dragged pane without remounting it", async () => {
 				).toBe(true);
 			});
 			expect(screen()[1]).toMatch(/^main body\s+│side before$/);
+			const written = memory.output.length;
 			await afterFrame(host, () => memory.feed("\x1b[<0;41;1M\x1b[<32;2;5M"));
-			expect(screen()[0]).toMatch(/^◀ Main\s+│› Side/);
-			expect(screen()[1]).toMatch(/^main body\s+│side before$/);
+			expect(screen()[0]).toMatch(/^┏━+┓ +│› Side/);
+			expect(screen()[1]).toMatch(/^┃side before +┃ +│side before$/);
+			const preview = memory.output.slice(written).join("");
+			expect(preview).toContain(`${theme.fgSgr("accent")}┏`);
+			expect(preview).toContain(`${theme.fgSgr("muted")}side before`);
+			await afterFrame(host, () => body.set("side after"));
+			expect(screen()[1]).toMatch(/^┃side before +┃ +│side after$/);
+			await afterFrame(host, () => memory.feed("\x1b[27u"));
+			expect(screen()[1]).toMatch(/^main body\s+│side after$/);
+			await afterFrame(host, () => memory.feed("\x1b[<0;41;1M\x1b[<32;2;5M"));
 			await afterFrame(host, () => memory.feed("\x1b[<0;2;5m"));
 			expect(screen()[0]).toMatch(/^› Side.*│  Main$/);
-			expect(screen()[1]).toMatch(/^side before\s+│main body$/);
+			expect(screen()[1]).toMatch(/^side after\s+│main body$/);
 			expect(workspace.active()).toBe("side");
 			expect(released).toBe(0);
-			await afterFrame(host, () => body.set("side after"));
-			expect(screen()[1]).toMatch(/^side after\s+│main body$/);
 		},
-		{ columns: 77, rows: 11 },
+		{ columns: 77, rows: 11, theme: () => theme },
 	);
 	expect(released).toBe(1);
+});
+
+it("reflows only automatic splits that fit a grid, keeping mounted editors and focus", async () => {
+	const main = createSurface(() => ({ main: <text>Main body</text> }));
+	const mounted: string[] = [];
+	const disposed: string[] = [];
+	const initialRows: Record<string, number> = {};
+	const create =
+		(name: string) =>
+		(_close: () => void, rows: () => number): WorkspaceSurface => {
+			mounted.push(name);
+			initialRows[name] = rows();
+			const draft = signal("");
+			const surface = createSurface(() => ({
+				main: <text text={`${name} body`} />,
+				dock:
+					name === "b" ? (
+						<editor
+							text={draft}
+							onEdit={edit => {
+								if (edit.type === "edit") {
+									draft.set(draft().slice(0, edit.from) + edit.text + draft().slice(edit.to));
+								}
+							}}
+						/>
+					) : null,
+			}));
+			if (name === "b") surface.focus(surface.dock()[0]!);
+			return { surface, dispose: () => disposed.push(name) };
+		};
+	await withHost(
+		main,
+		async ({ host, memory, screen }) => {
+			const workspace = host.ansiWorkspace!;
+			await afterFrame(host, () => {
+				expect(workspace.open("b", create("b"), { target: "main", edge: "right" })).toBe(true);
+				expect(workspace.open("c", create("c"), { target: "b", edge: "bottom", focus: false })).toBe(true);
+			});
+			await afterFrame(host, () => memory.feed("draft"));
+			const initial = screen().join("\n");
+			expect(initial).toContain("Main body");
+			expect(initial).toContain("c body");
+			expect(initial).toContain("draft");
+
+			const before = screen();
+			expect(workspace.open("d", create("d"), { target: "main", minHeight: 6 })).toBe(false);
+			expect(mounted).toEqual(["b", "c"]);
+			expect(screen()).toEqual(before);
+
+			// Main and D each need 6 rows, so neither can share the left column of the
+			// original tree. The right column is also full. Pair them with B and C instead.
+			await afterFrame(host, () => {
+				expect(workspace.open("d", create("d"), { minHeight: 6, focus: false })).toBe(true);
+			});
+			expect(mounted).toEqual(["b", "c", "d"]);
+			expect(initialRows.d).toBe(5);
+			expect(disposed).toEqual([]);
+			expect(workspace.active()).toBe("b");
+			const reflowed = screen().join("\n");
+			for (const text of ["Main body", "b body", "c body", "d body", "draft"]) expect(reflowed).toContain(text);
+
+			await afterFrame(host, () => memory.feed("X"));
+			expect(screen().join("\n")).toContain("draftX");
+			const grid = screen();
+			await afterFrame(host, () => {
+				expect(workspace.open("e", create("e"))).toBe(false);
+				memory.feed("\x1b[24~"); // A no-op F12 still requests a frame.
+			});
+			expect(mounted).toEqual(["b", "c", "d"]);
+			expect(workspace.active()).toBe("b");
+			expect(screen()).toEqual(grid);
+		},
+		{ columns: 37, rows: 11, ansiWorkspaceMainMinimum: { minHeight: 6 } },
+	);
+	expect(disposed).toEqual(["b", "c", "d"]);
 });

@@ -626,6 +626,7 @@ export interface ExtensionHostUIContext extends ExtensionUIContext {
 export class ExtensionRunner {
 	#uiContext: ExtensionHostUIContext;
 	#ownedUi = new Map<string, ExtensionUIContext>();
+	#interactiveUI = false;
 	#mode: ExtensionMode = "print";
 	#toolApprovalPreviewWaiter?: (toolCallId: string) => Promise<void>;
 	/** Grant keys (see `sessionApprovalScope`) approved "for this session", each prefixed by the session it covers. */
@@ -989,7 +990,12 @@ export class ExtensionRunner {
 		commandContextActions?: ExtensionCommandContextActions,
 		uiContext?: ExtensionHostUIContext,
 		mode: ExtensionMode = "print",
-		options?: { installFileFallbacks?: boolean; registerProviders?: boolean },
+		options?: {
+			installFileFallbacks?: boolean;
+			registerProviders?: boolean;
+			/** Publish local status without enabling interactive or Main-owned UI. */
+			setStatus?: ExtensionUIContext["setStatus"];
+		},
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
@@ -1049,10 +1055,21 @@ export class ExtensionRunner {
 			this.#compactFn = commandContextActions.compact;
 		}
 
+		const setStatus = options?.setStatus;
+		this.#interactiveUI = uiContext !== undefined && uiContext !== noOpUIContext;
 		this.#uiContext =
 			uiContext && this.#trackUserWait
 				? trackUserWaits(uiContext, this.#trackUserWait)
-				: (uiContext ?? noOpUIContext);
+				: (uiContext ??
+					(setStatus
+						? {
+								...noOpUIContext,
+								get theme() {
+									return noOpUIContext.theme;
+								},
+								setStatus,
+							}
+						: noOpUIContext));
 		this.#ownedUi.clear();
 		this.#mode = mode;
 		this.#initialized = true;
@@ -1235,7 +1252,7 @@ export class ExtensionRunner {
 	}
 
 	hasUI(): boolean {
-		return this.#uiContext !== noOpUIContext;
+		return this.#interactiveUI;
 	}
 
 	/**

@@ -233,7 +233,7 @@ import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
-import { NativeAgentPanes } from "./controllers/native-agent-panes";
+import { animatePanePetrification, NativeAgentPanes } from "./controllers/native-agent-panes";
 import { NativeWorkspace } from "./native-workspace/workspace";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
@@ -404,6 +404,7 @@ import { followTerminal, onThemeChange, setSymbolPreset } from "../ui/theme/serv
 import {
 	batch,
 	createRoot,
+	createSurface,
 	effect,
 	type JSXNode,
 	jsx,
@@ -1787,7 +1788,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					await workspace.open(
 						"btw",
 						"BTW",
-						close => create(close, () => workspace.get("btw")?.driver.rows ?? this.shell.size().rows),
+						(close, supports) =>
+							create(close, () => workspace.get("btw")?.driver.rows ?? this.shell.size().rows, supports),
 						() => {},
 					);
 					return true;
@@ -8085,6 +8087,32 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleDebugTranscriptCommand(): Promise<void> {
 		return this.#commandController.handleDebugTranscriptCommand();
+	}
+
+	previewSubagentExitAnimation(): void {
+		const workspace = this.shell.host?.ansiWorkspace;
+		if (!workspace) {
+			this.showWarning("Petrification preview requires the app-viewport render backend");
+			return;
+		}
+		const key = "debug:petrify";
+		workspace.close(key);
+		const opened = workspace.open(
+			key,
+			close => {
+				const progress = signal<number | undefined>(undefined);
+				const surface = createSurface(() => ({
+					main: [
+						jsx("text", { text: "Subagent work complete", tone: "success" }),
+						jsx("text", { text: "Background panes fade before closing.", tone: "muted" }),
+					],
+				}));
+				const dispose = animatePanePetrification(progress, () => true, close);
+				return { surface, petrification: progress, dispose };
+			},
+			{ label: "Petrification preview", focus: false },
+		);
+		if (!opened) this.showWarning("The terminal is too small to open the petrification preview");
 	}
 
 	handleShareCommand(): Promise<void> {

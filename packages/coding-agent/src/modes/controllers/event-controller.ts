@@ -35,6 +35,7 @@ import {
 	isSettledJobFrame,
 	parksAsBackground,
 	readMediaPath,
+	renderArgsWithIntent,
 	settleWithJobFrame,
 	toolRenderName,
 } from "../../session/transcript/tool-execution";
@@ -72,7 +73,7 @@ import { isWarpCliAgentProtocolActive } from "../warp-events";
 import { ComposerPredictionController } from "./composer-prediction-controller";
 import { recapBlock, todoReminderBlock, ttsrBlock, usageRowBlock } from "./event-blocks";
 import { StreamingRevealController } from "./streaming-reveal";
-import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
+import { toolArgsRevealTarget, ToolArgsRevealController } from "./tool-args-reveal";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
 
@@ -87,12 +88,6 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
  * oldest live-region card retires as soon as a new one would exceed the cap.
  */
 const MAX_LIVE_IRC_CARDS = 4;
-
-const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = {
-	bash: true,
-	edit: true,
-	apply_patch: true,
-};
 
 function hasCommittedTodo(events: unknown): boolean {
 	return (
@@ -133,13 +128,6 @@ function nativeTaskJobToast(message: { role: string; customType?: string; detail
 	const name = sanitizeText(job.label ?? job.jobId ?? "task").trim() || "task";
 	const took = typeof job.durationMs === "number" ? ` · ${formatDuration(job.durationMs)}` : "";
 	return `Background task ${name} completed${took}`;
-}
-
-function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknown): boolean {
-	if (rawInput) return true;
-	if (RAW_PARTIAL_JSON_RENDERERS[toolName]) return true;
-	if (tool === null || typeof tool !== "object" || !("renderCall" in tool)) return false;
-	return typeof tool.renderCall === "function";
 }
 
 type AgentSessionEventHandlers = {
@@ -215,12 +203,6 @@ function formatAsyncWaitLabel(sources: WakeSources | undefined): string {
 	].filter(part => part !== undefined);
 	if (parts.length > 0) return `Waiting for ${parts.join("; ")}`;
 	return sources?.queued ? "Delivering queued results" : "Waiting for background work";
-}
-
-/** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
-function renderArgsWithIntent(args: unknown, intent: string | undefined): unknown {
-	if (intent === undefined || !isRecord(args) || INTENT_FIELD in args) return args;
-	return { ...args, [INTENT_FIELD]: intent };
 }
 
 /** Identity of a reply across retries: when it was sent, by which model, how it ended. */
@@ -1867,7 +1849,6 @@ export class EventController {
 				// as-is — mirroring how assistant text snaps at message_end.
 				let renderArgs: Record<string, unknown>;
 				const partialJson = getStreamingPartialJson(content);
-				const rawInput = content.customWireName !== undefined;
 				// `message_update` is cumulative — every update re-lists all blocks
 				// of the streaming message — so creation must also be guarded by the
 				// timeline map: `pendingTools` loses the id the moment a completion
@@ -1877,11 +1858,11 @@ export class EventController {
 				// that already finished, permanently pending.
 				const isNew = !this.ctx.pendingTools.has(content.id) && !this.#toolTimelineComponents.has(content.id);
 				if (partialJson) {
-					renderArgs = this.#toolArgsReveal.setTarget(content.id, partialJson, {
-						rawInput,
-						exposeRawPartialJson: exposesRawPartialJson(renderToolName, rawInput, tool),
-						streamingStringKeys: streamingStringKeysForTool(renderToolName, rawInput),
-					});
+					renderArgs = this.#toolArgsReveal.setTarget(
+						content.id,
+						partialJson,
+						toolArgsRevealTarget(renderToolName, content.customWireName !== undefined, tool),
+					);
 				} else {
 					this.#toolArgsReveal.finish(content.id);
 					renderArgs = content.arguments;

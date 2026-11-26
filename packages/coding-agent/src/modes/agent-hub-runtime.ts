@@ -19,7 +19,7 @@ export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
 	parseEntries: text => {
 		const entries = parseSessionEntries(text).filter(
-			entry => entry.type === "message" || entry.type === "model_change",
+			entry => entry.type === "message" || entry.type === "custom_message" || entry.type === "model_change",
 		);
 		for (const entry of entries) {
 			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);

@@ -15253,6 +15253,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				const runtime = await BtwExtensionRuntime.create({
 					agent: child,
 					onSessionClosed: options?.onSessionClosed,
+					onStatusChange: options?.onStatusChange,
 					sessionManager,
 					availableTools: this.#tools
 						.getEnabledToolNames()

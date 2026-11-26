@@ -32,6 +32,7 @@ export interface EphemeralConversationSideOptions {
 	sessionManager?: SessionManager;
 	/** Host-owned standard storage survives terminal child-runtime disposal. */
 	onSessionClosed?: (manager: SessionManager) => void;
+	onStatusChange?: () => void;
 }
 
 export interface EphemeralTurnResult {
@@ -349,6 +350,10 @@ export class EphemeralConversation {
 
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#runtime?.runner;
+	}
+
+	get extensionStatuses(): ReadonlyMap<string, string> | undefined {
+		return this.#runtime?.statuses;
 	}
 
 	freeze(): FrozenEphemeralConversationCheckpoint {

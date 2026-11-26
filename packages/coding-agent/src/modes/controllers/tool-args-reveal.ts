@@ -23,6 +23,18 @@ export function streamingStringKeysForTool(toolName: string, rawInput: boolean):
 	return STREAMING_STRING_KEYS_BY_TOOL[toolName];
 }
 
+/** Which tool faces consume the raw JSON prefix as well as the parsed arguments. */
+export function toolArgsRevealTarget(toolName: string, rawInput: boolean, tool: unknown): ToolArgsRevealTarget {
+	const hasRenderCall =
+		tool !== null && typeof tool === "object" && "renderCall" in tool && typeof tool.renderCall === "function";
+	return {
+		rawInput,
+		exposeRawPartialJson:
+			rawInput || toolName === "bash" || toolName === "edit" || toolName === "apply_patch" || hasRenderCall,
+		streamingStringKeys: streamingStringKeysForTool(toolName, rawInput),
+	};
+}
+
 type ToolArgsRevealControllerOptions = {
 	getSmoothStreaming(): boolean;
 };

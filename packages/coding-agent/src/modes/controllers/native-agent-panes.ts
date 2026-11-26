@@ -1,4 +1,4 @@
-import type { AnsiWorkspace } from "@oh-my-pi/pi-tui";
+import { type AnsiWorkspace, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { type NativeClock, SYSTEM_CLOCK } from "@oh-my-pi/pi-tui/native/connection";
 import type { RegistryEvent } from "../../registry/agent-registry";
 import type { AgentWorkspaceSurface } from "../agent-workspace-pane";
@@ -7,6 +7,7 @@ import type { NativeWorkspace } from "../native-workspace/workspace";
 interface AgentPane {
 	manual: boolean;
 	protect?: () => boolean;
+	petrification?: Signal<number | undefined>;
 	cancelClose?: () => void;
 }
 
@@ -19,6 +20,30 @@ interface NativeAgentPaneOptions {
 }
 
 const CLOSE_GRACE_MS = 3000;
+
+/** Return the pane to its live colors when the animation is cancelled. */
+export function animatePanePetrification(
+	progress: Signal<number | undefined>,
+	eligible: () => boolean,
+	close: () => void,
+	clock = SYSTEM_CLOCK,
+): () => void {
+	const started = clock.now();
+	let cancelFrame: (() => void) | undefined;
+	const cancel = () => {
+		cancelFrame?.();
+		progress.set(undefined);
+	};
+	const frame = () => {
+		if (!eligible()) return cancel();
+		const left = CLOSE_GRACE_MS - (clock.now() - started);
+		if (left <= 0) return close();
+		progress.set(1 - left / CLOSE_GRACE_MS);
+		cancelFrame = clock.setTimeout(frame, Math.min(1000 / 60, left));
+	};
+	frame();
+	return cancel;
+}
 
 /** Follow the running roster without reopening a dismissed pane or auto-closing a pinned one. */
 export class NativeAgentPanes {
@@ -95,8 +120,11 @@ export class NativeAgentPanes {
 					(close, rows) => {
 						const mounted = this.options.create(id, close, rows);
 						entry.protect = mounted.protectedFromAutoClose;
+						const petrification = manual ? undefined : signal<number | undefined>(undefined);
+						entry.petrification = petrification;
 						return {
 							...mounted,
+							petrification,
 							dispose: () => {
 								try {
 									mounted.dispose?.();
@@ -126,12 +154,27 @@ export class NativeAgentPanes {
 		if (pane.manual || !pane.protect || pane.protect() || pane.cancelClose) return;
 		const { workspace } = this.options;
 		const key = `agent:${id}`;
+		const clock = this.options.clock ?? SYSTEM_CLOCK;
 		const eligible = () =>
 			this.#panes.get(id) === pane && !pane.manual && !pane.protect?.() && !this.options.isRunning(id);
-		const focused = () => ("isFocused" in workspace ? workspace.isFocused(key) : workspace.active() === key);
+		if (!("isFocused" in workspace)) {
+			const unfocusedAndEligible = () => workspace.active() !== key && eligible();
+			if (pane.petrification && unfocusedAndEligible()) {
+				pane.cancelClose = animatePanePetrification(
+					pane.petrification,
+					unfocusedAndEligible,
+					() => {
+						workspace.close(key);
+					},
+					clock,
+				);
+			}
+			return;
+		}
+		const focused = () => workspace.isFocused(key);
 		const arm = async (): Promise<void> => {
 			if ((await focused()) || !eligible() || pane.cancelClose) return;
-			pane.cancelClose = (this.options.clock ?? SYSTEM_CLOCK).setTimeout(() => {
+			pane.cancelClose = clock.setTimeout(() => {
 				pane.cancelClose = undefined;
 				void Promise.resolve(focused()).then(isFocused => {
 					if (!isFocused && eligible()) workspace.close(key);

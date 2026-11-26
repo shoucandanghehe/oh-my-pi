@@ -2,6 +2,7 @@ import type { MouseEvent } from "../driver/contract";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
 import { batch, computed, createRoot, signal } from "../reactive";
+import { stripEscapes } from "../text/ansi";
 import { flattenLine, stripControl } from "../text/sanitize";
 import type {
 	AnsiWorkspace,
@@ -15,6 +16,7 @@ import type { AppViewport, ViewportHit } from "./app-viewport";
 export interface InputFrame {
 	readonly layer: readonly UiNode[];
 	readonly hits: readonly ViewportHit[];
+	readonly rail?: { readonly width: number; readonly inset: number };
 }
 
 export interface WorkspacePane {
@@ -62,6 +64,8 @@ interface MoveDrag {
 	readonly id: string;
 	readonly row: number;
 	readonly col: number;
+	moved: boolean;
+	snapshot?: readonly string[];
 	drop?: { readonly root: Layout; readonly target: string; readonly edge: WorkspaceEdge };
 }
 
@@ -70,6 +74,12 @@ type PointerDrag = MoveDrag | { readonly kind: "resize"; readonly sash: Sash; re
 interface Geometry {
 	readonly panes: ReadonlyMap<string, WorkspaceRect>;
 	readonly sashes: readonly Sash[];
+}
+
+interface WorkspacePlacement {
+	readonly layout: Layout;
+	readonly rect: WorkspaceRect;
+	readonly splits: number;
 }
 
 const MAIN = "main";
@@ -131,6 +141,62 @@ function geometry(layout: Layout, box: WorkspaceRect): Geometry {
 	};
 	place(layout, box);
 	return { panes, sashes };
+}
+
+/** Equal cells along one grid axis, using the same binary sashes as manually split panes. */
+function stack(nodes: readonly Layout[], axis: Split["axis"], nextIndex: () => number): Layout {
+	if (nodes.length === 1) return nodes[0]!;
+	const middle = Math.ceil(nodes.length / 2);
+	return {
+		index: nextIndex(),
+		axis,
+		first: stack(nodes.slice(0, middle), axis, nextIndex),
+		second: stack(nodes.slice(middle), axis, nextIndex),
+		ratio: middle / nodes.length,
+	};
+}
+
+/** Try both orientations of a grid, favoring room above the tightest pane's minimum. */
+function gridPlacement(
+	panes: readonly Leaf[],
+	entry: Leaf,
+	box: WorkspaceRect,
+	sequence: number,
+): WorkspacePlacement | undefined {
+	let best: (WorkspacePlacement & { scale: number; mainArea: number }) | undefined;
+	for (const axis of ["x", "y"] as const) {
+		const innerAxis = axis === "x" ? "y" : "x";
+		for (let count = 1; count <= panes.length; count++) {
+			const base = Math.floor(panes.length / count);
+			const extra = panes.length % count;
+			for (const extraAtStart of extra === 0 ? [true] : [true, false]) {
+				let index = sequence;
+				const nextIndex = () => ++index;
+				let offset = 0;
+				const groups: Layout[] = [];
+				for (let group = 0; group < count; group++) {
+					const larger = extraAtStart ? group < extra : group >= count - extra;
+					const end = offset + base + Number(larger);
+					groups.push(stack(panes.slice(offset, end), innerAxis, nextIndex));
+					offset = end;
+				}
+				const layout = stack(groups, axis, nextIndex);
+				const frame = geometry(layout, box);
+				if (frame.panes.size !== panes.length) continue;
+				let scale = Number.POSITIVE_INFINITY;
+				for (const pane of panes) {
+					const rect = frame.panes.get(pane.id)!;
+					scale = Math.min(scale, rect.width / pane.width, rect.height / pane.height);
+				}
+				const main = frame.panes.get(MAIN)!;
+				const mainArea = main.width * main.height;
+				if (!best || scale > best.scale || (scale === best.scale && mainArea > best.mainArea)) {
+					best = { layout, rect: frame.panes.get(entry.id)!, splits: index - sequence, scale, mainArea };
+				}
+			}
+		}
+	}
+	return best;
 }
 
 /** Replace or remove a leaf, collapsing the branch that lost a child. */
@@ -206,6 +272,13 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		return this.#focused();
 	}
 
+	pointerMotion(): boolean {
+		for (const id of this.#geometry.read().panes.keys()) {
+			if (this.#panes.get(id)?.mount.ansiRail) return true;
+		}
+		return false;
+	}
+
 	pane(id: string): WorkspacePane | undefined {
 		return this.#panes.get(id);
 	}
@@ -229,6 +302,47 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		if (this.#panes.has(id)) {
 			return options.focus === false ? this.#geometry.read().panes.has(id) : this.focus(id);
 		}
+		const entry = leaf(id, options);
+		const position = this.#openPlacement(entry, options);
+		if (!position) return false;
+		const { layout, rect, splits } = position;
+		// During construction the new surface needs its proposed size; after admission it
+		// follows the same geometry the compositor paints, even across a terminal resize.
+		let constructing = true;
+		let closed = false;
+		const close = (): void => {
+			if (constructing) closed = true;
+			else if (!closed && this.#panes.get(id) === pane) this.close(id);
+		};
+		const rows = (): number => {
+			const height = this.#geometry.read().panes.get(id)?.height ?? 0;
+			if (constructing) return rect.height - 1;
+			return !closed && this.#panes.get(id) === pane ? Math.max(0, height - 1) : 0;
+		};
+		const mount = create(close, rows);
+		constructing = false;
+		if (closed) {
+			mount.surface.dispose();
+			mount.dispose?.();
+			return false;
+		}
+		this.#sequence += splits;
+		const pane = {
+			mount,
+			leaf: entry,
+			label: flattenLine(stripControl(options.label ?? id)),
+			viewport: this.viewport(mount),
+		};
+		this.#panes.set(id, pane);
+		this.endPointer();
+		batch(() => {
+			this.#layout.set(layout);
+			if (options.focus !== false) this.#focused.set(id);
+		});
+		return true;
+	}
+
+	#openPlacement(entry: Leaf, options: WorkspaceOpenOptions): WorkspacePlacement | undefined {
 		const current = this.#geometry.read();
 		const targets =
 			options.target === undefined
@@ -237,51 +351,18 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		const edges: readonly WorkspaceEdge[] = options.edge === undefined ? ["right", "bottom"] : [options.edge];
 		const share = options.ratio ?? 0.5;
 		const ratio = Number.isFinite(share) ? Math.max(0.1, Math.min(0.9, share)) : 0.5;
-		const entry = leaf(id, options);
+		const box = this.#size.peek();
 		for (const target of targets) {
 			if (!current.panes.has(target)) continue;
 			for (const edge of edges) {
 				const layout = insertPane(this.#layout.peek(), target, entry, edge, ratio, this.#sequence + 1);
-				const prospective = geometry(layout, this.#size.peek());
-				const rect = prospective.panes.get(id);
-				if (!rect || prospective.panes.size !== current.panes.size + 1) continue;
-				// During construction the new surface needs its proposed size; after admission it
-				// follows the same geometry the compositor paints, even across a terminal resize.
-				let constructing = true;
-				let closed = false;
-				const close = (): void => {
-					if (constructing) closed = true;
-					else if (!closed && this.#panes.get(id) === pane) this.close(id);
-				};
-				const rows = (): number => {
-					const height = this.#geometry.read().panes.get(id)?.height ?? 0;
-					if (constructing) return rect.height - 1;
-					return !closed && this.#panes.get(id) === pane ? Math.max(0, height - 1) : 0;
-				};
-				const mount = create(close, rows);
-				constructing = false;
-				if (closed) {
-					mount.surface.dispose();
-					mount.dispose?.();
-					return false;
-				}
-				this.#sequence++;
-				const pane = {
-					mount,
-					leaf: entry,
-					label: flattenLine(stripControl(options.label ?? id)),
-					viewport: this.viewport(mount),
-				};
-				this.#panes.set(id, pane);
-				this.endPointer();
-				batch(() => {
-					this.#layout.set(layout);
-					if (options.focus !== false) this.#focused.set(id);
-				});
-				return true;
+				const prospective = geometry(layout, box);
+				const rect = prospective.panes.get(entry.id);
+				if (rect && prospective.panes.size === current.panes.size + 1) return { layout, rect, splits: 1 };
 			}
 		}
-		return false;
+		if (options.target !== undefined || options.edge !== undefined) return undefined;
+		return gridPlacement([...this.#panes.values()].map(pane => pane.leaf).concat(entry), entry, box, this.#sequence);
 	}
 
 	close(id: string): boolean {
@@ -334,9 +415,13 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		return frame;
 	}
 
-	dropPreview(id: string): WorkspaceEdge | undefined {
+	dropPreview(
+		capture: (source: string) => readonly string[],
+	): { readonly target: string; readonly edge: WorkspaceEdge; readonly snapshot: readonly string[] } | undefined {
 		const drag = this.#drag;
-		return drag?.kind === "move" && drag.drop?.target === id ? drag.drop.edge : undefined;
+		if (drag?.kind !== "move" || !drag.moved) return undefined;
+		drag.snapshot ??= capture(drag.id).map(stripEscapes);
+		if (drag.drop) return { target: drag.drop.target, edge: drag.drop.edge, snapshot: drag.snapshot };
 	}
 
 	bodyHeight(id: string): number {
@@ -362,6 +447,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		if (drag) {
 			if (drag.kind === "move") {
 				if (mouse.action === "drag") {
+					drag.moved ||= drag.row !== mouse.row || drag.col !== mouse.col;
 					const drop = this.#dropAt(drag, mouse);
 					if (drop) drag.drop = drop;
 					else delete drag.drop;
@@ -408,7 +494,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			if (leftPress && id !== MAIN && mouse.col === rect.x + rect.width - 1) this.close(id);
 			else if (leftPress) {
 				this.focus(id);
-				this.#drag = { kind: "move", id, row: mouse.row, col: mouse.col };
+				this.#drag = { kind: "move", id, row: mouse.row, col: mouse.col, moved: false };
 			}
 			return undefined;
 		}

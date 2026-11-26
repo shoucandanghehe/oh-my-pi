@@ -60,7 +60,13 @@ import type { InteractiveModeContext } from "../types";
 
 export interface BtwWorkspaceAdapter {
 	available?(): boolean;
-	open(create: (close: () => void, rows: () => number) => NativeWorkspaceSurface): Promise<boolean>;
+	open(
+		create: (
+			close: () => void,
+			rows: () => number,
+			nativeSupports?: (kind: string) => boolean,
+		) => NativeWorkspaceSurface,
+	): Promise<boolean>;
 	close(): void;
 }
 
@@ -770,6 +776,9 @@ export class BtwController {
 						sessionManager: store.getSessionManager(key),
 						onSessionClosed: closed => store.adoptClosedSession(key, closed),
 						approveSummary: (summary, signal) => this.#approveSummary(workspace, key, summary, signal),
+						onStatusChange: () => {
+							if (this.#owns(workspace)) this.#refreshDurable();
+						},
 						sendToMainSession: summary => {
 							if (!this.#owns(workspace)) throw new Error("Main session changed before BTW summary delivery");
 							return owner.publishBtwSummary({
@@ -937,10 +946,11 @@ export class BtwController {
 		const { manager } = workspace;
 		try {
 			if (key && !manager.select(key)) return false;
-			const opened = await this.workspace.open((close, rows) => {
+			const opened = await this.workspace.open((close, rows, nativeSupports) => {
 				const pane = new BtwConversationPane({
 					cwd: workspace.owner.sessionManager.getCwd(),
 					rows,
+					nativeSupports,
 					keybindings: this.ctx.keybindings,
 					revision: this.#durableRevision,
 					threads: () => manager.children,
@@ -972,6 +982,7 @@ export class BtwController {
 				this.#pane = pane;
 				return {
 					surface: pane.surface,
+					ansiRail: pane.ansiRail,
 					onKey: pane.onKey,
 					intercept: pane.intercept,
 					onAppViewportPasteRequest: pane.onAppViewportPasteRequest,

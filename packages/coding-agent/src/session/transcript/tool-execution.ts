@@ -1,9 +1,16 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 /** Resolves the canonical renderer key while retaining the provider's wire name in message history. */
 export function toolRenderName(wireName: string, tool: AgentTool | undefined): string {
 	return tool?.name ?? wireName;
+}
+
+/** The harness strips `i` from executed args, but the displayed call keeps its intent. */
+export function renderArgsWithIntent(args: unknown, intent: string | undefined): unknown {
+	if (intent === undefined || !isRecord(args) || INTENT_FIELD in args) return args;
+	return { ...args, [INTENT_FIELD]: intent };
 }
 
 /** The background job state a tool result reports (`details.async.state`: running, completed, failed, cancelled). */

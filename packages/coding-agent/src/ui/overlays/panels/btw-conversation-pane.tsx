@@ -2,28 +2,32 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
+	batch,
 	computed,
 	createSurface,
 	effect,
 	For,
 	type JSXNode,
 	type KeyEvent,
-	Show,
+	onCleanup,
 	signal,
 	type Surface,
 	untrack,
 } from "@oh-my-pi/pi-tui";
+import { formatNumber } from "@oh-my-pi/pi-utils";
 import { CombinedAutocompleteProvider } from "../../../autocomplete/autocomplete";
 import type { KeybindingsManager } from "../../../config/keybindings/keybindings";
 import {
 	appFollowUpKeys,
 	appToolsExpandKeys,
+	listKeyId,
 	matchesAnyKey,
 	matchesAppInterrupt,
 } from "../../../config/keybindings/matchers";
 import { canonicalKeyId } from "../../../config/keybindings/key-id";
 import type { SpaceHoldHandler } from "../../../config/keybindings/space-hold";
 import { firstOfKind } from "../../../modes/controllers/selector-views";
+import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
 import type { NativeWorkspaceSurface } from "../../../modes/native-workspace/workspace";
 import type { AgentSession } from "../../../session/agent-session";
@@ -36,14 +40,21 @@ import {
 	type YieldCompaction,
 } from "../../../session/session-command-queue";
 import { isClipboardTerminalLocal, readClipboardContent, readImageFromClipboard } from "../../../utils/clipboard";
-import { Composer } from "../../composer/composer";
+import { Composer, type ComposerSlots } from "../../composer/composer";
 import { queuedLine } from "../../dock/queue";
 import { Overlays } from "../../shell/overlays";
-import { AssistantMessageBlock } from "../../transcript/messages/assistant-message";
+import { SideToolCalls } from "../../transcript/side-tool-calls";
 import { UserMessage } from "../../transcript/messages/user-message";
-import { ToolBlock, ToolCall } from "../../transcript/tool-block";
+import {
+	SideMessage,
+	SideReply,
+	type SideTranscriptDisplay,
+	sideTranscriptDisplay,
+} from "../../transcript/side-transcript";
 import { ActionButton } from "./common";
+import { BtwTopicRail } from "./btw-topic-rail";
 import { TreeSelector } from "../pickers/tree-selector";
+import { SelectSheet } from "../pickers/select-sheet";
 import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
 import "../../styles/messages";
 import "../../styles/tools";
@@ -62,6 +73,8 @@ export type BtwQueueEdit =
 interface BtwPaneOptions {
 	readonly cwd: string;
 	readonly rows: () => number;
+	/** Presence distinguishes a Tern workspace surface from an ANSI pane. */
+	readonly nativeSupports?: (kind: string) => boolean;
 	readonly keybindings: KeybindingsManager;
 	readonly revision: () => number;
 	threads(): readonly BtwThread[];
@@ -113,13 +126,14 @@ const COMMANDS = [
 /** The workspace owns this view; its manager owns the conversation and the draft. */
 export class BtwConversationPane implements NativeWorkspaceSurface {
 	readonly surface: Surface;
+	readonly ansiRail: BtwTopicRail | undefined;
 	readonly #composer: Composer;
 	readonly #overlays: Overlays;
 	readonly #selected;
 	readonly #threads;
-	readonly #rail = signal(false);
 	readonly #expanded = signal(false);
 	readonly #approval = signal<SummaryApproval | undefined>(undefined);
+	readonly #menu = signal<{ key: string; active: string } | undefined>(undefined);
 	readonly #lifetime = new AbortController();
 	#approvalTail = Promise.resolve();
 	#mode: "steer" | "followUp" = "steer";
@@ -137,11 +151,23 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			return options.threads();
 		});
 		let composer!: Composer;
+		let rail: BtwTopicRail | undefined;
 		this.surface = createSurface(() => {
 			composer = new Composer({
 				placeholder: "Ask BTW…",
 				autocomplete: new CombinedAutocompleteProvider(COMMANDS, options.cwd),
 			});
+			if (options.nativeSupports) composer.setSlots(this.#nativeStatus());
+			else {
+				rail = new BtwTopicRail({
+					rows: options.rows,
+					threads: this.#threads,
+					selected: this.#selected,
+					blocked: () => this.#approval() !== undefined,
+					select: key => this.#select(key),
+					newThread: () => this.#action("new"),
+				});
+			}
 			return {
 				main: () => {
 					const approval = this.#approval();
@@ -149,8 +175,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						<md key="btw-summary" text={approval.summary} />
 					) : (
 						<ThreadTranscript
-							key={this.#selected()}
-							thread={this.#thread}
+							key={this.#displayed()?.key}
+							thread={this.#displayed}
 							expanded={this.#expanded}
 							options={options}
 						/>
@@ -163,6 +189,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				layer: () => this.#overlays.nodes(),
 			};
 		});
+		this.ansiRail = rail;
 		this.#composer = composer;
 		this.#overlays = new Overlays({
 			focused: this.surface.focused,
@@ -188,15 +215,132 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			options.dictation?.(composer),
 		);
 		this.#loadDraft();
+		this.ansiRail?.selectionChanged(this.#draftKey);
 		// Track undo, recall, typing, pasted atoms and dictation alike; the keyed editor must
 		// never persist an old draft into the newly selected thread.
-		this.#composer.addEditListener(() => this.saveDraft(false));
+		this.#composer.addEditListener(() => {
+			this.ansiRail?.preview.set(undefined);
+			this.saveDraft(false);
+		});
 	}
 
 	readonly #thread = (): BtwThread | undefined => {
 		this.options.revision();
 		return this.options.selected();
 	};
+
+	readonly #displayed = (): BtwThread | undefined => {
+		const preview = this.ansiRail?.preview();
+		return (
+			(preview === undefined ? undefined : this.#threads().find(thread => thread.key === preview)) ?? this.#thread()
+		);
+	};
+
+	readonly #facts = computed(() => {
+		const thread = this.#displayed();
+		if (!thread) return;
+		const session = thread.conversation.session;
+		const status = thread.conversation.status;
+		const liveModel = status?.model;
+		const branch = !liveModel ? thread.conversation.sessionManager.getBranch() : undefined;
+		const savedModel = branch?.findLast(entry => entry.type === "model_change" && !entry.resolvedModelIsFallback);
+		const savedEffort = branch?.findLast(entry => entry.type === "thinking_level_change");
+		const usage = status?.stats.contextUsage;
+		const stats = status?.stats;
+		return {
+			model: sanitizeDisplayLine(
+				liveModel?.name ?? (savedModel?.type === "model_change" ? savedModel.model : thread.model.id),
+			),
+			effort: liveModel
+				? liveModel.thinking
+					? ((session?.isAutoThinking ? session.autoResolvedThinkingLevel() : undefined) ??
+						session?.configuredThinkingLevel() ??
+						"off")
+					: undefined
+				: (savedEffort?.configured ?? savedEffort?.thinkingLevel ?? undefined),
+			context: usage && usage.contextWindow > 0 ? `${Math.round(usage.percent)}% context` : undefined,
+			usage,
+			tokens: stats?.tokens.total ? `${formatNumber(stats.tokens.total)} tokens` : undefined,
+			cost: stats?.cost ? formatCost(stats.cost) : undefined,
+			requests: stats?.premiumRequests ? `${formatNumber(stats.premiumRequests)} premium requests` : undefined,
+			statuses: thread.conversation.extensionStatuses,
+		};
+	});
+
+	#nativeStatus(): ComposerSlots {
+		return {
+			model: () => {
+				const model = this.#facts()?.model;
+				return (
+					model && (
+						<row key="model" role="omp.composer.model" align="center" gap="xs">
+							<icon name="model" />
+							<text text={model} wrap="none" />
+						</row>
+					)
+				);
+			},
+			effort: () => {
+				const level = this.#facts()?.effort;
+				return (
+					level && (
+						<row key="effort" role="omp.composer.effort" align="center" gap="xs" title="Thinking effort">
+							<effort level={level} />
+							<text text={level} wrap="none" />
+						</row>
+					)
+				);
+			},
+			context: () => {
+				const facts = this.#facts();
+				const usage = facts?.usage;
+				return (
+					facts?.context &&
+					usage && (
+						<meter
+							key="context"
+							role="omp.composer.context"
+							style="bar"
+							value={Math.min(1, usage.percent / 100)}
+							label={`${Math.round(usage.percent)}%`}
+							total={String(usage.contextWindow)}
+							title={facts.context}
+						/>
+					)
+				);
+			},
+			extras: () => this.#statusLine(true),
+			usage: () => {
+				const cost = this.#facts()?.cost;
+				return cost && <text key="usage" role="omp.composer.usage" text={cost} wrap="none" />;
+			},
+		};
+	}
+
+	#statusLine(native = false): JSXNode {
+		const facts = this.#facts();
+		if (!facts) return undefined;
+		return (
+			<status
+				key="btw-status"
+				role={native ? "omp.composer.extras" : "omp.btw.status"}
+				transparent={native}
+				grow={native ? 1 : undefined}
+			>
+				{!native && <seg key="model" priority={2} min={{ w: "5ch" }} spans={[{ t: facts.model, s: "accent" }]} />}
+				{!native && facts.effort && <seg key="effort" priority={1} spans={[{ t: facts.effort }]} />}
+				<seg key="read-only" spans={[{ t: "Read-only", s: "muted" }]} />
+				{!native && facts.context && <seg key="context" spans={[{ t: facts.context }]} />}
+				{facts.tokens && <seg key="tokens" spans={[{ t: facts.tokens, s: "muted" }]} />}
+				{!native && facts.cost && <seg key="cost" spans={[{ t: facts.cost, s: "muted" }]} />}
+				{facts.requests && <seg key="requests" spans={[{ t: facts.requests, s: "muted" }]} />}
+				{facts.statuses &&
+					[...facts.statuses].map(([key, status]) => (
+						<seg key={`extension:${key}`} spans={[{ t: sanitizeDisplayLine(status), s: "muted" }]} />
+					))}
+			</status>
+		);
+	}
 
 	#draft(text = this.#composer.expandedText(), take = false): BtwPaneDraft {
 		const images = take ? this.#composer.pendingImages.splice(0) : this.#composer.pendingImages;
@@ -225,8 +369,10 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		if (this.#disposed) return;
 		const thread = this.#thread();
 		if (thread?.key !== this.#draftKey) {
+			this.#menu.set(undefined);
 			this.saveDraft();
 			this.#loadDraft();
+			this.ansiRail?.selectionChanged(thread?.key);
 		}
 	}
 
@@ -290,6 +436,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	}
 
 	#submit(text: string): void {
+		this.ansiRail?.preview.set(undefined);
 		const input = this.#draft(text, true);
 		const key = this.#draftKey;
 		const sent = this.options.submit(key, input, this.#mode);
@@ -305,8 +452,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 
 	#select(key: string): void {
 		this.saveDraft();
+		this.ansiRail?.preview.set(undefined);
 		this.options.select(key);
-		this.#rail.set(false);
 	}
 
 	readonly onAppViewportPasteRequest = (): void => {
@@ -361,6 +508,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			};
 			const deny = () => finish(false);
 			cancel.addEventListener("abort", deny, { once: true });
+			this.ansiRail?.clearHover();
+			this.#menu.set(undefined);
 			this.#overlays.closeAll();
 			this.surface.focus(null);
 			this.#approval.set({ title, summary, finish });
@@ -386,6 +535,22 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		if (this.#overlays.open()) return false;
 		const { keybindings } = this.options;
 		const thread = this.#thread();
+		const menu = this.#menu.peek();
+		if (thread && menu?.key === thread.key) {
+			const actions = this.#threadActions(thread);
+			const current = Math.max(
+				0,
+				actions.findIndex(action => action.id === menu.active),
+			);
+			const command = listKeyId(key, keybindings);
+			if (command === "escape") this.#menu.set(undefined);
+			else if (command === "enter" && key.kind === "press" && !key.afterPaste) this.#action(actions[current]!.id);
+			else if (command === "up" || command === "down") {
+				const next = (current + actions.length + (command === "up" ? -1 : 1)) % actions.length;
+				this.#menu.set({ ...menu, active: actions[next]!.id });
+			}
+			return true;
+		}
 		if (keybindings.matches(key, "app.message.dequeue")) {
 			if (thread) this.options.dequeue(thread.key);
 			return true;
@@ -408,15 +573,15 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			!this.#composer.vimConsumesEscape() &&
 			!this.#composer.completing()
 		) {
-			if (this.#rail.peek()) this.#rail.set(false);
-			else if (thread?.phase === "running" || thread?.conversation.session?.isCompacting)
+			if (thread?.phase === "running" || thread?.conversation.session?.isCompacting) {
+				this.ansiRail?.clearHover();
 				this.options.cancel(thread.key);
-			else this.options.close();
+			} else if (!this.ansiRail?.dismiss()) this.options.close();
 			return true;
 		}
 		switch (key.id) {
 			case "alt+t":
-				this.#rail.set(!this.#rail.peek());
+				this.#action("threads");
 				return true;
 			case "alt+enter":
 				if (thread) this.options.promote(thread.key);
@@ -447,7 +612,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 
 	readonly intercept: NonNullable<NativeWorkspaceSurface["intercept"]> = event => {
 		if (event.type === "key") return this.onKey(event.key);
-		return this.#approval.peek() !== undefined && event.type === "paste";
+		return event.type === "paste" && (this.#approval.peek() !== undefined || this.#menu.peek() !== undefined);
 	};
 
 	readonly #chrome = (): JSXNode => {
@@ -491,50 +656,136 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						))}
 					</col>
 				)}
-				<Show when={this.#rail}>
-					<list
-						max={() => ({ lines: Math.max(1, Math.floor(this.options.rows() / 3)) })}
-						selected={this.#selected() ?? null}
-						onSelect={key => this.options.select(key)}
-						onActivate={key => this.#select(key)}
-					>
-						{this.#threads().map(item => (
-							<item
-								key={item.key}
-								label={sanitizeDisplayLine(item.title)}
-								value={
-									item.phase === "running" ? "Replying" : item.unread ? `${item.unread} unread` : undefined
-								}
-							/>
-						))}
-					</list>
-				</Show>
+				{!this.options.nativeSupports && this.#statusLine()}
 				<row gap="sm" wrap>
-					<text grow={1} truncate="end" text={thread ? `BTW · ${sanitizeDisplayLine(thread.title)}` : "BTW"} />
+					<text
+						grow={1}
+						truncate="end"
+						text={() => {
+							const displayed = this.#displayed();
+							return displayed
+								? `BTW · ${this.ansiRail?.preview() ? "Preview · " : ""}${sanitizeDisplayLine(displayed.title)}`
+								: "BTW";
+						}}
+					/>
 					<PaneButton id="threads" label="Threads" />
 					<PaneButton id="new" label="New" />
-					{(thread?.phase === "running" || session?.isCompacting) && <PaneButton id="stop" label="Stop" />}
-					{thread && this.options.canPromote(thread.key) && <PaneButton id="promote" label="Promote" />}
-					{thread && <PaneButton id="delete" label="Delete" />}
+					{this.options.nativeSupports ? (
+						thread &&
+						(this.options.nativeSupports("menu") ? (
+							this.#nativeActions(thread)
+						) : (
+							<ActionButton id="more" label="···" title="Thread actions" />
+						))
+					) : (
+						<>
+							{(thread?.phase === "running" || session?.isCompacting) && <PaneButton id="stop" label="Stop" />}
+							{thread && this.options.canPromote(thread.key) && <PaneButton id="promote" label="Promote" />}
+							{thread && <PaneButton id="delete" label="Delete" />}
+						</>
+					)}
 					<PaneButton id="close" label="Close" />
 				</row>
 			</col>
 		);
 	};
 
+	#nativeActions(thread: BtwThread): JSXNode {
+		const { key } = thread;
+		const actions = this.#threadActions(thread);
+		return (
+			<menu
+				key={`actions:${key}`}
+				role="omp.btw.actions"
+				title="Thread actions"
+				align="end"
+				size="sm"
+				items={actions}
+				open={() => this.#menu()?.key === key}
+				active={() => {
+					const menu = this.#menu();
+					if (menu?.key !== key) return undefined;
+					return actions.find(action => action.id === menu.active)?.id ?? actions[0]!.id;
+				}}
+				onToggle={collapsed => {
+					if (this.#selected() !== key || this.#approval.peek() || this.#overlays.open()) return;
+					this.#menu.set(collapsed ? undefined : { key, active: actions[0]!.id });
+				}}
+				onAction={act => {
+					if (this.#selected() === key && actions.some(action => action.id === act)) this.#action(act);
+				}}
+			/>
+		);
+	}
+
+	#threadActions(thread: BtwThread): { id: string; label: string; danger?: boolean }[] {
+		return [
+			...(thread.phase === "running" || thread.conversation.session?.isCompacting
+				? [{ id: "stop", label: "Stop" }]
+				: []),
+			...(thread.turns.at(-1)?.replyText ? [{ id: "copy", label: "Copy answer" }] : []),
+			...(this.options.canPromote(thread.key) ? [{ id: "promote", label: "Promote" }] : []),
+			{ id: "delete", label: "Delete thread", danger: true },
+		];
+	}
+
+	#showPicker(kind: "threads" | "actions"): void {
+		const thread = this.#thread();
+		const initial = kind === "threads" ? thread?.key : undefined;
+		const title = kind === "threads" ? "BTW threads" : "Thread actions";
+		const items = () =>
+			kind === "threads"
+				? this.#threads().map(topic => ({
+						id: topic.key,
+						label: sanitizeDisplayLine(topic.title),
+						detail: topic.phase === "running" ? "Replying" : topic.unread ? `${topic.unread} unread` : undefined,
+					}))
+				: this.#thread()?.key === thread?.key && thread
+					? this.#threadActions(thread)
+					: [];
+		const sheet = this.#overlays.show(
+			() => (
+				<overlay key={`btw-${kind}`} role={`omp.btw.${kind}`} size="sm" modal>
+					<SelectSheet
+						title={title}
+						items={items}
+						initial={initial}
+						current={initial === undefined ? undefined : [initial]}
+						onCancel={() => sheet.close()}
+						onPick={id => {
+							sheet.close();
+							if (kind === "threads") this.#select(id);
+							else if (this.#thread()?.key === thread?.key) this.#action(id);
+						}}
+					/>
+				</overlay>
+			),
+			{ focus: root => firstOfKind(root, "picker") },
+		);
+	}
+
 	#action(act: string): void {
 		if (this.#approval.peek() || this.#overlays.open()) return;
+		this.#menu.set(undefined);
 		const thread = this.#thread();
 		switch (act) {
 			case "threads":
-				this.#rail.set(!this.#rail.peek());
+				if (this.ansiRail) this.ansiRail.toggle();
+				else this.#showPicker("threads");
+				break;
+			case "more":
+				this.#showPicker("actions");
 				break;
 			case "new":
+				this.ansiRail?.preview.set(undefined);
 				this.saveDraft();
 				this.options.newThread();
 				break;
 			case "stop":
 				if (thread) this.options.cancel(thread.key);
+				break;
+			case "copy":
+				if (thread) this.options.copy(thread.key);
 				break;
 			case "promote":
 				if (thread) this.options.promote(thread.key);
@@ -572,6 +823,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		this.saveDraft();
 		this.#disposed = true;
 		this.#lifetime.abort();
+		this.ansiRail?.dispose();
 		this.#overlays.closeAll();
 		this.#composer.setSpaceHold([], undefined);
 	};
@@ -581,74 +833,145 @@ function PaneButton(props: { id: string; label: string }): JSXNode {
 	return <ActionButton id={props.id} label={props.label} title={props.label} />;
 }
 
+interface BtwTranscriptSource {
+	readonly thread: BtwThread;
+	readonly conversation: BtwThread["conversation"];
+	readonly session: AgentSession | undefined;
+}
+
 function ThreadTranscript(props: {
 	thread(): BtwThread | undefined;
 	expanded(): boolean;
 	options: BtwPaneOptions;
 	key?: string;
 }): JSXNode {
-	const messages = computed(() => {
+	const source = computed<readonly BtwTranscriptSource[]>(previous => {
 		const thread = props.thread();
-		return thread ? projectBtwMessages(thread.conversation.sessionManager, thread.conversation.session) : [];
-	});
-	const resultById = computed(
-		() =>
-			new Map(
-				messages().flatMap(message =>
-					message.role === "toolResult" ? [[message.toolCallId, message] as const] : [],
-				),
-			),
-	);
-	const stream = computed(() => {
-		const thread = props.thread();
-		const message = thread?.conversation.session?.agent.state.streamMessage ?? thread?.request?.streamMessage;
-		if (message?.role !== "assistant") return undefined;
-		const last = messages().at(-1);
-		return last?.role === "assistant" && last.timestamp === message.timestamp ? undefined : message;
+		if (!thread) return [];
+		const { conversation } = thread;
+		const session = conversation.session;
+		const old = previous?.[0];
+		if (previous && old?.thread === thread && old.conversation === conversation && old.session === session)
+			return previous;
+		return [{ thread, conversation, session }];
 	});
 	return (
-		<col role="omp.btw.transcript" gap="sm">
+		<For
+			each={source}
+			fallback={
+				<col role="omp.btw.transcript" gap="sm">
+					<text text="Ask a side question without interrupting Main." tone="muted" />
+				</col>
+			}
+		>
+			{current => (
+				<ThreadTranscriptBody
+					source={current}
+					thread={props.thread}
+					options={props.options}
+					expanded={props.expanded}
+				/>
+			)}
+		</For>
+	);
+}
+
+function ThreadTranscriptBody(props: {
+	source: BtwTranscriptSource;
+	thread(): BtwThread | undefined;
+	expanded(): boolean;
+	options: BtwPaneOptions;
+}): JSXNode {
+	const { thread, conversation, session } = props.source;
+	const display = sideTranscriptDisplay(
+		() => conversation.extensionRunner,
+		() => session?.settings,
+		props.expanded,
+	);
+	const messages = signal<readonly AgentMessage[]>([]);
+	const stream = signal<AssistantMessage | undefined>(undefined);
+	const eventRevision = signal(0);
+	const tools = new SideToolCalls({
+		expanded: props.expanded,
+		onSessionChange: () => eventRevision.update(value => value + 1),
+	});
+	tools.bind(session);
+	onCleanup(() => tools.dispose());
+	effect(() => {
+		eventRevision();
+		// Read the selected thread's revision, but never adopt another thread's session.
+		if (props.thread() !== thread || thread.conversation !== conversation || conversation.session !== session) return;
+		const projected = projectBtwMessages(conversation.sessionManager, session);
+		untrack(() =>
+			batch(() => {
+				const previous = messages();
+				if (previous !== projected) {
+					const append =
+						previous.length <= projected.length &&
+						previous.every((message, index) => message === projected[index]);
+					if (!append) tools.clearCommitted();
+					for (let i = append ? previous.length : 0; i < projected.length; i++) {
+						const message = projected[i]!;
+						if (message.role === "assistant") {
+							for (const part of message.content) {
+								if (part.type === "toolCall") tools.commit(part, message);
+							}
+						} else if (message.role === "toolResult") {
+							tools.finish(message.toolCallId, message);
+						}
+					}
+				}
+				const live = tools.stream(session?.agent.state.streamMessage ?? thread.request?.streamMessage, projected);
+				tools.syncExecution();
+				messages.set(projected);
+				stream.set(live);
+			}),
+		);
+	});
+
+	const blocks = (
+		<>
 			{() => !messages().length && <text text="Ask a side question without interrupting Main." tone="muted" />}
 			<For each={messages}>
-				{message => (
-					<ThreadMessage
-						message={message}
-						options={props.options}
-						expanded={props.expanded}
-						resultById={resultById}
-					/>
-				)}
+				{message => <ThreadMessage message={message} options={props.options} tools={tools} display={display} />}
 			</For>
-			<AssistantMessageBlock
-				model={{
-					message: stream,
-					transient: true,
-					hideThinking: props.options.hideThinking,
-					expandThinking: props.expanded,
-					proseOnlyThinking: props.options.proseOnlyThinking(),
-					reacts: false,
-				}}
+			<SideReply
+				message={stream}
+				tools={tools}
+				display={display}
+				live
+				hideThinking={props.options.hideThinking}
+				proseOnlyThinking={props.options.proseOnlyThinking()}
 			/>
 			{() => {
 				const thread = props.thread();
-				if (!thread) return undefined;
+				if (thread !== props.source.thread || thread.conversation !== conversation) return undefined;
 				if (thread.conversation.session?.isCompacting) return <spinner label="Compacting BTW" />;
 				if (thread.phase === "running") return <spinner label="Replying" />;
 				if (thread.error) return <text text={thread.error} tone="error" wrap="word" />;
 				if (readAgentsPaused(thread.conversation.sessionManager.getBranch()))
 					return <text text="BTW thread paused · /continue to resume" tone="muted" />;
 			}}
+		</>
+	);
+	// The ANSI viewport indexes top-level blocks; keep Tern's semantic grouping.
+	return props.options.nativeSupports ? (
+		<col role="omp.btw.transcript" gap="sm">
+			{blocks}
 		</col>
+	) : (
+		blocks
 	);
 }
 
 function ThreadMessage(props: {
 	message: AgentMessage;
 	options: BtwPaneOptions;
-	expanded(): boolean;
-	resultById(): ReadonlyMap<string, Extract<AgentMessage, { role: "toolResult" }>>;
+	tools: SideToolCalls;
+	display: SideTranscriptDisplay;
 }): JSXNode {
 	const { message } = props;
+	if (message.role === "toolResult") return undefined;
 	if (message.role === "user") {
 		const parts =
 			typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
@@ -663,32 +986,14 @@ function ThreadMessage(props: {
 			/>
 		);
 	}
-	if (message.role !== "assistant") return undefined;
-	const reply: AssistantMessage = message;
-	return [
-		<AssistantMessageBlock
-			model={{
-				message: reply,
-				finalized: true,
-				hideThinking: props.options.hideThinking,
-				expandThinking: props.expanded,
-				proseOnlyThinking: props.options.proseOnlyThinking(),
-				reacts: false,
-			}}
-		/>,
-		...reply.content.flatMap(part => {
-			if (part.type !== "toolCall") return [];
-			const call = new ToolCall({ id: part.id, name: part.name, args: part.arguments });
-			call.setArgsComplete();
-			effect(() => {
-				const result = props.resultById().get(part.id);
-				const expanded = props.expanded();
-				untrack(() => {
-					if (result) call.updateResult(result, false);
-					call.setExpanded(expanded);
-				});
-			});
-			return [<ToolBlock call={call} />];
-		}),
-	];
+	if (message.role !== "assistant") return <SideMessage message={message} display={props.display} />;
+	return (
+		<SideReply
+			message={() => message}
+			tools={props.tools}
+			display={props.display}
+			hideThinking={props.options.hideThinking}
+			proseOnlyThinking={props.options.proseOnlyThinking()}
+		/>
+	);
 }

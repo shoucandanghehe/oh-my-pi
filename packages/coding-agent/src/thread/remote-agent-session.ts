@@ -59,6 +59,7 @@ import {
 	type AgentViewLoop,
 	type AgentViewRuleSource,
 	type AgentViewSession,
+	type AgentViewToolRenderMetadata,
 	type AgentViewSessionManager,
 	type AgentViewState,
 	isLocalAgentSession,
@@ -111,6 +112,7 @@ import { TokenRateMeter } from "../utils/token-rate";
 import type { ThreadId } from "./identity";
 import { type RemoteObject, RpcClosedError, rpcSync } from "./rpc";
 import {
+	restoreStreamedToolArgs,
 	type SessionAbortOptions,
 	type SessionEntriesDelta,
 	type SessionHostProtocol,
@@ -120,6 +122,7 @@ import {
 	type SessionRestorableQueue,
 	type SessionRunState,
 	type SessionViewState,
+	type StreamedToolArgs,
 	toWireData,
 } from "./session-mirror";
 
@@ -768,6 +771,11 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#toolNames.has(name) ? this.#mainAncestor()?.getToolByName(name) : undefined;
 	}
 
+	getToolRenderMetadata(name: string): AgentViewToolRenderMetadata | undefined {
+		const metadata = this.#view.toolRenderMetadata;
+		return metadata && Object.hasOwn(metadata, name) ? metadata[name] : undefined;
+	}
+
 	hasBuiltInTool(name: string): boolean {
 		return this.#builtInTools.has(name);
 	}
@@ -955,8 +963,9 @@ export class RemoteAgentSession implements AgentViewSession {
 	 * Bridge only: a watch started; replace the view state with the publisher's
 	 * snapshot and catch the entry list (kept across watches) up with `entries`.
 	 */
-	applyView(state: SessionViewState, entries: SessionEntriesDelta | undefined): void {
+	applyView(state: SessionViewState, entries: SessionEntriesDelta | undefined, streamArgs?: StreamedToolArgs): void {
 		if (this.#closed !== undefined) return;
+		restoreStreamedToolArgs(this.#state.streamMessage, streamArgs);
 		this.#view = state;
 		this.#pruneSettled(state.restorableQueue);
 		this.#activeUpdates.clear();
@@ -1003,8 +1012,9 @@ export class RemoteAgentSession implements AgentViewSession {
 	}
 
 	/** Bridge only: dispatch one forwarded event to subscribers. */
-	applyEvent(event: AgentSessionEvent): void {
+	applyEvent(event: AgentSessionEvent, streamArgs?: StreamedToolArgs): void {
 		if (this.#closed !== undefined) return;
+		if (event.type === "message_update") restoreStreamedToolArgs(event.message, streamArgs);
 		this.#trackEvent(event);
 		// oxlint-disable-next-line unicorn/no-useless-spread -- snapshot: the loop body may add or remove listeners
 		for (const listener of [...this.#listeners]) {

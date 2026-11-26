@@ -38,6 +38,7 @@ import { TODO_HUD_STATE_CUSTOM_TYPE } from "../../src/tools/todo";
 import { Composer } from "../../src/ui/composer/composer";
 import { statusSegs } from "../../src/ui/status/status-line";
 import type { FocusProbe, FocusProbeGlobals } from "../fixtures/focus-view-worker";
+import { nodeText } from "../helpers/btw-ui";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
@@ -286,6 +287,48 @@ describe("focused view of a worker-homed agent session", () => {
 		const transcript = remote.buildTranscriptSessionContext().messages.map(message => textOf(message));
 		expect(transcript).toContain("Hello");
 		expect(transcript).toContain("steer from the composer");
+	});
+
+	it("shows live tool arguments and partial results from the worker in one side-pane card", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), { "display.smoothStreaming": false });
+		const pane = mountAgentWorkspacePane({
+			agentId: "W1",
+			close: () => {},
+			rows: () => 24,
+			registry: AgentRegistry.global(),
+			lifecycle: AgentLifecycleManager.global(),
+			settings: Settings.instance,
+			draft: new AgentPaneDraft(),
+			isCurrent: () => true,
+			knownCommand: () => false,
+		});
+		cleanups.push(() => {
+			pane.surface.dispose();
+			pane.dispose?.();
+		});
+		const transcript = () =>
+			pane.surface
+				.main()
+				.map(node => nodeText(node))
+				.join("\n");
+		const running = probe.prompt("W1", "[tool]");
+		void running.catch(() => {}); // Teardown also settles the call when an assertion fails early.
+		try {
+			await waitFor(() => transcript().includes("worker live prefix"));
+			expect(transcript()).toContain("Lookup on worker");
+			expect(transcript()).not.toContain("prefix.txt");
+			await probe.release();
+			await waitFor(() => transcript().includes("Still reading on worker"));
+			expect(transcript().match(/Lookup on worker/g)).toHaveLength(1);
+			await probe.release();
+			await running;
+			await waitFor(() => transcript().includes("Worker returned the document"));
+			expect(transcript()).not.toContain("Still reading on worker");
+			expect(transcript().match(/Lookup on worker/g)).toHaveLength(1);
+		} finally {
+			await probe.release();
+		}
 	});
 
 	it("refocuses with the entries the worker appended while unwatched, without re-sending the earlier ones", async () => {

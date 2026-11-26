@@ -55,8 +55,8 @@ import {
 } from "../reactive";
 import { isSettled, type Surface } from "../surface";
 import type { Theme } from "../theme/contract";
-import { padTo, sliceColumns, truncate, visibleWidth } from "../text/width";
-import type { WorkspacePaneMinimum, WorkspaceSurface } from "../workspace";
+import { padTo, sliceCells, sliceColumns, truncate, visibleWidth } from "../text/width";
+import type { AnsiWorkspaceRail, WorkspacePaneMinimum, WorkspaceSurface } from "../workspace";
 import { AppViewport, type ViewportHit } from "./app-viewport";
 import {
 	type Block,
@@ -67,6 +67,7 @@ import {
 	paintNode,
 	type PointerHover,
 } from "./paint";
+import { petrifyRows } from "./petrification";
 import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
 import { TranscriptPointer } from "./transcript-pointer";
 import { TranscriptSearch } from "./transcript-search";
@@ -76,8 +77,6 @@ import "./painters";
 
 /** Tick of a block drawing smooth motion (a shimmer sweep), ms. */
 const SMOOTH_TICK_MS = 1000 / 20;
-
-const DROP_ARROW = { left: "◀", right: "▶", top: "▲", bottom: "▼" } as const;
 
 /**
  * Where a session draws: `inline` on the normal screen (settled blocks retire into terminal
@@ -227,10 +226,14 @@ interface Placed {
  * The paint seam over a driver's image store: its rows, measured in the
  * terminal's reported cell size (a default until the terminal reports one).
  */
-export function driverImages(images: Pick<PaintImages, "rows">, capabilities: () => TerminalCapabilities): PaintImages {
+export function driverImages(
+	images: Pick<PaintImages, "rows" | "measure">,
+	capabilities: () => TerminalCapabilities,
+): PaintImages {
 	return {
 		rows: (source, request) => images.rows(source, request),
 		cell: () => capabilities().cell ?? DEFAULT_CELL,
+		...(images.measure ? { measure: images.measure.bind(images) } : {}),
 	};
 }
 
@@ -392,6 +395,7 @@ export class TermBackend {
 	readonly #reduceMotion: Signal<boolean> = signal(false);
 	/** The hit under the pointer, from the last mouse report. */
 	readonly #hover: Signal<PointerHover | null> = signal<PointerHover | null>(null);
+	#pointerRail: AnsiWorkspaceRail | undefined;
 	readonly #hyperlinks: Signal<boolean>;
 	readonly #textSizing: Signal<boolean>;
 	#tick: Timer | undefined;
@@ -453,8 +457,17 @@ export class TermBackend {
 				mount =>
 					new AppViewport({
 						surface: mount.surface,
-						paint: (node, width) => this.#paint(node, width),
+						paint: (node, width, layoutOnly) =>
+							paintNode(
+								this.#env,
+								node,
+								width,
+								undefined,
+								layoutOnly && this.#driver.capabilities.images !== null,
+							),
 						separator: options.separator ?? (() => 1),
+						theme: options.theme,
+						requestRender: () => this.requestRender(),
 						copy:
 							options.onAppViewportSelectionCopy ??
 							(text => options.driver.writeRaw(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`)),
@@ -480,6 +493,23 @@ export class TermBackend {
 		const terminalTextSizing = this.#textSizing;
 		const allowTextSizing = options.textSizing;
 		const images = options.images;
+		const measureImages = images?.measure?.bind(images);
+		const workspace = this.workspace;
+		// Full-width placements cannot share composed panes, including during layout.
+		const paintImages: PaintImages | undefined =
+			images && workspace
+				? {
+						cell: () => images.cell(),
+						rows: (source, request) =>
+							images.rows(source, workspace.split() ? { ...request, cells: true } : request),
+						...(measureImages
+							? {
+									measure: (source, request) =>
+										measureImages(source, workspace.split() ? { ...request, cells: true } : request),
+								}
+							: {}),
+					}
+				: images;
 		this.#env = {
 			theme: options.theme,
 			clock: smooth => {
@@ -496,17 +526,7 @@ export class TermBackend {
 			...(allowTextSizing
 				? { textSizing: () => !this.workspace?.split() && allowTextSizing() && terminalTextSizing() }
 				: {}),
-			// Full-width inline graphics can escape a pane's rectangle. Composed panes use
-			// cell-based Kitty placements where supported, otherwise the painter's text fallback.
-			...(images
-				? {
-						images: {
-							cell: () => images.cell(),
-							rows: (source, request) =>
-								images.rows(source, this.workspace?.split() ? { ...request, cells: true } : request),
-						},
-					}
-				: {}),
+			...(paintImages ? { images: paintImages } : {}),
 		};
 	}
 
@@ -934,19 +954,27 @@ export class TermBackend {
 	#composeWorkspace(workspace: TerminalWorkspace): FramePlan {
 		const { panes, sashes } = workspace.paintGeometry();
 		const active = workspace.active();
+		const theme = this.#options.theme();
 		const split = panes.size > 1;
-		const fragments: { rect: WorkspaceRect; rows: readonly string[] }[] = [];
+		const fragments: { id?: string; rect: WorkspaceRect; rows: string[] }[] = [];
 		let cursor: Cell | null = null;
 		for (const [id, rect] of panes) {
 			const pane = workspace.pane(id)!;
 			const header = split ? 1 : 0;
 			const plan = this.#composeSurface(pane.mount.surface, rect.width, rect.height - header, pane);
 			if (!split) return plan;
-			const drop = workspace.dropPreview(id);
-			const title = `${drop ? DROP_ARROW[drop] : active === id ? "›" : " "} ${pane.label}`;
+			const title = `${active === id ? "›" : " "} ${pane.label}`;
 			const bar = id === "main" ? title : `${padTo(truncate(title, rect.width - 2, ""), rect.width - 2)} ×`;
-			const theme = this.#options.theme();
-			fragments.push({ rect, rows: [theme.fg(drop || active === id ? "accent" : "dim", bar), ...plan.fullscreen!] });
+			const rows = [theme.fg(active === id ? "accent" : "dim", bar), ...plan.fullscreen!];
+			const petrification = pane.mount.petrification?.();
+			fragments.push({
+				id,
+				rect,
+				rows:
+					petrification === undefined || this.#reduceMotion()
+						? rows
+						: petrifyRows(rows, rect.width, petrification, theme),
+			});
 			if (active === id && plan.cursor && plan.cursor.row < rect.height - header) {
 				cursor = {
 					row: rect.y + header + plan.cursor.row,
@@ -954,8 +982,34 @@ export class TermBackend {
 				};
 			}
 		}
+		// The preview covers the target's painted rows without laying out or hit-testing the dragged pane there.
+		const drop = workspace.dropPreview(id => fragments.find(fragment => fragment.id === id)!.rows);
+		if (drop) {
+			const { rect, rows } = fragments.find(fragment => fragment.id === drop.target)!;
+			const vertical = drop.edge === "top" || drop.edge === "bottom";
+			const width = vertical ? rect.width : Math.floor(rect.width / 2);
+			const height = vertical ? Math.floor(rect.height / 2) : rect.height;
+			const left = drop.edge === "right" ? rect.width - width : 0;
+			const top = drop.edge === "bottom" ? rect.height - height : 0;
+			const border = theme.fg("accent", "┃");
+			for (let row = 0; row < height; row++) {
+				let preview: string;
+				if (row === 0) preview = theme.fg("accent", `┏${"━".repeat(width - 2)}┓`);
+				else if (row === height - 1) preview = theme.fg("accent", `┗${"━".repeat(width - 2)}┛`);
+				else {
+					const ghost = padTo(normalizeRow(drop.snapshot[row] ?? "", width - 2), width - 2);
+					preview = `${border}${theme.fg("muted", ghost)}${border}`;
+				}
+				const line = padTo(normalizeRow(rows[top + row] ?? "", rect.width), rect.width);
+				const before = padTo(normalizeRow(sliceColumns(line, 0, left), left), left);
+				const after = sliceColumns(line, left + width, rect.width);
+				// A wide character crossing the cut is dropped without shifting the remaining cells.
+				const remaining = rect.width - left - width - visibleWidth(after);
+				rows[top + row] = `${before}${preview}${" ".repeat(Math.max(0, remaining))}${after}`;
+			}
+		}
 		for (const { rect, split: sash } of sashes) {
-			const line = this.#options.theme().fg("border", sash.axis === "x" ? "│" : "─".repeat(rect.width));
+			const line = theme.fg("border", sash.axis === "x" ? "│" : "─".repeat(rect.width));
 			fragments.push({ rect, rows: Array.from({ length: rect.height }, () => line) });
 		}
 		const rows = Array.from({ length: this.#driver.rows }, () => "");
@@ -977,7 +1031,11 @@ export class TermBackend {
 
 		// The shutdown flush writes the transcript inline: transient layers are no part of it.
 		const layer = flush ? [] : surface.layer();
-		const input = { layer, hits };
+		const rail = pane?.mount.ansiRail;
+		const railLayout = rail?.layout(width);
+		const inset = railLayout?.inset ?? 0;
+		const contentWidth = width - inset;
+		const input: InputFrame = { layer, hits, rail: railLayout };
 		if (pane) {
 			pane.input = input;
 			if (layer.length > 0) appViewport?.endDrag();
@@ -1067,7 +1125,7 @@ export class TermBackend {
 		/** Dock rows drawn over the transcript (a completion popup): they take no room from `main`. */
 		let covering = 0;
 		for (const node of surface.dock()) {
-			const block = this.#paint(node, width);
+			const block = this.#paint(node, contentWidth);
 			dock.push({ block, top: dockRows, left: 0 });
 			dockRows += block.rows.length;
 			covering += Math.min(block.covering ?? 0, block.rows.length);
@@ -1087,8 +1145,25 @@ export class TermBackend {
 			const visible = Math.max(0, dockTop);
 			const capacity = Math.max(0, dockTop + covering);
 			const rows = Array.from({ length: visible }, () => "");
-			cursor = appViewport.paint(width, capacity, visible, rows, hits);
+			cursor = appViewport.paint(contentWidth, capacity, visible, rows, hits);
 			appendDock(rows, dockTop);
+			if (rail && railLayout && railLayout.width > 0) {
+				const railWidth = railLayout.width;
+				const block = this.#paint(rail.node, railWidth, height);
+				const cut = railWidth - inset;
+				for (let row = 0; row < rows.length; row++) {
+					const base = rows[row]!;
+					const prefix = padTo(normalizeRow(block.rows[row] ?? "", railWidth), railWidth);
+					if (cut === 0) rows[row] = `${prefix}${base}`;
+					else {
+						const tail = sliceCells(base, cut, width - railWidth);
+						const gap = Math.min(cut - sliceCells(base, 0, cut).width, width - railWidth - tail.width);
+						rows[row] = `${prefix}${" ".repeat(Math.max(0, gap))}${tail.text}`;
+					}
+				}
+				for (let i = 0; i < hits.length; i++) hits[i] = { ...hits[i]!, left: hits[i]!.left + inset };
+				if (cursor) cursor = cursor.col + inset < railWidth ? null : { ...cursor, col: cursor.col + inset };
+			}
 			for (const node of layer) place(rows, node);
 			return { viewport: [], cursor, fullscreen: rows };
 		}
@@ -1620,6 +1695,9 @@ export class TermBackend {
 			if (workspace && event.type === "mouse") {
 				const screenRow = this.#driver.viewportRow ? this.#driver.viewportRow(event.mouse.row) : event.mouse.row;
 				const target = screenRow === null ? undefined : workspace.pointer({ ...event.mouse, row: screenRow });
+				const nextRail = target?.pane.mount.ansiRail;
+				if (this.#pointerRail !== nextRail) this.#pointerRail?.leave();
+				this.#pointerRail = nextRail;
 				if (!target) {
 					this.#hover.set(null);
 					return;
@@ -1627,12 +1705,13 @@ export class TermBackend {
 				({ id, pane } = target);
 				event = { type: "mouse", mouse: target.mouse };
 			}
+			if (event.type === "focus" && !event.focused) this.clearHover();
+			if (event.type === "key" && workspace?.key(event.key)) return;
 			const mount = pane?.mount ?? this.#options;
 			if (intercept && mount.intercept?.(event)) return;
 			const { surface } = mount;
 			switch (event.type) {
 				case "key": {
-					if (workspace?.key(event.key)) break;
 					const focused = surface.focused();
 					const path = focused ? pathTo(this.#regions(surface), focused) : [];
 					if (bubbleKey(path, event.key)) break;
@@ -1680,8 +1759,17 @@ export class TermBackend {
 		const pointer = !pane && this.#window?.wheel && (!input.layer.length || this.#searchable()) ? this.#pointer : undefined;
 		if (pointer?.capture(mouse, viewportRow)) return;
 		const appViewport = input.layer.length === 0 ? pane?.viewport : undefined;
-		if (appViewport?.drag(mouse, viewportRow)) return;
+		const contentMouse = input.rail ? { ...mouse, col: Math.max(0, mouse.col - input.rail.inset) } : mouse;
+		if (appViewport?.drag(contentMouse, viewportRow)) return;
+		if (appViewport?.chrome(contentMouse, viewportRow)) {
+			this.#hover.set(null);
+			return;
+		}
 		if (mouse.action === "press" && mouse.button === "left") appViewport?.clearSelection();
+		if (appViewport && input.rail?.width && pane?.mount.ansiRail?.pointer(mouse, input.rail.width)) {
+			this.#hover.set(null);
+			return;
+		}
 		const cover =
 			pointer &&
 			this.#pointerCovers.findLast(
@@ -1716,7 +1804,7 @@ export class TermBackend {
 			}
 		}
 		if (pointer && !cover) pointer.input(mouse, viewportRow);
-		appViewport?.mouse(mouse, viewportRow);
+		appViewport?.mouse(contentMouse, viewportRow);
 	}
 
 	/** Point the hover state at the topmost hit under the pointer (painters band it via `cx.hovered`). */
@@ -1745,6 +1833,8 @@ export class TermBackend {
 	clearHover(): void {
 		if (this.#pointer?.blur()) this.requestRender();
 		this.workspace?.endPointer();
+		this.#pointerRail?.leave();
+		this.#pointerRail = undefined;
 		if (this.#hover.peek() !== null) this.#hover.set(null);
 	}
 

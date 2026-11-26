@@ -15,12 +15,18 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { sanitizeErrorLine } from "../../../modes/view-model/chrome/error-block";
 import { formatContextUsage } from "../../status/format";
 import "../../styles/panels/agent-transcript-viewer";
-import { AssistantMessageBlock } from "../../transcript/messages/assistant-message";
 import { ParentIrcMessage } from "../../transcript/messages/async-cards";
 import { TranscriptBlocks } from "../../transcript/messages/panel";
 import { BranchSummaryBlock, CompactionSummaryBlock } from "../../transcript/messages/summaries";
 import { SyntheticMessage, UserMessage } from "../../transcript/messages/user-message";
-import { ToolBlock } from "../../transcript/tool-block";
+import {
+	SideAssistantBlock,
+	SideMessage,
+	SideReply,
+	SideToolCard,
+	type SideTranscriptDisplay,
+	sideTranscriptDisplay,
+} from "../../transcript/side-transcript";
 import type { AgentTranscriptViewerModel, ViewerAgentStatus, ViewerBlock } from "./agent-transcript-viewer-model";
 import { applyEdit, EscCloseButton, Hints, type KeyHint } from "./common";
 import { actionKbd } from "../../keys/hints";
@@ -36,8 +42,12 @@ export const STATUS_TONE: Readonly<Record<ViewerAgentStatus, TspTone>> = {
 	aborted: "error",
 };
 
-function Block(props: { readonly model: AgentTranscriptViewerModel; readonly block: ViewerBlock }): JSXNode {
-	const { model, block } = props;
+function Block(props: {
+	readonly model: AgentTranscriptViewerModel;
+	readonly block: ViewerBlock;
+	readonly display: SideTranscriptDisplay;
+}): JSXNode {
+	const { model, block, display } = props;
 	// The session's transcript controls: shown (and run) as on the session's own blocks.
 	const actions = model.deps.actions;
 	switch (block.kind) {
@@ -61,11 +71,12 @@ function Block(props: { readonly model: AgentTranscriptViewerModel; readonly blo
 			return <ParentIrcMessage parentIrc={block.parentIrc} timestamp={block.timestamp} expanded={model.expanded} />;
 		case "assistant":
 			return (
-				<AssistantMessageBlock
+				<SideAssistantBlock
+					display={display}
 					model={{
 						message: block.message,
 						finalized: true,
-						expandThinking: model.expanded,
+						contentOffset: block.contentOffset,
 						turnUsage: block.usage,
 						actions: actions !== undefined,
 						onAction: (act, copyText) => actions?.reply(act, block.message, copyText),
@@ -73,7 +84,9 @@ function Block(props: { readonly model: AgentTranscriptViewerModel; readonly blo
 				/>
 			);
 		case "tool":
-			return <ToolBlock call={block.call} />;
+			return <SideToolCard call={block.call} display={display} />;
+		case "message":
+			return <SideMessage message={block.message} display={display} />;
 		case "compaction":
 			return (
 				<CompactionSummaryBlock
@@ -121,17 +134,27 @@ function Stats(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
 	);
 }
 
+function ViewerTranscript(props: {
+	readonly model: AgentTranscriptViewerModel;
+	readonly workspace?: boolean;
+}): JSXNode {
+	const { model } = props;
+	const display = sideTranscriptDisplay(model.runner, model.settings, model.expanded);
+	const blocks = <For each={model.blocks}>{block => <Block model={model} block={block} display={display} />}</For>;
+	return (
+		<>
+			{props.workspace ? blocks : <TranscriptBlocks>{blocks}</TranscriptBlocks>}
+			<SideReply message={model.streaming} tools={model.tools} display={display} live />
+		</>
+	);
+}
+
 /** Main region of a standalone agent pane. The pane's scrollback belongs to its renderer. */
 export function AgentWorkspaceTranscript(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
 	const { model } = props;
 	return (
 		<>
-			<TranscriptBlocks>
-				<For each={model.blocks}>{block => <Block model={model} block={block} />}</For>
-			</TranscriptBlocks>
-			<AssistantMessageBlock
-				model={{ message: model.streaming, finalized: false, expandThinking: model.expanded }}
-			/>
+			<ViewerTranscript model={model} workspace />
 			{() => {
 				model.rev();
 				return model.blocks().length === 0 && !model.streaming() ? (
@@ -180,9 +203,7 @@ export function AgentTranscriptViewer(props: { readonly model: AgentTranscriptVi
 	const id = model.deps.agentId;
 	const transcript = (
 		<col key="transcript" grow={1}>
-			<TranscriptBlocks>
-				<For each={model.blocks}>{block => <Block model={model} block={block} />}</For>
-			</TranscriptBlocks>
+			<ViewerTranscript model={model} />
 		</col>
 	);
 	const editor = (
@@ -242,7 +263,7 @@ export function AgentTranscriptViewer(props: { readonly model: AgentTranscriptVi
 				);
 			})}
 			{() =>
-				model.blocks().length > 0
+				model.blocks().length > 0 || model.streaming()
 					? transcript
 					: part(() => (
 							<text

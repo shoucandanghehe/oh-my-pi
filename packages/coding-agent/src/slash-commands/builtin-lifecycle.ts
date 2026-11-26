@@ -521,10 +521,15 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "debug",
 		icon: "bug",
-		description: "Open debug tools selector",
-		handleTui: async (_command, runtime) => {
-			await runtime.ctx.showDebugSelector();
+		description: "Open debug tools or preview TUI effects",
+		allowArgs: true,
+		subcommands: [{ name: "petrify", description: "Preview subagent pane petrification" }],
+		handleTui: async (command, runtime) => {
 			clearSubmittedText(runtime);
+			const action = command.args.trim().toLowerCase();
+			if (action === "petrify") runtime.ctx.previewSubagentExitAnimation();
+			else if (!action) await runtime.ctx.showDebugSelector();
+			else runtime.ctx.showWarning("Usage: /debug [petrify]");
 		},
 	},
 	{

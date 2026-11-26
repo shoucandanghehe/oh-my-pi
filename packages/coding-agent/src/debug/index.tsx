@@ -66,6 +66,7 @@ export interface DebugHost {
 	showError(message: string): void;
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	handleDebugTranscriptCommand(): Promise<void>;
+	previewSubagentExitAnimation(): void;
 	/** Reopen the debug menu (a viewer closed). */
 	showDebugSelector(): Promise<void>;
 }
@@ -81,6 +82,7 @@ const DEBUG_MENU_ITEMS = [
 	{ id: "system", label: "View: system info", detail: "Show environment details" },
 	{ id: "terminal", label: "View: terminal state", detail: "Subprotocols, geometry, scrollback strategy" },
 	{ id: "protocols", label: "Test: terminal protocols", detail: "Styling, links, text sizing, graphics, notify" },
+	{ id: "petrify", label: "Test: subagent pane petrification", detail: "Preview the ANSI pane exit animation" },
 	{ id: "raw-sse", label: "View: raw SSE stream", detail: "Show live provider SSE frames" },
 	{
 		id: "remote-debugger",
@@ -175,6 +177,8 @@ export class DebugTools {
 				return this.#viewTerminalState();
 			case "protocols":
 				return this.#viewProtocols();
+			case "petrify":
+				return this.#host.previewSubagentExitAnimation();
 			case "transcript":
 				return this.#host.handleDebugTranscriptCommand();
 			case "clear-cache":

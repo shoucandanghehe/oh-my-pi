@@ -15,22 +15,24 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, batch, signal, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../../config/settings";
-import { formatModelString } from "../../../config/model-resolver";
 import type { AgentHubRemote } from "../../../modes/view-model/overlays/agent-hub";
 import type {
 	AgentTranscriptEntry,
 	AgentTranscriptSource,
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
+import type { ExtensionRunner } from "../../../extensibility/extensions/runner";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
 import {
+	customMessageEntryMessage,
 	imageContent,
 	type SessionMessageEntryLike,
 	userMessageDisplayText,
 } from "../../../session/transcript/transcript-entry";
-import { resolveEditToolMode } from "../../../utils/edit-mode";
-import { ToolCall, type ToolCallOptions, type ToolCallResult } from "../../transcript/tool-block";
+import { splitAssistantMessageToolTimeline } from "../../../session/transcript/transcript-render-helpers";
+import { SideToolCalls } from "../../transcript/side-tool-calls";
+import type { ToolCall, ToolCallOptions } from "../../transcript/tool-block";
 import type { LineValue } from "./common";
-import type { AgentViewSession } from "../../../session/agent-session-handle";
+import { type AgentViewSession, isLocalAgentSession } from "../../../session/agent-session-handle";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
 
 export type ViewerAgentStatus = "running" | "idle" | "parked" | "aborted";
@@ -139,9 +141,11 @@ export type ViewerBlock =
 			readonly kind: "assistant";
 			readonly id: string;
 			readonly message: AssistantMessage;
+			readonly contentOffset?: number;
 			readonly usage: TurnUsageSummary | undefined;
 	  }
 	| { readonly kind: "tool"; readonly id: string; readonly call: ToolCall }
+	| { readonly kind: "message"; readonly id: string; readonly message: AgentMessage }
 	| { readonly kind: "compaction"; readonly id: string; readonly summary: string; readonly tokensBefore: number }
 	| { readonly kind: "branch"; readonly id: string; readonly summary: string };
 
@@ -210,6 +214,9 @@ export class AgentTranscriptViewerModel {
 	readonly streaming = signal<AssistantMessage | undefined>(undefined);
 	/** Tools and thinking expanded (Ctrl+O). */
 	readonly expanded = signal(false);
+	readonly runner = signal<ExtensionRunner | undefined>(undefined);
+	readonly settings = signal<Settings | undefined>(undefined);
+	readonly tools: SideToolCalls;
 	/** Model of the transcript (first assistant reply, else the last model change). */
 	model: string | undefined;
 	/** Send failure shown above the draft. */
@@ -241,11 +248,10 @@ export class AgentTranscriptViewerModel {
 				messages: readonly AgentMessage[];
 		  }
 		| undefined;
-	#liveToolResults = new Map<string, unknown>();
+	#refreshQueued = false;
 	#localUnavailable = "";
 	#loading = false;
 	#idlePolls = 0;
-	#tools = new Map<string, ToolCall>();
 	#tally = new TurnUsageTally();
 	#turnStartedAt: number | undefined;
 	#poll: NodeJS.Timeout | undefined;
@@ -254,6 +260,20 @@ export class AgentTranscriptViewerModel {
 	#meta: string;
 
 	constructor(readonly deps: AgentTranscriptViewerDeps) {
+		this.settings.set(deps.settings);
+		this.tools = new SideToolCalls({
+			settings: deps.settings,
+			inspectShell: deps.inspectShell,
+			expanded: this.expanded,
+			onSessionChange: () => {
+				if (this.#refreshQueued) return;
+				this.#refreshQueued = true;
+				queueMicrotask(() => {
+					this.#refreshQueued = false;
+					this.#refresh(false);
+				});
+			},
+		});
 		this.revealEntry = deps.initialEntryId;
 		this.#meta = this.#metaSignature();
 		this.#refresh(false);
@@ -318,6 +338,7 @@ export class AgentTranscriptViewerModel {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.tools.dispose();
 		this.#stopPolling();
 		this.#remoteToken++;
 	}
@@ -341,9 +362,15 @@ export class AgentTranscriptViewerModel {
 			return;
 		}
 		if (this.#live) {
-			this.#live = undefined;
-			this.#local = undefined;
-			this.streaming.set(undefined);
+			batch(() => {
+				this.#live = undefined;
+				this.#local = undefined;
+				this.tools.bind(undefined);
+				this.runner.set(undefined);
+				this.settings.set(this.deps.settings);
+				this.streaming.set(undefined);
+				this.#rebuild([]);
+			});
 		}
 		if (this.#loading) return;
 		const file = this.ref()?.sessionFile;
@@ -375,47 +402,41 @@ export class AgentTranscriptViewerModel {
 	}
 
 	#refreshLive(session: AgentViewSession): void {
-		const live = session.agent.state.streamMessage;
-		this.streaming.set(live?.role === "assistant" ? live : undefined);
-		const leaf = session.sessionManager.getLeafId();
-		const count = session.messages.length;
-		const streaming = session.isStreaming;
-		const old = this.#live;
-		if (!(old?.session === session && old.leaf === leaf && old.count === count && old.streaming === streaming)) {
-			const messages = session.buildTranscriptSessionContext({
-				collapseCompactedHistory: true,
-				keepInFlightToolCalls: true,
-			}).messages;
-			const previous = old?.session === session ? old.messages : [];
-			const extendsBranch =
-				previous.length > 0 &&
-				previous.length <= messages.length &&
-				previous.every((message, index) => message === messages[index]);
-			const start = extendsBranch ? previous.length : 0;
-			const entries = messages.slice(start).map((message, index): SessionMessageEntryLike => ({
-				type: "message",
-				id: `live:${start + index}`,
-				parentId: null,
-				timestamp: "",
-				message,
-			}));
-			this.#live = { session, leaf, count, streaming, messages };
-			this.model = session.model?.id;
-			if (extendsBranch) this.#append(entries);
-			else {
-				this.#liveToolResults.clear();
-				batch(() => this.#rebuild(entries));
+		batch(() => {
+			this.tools.bind(session);
+			this.runner.set(isLocalAgentSession(session) ? session.extensionRunner : undefined);
+			this.settings.set(session.settings);
+			const leaf = session.sessionManager.getLeafId();
+			const count = session.messages.length;
+			const streaming = session.isStreaming;
+			const old = this.#live;
+			if (!(old?.session === session && old.leaf === leaf && old.count === count && old.streaming === streaming)) {
+				const messages = session.buildTranscriptSessionContext({
+					collapseCompactedHistory: true,
+					keepInFlightToolCalls: true,
+				}).messages;
+				const previous = old?.session === session ? old.messages : [];
+				const extendsBranch =
+					previous.length > 0 &&
+					previous.length <= messages.length &&
+					previous.every((message, index) => message === messages[index]);
+				const start = extendsBranch ? previous.length : 0;
+				const entries = messages.slice(start).map((message, index): SessionMessageEntryLike => ({
+					type: "message",
+					id: `live:${start + index}`,
+					parentId: null,
+					timestamp: "",
+					message,
+				}));
+				this.#live = { session, leaf, count, streaming, messages };
+				this.model = session.model?.id;
+				if (extendsBranch) this.#append(entries);
+				else this.#rebuild(entries);
 			}
-		}
-		const updates = session.activeToolExecutionUpdates();
-		const active = new Map<string, unknown>();
-		for (const update of updates) {
-			active.set(update.toolCallId, update.partialResult);
-			if (this.#liveToolResults.get(update.toolCallId) !== update.partialResult) {
-				this.#tools.get(update.toolCallId)?.updateResult(update.partialResult as ToolCallResult, true);
-			}
-		}
-		this.#liveToolResults = active;
+			const stream = this.tools.stream(session.agent.state.streamMessage, this.#live?.messages ?? []);
+			this.tools.syncExecution();
+			this.streaming.set(stream);
+		});
 	}
 
 	#clearLocal(reason: string): void {
@@ -563,13 +584,25 @@ export class AgentTranscriptViewerModel {
 			if (entry.type === "message") {
 				messages.push(entry);
 				if (!this.model && entry.message.role === "assistant") this.model = entry.message.model;
-			} else if (entry.type === "model_change") this.model = entry.model;
+			} else if (entry.type === "model_change") {
+				this.model = entry.model;
+			} else {
+				const message = customMessageEntryMessage(entry);
+				if (message)
+					messages.push({
+						type: "message",
+						id: entry.id,
+						parentId: entry.parentId,
+						timestamp: entry.timestamp,
+						message,
+					});
+			}
 		}
 		return messages;
 	}
 
 	#rebuild(entries: readonly SessionMessageEntryLike[]): void {
-		this.#tools.clear();
+		this.tools.clearCommitted();
 		this.#tally.reset();
 		this.#turnStartedAt = undefined;
 		this.blocks.set([]);
@@ -619,37 +652,39 @@ export class AgentTranscriptViewerModel {
 				}
 				case "assistant": {
 					const usage = this.#tally.add(message, this.#turnStartedAt);
-					added.push({ kind: "assistant", id: entry.id, message, usage });
+					// Independent panes follow the live tool timeline. Keep the Hub's full reply
+					// as the source of its existing copy and turn actions.
+					const timeline = this.deps.liveSession ? splitAssistantMessageToolTimeline(message) : undefined;
+					const lead = timeline?.beforeTools ?? message;
+					const shown =
+						message.stopReason === "aborted" || message.stopReason === "error"
+							? {
+									...lead,
+									stopReason: message.stopReason,
+									errorMessage: message.errorMessage,
+									retryRecovery: message.retryRecovery,
+								}
+							: lead;
+					added.push({ kind: "assistant", id: entry.id, message: shown, usage });
 					for (const part of message.content) {
 						if (part.type !== "toolCall") continue;
-						const call = new ToolCall({
-							id: part.id,
-							name: part.name,
-							args: part.arguments,
-							...(this.deps.inspectShell ? { inspectShell: this.deps.inspectShell } : {}),
-						});
-						const settings = this.deps.settings;
-						if (settings && part.name === "edit") {
-							const model = formatModelString({ provider: message.provider, id: message.model });
-							call.setRenderContext({
-								editMode: resolveEditToolMode({ settings, getActiveModelString: () => model }),
+						const call = this.tools.commit(part, message);
+						added.push({ kind: "tool", id: part.id, call });
+						const after = timeline?.afterToolCalls.get(part.id);
+						if (after) {
+							added.push({
+								kind: "assistant",
+								id: `after:${part.id}`,
+								message: after,
+								usage: undefined,
+								contentOffset: timeline?.contentOffsets.get(part.id),
 							});
 						}
-						call.setArgsComplete();
-						call.setExpanded(untrack(this.expanded));
-						this.#tools.set(part.id, call);
-						added.push({ kind: "tool", id: part.id, call });
 					}
 					break;
 				}
 				case "toolResult": {
-					const call = this.#tools.get(message.toolCallId);
-					if (!call) break;
-					call.updateResult(
-						{ content: message.content, details: message.details, isError: message.isError } as ToolCallResult,
-						false,
-					);
-					call.seal();
+					this.tools.finish(message.toolCallId, message);
 					break;
 				}
 				case "compactionSummary":
@@ -663,6 +698,14 @@ export class AgentTranscriptViewerModel {
 				case "branchSummary":
 					added.push({ kind: "branch", id: entry.id, summary: message.summary });
 					break;
+				case "custom":
+				case "hookMessage":
+					if (!message.display) break;
+					added.push({ kind: "message", id: entry.id, message });
+					break;
+				case "fileMention":
+					added.push({ kind: "message", id: entry.id, message });
+					break;
 			}
 		}
 		if (added.length > 0) this.blocks.set([...untrack(this.blocks), ...added]);
@@ -674,7 +717,7 @@ export class AgentTranscriptViewerModel {
 	toggleExpanded(): void {
 		const expanded = !untrack(this.expanded);
 		this.expanded.set(expanded);
-		for (const call of this.#tools.values()) call.setExpanded(expanded);
+		this.tools.setExpanded(expanded);
 		this.touch();
 	}
 

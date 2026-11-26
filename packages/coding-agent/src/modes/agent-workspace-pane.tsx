@@ -503,7 +503,13 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		onKey,
 		onAppViewportPasteRequest: pasteNative,
 		intercept(event) {
-			if (event.type === "key" || event.type === "paste") interacted = true;
+			if (
+				event.type === "key" ||
+				event.type === "paste" ||
+				(event.type === "mouse" && event.mouse.action !== "move")
+			) {
+				interacted = true;
+			}
 			return event.type === "osc" && (paste?.handleInput(event.raw) ?? false);
 		},
 		protectedFromAutoClose: () =>

@@ -7,11 +7,21 @@
  * reply in two deltas, holding between them until the test opens the gate.
  */
 import { MessagePort, parentPort } from "node:worker_threads";
-import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import type {
+	Api,
+	AssistantMessage,
+	Context,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+	ToolCall,
+} from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
+import { type } from "@oh-my-pi/omptype";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
@@ -107,6 +117,21 @@ function heldStream(model: Model<Api>, context: Context, options?: SimpleStreamO
 			timestamp: Date.now(),
 		};
 		stream.push({ type: "start", partial });
+		if (prompt === "[tool]" && context.messages.at(-1)?.role === "user") {
+			const call: ToolCall = { type: "toolCall", id: "worker-lookup", name: "probe_lookup", arguments: {} };
+			partial.content.push(call);
+			stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+			const prefix = '{"path":"worker live prefix';
+			setStreamingPartialJson(call, prefix);
+			stream.push({ type: "toolcall_delta", contentIndex: 0, delta: prefix, partial });
+			await gate.promise;
+			const final = { ...call, arguments: { path: "worker live prefix.txt" } };
+			partial.content[0] = final;
+			partial.stopReason = "toolUse";
+			stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: final, partial });
+			stream.push({ type: "done", reason: "toolUse", message: partial });
+			return;
+		}
 		partial.content.push(text);
 		stream.push({ type: "text_start", contentIndex: 0, partial });
 		if (hold) {
@@ -147,9 +172,20 @@ const probe: FocusProbe = {
 	open: async (id, registry, overrides) => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("bundled model missing");
+		const lookup: AgentTool = {
+			name: "probe_lookup",
+			label: "Lookup on worker",
+			description: "Returns a fixture document",
+			parameters: type({ path: "string" }),
+			async execute(_id, _args, _signal, update) {
+				update?.({ content: [{ type: "text", text: "Still reading on worker" }] });
+				await gate.promise;
+				return { content: [{ type: "text", text: "Worker returned the document" }] };
+			},
+		};
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Focus fixture"], tools: [] },
+			initialState: { model, systemPrompt: ["Focus fixture"], tools: [lookup] },
 			convertToLlm,
 			streamFn: heldStream,
 		});
@@ -159,6 +195,7 @@ const probe: FocusProbe = {
 			sessionManager,
 			settings: Settings.isolated(overrides),
 			modelRegistry: registry,
+			toolRegistry: new Map([[lookup.name, lookup]]),
 			extensionRunner: new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), sessionManager, registry),
 			agentId: id,
 		});

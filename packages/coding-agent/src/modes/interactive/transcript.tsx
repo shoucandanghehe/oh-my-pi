@@ -14,7 +14,7 @@
  * settles too, though a later update may still replace it; a live one that
  * completed tasks stays live while their strike plays.
  */
-import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import {
 	type Accessor,
@@ -28,10 +28,8 @@ import {
 	signal,
 	untrack,
 } from "@oh-my-pi/pi-tui";
-import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { TspText } from "@oh-my-pi/pi-wire";
 import type {
 	TranscriptPresentation,
 	TranscriptPresenter as PresenterFn,
@@ -40,7 +38,7 @@ import type { AgentViewSession } from "../../session/agent-session-handle";
 import type { BashExecutionMessage, PythonExecutionMessage } from "../../session/transcript/messages";
 import type { ToolActivityMode } from "../settings";
 import { isReplyWrite, replyDisplayMessage } from "../../session/transcript/reply-write";
-import { messageBlock, readTranscriptPresentation } from "../../session/transcript/transcript-presentation";
+import { messageBlock, resolveTranscriptPresentation } from "../../session/transcript/transcript-presentation";
 import { capturePage } from "../../tools/browser/page-shot";
 import { type SpotlightDetails, spotlightDetails } from "../../tools/details/spotlight";
 import { TODO_STRIKE_TOTAL_FRAMES } from "../../tools/details/todo";
@@ -52,11 +50,6 @@ import "../../ui/styles/messages";
 import "../../ui/styles/tools";
 import "../../ui/styles/transcript/exec-run";
 import "../../ui/styles/transcript/read-group";
-import { defaultPresenter } from "../../ui/tools/default";
-import { toolEditMode } from "../../ui/tools/edit";
-import { legacyPresenter, type LegacyToolRenderer } from "../../ui/tools/legacy";
-import { toolPresenter } from "../../ui/tools/registry";
-import type { ToolCommandMounted } from "../../ui/tools/tool-command";
 import type { BlockOptions, Shell, TranscriptBlock, ViewList } from "../../ui/shell";
 import { holdSettle, mountNode } from "../../ui/shell";
 import { type ExecRun, ExecRunBlock } from "../../ui/transcript/exec-run";
@@ -72,7 +65,8 @@ import {
 } from "../../ui/transcript/messages/assistant-message";
 import { ThinkingRateMeter } from "../../session/transcript/thinking-speed";
 import { ReadGroup, ReadGroupBlock, type ReadResult } from "../../ui/transcript/read-group";
-import { ToolBlock, ToolCall, type ToolCallResult, type ToolPresentation } from "../../ui/transcript/tool-block";
+import { ToolBlock, type ToolCallResult } from "../../ui/transcript/tool-block";
+import { createTranscriptToolCall, toolPresentation } from "../../ui/transcript/tool-card-model";
 import { type MessageFaceEnv, type MessageFaceOptions, messageFace } from "./messages";
 import type {
 	AssistantView,
@@ -249,17 +243,7 @@ export class TranscriptPresenter {
 	presentationOf(block: Parameters<PresenterFn>[0]): TranscriptPresentation {
 		this.#presentationRevision();
 		this.#revisionOf(block.id);
-		for (const presenter of this.#presenters()) {
-			let answer: TranscriptPresentation | null;
-			try {
-				answer = readTranscriptPresentation(presenter(block));
-			} catch {
-				continue;
-			}
-			if (answer === null) return "full";
-			if (answer !== undefined) return answer;
-		}
-		return undefined;
+		return resolveTranscriptPresentation(this.#presenters(), block);
 	}
 
 	/** What `block` shows, undefined for static blocks. */
@@ -443,29 +427,17 @@ export class TranscriptPresenter {
 
 	#presentCard(spec: ToolCallSpec, builtIn: boolean, before: TranscriptBlock | undefined): PendingTool {
 		const { display } = this.#host;
-		const renderer = builtIn ? undefined : legacyRenderer(spec.tool);
-		// A same-named tool that is not the built-in (an extension's) without hooks draws the
-		// generic card, never the built-in's presenter.
-		const registered = toolPresenter(spec.name);
-		const presenter = renderer
-			? legacyPresenter(renderer, registered ?? defaultPresenter)
-			: !builtIn && registered
-				? defaultPresenter
-				: undefined;
-		const call = new ToolCall({
+		const call = createTranscriptToolCall({
 			id: spec.id,
 			name: spec.name,
-			...(spec.tool?.label ? { label: spec.tool.label } : {}),
+			tool: spec.tool,
+			builtIn,
 			args: spec.args,
-			...(presenter ? { presenter } : {}),
-			resolveToolCommand: toolCommandResolver(spec.tool),
 			shellVisualization: display.shellVisualization.peek(),
 			inspectShell: source => presentShellInspector(this.#host.shell, source),
 			mcpMarkdown: display.mcpMarkdown.peek(),
 			...(spec.timestamp !== undefined ? { timestamp: spec.timestamp } : {}),
 		});
-		const editMode = toolEditMode(spec.name, spec.tool);
-		if (editMode) call.setRenderContext({ editMode });
 		const presentedId = signal(spec.id);
 		// A live `todo` result strikes the tasks it completed through on the spinner clock, which the
 		// look plays only while the block is live: the card holds its settle for the strike while it
@@ -790,28 +762,6 @@ function PresentedBlockNode(props: {
 	);
 }
 
-/**
- * A presenters' answer as a tool card's presentation (a string label or row loses its control
- * sequences); without an answer the call draws as `display.toolActivity` says.
- */
-function toolPresentation(answer: TranscriptPresentation, mode: ToolActivityMode): ToolPresentation {
-	if (answer === undefined) return mode === "concise" ? "concise" : "full";
-	if (answer === "full") return "full";
-	if (answer === "hidden" || answer === "compact") return answer;
-	const { label, rows } = answer.compact;
-	return {
-		compact: {
-			...(label !== undefined ? { label: plainText(label) } : {}),
-			...(rows ? { rows: rows.map(plainText) } : {}),
-		},
-	};
-}
-
-/** `text` without control sequences when a string; spans keep their theme tokens. */
-function plainText(text: TspText): TspText {
-	return typeof text === "string" ? stripEscapes(text) : text;
-}
-
 function textOf(message: AssistantMessage | undefined): string {
 	return (message?.content ?? []).map(part => (part.type === "text" ? part.text : "")).join("");
 }
@@ -831,38 +781,6 @@ function completesTasks(result: ToolCallResult): boolean {
 		Array.isArray(details.completedTasks) &&
 		details.completedTasks.length > 0
 	);
-}
-
-/** An extension tool's render hooks, when it has any. */
-function legacyRenderer(tool: AgentTool | undefined): LegacyToolRenderer | undefined {
-	const hooks = tool as (AgentTool & Partial<LegacyToolRenderer>) | undefined;
-	if (!hooks?.renderCall && !hooks?.renderResult) return undefined;
-	return {
-		...(hooks.renderCall ? { renderCall: hooks.renderCall.bind(hooks) } : {}),
-		...(hooks.renderResult ? { renderResult: hooks.renderResult.bind(hooks) } : {}),
-		...(hooks.mergeCallAndResult !== undefined ? { mergeCallAndResult: hooks.mergeCallAndResult } : {}),
-	};
-}
-
-/** Lookup of the tools a bash run's tool commands dispatch to (the tool's session state). */
-function toolCommandResolver(
-	tool: AgentTool | undefined,
-): ((name: string) => ToolCommandMounted | undefined) | undefined {
-	const session = (tool as { session?: { toolCommands?: { resolve?: (name: string) => unknown } } } | undefined)
-		?.session;
-	const resolve = session?.toolCommands?.resolve;
-	if (!resolve) return undefined;
-	return name => {
-		const mounted = resolve(name) as (Partial<LegacyToolRenderer> & { label?: string }) | undefined;
-		if (!mounted) return undefined;
-		const legacy = mounted.renderCall || mounted.renderResult ? legacyRenderer(mounted as AgentTool) : undefined;
-		const presenter = toolPresenter(name);
-		return {
-			...(mounted.label ? { label: mounted.label } : {}),
-			...(presenter ? { presenter } : {}),
-			...(legacy ? { legacy } : {}),
-		};
-	};
 }
 
 /** The message a run stands for until the session records it. */

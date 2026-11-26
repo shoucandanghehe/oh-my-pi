@@ -216,7 +216,8 @@ export class Shell {
 				const backend = host.renderBackend;
 				const fullscreen = backend === "inline" && options.screen?.() === "fullscreen";
 				let tracking = inline;
-				if (backend === "app-viewport" && inline === "off") tracking = "drag";
+				if (host.ansiWorkspace?.pointerMotion()) tracking = "any";
+				else if (backend === "app-viewport" && inline === "off") tracking = "drag";
 				if (fullscreen) tracking = options.fullscreenMouse?.() === false ? "off" : inline === "any" ? "any" : "drag";
 				host.setMouse(this.overlays.mouse() ?? tracking);
 			});

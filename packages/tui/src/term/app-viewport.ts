@@ -2,28 +2,38 @@ import type { MouseEvent } from "../driver/contract";
 import { hasGraphics } from "../driver/output/ansi";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
-import { type Accessor, computed, createRoot } from "../reactive";
+import { untrack } from "../reactive";
 import type { Surface } from "../surface";
 import { stripEscapes, tokens } from "../text/ansi";
 import { textSizedRows } from "../text/osc";
-import { pieces, sliceColumns, visibleWidth } from "../text/width";
+import { padTo, pieces, sliceColumns, visibleWidth } from "../text/width";
+import type { Theme } from "../theme/contract";
 import type { Block, Cell, Hit } from "./paint";
+import { TranscriptRows } from "./transcript-rows";
 
 interface DocumentBlock {
 	readonly node: UiNode;
-	readonly block: Block;
-	/** First content row (the separator immediately above belongs to this block too). */
-	readonly start: number;
-	readonly lead: number;
-	readonly end: number;
+	above: UiNode | undefined;
+	lead: number;
+	body: number | undefined;
+	block: Block | undefined;
 }
 
 interface Document {
 	readonly width: number;
-	readonly end: number;
+	readonly nodes: readonly UiNode[];
 	readonly blocks: readonly DocumentBlock[];
-	readonly byNode: ReadonlyMap<UiNode, DocumentBlock>;
+	readonly byNode: ReadonlyMap<UiNode, number>;
+	readonly rows: TranscriptRows;
+	/** New, not-yet-laid-out nodes; older widths supply estimates, not painted blocks. */
+	remaining: number;
+	warmup: number;
+	seeded: boolean;
 }
+
+const OVERSCAN = 4;
+const REFINE_BLOCKS = 32;
+const REFINE_MS = 4;
 
 /** A row and column inside a node, independent of other nodes' heights. Negative rows are its separator. */
 interface Point extends Cell {
@@ -41,6 +51,11 @@ interface View {
 	readonly from: number;
 	readonly to: number;
 	readonly maxTop: number;
+	readonly railCol: number;
+	readonly railRows: number;
+	readonly thumbTop: number;
+	readonly thumbRows: number;
+	readonly returnRow: number;
 }
 
 export interface ViewportHit {
@@ -55,34 +70,24 @@ export interface ViewportHit {
 
 interface AppViewportOptions {
 	readonly surface: Surface;
-	readonly paint: (node: UiNode, width: number) => Block;
+	readonly paint: (node: UiNode, width: number, layoutOnly?: boolean) => Block;
 	readonly separator: (above: UiNode, below: UiNode) => number;
+	readonly theme: () => Theme;
+	readonly requestRender: () => void;
 	readonly copy: (text: string) => void;
 	readonly paste?: () => void;
 }
 
-/** The first block whose end is below `row`. */
-function blockIndex(document: Document, row: number): number {
-	let lo = 0;
-	let hi = document.blocks.length;
-	while (lo < hi) {
-		const mid = (lo + hi) >>> 1;
-		if (document.blocks[mid]!.end <= row) lo = mid + 1;
-		else hi = mid;
-	}
-	return lo;
-}
-
 function pointAt(document: Document, row: number, col: number): Point {
-	const entry = document.blocks[blockIndex(document, row)]!;
-	const relative = row - entry.start;
-	const text = entry.block.rows[relative] ?? "";
-	return { node: entry.node, row: relative, col: Math.min(col, visibleWidth(text)) };
-}
-
-function rowAt(document: Document, row: number): string {
-	const entry = document.blocks[blockIndex(document, row)];
-	return entry?.block.rows[row - entry.start] ?? "";
+	const index = document.rows.find(row);
+	const entry = document.blocks[index]!;
+	const relative = row - document.rows.start(index) - entry.lead;
+	const text = entry.block?.rows[relative];
+	return {
+		node: entry.node,
+		row: relative,
+		col: relative < 0 ? 0 : text === undefined ? col : Math.min(col, visibleWidth(text)),
+	};
 }
 
 const SIZED = "\x1b]66;";
@@ -108,17 +113,20 @@ function contentLength(line: string): number {
 
 /** Rebase a block-relative point when the block between the same nodes is repainted. */
 function rebase(point: Point, before: Document, after: Document, keepColumn = false): Point | undefined {
-	const current = after.byNode.get(point.node);
-	if (!current) return undefined;
-	const previous = before.byNode.get(point.node);
+	const index = after.byNode.get(point.node);
+	if (index === undefined) return undefined;
+	const current = after.blocks[index]!;
+	if (!current.block?.rows.length) return undefined;
+	const previousIndex = before.byNode.get(point.node);
+	const previous = previousIndex === undefined ? undefined : before.blocks[previousIndex]?.block;
 	let row = point.row;
 	let col = point.col;
-	if (row >= 0 && previous && before.width !== after.width && previous.block.rows !== current.block.rows) {
+	if (row >= 0 && previous && before.width !== after.width && previous.rows !== current.block.rows) {
 		// Keep the text at the top (or under the selected cell), not the old wrap row. This
 		// is approximate for a painter whose decoration or content changes at the new width.
 		// Snap selection columns to grapheme starts before measuring the prefix.
-		let offset = contentLength(sliceColumns(previous.block.rows[row] ?? "", 0, col));
-		for (let i = 0; i < row && i < previous.block.rows.length; i++) offset += contentLength(previous.block.rows[i]!);
+		let offset = contentLength(sliceColumns(previous.rows[row] ?? "", 0, col));
+		for (let i = 0; i < row && i < previous.rows.length; i++) offset += contentLength(previous.rows[i]!);
 		for (row = 0; row < current.block.rows.length - 1; row++) {
 			const length = contentLength(current.block.rows[row]!);
 			if (offset < length) break;
@@ -140,16 +148,22 @@ function rebase(point: Point, before: Document, after: Document, keepColumn = fa
 }
 
 /** Selection endpoints in document order, or undefined for an ordinary click. */
-function range(selection: Selection | undefined, document: Document): { start: Cell; end: Cell } | undefined {
+function ordered(selection: Selection | undefined, document: Document): readonly [Point, Point] | undefined {
 	if (!selection) return undefined;
 	const { anchor, focus } = selection;
 	const first = document.byNode.get(anchor.node);
 	const last = document.byNode.get(focus.node);
-	if (!first || !last) return undefined;
-	const a = { row: first.start + anchor.row, col: anchor.col };
-	const b = { row: last.start + focus.row, col: focus.col };
-	if (a.row === b.row && a.col === b.col) return undefined;
-	return a.row < b.row || (a.row === b.row && a.col < b.col) ? { start: a, end: b } : { start: b, end: a };
+	if (first === undefined || last === undefined) return undefined;
+	if (first !== last) return first < last ? [anchor, focus] : [focus, anchor];
+	if (anchor.row === focus.row && anchor.col === focus.col) return undefined;
+	return anchor.row < focus.row || (anchor.row === focus.row && anchor.col < focus.col)
+		? [anchor, focus]
+		: [focus, anchor];
+}
+
+function position(document: Document, point: Point): Cell {
+	const index = document.byNode.get(point.node)!;
+	return { row: document.rows.start(index) + document.blocks[index]!.lead + point.row, col: point.col };
 }
 
 /** Selected cells, including the last clicked cell and without slicing through wide glyphs. */
@@ -171,54 +185,95 @@ function columns(line: string, row: number, start: Cell, end: Cell): [number, nu
 
 /** The ANSI `main` region's scroll and selection, independent of dock and layer layout. */
 export class AppViewport {
-	#layout: { readonly width: number; readonly document: Accessor<Document>; dispose(): void } | undefined;
+	#layout: Document | undefined;
 	#view: View | undefined;
 	/** Undefined follows the transcript tail. */
 	#anchor: Point | undefined;
 	#selection: Selection | undefined;
 	#dragging = false;
+	#scrollbarGrab: number | undefined;
 
 	constructor(private readonly options: AppViewportOptions) {}
 
 	#document(width: number): Document {
-		if (this.#layout?.width !== width) {
-			this.#layout?.dispose();
-			this.#layout = createRoot(dispose => ({
-				width,
-				dispose,
-				document: computed(() => {
-					const blocks: DocumentBlock[] = [];
-					const byNode = new Map<UiNode, DocumentBlock>();
-					let end = 0;
-					let above: UiNode | undefined;
-					for (const node of this.options.surface.main()) {
-						const block = this.options.paint(node, width);
-						if (block.rows.length === 0) continue;
-						const lead = above ? Math.max(0, this.options.separator(above, node)) : 0;
-						const start = end + lead;
-						end = start + block.rows.length;
-						const entry = { node, block, start, end, lead };
-						blocks.push(entry);
-						byNode.set(node, entry);
-						above = node;
-					}
-					return { width, end, blocks, byNode };
-				}),
-			}));
+		const nodes = this.options.surface.main();
+		const previous = this.#layout;
+		if (previous?.width === width && previous.nodes === nodes) return previous;
+		const blocks: DocumentBlock[] = [];
+		const weights: (number | undefined)[] = [];
+		const byNode = new Map<UiNode, number>();
+		let remaining = 0;
+		let above: UiNode | undefined;
+		const sameWidth = previous?.width === width;
+		for (const [index, node] of nodes.entries()) {
+			const oldIndex = previous?.byNode.get(node);
+			const old = oldIndex === undefined ? undefined : previous?.blocks[oldIndex];
+			const block = sameWidth ? old?.block : undefined;
+			const body = sameWidth ? old?.body : undefined;
+			const estimate = body ?? (old?.body || undefined);
+			const predecessor = above;
+			let lead = 0;
+			if (predecessor && estimate !== 0) {
+				if (old?.above === predecessor) lead = old.lead;
+				else if (body !== undefined) lead = untrack(() => Math.max(0, this.options.separator(predecessor, node)));
+				else lead = 1;
+			}
+			// Carry height across a resize as an estimate; the new layout owns its paint.
+			weights.push(estimate === undefined ? undefined : estimate + lead);
+			blocks.push({ node, block, lead, above, body });
+			byNode.set(node, index);
+			if (body === undefined) remaining++;
+			if (estimate !== 0) above = node;
 		}
-		return this.#layout.document();
+		const layout = {
+			width,
+			nodes,
+			blocks,
+			byNode,
+			rows: new TranscriptRows(weights, previous?.rows.estimate ?? 2),
+			remaining,
+			warmup: blocks.length - 1,
+			seeded: sameWidth && previous.seeded,
+		};
+		this.#layout = layout;
+		return layout;
+	}
+
+	#updateExtent(document: Document, index: number): void {
+		const { blocks, rows } = document;
+		const entry = blocks[index]!;
+		const body = entry.body;
+		if (body === undefined) return;
+		entry.above = blocks[rows.find(rows.start(index) - 1)]?.node;
+		entry.lead = entry.above && body > 0 ? Math.max(0, this.options.separator(entry.above, entry.node)) : 0;
+		rows.set(index, body + entry.lead);
+	}
+
+	#measure(document: Document, index: number, layoutOnly = false): void {
+		const { blocks, rows } = document;
+		const entry = blocks[index]!;
+		const block = this.options.paint(entry.node, document.width, layoutOnly);
+		const hadRows = rows.weight(index) > 0;
+		if (entry.body === undefined) document.remaining--;
+		entry.body = block.rows.length;
+		if (!layoutOnly) entry.block = block;
+		this.#updateExtent(document, index);
+		if (hadRows !== block.rows.length > 0) {
+			// A separator joins the nearest nonempty blocks, not necessarily adjacent nodes.
+			const next = rows.find(rows.start(index + 1));
+			if (next < blocks.length) this.#updateExtent(document, next);
+		}
 	}
 
 	/** Pause observation while the terminal is lent out. Keep the displayed anchor for restart. */
 	pause(): void {
-		this.#layout?.dispose();
-		this.#layout = undefined;
-		this.#dragging = false;
+		this.endDrag();
 	}
 
 	/** Stop a drag when the pointer is taken away by an overlay or tracking is switched off. */
 	endDrag(): void {
 		this.#dragging = false;
+		this.#scrollbarGrab = undefined;
 	}
 
 	clearSelection(): void {
@@ -228,36 +283,131 @@ export class AppViewport {
 
 	/** Paint the visible `main` slice into the rows above the dock, leaving any unused space blank. */
 	paint(width: number, capacity: number, visible: number, rows: string[], hits: ViewportHit[]): Cell | null {
-		const document = this.#document(width);
+		// Reserve one column so showing/hiding the chrome never changes transcript wrapping.
+		const contentWidth = Math.max(1, width - 1);
+		const document = this.#document(contentWidth);
 		const previous = this.#view;
-		if (previous && previous.document !== document) {
-			const before = previous.document;
-			if (this.#anchor) {
-				this.#anchor = rebase(this.#anchor, before, document);
-				if (!this.#anchor && document.end > 0) {
-					this.#anchor = pointAt(document, Math.min(previous.top, document.end - 1), 0);
-				}
-			}
-			if (this.#selection) {
-				const anchor = rebase(this.#selection.anchor, before, document, true);
-				const focus = rebase(this.#selection.focus, before, document, true);
-				this.#selection = anchor && focus ? { anchor, focus } : undefined;
-				if (!this.#selection) this.endDrag();
+		const before = previous?.document ?? document;
+		const geometry = () => {
+			const end = document.rows.end;
+			const maxTop = Math.max(0, end - Math.max(1, capacity));
+			const top = this.#anchor ? Math.min(maxTop, Math.max(0, position(document, this.#anchor).row)) : maxTop;
+			const from = top + Math.max(0, Math.min(capacity - visible, end - top - visible));
+			return { top, from, to: Math.min(end, from + visible), maxTop };
+		};
+		const checked = new Set<number>();
+		const measure = (index: number): void => {
+			if (checked.has(index) || index < 0 || index >= document.blocks.length) return;
+			checked.add(index);
+			this.#measure(document, index);
+		};
+		if (this.#anchor) {
+			const index = document.byNode.get(this.#anchor.node);
+			if (index !== undefined) measure(index);
+			this.#anchor = rebase(this.#anchor, before, document);
+			if (!this.#anchor && document.rows.end > 0) {
+				this.#anchor = pointAt(document, Math.min(previous?.top ?? 0, document.rows.end - 1), 0);
 			}
 		}
-		const maxTop = Math.max(0, document.end - Math.max(1, capacity));
-		const top = this.#anchor
-			? Math.min(maxTop, Math.max(0, document.byNode.get(this.#anchor.node)!.start + this.#anchor.row))
-			: maxTop;
-		const from = top + Math.max(0, Math.min(capacity - visible, document.end - top - visible));
-		const to = Math.min(document.end, from + visible);
-		this.#view = { document, top, from, to, maxTop };
-		const selection = range(this.#selection, document);
+		if (before.width !== document.width && this.#selection) {
+			for (const point of [this.#selection.anchor, this.#selection.focus]) {
+				const index = document.byNode.get(point.node);
+				if (index !== undefined) untrack(() => this.#measure(document, index));
+			}
+		}
+
+		const limit = Math.max(128, capacity + OVERSCAN * 2);
+		const fill = (): boolean => {
+			// Walk from the edge that must stay visible, changing the other bound as the
+			// estimates resolve. A tall block can displace its unpainted neighbours.
+			const { top, from: initialFrom, to: initialTo } = geometry();
+			if (initialFrom === initialTo) return true;
+			let from = initialFrom;
+			let to = initialTo;
+			const following = !this.#anchor;
+			const { rows: heights, blocks } = document;
+			for (
+				let index = heights.find(following ? heights.end - 1 : top);
+				index >= 0 && index < blocks.length;
+				index = heights.find(following ? heights.start(index) - 1 : heights.start(index + 1))
+			) {
+				if (following ? heights.start(index + 1) <= from : heights.start(index) >= to) break;
+				if (checked.has(index)) continue;
+				if (checked.size >= limit) return false;
+				measure(index);
+				({ from, to } = geometry());
+			}
+			return true;
+		};
+		if (visible > 0) {
+			fill();
+			const { top, to } = geometry();
+			const { blocks, rows: heights } = document;
+			const first = heights.find(top);
+			const last = heights.find(to - 1);
+			// Adjacent blocks make short wheel steps exact. Also observe empty nodes at the tail:
+			// a streaming block that currently draws nothing can gain rows without a structural change.
+			const nearby = new Set<number>();
+			for (let i = 1; i <= OVERSCAN; i++) {
+				nearby.add(first - i);
+				nearby.add(last + i);
+				if (!this.#anchor) nearby.add(blocks.length - i);
+			}
+			for (const index of nearby) {
+				if (blocks[index] && !checked.has(index)) this.#measure(document, index, true);
+			}
+			if (!document.seeded && checked.size > 0) {
+				let sum = 0;
+				let sampled = 0;
+				for (const index of checked) {
+					const body = blocks[index]!.block!.rows.length;
+					if (body === 0) continue;
+					sum += body;
+					sampled++;
+				}
+				if (sampled > 0) {
+					heights.estimate = 1 + Math.round(sum / sampled);
+					document.seeded = true;
+				}
+			}
+			if (previous?.document === document && document.remaining > 0) {
+				const deadline = performance.now() + REFINE_MS;
+				untrack(() => {
+					for (let n = 0; document.warmup >= 0 && n < REFINE_BLOCKS; n++) {
+						const index = document.warmup--;
+						if (blocks[index]!.body === undefined) this.#measure(document, index, true);
+						if (performance.now() >= deadline) break;
+					}
+				});
+			}
+			if (!fill() || document.remaining > 0) this.options.requestRender();
+		}
+		if (this.#selection) {
+			const anchor = rebase(this.#selection.anchor, before, document, true);
+			const focus = rebase(this.#selection.focus, before, document, true);
+			this.#selection = anchor && focus ? { anchor, focus } : undefined;
+			if (!this.#selection) this.endDrag();
+		}
+		const { top, from, to, maxTop } = geometry();
+		const railRows = width > 1 && maxTop > 0 ? visible : 0;
+		const thumbRows = Math.min(
+			railRows,
+			Math.max(1, Math.floor((railRows * capacity) / Math.max(1, document.rows.end))),
+		);
+		const thumbTop = Math.round((top / Math.max(1, maxTop)) * (railRows - thumbRows));
+		const returnRow = railRows > 0 && this.#anchor && top < maxTop ? railRows - 1 : -1;
+		this.#view = { document, top, from, to, maxTop, railCol: width - 1, railRows, thumbRows, thumbTop, returnRow };
+		const selection = ordered(this.#selection, document);
+		const startPoint = selection && position(document, selection[0]);
+		const endPoint = selection && position(document, selection[1]);
 		let cursor: Cell | null = null;
-		for (let i = blockIndex(document, from); i < document.blocks.length; i++) {
-			const { block, start, end } = document.blocks[i]!;
+		const heights = document.rows;
+		for (let i = heights.find(from); i < document.blocks.length; i = heights.find(heights.start(i + 1))) {
+			const start = heights.start(i) + document.blocks[i]!.lead;
 			if (start >= to) break;
-			for (let row = Math.max(from, start); row < Math.min(to, end); row++) {
+			const block = document.blocks[i]!.block;
+			if (!block) continue;
+			for (let row = Math.max(from, start); row < Math.min(to, start + block.rows.length); row++) {
 				let line = block.rows[row - start]!;
 				if (line.includes("\x1b7") && hasGraphics(line)) {
 					// An image whose first row scrolled off must not jump above the viewport to draw.
@@ -269,12 +419,12 @@ export class AppViewport {
 						.map(token => (token.text.startsWith(SIZED) ? sizedText(token.text) : token.text))
 						.join("");
 				}
-				if (selection && row >= selection.start.row && row <= selection.end.row && !hasGraphics(line)) {
-					const [left, right] = columns(line, row, selection.start, selection.end);
+				if (startPoint && endPoint && row >= startPoint.row && row <= endPoint.row && !hasGraphics(line)) {
+					const [left, right] = columns(line, row, startPoint, endPoint);
 					const selected = sliceColumns(line, left, right);
 					if (selected) {
 						// Drop selected text's styles so an embedded reset cannot cancel the highlight.
-						line = `${sliceColumns(line, 0, left)}\x1b[7m${stripEscapes(selected)}\x1b[0m${sliceColumns(line, right, width)}`;
+						line = `${sliceColumns(line, 0, left)}\x1b[7m${stripEscapes(selected)}\x1b[0m${sliceColumns(line, right, contentWidth)}`;
 					}
 				}
 				rows[row - from] = line;
@@ -289,30 +439,88 @@ export class AppViewport {
 				}
 			}
 		}
+		if (railRows > 0) {
+			const theme = this.options.theme();
+			for (let row = 0; row < railRows; row++) {
+				const control =
+					row === returnRow
+						? theme.style("accent", "▽")
+						: row >= thumbTop && row < thumbTop + thumbRows
+							? theme.style("accent", "█")
+							: theme.style("muted", "│");
+				rows[row] = `${padTo(rows[row]!, contentWidth)}\x1b[0m${control}`;
+			}
+		}
 		return cursor;
 	}
 
 	#scroll(delta: number): number | undefined {
 		const view = this.#view;
-		if (!view || view.document.end === 0) return undefined;
+		if (!view || view.document.rows.end === 0) return undefined;
 		// Several input reports can arrive before another frame: accumulate on the pending anchor.
-		const base = this.#anchor ? view.document.byNode.get(this.#anchor.node)!.start + this.#anchor.row : view.maxTop;
+		const base = this.#anchor ? position(view.document, this.#anchor).row : view.maxTop;
 		const top = Math.max(0, Math.min(view.maxTop, Math.min(view.maxTop, base) + delta));
-		this.#anchor = top < view.maxTop ? pointAt(view.document, top, 0) : undefined;
+		this.#setTop(view, top);
 		return top;
+	}
+
+	#setTop(view: View, top: number): void {
+		this.#anchor = top < view.maxTop ? pointAt(view.document, top, 0) : undefined;
+	}
+
+	/** Scroll chrome is over the transcript, but only while no layer owns the pointer. */
+	chrome(mouse: MouseEvent, row: number): boolean {
+		const view = this.#view;
+		if (!view || view.railRows === 0 || mouse.action !== "press" || mouse.button !== "left") return false;
+		if (mouse.col !== view.railCol || row < 0 || row >= view.railRows) return false;
+		if (row === view.returnRow) {
+			this.#anchor = undefined;
+			return true;
+		}
+		const inThumb = row >= view.thumbTop && row < view.thumbTop + view.thumbRows;
+		this.#scrollbarGrab = inThumb ? row - view.thumbTop : (view.thumbRows - 1) / 2;
+		if (!inThumb) this.#dragScrollbar(view, row);
+		return true;
+	}
+
+	#dragScrollbar(view: View, row: number): void {
+		const travel = view.railRows - view.thumbRows;
+		if (travel <= 0 || this.#scrollbarGrab === undefined) return;
+		const grab = Math.min(view.thumbRows - 1, this.#scrollbarGrab);
+		const thumb = Math.max(0, Math.min(travel, row - grab));
+		this.#setTop(view, Math.round((thumb * view.maxTop) / travel));
 	}
 
 	#copy(): boolean {
 		const document = this.#view?.document;
 		if (!document) return false;
-		const selection = range(this.#selection, document);
+		const selection = ordered(this.#selection, document);
 		if (!selection) return false;
+		const [start, end] = selection;
+		const first = document.byNode.get(start.node)!;
+		const last = document.byNode.get(end.node)!;
 		const chunks: string[] = [];
-		for (let row = selection.start.row; row <= selection.end.row; row++) {
-			const line = rowAt(document, row);
-			const [left, right] = columns(line, row, selection.start, selection.end);
-			const text = plainText(sliceColumns(line, left, right));
-			chunks.push(right >= visibleWidth(line) ? text.trimEnd() : text);
+		let above: UiNode | undefined;
+		for (let index = first; index <= last; index++) {
+			const { node, block } = document.blocks[index]!;
+			// Copy can span skipped history. Materialize its text without reserving offscreen images.
+			const rows = block?.rows ?? this.options.paint(node, document.width, true).rows;
+			if (rows.length === 0) continue;
+			const lead =
+				index === first
+					? document.blocks[index]!.lead
+					: above
+						? Math.max(0, this.options.separator(above, node))
+						: 0;
+			const a = index === first ? start : { row: -lead, col: 0 };
+			const b = index === last ? end : { row: rows.length - 1, col: document.width };
+			for (let row = Math.max(-lead, a.row); row <= Math.min(rows.length - 1, b.row); row++) {
+				const line = rows[row] ?? "";
+				const [left, right] = columns(line, row, a, b);
+				const text = plainText(sliceColumns(line, left, right));
+				chunks.push(right >= visibleWidth(line) ? text.trimEnd() : text);
+			}
+			above = node;
 		}
 		const text = chunks.join("\n");
 		if (!text) return false;
@@ -348,6 +556,12 @@ export class AppViewport {
 
 	/** A started transcript drag owns its continuation even over a widget. */
 	drag(mouse: MouseEvent, row: number): boolean {
+		if (this.#scrollbarGrab !== undefined && this.#view) {
+			if (mouse.action === "release") this.endDrag();
+			else if (mouse.action === "drag") this.#dragScrollbar(this.#view, row);
+			else return false;
+			return true;
+		}
 		if (!this.#dragging || !this.#selection || !this.#view) return false;
 		if (mouse.action === "release") {
 			this.endDrag();
@@ -361,7 +575,7 @@ export class AppViewport {
 		const delta = wheel || (row >= visible ? 1 : row === 0 ? -1 : 0);
 		const top = delta ? (this.#scroll(delta) ?? view.top) : view.top;
 		const source = Math.min(
-			view.document.end - 1,
+			view.document.rows.end - 1,
 			top + view.from - view.top + Math.max(0, Math.min(visible - 1, row)),
 		);
 		this.#selection = { anchor: this.#selection.anchor, focus: pointAt(view.document, source, mouse.col) };

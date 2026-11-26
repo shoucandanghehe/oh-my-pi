@@ -1,5 +1,9 @@
 import type { TspText } from "@oh-my-pi/pi-wire";
-import type { TranscriptBlock, TranscriptPresentation } from "../../extensibility/extensions/render-types";
+import type {
+	TranscriptBlock,
+	TranscriptPresentation,
+	TranscriptPresenter,
+} from "../../extensibility/extensions/render-types";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -29,6 +33,24 @@ export function notifyTranscriptPresentersChanged(): void {
 export function onTranscriptPresentersChanged(listener: () => void): () => void {
 	presenterListeners.add(listener);
 	return () => presenterListeners.delete(listener);
+}
+
+/** The first presenter to answer wins; an invalid answer requests the stock block. */
+export function resolveTranscriptPresentation(
+	presenters: readonly TranscriptPresenter[],
+	block: TranscriptBlock,
+): TranscriptPresentation {
+	for (const presenter of presenters) {
+		let answer: TranscriptPresentation | null;
+		try {
+			answer = readTranscriptPresentation(presenter(block));
+		} catch {
+			continue;
+		}
+		if (answer === null) return "full";
+		if (answer !== undefined) return answer;
+	}
+	return undefined;
 }
 
 function isTspText(value: unknown): value is TspText {

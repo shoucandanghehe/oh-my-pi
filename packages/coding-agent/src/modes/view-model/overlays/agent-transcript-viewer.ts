@@ -1,8 +1,8 @@
 import type * as fs from "node:fs";
-import type { SessionMessageEntryLike } from "../../../session/transcript/transcript-entry";
+import type { TranscriptEntryLike } from "../../../session/transcript/transcript-entry";
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
-export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
+export type AgentTranscriptEntry = TranscriptEntryLike | { type: "model_change"; model: string };
 
 /** Local filesystem and session parsing capabilities supplied by the host. */
 export interface AgentTranscriptSource {

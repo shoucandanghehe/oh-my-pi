@@ -64,7 +64,7 @@ export class NativeWorkspace {
 	async open(
 		key: string,
 		title: string,
-		create: (close: () => void) => NativeWorkspaceSurface,
+		create: (close: () => void, supports: (kind: string) => boolean) => NativeWorkspaceSurface,
 		onClose: () => void,
 		preserveFocus = false,
 	): Promise<NativeWorkspaceView> {
@@ -93,7 +93,7 @@ export class NativeWorkspace {
 	async #open(
 		entry: PaneEntry,
 		title: string,
-		create: (close: () => void) => NativeWorkspaceSurface,
+		create: (close: () => void, supports: (kind: string) => boolean) => NativeWorkspaceSurface,
 		preserveFocus: boolean,
 	): Promise<NativeWorkspaceView> {
 		let timer: Timer | undefined;
@@ -143,7 +143,10 @@ export class NativeWorkspace {
 			entry.connection = connection;
 			this.#requireOpen(entry);
 
-			const mount = create(() => this.#close(entry));
+			const mount = create(
+				() => this.#close(entry),
+				kind => connection.supports(kind),
+			);
 			if (this.#panes.get(entry.key) !== entry) {
 				mount.surface.dispose();
 				mount.dispose?.();

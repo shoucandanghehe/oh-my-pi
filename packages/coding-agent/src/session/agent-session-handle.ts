@@ -231,6 +231,13 @@ export interface AgentViewRuleSource {
 /** The part of a registered tool the status line sizes (its prompt schema). */
 export type AgentViewToolSchema = Pick<AgentTool, "name" | "description" | "parameters">;
 
+/** Cloneable tool identity for the transcript when the tool itself lives on a worker. */
+export interface AgentViewToolRenderMetadata {
+	readonly name: string;
+	readonly label: string;
+	readonly builtIn: boolean;
+}
+
 /** Live agent-loop state the TUI reads on the session it shows. */
 export interface AgentViewLoopState extends AgentSessionLoopStateHandle {
 	/** Schemas of the tools registered on the loop (the status line sizes them). */
@@ -408,6 +415,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	commitTodoPhases(phases: TodoPhase[]): void;
 	/** Registered tool by name. */
 	getToolByName(name: string): AgentTool | undefined;
+	/** A worker's own tool identity, distinct from its main-thread renderer adapter. */
+	getToolRenderMetadata?(name: string): AgentViewToolRenderMetadata | undefined;
 	/** Whether a built-in tool with this name is registered. */
 	hasBuiltInTool(name: string): boolean;
 	/** Queued steering and follow-up messages. */

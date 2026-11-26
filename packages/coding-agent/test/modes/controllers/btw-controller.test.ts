@@ -1,7 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { type } from "@oh-my-pi/omptype";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,6 +23,9 @@ import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { replaceTabs } from "@oh-my-pi/pi-coding-agent/utils/text-width";
 import { Shell, type TranscriptBlock } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
 import { jsx, type UiNode } from "@oh-my-pi/pi-tui";
+import { bubbleEvent, keypathOf, pathTo } from "@oh-my-pi/pi-tui/dispatch";
+import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
+import type { TspMenuProps } from "@oh-my-pi/pi-wire";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 import {
@@ -1383,6 +1387,19 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 	const model = registry.find("anthropic", "claude-sonnet-4-5")!;
 	const releaseReply = Promise.withResolvers<void>();
 	const releaseInterrupted = Promise.withResolvers<void>();
+	const releaseTool = Promise.withResolvers<void>();
+	const lookup: AgentTool = {
+		name: "web_search",
+		label: "Search",
+		description: "Search a fixture collection",
+		approval: "read",
+		parameters: type({ query: "string" }),
+		async execute(_id, _args, _signal, update) {
+			update?.({ content: [{ type: "text", text: "Looking up the side topic" }] });
+			await releaseTool.promise;
+			return { content: [{ type: "text", text: "Completed the side lookup" }] };
+		},
+	};
 	const releaseCompaction = Promise.withResolvers<void>();
 	const compactionStarted = Promise.withResolvers<AgentSession>();
 	const mock = createMockModel({
@@ -1394,17 +1411,24 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 					: input?.flatMap(part => (part.type === "text" ? [part.text] : [])).join("");
 			if (text === "wait before yielding") await releaseReply.promise;
 			if (text === "wait before interruption") await releaseInterrupted.promise;
+			if (text === "find side topic" && context.messages.at(-1)?.role !== "toolResult") {
+				return {
+					content: [{ type: "toolCall", id: "side-lookup", name: lookup.name, arguments: { query: text } }],
+				};
+			}
 			return { content: [`reply for ${text}`] };
 		},
 	});
 	const sessionManager = SessionManager.create(cwd, cwd, undefined, { suppressBreadcrumb: true });
 	sessionManager.appendMessage({ role: "user", content: "Only Main sees this", timestamp: 1 });
 	const main = new AgentSession({
-		agent: new Agent({ initialState: { model, systemPrompt: ["Main instructions"] } }),
+		agent: new Agent({ initialState: { model, systemPrompt: ["Main instructions"], tools: [lookup] } }),
 		sessionManager,
 		settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
 		modelRegistry: registry,
 		sideStreamFn: mock.stream,
+		toolRegistry: new Map([[lookup.name, lookup]]),
+		builtInToolNames: new Set([lookup.name]),
 	});
 	vi.spyOn(main, "generateTitle").mockResolvedValue(null);
 	const compact = vi.spyOn(AgentSession.prototype, "compact").mockImplementation(async function (this: AgentSession) {
@@ -1417,11 +1441,13 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 	const showError = vi.fn();
 	const ctx = { ...makeCtx(main), sessionManager, showError };
 	let mounted: NativeWorkspaceSurface | undefined;
+	let nativeSupports: ((kind: string) => boolean) | undefined;
 	const adapter: BtwWorkspaceAdapter = {
 		async open(create) {
 			mounted ??= create(
 				() => adapter.close(),
 				() => 24,
+				nativeSupports,
 			);
 			return true;
 		},
@@ -1438,6 +1464,19 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 	};
 	const send = (text: string) => {
 		mounted?.surface.focused()?.handlers.onSend?.(text, { type: "send", key: "", text });
+	};
+	const dock = () => mounted?.surface.dock() ?? [];
+	const dockNode = (predicate: (node: UiNode) => boolean): UiNode | undefined => {
+		const pending = [...dock()];
+		for (const node of pending) {
+			if (predicate(node)) return node;
+			pending.push(...node.children());
+		}
+		return undefined;
+	};
+	const click = (node: UiNode, act: string) => {
+		const path = pathTo(dock(), node);
+		return bubbleEvent(path, { type: "action", key: keypathOf(path), act, mods: [] });
 	};
 	const draw = () =>
 		[...(mounted?.surface.main() ?? []), ...(mounted?.surface.dock() ?? []), ...(mounted?.surface.layer() ?? [])]
@@ -1501,6 +1540,12 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(compact).toHaveBeenCalledTimes(1);
 		expect(compact.mock.calls[0]?.[0]).toBe("inspect");
 		expect(draw()).toContain("reply for keep this");
+		child.setThinkingLevel(ThinkingLevel.High);
+		const sideRunner = child.extensionRunner!;
+		expect(sideRunner.hasUI()).toBe(false);
+		sideRunner.getUIContext().setStatus("fixture", "First topic extension status");
+		expect(draw()).toContain("First topic extension status");
+		expect(draw()).toContain("high");
 		expect(draw()).not.toContain("reply for held after compact");
 		const newer = "unsent while compacting";
 		mounted?.surface.focused()?.handlers.onEdit?.({
@@ -1549,6 +1594,8 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		await drawn("Stop");
 		send("/queue pending to take back");
 		await drawn("After yield · pending to take back");
+		// The non-modal rail cannot take the interruption away from the running topic.
+		expect(press("alt+t")).toBe(true);
 		expect(press("escape")).toBe(true);
 		releaseInterrupted.resolve();
 		await drawn("pending to take back", true);
@@ -1559,9 +1606,17 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		send("/new second question");
 		await drawn("reply for second question");
 		expect(draw()).not.toContain("reply for quick question");
+		expect(draw()).not.toContain("First topic extension status");
 		expect(mock.calls).toHaveLength(7);
 		press("tab");
 		await drawn("reply for quick question");
+
+		send("find side topic");
+		await drawn("Looking up the side topic");
+		releaseTool.resolve();
+		await drawn("Completed the side lookup", true);
+		expect(draw()).not.toContain("Looking up the side topic");
+		expect(draw().match(/Completed the side lookup/g)).toHaveLength(1);
 		mounted?.surface
 			.focused()
 			?.handlers.onEdit?.({ from: 0, to: 0, text: draft, cursor: draft.length, len: 0, type: "edit", key: "" });
@@ -1570,10 +1625,85 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		controller = new BtwController(ctx, adapter);
 		expect(await controller.start("")).toBe(true);
 		await drawn(draft);
-		press("alt+t");
-		await drawn("second question");
-		press("escape");
-		press("alt+shift+d");
+		vi.useFakeTimers();
+		try {
+			const rail = mounted!.ansiRail!;
+			const layout = () => rail.layout(80);
+			const point = (
+				action: MouseEvent["action"],
+				row: number,
+				col: number,
+				button: MouseEvent["button"] = "none",
+			) => rail.pointer({ action, row, col, button, mods: [] }, layout().width);
+			expect(layout()).toEqual({ width: 1, inset: 1 });
+			point("move", 11, 0);
+			vi.advanceTimersByTime(40);
+			const opening = layout().width;
+			expect(opening).toBeGreaterThan(1);
+			expect(layout().inset).toBe(1);
+			point("move", 1, 4);
+			expect(draw()).toContain("reply for second question");
+			expect(draw()).toContain("Preview · second question");
+			expect(draw()).toContain(draft);
+			rail.leave();
+			vi.advanceTimersByTime(175);
+			expect(draw()).toContain("reply for quick question");
+			expect(draw()).not.toContain("Preview · second question");
+			const closing = layout().width;
+			expect(closing).toBeGreaterThan(1);
+			// A click can pin the rail while it is sliding away without jumping to either endpoint.
+			point("press", 11, 0, "left");
+			expect(layout()).toEqual({ width: closing, inset: 1 });
+			vi.advanceTimersByTime(120);
+			expect(layout().inset).toBe(layout().width);
+			point("press", 1, 4, "left");
+			expect(draw()).toContain("BTW · second question");
+			expect(draw()).not.toContain(draft);
+			expect(layout().inset).toBeGreaterThan(1);
+			point("press", 0, 4, "left");
+			expect(draw()).toContain(draft);
+			expect(press("escape")).toBe(true);
+			vi.advanceTimersByTime(120);
+			expect(layout()).toEqual({ width: 1, inset: 1 });
+		} finally {
+			vi.useRealTimers();
+		}
+
+		controller.closeView();
+		nativeSupports = () => false;
+		expect(await controller.start("")).toBe(true);
+		const fallback = dockNode(node => node.props().title === "Thread actions");
+		expect(fallback).toBeDefined();
+		expect(click(fallback!, "more")).toBe(true);
+		expect(mounted?.surface.focused()?.kind).toBe("picker");
+		expect(draw()).toContain("Delete thread");
+		controller.closeView();
+
+		nativeSupports = kind => kind === "menu";
+		expect(await controller.start("")).toBe(true);
+		const menu = dockNode(node => node.kind === "menu");
+		expect(menu).toBeDefined();
+		expect((menu!.props() as TspMenuProps).items).toContainEqual({
+			id: "delete",
+			label: "Delete thread",
+			danger: true,
+		});
+		const openMenu = () => {
+			const path = pathTo(dock(), menu!);
+			expect(bubbleEvent(path, { type: "toggle", key: keypathOf(path), collapsed: false })).toBe(true);
+			expect((menu!.props() as TspMenuProps).open).toBe(true);
+		};
+		openMenu();
+		expect(press("escape")).toBe(true);
+		expect((menu!.props() as TspMenuProps).open).toBe(false);
+		expect(mounted).toBeDefined();
+		openMenu();
+		expect(press("up")).toBe(true);
+		expect((menu!.props() as TspMenuProps).active).toBe("delete");
+		expect(press("down")).toBe(true);
+		expect((menu!.props() as TspMenuProps).active).toBe("copy");
+		expect(press("up")).toBe(true);
+		expect(press("enter")).toBe(true);
 		await drawn("reply for second question");
 		expect(draw()).not.toContain("First topic");
 		await controller.dispose();
@@ -1587,6 +1717,7 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(showError.mock.calls).toEqual([]);
 	} finally {
 		releaseInterrupted.resolve();
+		releaseTool.resolve();
 		releaseReply.resolve();
 		releaseCompaction.resolve();
 		compact.mockRestore();

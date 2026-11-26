@@ -40,6 +40,7 @@ export class BtwExtensionRuntime {
 	readonly tools: AgentTool[];
 	readonly sessionManager: SessionManager;
 	readonly modelRegistry: ModelRegistry;
+	readonly #statuses = new Map<string, string>();
 	readonly #agent: Agent;
 	session!: AgentSession;
 	#disposed = false;
@@ -65,6 +66,10 @@ export class BtwExtensionRuntime {
 		this.#onSessionClosed = onSessionClosed;
 	}
 
+	get statuses(): ReadonlyMap<string, string> {
+		return this.#statuses;
+	}
+
 	async dispose(): Promise<void> {
 		if (this.#disposed) return;
 		this.#disposed = true;
@@ -85,6 +90,7 @@ export class BtwExtensionRuntime {
 		sendToMainSession?: (summary: string) => void | Promise<void>;
 		approveSummary?: (summary: string, signal?: AbortSignal) => Promise<boolean>;
 		approvalUI?: ExtensionUIContext;
+		onStatusChange?: () => void;
 		sessionManager: SessionManager;
 		createSession: (runtime: BtwExtensionRuntime) => AgentSession;
 		onSessionClosed?: (manager: SessionManager) => void;
@@ -218,7 +224,18 @@ export class BtwExtensionRuntime {
 			},
 			undefined,
 			"tui",
-			{ installFileFallbacks: false, registerProviders: false },
+			{
+				installFileFallbacks: false,
+				registerProviders: false,
+				setStatus: options.onStatusChange
+					? (key, text) => {
+							if (side.#statuses.get(key) === text) return;
+							if (text === undefined) side.#statuses.delete(key);
+							else side.#statuses.set(key, text);
+							options.onStatusChange?.();
+						}
+					: undefined,
+			},
 		);
 		try {
 			await runner.emit({ type: "session_start" });

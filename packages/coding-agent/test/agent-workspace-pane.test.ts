@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { createSurface } from "@oh-my-pi/pi-tui";
+import { createSurface, jsx, type PresentedFrame, startHost } from "@oh-my-pi/pi-tui";
 import { NativeSurfaces, TspConnection } from "@oh-my-pi/pi-tui/native/index";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { SgrState, tokens } from "@oh-my-pi/pi-tui/text/ansi";
+import { sliceColumns } from "@oh-my-pi/pi-tui/text/width";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { FakeTern, ManualClock } from "../../tui/test/native/fake-tern";
 import { Settings } from "../src/config/settings";
 import { AgentPaneDraft, type AgentWorkspaceSurface, mountAgentWorkspacePane } from "../src/modes/agent-workspace-pane";
@@ -80,7 +84,7 @@ function workspaceAgent(id: string) {
 	const session = {
 		instanceKey: `thread:${id}`,
 		messages,
-		agent: { state: { streamMessage: null } },
+		agent: { state: { streamMessage: null, pendingToolCalls: new Set<string>() }, getPendingToolResults: () => [] },
 		sessionManager: {
 			getSessionId: () => id,
 			getLeafId: () => "leaf",
@@ -259,9 +263,12 @@ test("idle automatic agent panes close unless pinned, being used or still focuse
 			async open(key, _title, create, close, preserveFocus) {
 				let pane = panes.get(key);
 				if (!pane) {
-					const surface = create(() => {
-						panes.delete(key);
-					});
+					const surface = create(
+						() => {
+							panes.delete(key);
+						},
+						() => false,
+					);
 					pane = { view: { ...surface, driver: new FakeTern(), dispatch() {}, redescribe() {} }, close };
 					panes.set(key, pane);
 				}
@@ -312,5 +319,88 @@ test("idle automatic agent panes close unless pinned, being used or still focuse
 		expect([...panes.keys()]).toEqual(["agent:pinned", "agent:draft", "agent:focused"]);
 	} finally {
 		policy.reset();
+	}
+});
+
+test("ANSI background panes gray while closing, and focusing one restores its live colors", async () => {
+	const clock = new ManualClock();
+	const surface = createSurface(() => ({}));
+	const memory = memoryTerminal({ columns: 120, rows: 20, env: { PI_TUI_RENDER_BACKEND: "app-viewport" } });
+	const theme = loadThemeSync("dark", { depth: "truecolor" });
+	const host = await startHost({ surface, driver: memory.options, theme: () => theme, native: false });
+	const workspace = host.ansiWorkspace!;
+	const running = new Set<string>();
+	const policy = new NativeAgentPanes({
+		clock,
+		workspace,
+		create: id => ({
+			surface: createSurface(() => ({ main: jsx("text", { text: `transcript for ${id}`, tone: "success" }) })),
+			protectedFromAutoClose: () => false,
+		}),
+		isRunning: id => running.has(id),
+		error: error => {
+			throw error;
+		},
+	});
+	const status = (id: string, active: boolean) => {
+		if (active) running.add(id);
+		else running.delete(id);
+		const ref = { id, kind: "sub", status: active ? "running" : "idle" } as AgentRef;
+		policy.handle({ type: "status_changed", ref });
+	};
+	const nextFrame = (change: () => void) => {
+		const { promise, resolve } = Promise.withResolvers<PresentedFrame>();
+		const off = host.onFrame(frame => {
+			off();
+			resolve(frame);
+		});
+		change();
+		return promise;
+	};
+	const transcriptRow = (frame: PresentedFrame) => {
+		const label = "transcript for used";
+		for (const row of frame.viewport) {
+			const text = Bun.stripANSI(row);
+			const at = text.indexOf(label);
+			if (at === -1) continue;
+			const start = Bun.stringWidth(text.slice(0, at));
+			return sliceColumns(row, start, start + label.length);
+		}
+		return "";
+	};
+	const foreground = (row: string) => {
+		const style = new SgrState();
+		for (const token of tokens(row)) {
+			if (!token.escape) break;
+			style.feed(token.text);
+		}
+		return style.foreground;
+	};
+	try {
+		const active = await nextFrame(() => {
+			status("used", true);
+			status("unattended", true);
+		});
+		const original = transcriptRow(active);
+		expect(Bun.stripANSI(original)).toContain("transcript for used");
+		const fading = await nextFrame(() => {
+			status("used", false);
+			status("unattended", false);
+			clock.advance(1800);
+		});
+		expect(Bun.stripANSI(transcriptRow(fading))).toBe(Bun.stripANSI(original));
+		expect(foreground(transcriptRow(fading))).not.toEqual(foreground(original));
+		const focused = await nextFrame(() => {
+			expect(workspace.focus("agent:used")).toBe(true);
+			clock.advance(100);
+		});
+		expect(foreground(transcriptRow(focused))).toEqual(foreground(original));
+		const remaining = await nextFrame(() => clock.advance(3100));
+		expect(Bun.stripANSI(remaining.viewport.join("\n"))).toContain("transcript for used");
+		expect(Bun.stripANSI(remaining.viewport.join("\n"))).not.toContain("transcript for unattended");
+	} finally {
+		policy.reset();
+		await host.stop();
+		surface.dispose();
 	}
 });

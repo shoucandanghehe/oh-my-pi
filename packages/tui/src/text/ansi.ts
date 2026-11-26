@@ -199,6 +199,11 @@ export class SgrState {
 		);
 	}
 
+	/** The SGR that sets the active foreground, or undefined when none is. */
+	get foreground(): string | undefined {
+		return this.#fg === undefined ? undefined : `\x1b[${this.#fg}m`;
+	}
+
 	/** The SGR that sets the active background, or undefined when none is. */
 	get background(): string | undefined {
 		return this.#bg === undefined ? undefined : `\x1b[${this.#bg}m`;

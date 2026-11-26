@@ -124,6 +124,8 @@
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Select the ANSI app viewport with `PI_TUI_RENDER_BACKEND=app-viewport`, or open native BTW and subagent split panes in Tern.
 - `/btw <question>` starts a durable side thread; Enter opens the same conversation with its draft and history. Threads can investigate with read-only tools, share an approved summary, or promote into a session branch.
+- BTW thread lists can preview topics on hover in ANSI; Tern shows thread actions in a dropdown. Status shows the open topic's own model, effort and usage.
+- Unattended ANSI subagent panes fade to gray before closing. Use `/debug petrify` to preview the effect.
 - `/pause` waits for active loops to reach a durable boundary; after a paused exit, `/continue` resumes them on their home workers.
 - `/queue /compact [mode] [focus]` defers compaction until the current run finishes. Pane-local controls target their own session.
 - `/sleep [authorization]` keeps unattended work moving by immediately denying interactive prompts; `/sleep off` restores normal interaction.
@@ -307,6 +309,7 @@
 - Tern keeps its native display when app viewport is enabled and returns to the ANSI workspace if negotiation fails ([#2](https://github.com/shoucandanghehe/oh-my-pi/issues/2)).
 - Clipboard paste keeps the attachment and subsequent keystrokes in the originating pane, including PNG-only Windows clipboard images pasted into WSL.
 - Interrupting a BTW or subagent reply returns uncommitted steering and queued input to that pane's draft, just as in Main.
+- BTW and subagent panes show streaming tool arguments and results in the same cards as Main.
 - Subagents retain their scoped MCP tools when browser settings change.
 - HTML exports from preview binaries embed the matching viewer for offline use.
 - Resuming an idle GPT-6.2 session retains earlier reasoning across superseded tool results ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).

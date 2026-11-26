@@ -192,19 +192,21 @@ export class TerminalImages {
 		this.#dirty = true;
 	}
 
-	/**
-	 * The rows `source` takes under `request`, for the current terminal.
-	 * Must run inside a reactive owner (a painter): the image stays
-	 * referenced until that computation reruns or is disposed, and the rows
-	 * depend on the capabilities, the budget and pending SIXEL encodes.
-	 */
-	rows(source: ImageSource, request: ImageRequest): ImageRows {
-		if (!getOwner()) throw new Error("pi-tui: TerminalImages.rows must run inside a painter (a reactive owner)");
-		const caps = this.#capabilities();
-		const label =
-			request.maxColumns === undefined ? request.fallback : truncate(request.fallback, request.maxColumns);
+	/** Layout of a potential placement without holding an image id or starting an encode. */
+	measure(source: ImageSource, request: ImageRequest): ImageRows {
+		const geometry = this.#layout(source, request, this.#capabilities());
+		return geometry
+			? { rows: reservedRows(geometry.box.rows), columns: geometry.box.columns, state: "pending" }
+			: this.#fallback(request);
+	}
+
+	#layout(
+		source: ImageSource,
+		request: ImageRequest,
+		caps: TerminalCapabilities,
+	): { box: ImageBox; placeholders: boolean; protocol: NonNullable<TerminalCapabilities["images"]> } | undefined {
 		const protocol = caps.images;
-		if (protocol === null) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
+		if (protocol === null) return undefined;
 		const cell = caps.cell ?? DEFAULT_CELL;
 		let box = fitImage(source.widthPx, source.heightPx, request, cell);
 		if (protocol === "sixel" || protocol === "iterm") {
@@ -216,13 +218,34 @@ export class TerminalImages {
 		}
 		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
 		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
-		if (request.cells && !placeholders) return { rows: [label], columns: visibleWidth(label), state: "fallback" };
-		const entry = this.#acquire(source);
-		const fallback = (): ImageRows => ({
-			rows: [label, ...Array.from({ length: box.rows - 1 }, () => RESERVED_ROW)],
+		if (request.cells && !placeholders) return undefined;
+		return { box, placeholders, protocol };
+	}
+
+	#fallback(request: ImageRequest, rows = 1): ImageRows {
+		const label =
+			request.maxColumns === undefined ? request.fallback : truncate(request.fallback, request.maxColumns);
+		return {
+			rows: [label, ...Array.from({ length: rows - 1 }, () => RESERVED_ROW)],
 			columns: visibleWidth(label),
 			state: "fallback",
-		});
+		};
+	}
+
+	/**
+	 * The rows `source` takes under `request`, for the current terminal.
+	 * Must run inside a reactive owner (a painter): the image stays
+	 * referenced until that computation reruns or is disposed, and the rows
+	 * depend on the capabilities, the budget and pending SIXEL encodes.
+	 */
+	rows(source: ImageSource, request: ImageRequest): ImageRows {
+		if (!getOwner()) throw new Error("pi-tui: TerminalImages.rows must run inside a painter (a reactive owner)");
+		const caps = this.#capabilities();
+		const geometry = this.#layout(source, request, caps);
+		if (!geometry) return this.#fallback(request);
+		const { box, placeholders, protocol } = geometry;
+		const entry = this.#acquire(source);
+		const fallback = () => this.#fallback(request, box.rows);
 		if (!entry.live()) return fallback();
 		switch (protocol) {
 			case "kitty": {

@@ -8,7 +8,8 @@ import { kittyPlacementRows, kittyTransmit } from "@oh-my-pi/pi-tui/driver/image
 import { TerminalImages, type TerminalImagesOptions } from "@oh-my-pi/pi-tui/driver/images/store";
 import { registerBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { driverImages, TermBackend } from "@oh-my-pi/pi-tui/term/backend";
-import { type PaintEnvironment, paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { defineRolePainter, type PaintEnvironment, paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import "@oh-my-pi/pi-tui/term/painters/index";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
@@ -217,5 +218,43 @@ describe("terminal backend image seam", () => {
 		expect(placements).toHaveLength(2);
 		backend.stop();
 		surface.dispose();
+	});
+
+	test("offscreen transcript refinement does not take the visible image's budget slot", () => {
+		const { images, seam } = store({}, { budget: 1 });
+		const driver = new StubDriver(images);
+		const older = registerBlob(Buffer.concat([PNG_BYTES, Buffer.from([0])]), "image/png");
+		let olderPaints = 0;
+		defineRolePainter("image", "test.viewport.offscreen-image", (node, cx) => {
+			olderPaints++;
+			return paintImage(node, cx);
+		});
+		const surface = createSurface(() => ({
+			main: [
+				<image role="test.viewport.offscreen-image" blob={older} w={100} h={100} max={{ w: "4ch" }} />,
+				...Array.from({ length: 24 }, (_, i) => <text key={`${i}`}>{`record${i}`}</text>),
+				<image blob={BLOB} w={100} h={100} max={{ w: "4ch" }} />,
+			],
+		}));
+		const backend = new TermBackend({
+			surface,
+			driver,
+			theme: () => theme,
+			images: seam,
+			appViewport: true,
+			separator: () => 0,
+		});
+		try {
+			backend.start();
+			expect(olderPaints).toBe(0);
+			expect(images.takeSequences("alternate")).toContain(PNG_1PX);
+			for (let frame = 0; frame < 16 && olderPaints === 0; frame++) backend.renderNow();
+			expect(olderPaints).toBeGreaterThan(0);
+			expect(images.takeSequences("alternate")).toBe("");
+			expect(driver.last.fullscreen?.filter(row => row.includes("\x1b_Ga=p"))).toHaveLength(2);
+		} finally {
+			backend.stop();
+			surface.dispose();
+		}
 	});
 });
