@@ -110,16 +110,31 @@ _OAUTH_RELAY_ATTRS = {
 }
 
 # Keep the rule calls explicit so the CI lint coverage check sees both ISAs.
+_BASELINE_RELAY = _OAUTH_RELAY_ATTRS[""]
+_MODERN_RELAY = _OAUTH_RELAY_ATTRS["_modern"]
+
 rust_binary(
     name = "oauth_callback_relay",
     lint_config = "//bazel/lints:workspace_lints",
-    **_OAUTH_RELAY_ATTRS[""]
+    srcs = _BASELINE_RELAY["srcs"],
+    crate_name = _BASELINE_RELAY["crate_name"],
+    crate_root = _BASELINE_RELAY["crate_root"],
+    edition = _BASELINE_RELAY["edition"],
+    rustc_env_files = _BASELINE_RELAY["rustc_env_files"],
+    rustc_flags = _BASELINE_RELAY["rustc_flags"],
+    target_compatible_with = _BASELINE_RELAY["target_compatible_with"],
 )
 
 rust_binary(
     name = "oauth_callback_relay_modern",
     lint_config = "//bazel/lints:workspace_lints",
-    **_OAUTH_RELAY_ATTRS["_modern"]
+    srcs = _MODERN_RELAY["srcs"],
+    crate_name = _MODERN_RELAY["crate_name"],
+    crate_root = _MODERN_RELAY["crate_root"],
+    edition = _MODERN_RELAY["edition"],
+    rustc_env_files = _MODERN_RELAY["rustc_env_files"],
+    rustc_flags = _MODERN_RELAY["rustc_flags"],
+    target_compatible_with = _MODERN_RELAY["target_compatible_with"],
 )
 
 # Posts the releases of keys and buttons an input request still holds when
@@ -271,16 +286,43 @@ _NATIVE_ADDON_ATTRS = {
     for suffix, isa_flags in _NATIVE_VARIANTS.items()
 }
 
+_BASELINE_ADDON = _NATIVE_ADDON_ATTRS[""]
+_MODERN_ADDON = _NATIVE_ADDON_ATTRS["_modern"]
+
 rust_shared_library(
     name = "pi_natives",
     lint_config = "//bazel/lints:workspace_lints",
-    **_NATIVE_ADDON_ATTRS[""]
+    srcs = _BASELINE_ADDON["srcs"],
+    aliases = _BASELINE_ADDON["aliases"],
+    compile_data = _BASELINE_ADDON["compile_data"],
+    crate_features = _BASELINE_ADDON["crate_features"],
+    crate_root = _BASELINE_ADDON["crate_root"],
+    edition = _BASELINE_ADDON["edition"],
+    proc_macro_deps = _BASELINE_ADDON["proc_macro_deps"],
+    rustc_env = _BASELINE_ADDON["rustc_env"],
+    rustc_env_files = _BASELINE_ADDON["rustc_env_files"],
+    rustc_flags = _BASELINE_ADDON["rustc_flags"],
+    target_compatible_with = _BASELINE_ADDON["target_compatible_with"],
+    version = _BASELINE_ADDON["version"],
+    deps = _BASELINE_ADDON["deps"],
 )
 
 rust_shared_library(
     name = "pi_natives_modern",
     lint_config = "//bazel/lints:workspace_lints",
-    **_NATIVE_ADDON_ATTRS["_modern"]
+    srcs = _MODERN_ADDON["srcs"],
+    aliases = _MODERN_ADDON["aliases"],
+    compile_data = _MODERN_ADDON["compile_data"],
+    crate_features = _MODERN_ADDON["crate_features"],
+    crate_root = _MODERN_ADDON["crate_root"],
+    edition = _MODERN_ADDON["edition"],
+    proc_macro_deps = _MODERN_ADDON["proc_macro_deps"],
+    rustc_env = _MODERN_ADDON["rustc_env"],
+    rustc_env_files = _MODERN_ADDON["rustc_env_files"],
+    rustc_flags = _MODERN_ADDON["rustc_flags"],
+    target_compatible_with = _MODERN_ADDON["target_compatible_with"],
+    version = _MODERN_ADDON["version"],
+    deps = _MODERN_ADDON["deps"],
 )
 
 rust_test(
