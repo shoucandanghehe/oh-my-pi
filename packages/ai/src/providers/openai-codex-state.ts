@@ -1,5 +1,5 @@
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
-import type { CodexCompactionContext, Model, ProviderSessionState } from "../types";
+import type { CodexCompactionContext, Model, OpenAIWebSocketPreference, ProviderSessionState } from "../types";
 import type {
 	CodexProviderSessionState,
 	CodexTransport,
@@ -157,7 +157,7 @@ export function getOpenAICodexTransportDetails(
 	options?: {
 		sessionId?: string;
 		baseUrl?: string;
-		preferWebsockets?: boolean;
+		preferWebsockets?: OpenAIWebSocketPreference;
 		providerSessionState?: Map<string, ProviderSessionState>;
 	},
 ): OpenAICodexTransportDetails {
@@ -182,7 +182,7 @@ export function getOpenAICodexTransportDetails(
 	return {
 		websocketPreferred,
 		lastTransport: state?.lastTransport,
-		websocketDisabled: state?.disableWebsocket ?? false,
+		websocketDisabled: options?.preferWebsockets !== "only" && (state?.disableWebsocket ?? false),
 		websocketConnected: state?.connection?.isOpen() ?? false,
 		fallbackCount: state?.fallbackCount ?? 0,
 		canAppend: state?.canAppend ?? false,

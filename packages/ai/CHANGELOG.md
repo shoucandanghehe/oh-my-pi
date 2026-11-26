@@ -20,6 +20,7 @@
 - Added `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` to override the Anthropic login callback port (default `54545`, `0` for a random free port) ([#14135](https://github.com/can1357/oh-my-pi/issues/14135))
 - Added routed audio and video input where both the model and provider wire support it, with early errors for unsupported attachments.
 - Added multipart image edits for Codex image models served by compatible proxies.
+- Added `preferWebsockets: "only"` for Codex streaming and streamed compaction. Connection failures and busy session sockets no longer fall back to SSE in this mode.
 
 ### Removed
 
