@@ -85,6 +85,14 @@ const PAIR_THINKING = {
 	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
 } as const;
 
+it("seeds preserved but absent wire routes from the present member's vendor input", () => {
+	const spec = pairSpec("model", { input: ["text", "image"] });
+	const [collapsed] = collapseVariants([spec], {
+		table: { families: [{ id: "model", name: "model", members: ["model", "model-thinking"], routing: { high: "model-thinking" }, thinking: PAIR_THINKING, preserveAbsentEffortRoutes: true }] },
+	});
+	expect(collapsed?.thinking?.effortRouting?.high).toBe("model-thinking");
+	expect(collapsed?.vendorInputByWireModel?.["model-thinking"]).toEqual(["text", "image"]);
+});
 describe("stripThinkingVariantSuffix", () => {
 	it("strips trailing and infix tokens case-insensitively", () => {
 		expect(stripThinkingVariantSuffix("kimi-k2-thinking")).toBe("kimi-k2");

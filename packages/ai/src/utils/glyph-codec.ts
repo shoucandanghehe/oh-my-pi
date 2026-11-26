@@ -3,7 +3,7 @@ import type {
 	AssistantMessageEvent,
 	Context,
 	CursorExecHandlers,
-	ImageContent,
+	MediaContent,
 	Message,
 	TextContent,
 	ToolCall,
@@ -207,10 +207,10 @@ function transformRecord(input: Record<string, unknown>, transform: GlyphTextTra
 }
 
 function transformTextBlocks(
-	content: Array<TextContent | ImageContent>,
+	content: Array<TextContent | MediaContent>,
 	transform: GlyphTextTransform,
-): Array<TextContent | ImageContent> {
-	let output: Array<TextContent | ImageContent> | undefined;
+): Array<TextContent | MediaContent> {
+	let output: Array<TextContent | MediaContent> | undefined;
 	for (const [index, block] of content.entries()) {
 		let transformed = block;
 		if (block.type === "text") {

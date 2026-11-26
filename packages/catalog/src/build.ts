@@ -10,6 +10,7 @@
 import RULES from "./compat/rules.json" with { type: "json" };
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
+import { resolveEffectiveMediaCapabilities } from "./media-capabilities";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import {
 	applyDueDatedCostCard,
@@ -20,7 +21,7 @@ import {
 	NO_RECURRING_TARIFF,
 	parseDatedCostCards,
 } from "./pricing";
-import { type Api, type EffectiveTokenCost, MODEL_KINDS, type Model, type ModelCost, type ModelSpec } from "./types";
+import { type Api, type EffectiveTokenCost, type InputModality, MODEL_KINDS, type Model, type ModelCost, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -34,8 +35,11 @@ function objectPayload(value: unknown): object | undefined {
 }
 
 /** Narrow a compiled `input-modalities` axis value to the model input union. */
-function isInputModalities(value: unknown): value is ("text" | "image")[] {
-	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
+function isInputModalities(value: unknown): value is InputModality[] {
+	return (
+		Array.isArray(value) &&
+		value.every(entry => entry === "text" || entry === "image" || entry === "audio" || entry === "video")
+	);
 }
 
 /**
@@ -76,6 +80,7 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	else if (catalog.hostedImage === false) delete model.hostedImage;
 	if (typeof catalog.imageModel === "string") model.imageModel = catalog.imageModel;
 	else if (catalog.imageModel === false) delete model.imageModel;
+	if (catalog.imageEditFormat === "multipart") model.imageEditFormat = "multipart";
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
@@ -499,5 +504,12 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	// Configured kinds and lifetimes replace catalog values rather than merging with them.
 	if (spec.kindConfig !== undefined) model.kind = spec.kindConfig;
 	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
+	const vendorInput = [
+		...(isInputModalities(policy.catalog.inputModalities) ? model.input : (spec.vendorInput ?? model.input)),
+	];
+	const effective = resolveEffectiveMediaCapabilities(model.api, vendorInput);
+	model.vendorInput = vendorInput;
+	model.input = [...effective.input];
+	model.toolResultInput = [...effective.toolResultInput];
 	return model;
 }

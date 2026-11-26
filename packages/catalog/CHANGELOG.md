@@ -46,6 +46,9 @@
 - Fixed `google-vertex` Claude Fable 5.1+ requests failing their first attempt with 400 `thinking.adaptive.block_binding: Extra inputs are not permitted` ([#20765](https://github.com/can1357/oh-my-pi/issues/20765))
 - Fixed ClinePass subscription `deepseek-v4.1-flash-1017` offering no thinking levels; it now exposes `low`/`high`/`max` and sends the selected `reasoning_effort` ([#16414](https://github.com/can1357/oh-my-pi/issues/16414), [#16417](https://github.com/can1357/oh-my-pi/pull/16417) by [@jhste102lab](https://github.com/jhste102lab))
 - Fixed OpenRouter `typesafe/jev-router` being classified as a judge model, which aborted startup for custom providers registering the OpenRouter roster on the `openrouter` chat API ([#15244](https://github.com/can1357/oh-my-pi/issues/15244))
+- Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Devin's Fast models (`-fast`) are no longer listed separately: each model carries its fast lane, which `/fast` switches on
+- Resolve effective media input from the selected wire model's capabilities and the provider's encoder, separately for messages and tool results.
 
 ### Added
 

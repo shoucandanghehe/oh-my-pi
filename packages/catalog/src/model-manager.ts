@@ -6,7 +6,7 @@ import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { forEachInSlices, readModelCache, writeModelCacheAsync } from "./model-cache";
 import { getBundledModelSlice, isBundledModelSlice } from "./models";
 import { TimeBasedCostShape } from "./pricing";
-import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
+import { type Api, type InputModality, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
 
 const DEFAULT_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -716,9 +716,18 @@ function mergeDynamicModel<TApi extends Api>(
 	// images to a now text-only route.
 	const endpointChanged = existingModel.baseUrl !== dynamicModel.baseUrl;
 	const dynamicInputAuthoritative = endpointChanged || authority.input;
-	const supportsImage = dynamicInputAuthoritative
-		? dynamicModel.input.includes("image")
-		: existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const dynamicVendorInput = dynamicModel.vendorInput ?? dynamicModel.input;
+	const existingVendorInput = existingModel.vendorInput ?? existingModel.input;
+	const vendorInput = dynamicInputAuthoritative
+		? dynamicVendorInput
+		: (["text", "image", "audio", "video"] as const).filter(
+				modality => existingVendorInput.includes(modality) || dynamicVendorInput.includes(modality),
+			);
+	const inputModalities = new Set<InputModality>(vendorInput);
+	const input: InputModality[] = ["text"];
+	for (const modality of ["image", "audio", "video"] as const) {
+		if (inputModalities.has(modality)) input.push(modality);
+	}
 	// Providers with authoritative reasoning metadata must not regain a
 	// stale bundled dial after explicitly reporting no reasoning. Others
 	// retain the additive fallback for discovery that omits capabilities.
@@ -770,7 +779,9 @@ function mergeDynamicModel<TApi extends Api>(
 		// `buildModel` re-derives a provisional ladder from the merged evidence;
 		// carried over, it would erase that evidence (see `resolveModelPolicy`).
 		thinking: thinking?.unverified ? undefined : thinking,
-		input: supportsImage ? ["text", "image"] : ["text"],
+		input,
+		vendorInput: [...vendorInput],
+		vendorInputByWireModel: dynamicModel.vendorInputByWireModel ?? existingModel.vendorInputByWireModel,
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output, authority.cost),
@@ -877,7 +888,7 @@ const ModelSpecShape = type({
 	// Providers such as Azure resolve the deployment endpoint at request time.
 	baseUrl: "string",
 	"reasoning?": "boolean | undefined",
-	input: "('text' | 'image')[] > 0",
+	input: "('text' | 'image' | 'audio' | 'video')[] > 0",
 	cost: FiniteTokenCost.and({
 		"timeBased?": TimeBasedCostShape.or("undefined"),
 		"longContext?": FiniteTokenCost.and({ inputThreshold: "number > 0" }).or("undefined"),

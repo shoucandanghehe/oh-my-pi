@@ -48,7 +48,7 @@ import type {
 	Context,
 	DeveloperMessage,
 	FetchImpl,
-	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ProviderInputTransformation,
@@ -730,7 +730,7 @@ type AnthropicToolResultContent =
  * that signed thinking is bound to.
  */
 function convertContentBlocks(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	options: { supportsImages: boolean; rejectUnsupportedMedia?: boolean },
 ): AnthropicToolResultContent {
 	const { supportsImages, rejectUnsupportedMedia = false } = options;
@@ -745,6 +745,12 @@ function convertContentBlocks(
 			sawText = true;
 			blocks.push({ type: "text", text });
 			continue;
+		}
+
+		if (block.type === "audio" || block.type === "video") {
+			throw new AIError.ValidationError(
+				`Anthropic Messages cannot encode ${block.type}; routed media preflight must reject it`,
+			);
 		}
 
 		if (!supportsImages) {

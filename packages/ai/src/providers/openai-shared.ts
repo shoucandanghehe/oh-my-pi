@@ -48,6 +48,7 @@ import {
 	type ComputerToolCallMetadata,
 	type Context,
 	type ImageContent,
+	type MediaContent,
 	type Message,
 	type MessageAttribution,
 	type Model,
@@ -123,6 +124,7 @@ import type {
 	ResponseContentPartAddedEvent,
 	ResponseCreateParamsStreaming,
 	ResponseCustomToolCall,
+	ResponseFunctionCallOutputItemList,
 	ResponseFunctionToolCall,
 	ResponseInput,
 	ResponseInputContent,
@@ -142,7 +144,7 @@ import {
 	setHeaderIfAbsent,
 } from "./inference-headers";
 import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
 	provider: string;
@@ -1984,9 +1986,15 @@ function convertResponsesInputImage(image: ImageContent, supportsImageDetailOrig
 		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
 	};
 }
+export function openAIAudioFormat(mimeType: string): "wav" | "mp3" | undefined {
+	const normalized = mimeType.trim().toLowerCase();
+	if (normalized === "audio/wav" || normalized === "audio/x-wav") return "wav";
+	if (normalized === "audio/mp3" || normalized === "audio/mpeg") return "mp3";
+	return undefined;
+}
 
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | Array<TextContent | MediaContent>,
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
@@ -2002,27 +2010,71 @@ export function convertResponsesInputContent(
 		];
 	}
 
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
 	const normalizedContent: ResponseInputContent[] = [];
-	for (const item of textBlocks) {
-		const raw = item.text.toWellFormed();
-		const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
-		if (text.trim().length === 0) continue;
-		normalizedContent.push({
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText);
-	}
-	for (const item of imageBlocks) {
-		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
+	let omittedImages = false;
+	for (const item of content) {
+		if (item.type === "text") {
+			const raw = item.text.toWellFormed();
+			const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
+			if (text.trim().length > 0) {
+				normalizedContent.push({ type: "input_text", text } satisfies ResponseInputText);
+			}
+			continue;
+		}
+		if (item.type === "image") {
+			if (supportsImages) {
+				normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
+			} else {
+				omittedImages = true;
+			}
+			continue;
+		}
+		if (item.type === "audio" || item.type === "video") {
+			// History/compaction callers may retain an explicit placeholder, but
+			// Responses has no supported audio/video input encoding. Request
+			// preflight and appendResponsesUserInput reject these attachments.
+			normalizedContent.push({
+				type: "input_text",
+				text: `[${item.type} attachment omitted]`,
+			} satisfies ResponseInputText);
+		}
 	}
 	if (omittedImages) {
-		normalizedContent.push({
-			type: "input_text",
-			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText);
+		normalizedContent.push({ type: "input_text", text: NON_VISION_IMAGE_PLACEHOLDER } satisfies ResponseInputText);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
+}
+function appendResponsesUserInput(
+	messages: ResponseInput,
+	content: string | Array<TextContent | MediaContent>,
+	supportsImages: boolean,
+	supportsImageDetailOriginal: boolean,
+	escapeControlTokens: boolean,
+	developerStringContent: boolean,
+	isDeveloper: boolean,
+): void {
+	if (Array.isArray(content)) {
+		const unsupportedMedia = content.find(block => block.type === "audio" || block.type === "video");
+		if (unsupportedMedia) {
+			throw new AIError.ValidationError(`Responses has no ${unsupportedMedia.type} input encoder`);
+		}
+	}
+	const converted = convertResponsesInputContent(
+		content,
+		supportsImages,
+		supportsImageDetailOriginal,
+		escapeControlTokens,
+	);
+	if (!converted) return;
+	messages.push({
+		role: "user",
+		content:
+			developerStringContent && isDeveloper && typeof content === "string"
+				? escapeControlTokens
+					? escapeHarmonyControlTokens(content.toWellFormed())
+					: content.toWellFormed()
+				: converted,
+	});
 }
 
 /**
@@ -2471,26 +2523,15 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				msgIndex++;
 				continue;
 			}
-			const content = convertResponsesInputContent(
+			appendResponsesUserInput(
+				messages,
 				msg.content,
 				options.model.input.includes("image"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
+				options.developerStringContent === true,
+				msg.role === "developer",
 			);
-			if (!content) continue;
-			const developerText =
-				options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
-					? msg.content.toWellFormed()
-					: undefined;
-			messages.push({
-				role: "user",
-				content:
-					developerText !== undefined
-						? escapeControlTokens
-							? escapeHarmonyControlTokens(developerText)
-							: developerText
-						: content,
-			});
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			// Providers replay stale native items even when the current request has
@@ -2957,7 +2998,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
  * cannot carry the native output array.
  */
 export interface ResponsesToolResultOutputEncoding {
-	output: string | ResponseInputContent[];
+	output: string | ResponseFunctionCallOutputItemList;
 	outputText: string;
 }
 
@@ -2972,7 +3013,13 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	model: Model<TApi>,
 	supportsImageDetailOriginal: boolean,
 ): ResponsesToolResultOutputEncoding {
-	const supportsImages = model.input.includes("image");
+	const supportsImages = (model.toolResultInput ?? model.input).includes("image");
+	const unsupportedMedia = toolResult.content.find(block => block.type === "audio" || block.type === "video");
+	if (unsupportedMedia) {
+		throw new AIError.ValidationError(
+			`Responses tool results cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+		);
+	}
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text)
@@ -2993,15 +3040,13 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	// data; escape the transport copy so a grep/read result cannot poison the
 	// session (#6913). Covers every downstream branch that consumes `output`.
 	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
-	const output: string | ResponseInputContent[] =
+	const output: string | ResponseFunctionCallOutputItemList =
 		hasImages && supportsImages
-			? toolResult.content.map((block): ResponseInputContent => {
-					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
+			? toolResult.content.flatMap((block): ResponseFunctionCallOutputItemList => {
+					if (block.type === "image") return [convertResponsesInputImage(block, supportsImageDetailOriginal)];
+					if (block.type !== "text") return [];
 					const text = block.text.toWellFormed();
-					return {
-						type: "input_text",
-						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
-					};
+					return [{ type: "input_text", text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text }];
 				})
 			: outputText;
 	return { output, outputText };
@@ -3021,6 +3066,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 ): void {
 	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
+
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
 		messages.push({
 			type: "message",

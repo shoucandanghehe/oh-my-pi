@@ -216,6 +216,19 @@ describe("vision guard for text-only models", () => {
 		]);
 	});
 
+	it("emits one Responses placeholder for repeated unsupported images", () => {
+		const content = convertResponsesInputContent(
+			[
+				{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" },
+				{ type: "image", mimeType: "image/png", data: "ZmFrZTI=" },
+			],
+			false,
+			false,
+		);
+
+		expect(content).toEqual([{ type: "input_text", text: NON_VISION_IMAGE_PLACEHOLDER }]);
+	});
+
 	it("strips non-vision images from Codex responses user and tool-result payloads", () => {
 		const model = makeModel("openai-codex-responses", "openai-codex");
 		const context: Context = {

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { zenmuxModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { applyGlobalModelsDevFallback, buildGeneratedModel } from "../scripts/generate-models";
+import { toModelSpec } from "../src/provider-models/bundled-references";
 
 const originalZenMuxApiKey = Bun.env.ZENMUX_API_KEY;
 
@@ -118,5 +120,50 @@ describe("zenmux provider support", () => {
 		expect(free?.api).toBe("anthropic-messages");
 		expect(free?.baseUrl).toBe("https://zenmux.ai/api/anthropic");
 		expect(free?.cost.input).toBe(0);
+	});
+
+	test("cross-provider catalog references cannot add or remove media from a ZenMux route", async () => {
+		const { fetchDynamicModels } = zenmuxModelManagerOptions({
+			fetch: async () =>
+				Response.json({
+					data: [
+						{ id: "meta/muse-spark-1.2", owned_by: "meta", input_modalities: ["text"] },
+						{
+							id: "meta/muse-spark-1.3",
+							owned_by: "meta",
+							input_modalities: ["text", "image", "file", "audio", "video"],
+						},
+					],
+				}),
+		});
+		const [textRoute, audioRoute] = ((await fetchDynamicModels?.()) ?? []).map(model =>
+			toModelSpec(buildGeneratedModel(model)),
+		);
+		const enriched = applyGlobalModelsDevFallback(
+			[textRoute, audioRoute],
+			[
+				{ ...textRoute, provider: "kilo", input: ["text", "image", "audio", "video"], maxTokens: 943_718 },
+				{ ...audioRoute, provider: "kilo", input: ["text", "image", "video"], maxTokens: 943_718 },
+			],
+		);
+
+		const capabilities = enriched.map(spec => {
+			const { input, vendorInput, toolResultInput, maxTokens } = buildGeneratedModel(spec);
+			return { input, vendorInput, toolResultInput, maxTokens };
+		});
+		expect(capabilities).toEqual([
+			{
+				input: ["text", "image"],
+				vendorInput: ["text", "image"],
+				toolResultInput: ["text", "image"],
+				maxTokens: 943_718,
+			},
+			{
+				input: ["text", "image", "audio"],
+				vendorInput: ["text", "image", "audio"],
+				toolResultInput: ["text", "image"],
+				maxTokens: 943_718,
+			},
+		]);
 	});
 });

@@ -5,7 +5,7 @@
  * `behavior.ts`, `resolve.ts`) exposes to consumers.
  */
 import type { Effort } from "../effort";
-import type { Api, KindApiKind, ThinkingControlMode, TokenCost } from "../types";
+import type { Api, InputModality, KindApiKind, ThinkingControlMode, TokenCost } from "../types";
 import type { RevisionOp } from "./revision";
 
 /** Class-membership matcher kinds, most to least specific. */
@@ -695,7 +695,7 @@ export interface CompiledSeedModel {
 	provider: string;
 	baseUrl: string;
 	reasoning: boolean;
-	input: ("text" | "image")[];
+	input: InputModality[];
 	/** Wire model id sent upstream when it differs from the row id (`request-model-id`). */
 	requestModelId?: string;
 	supportsTools?: boolean;

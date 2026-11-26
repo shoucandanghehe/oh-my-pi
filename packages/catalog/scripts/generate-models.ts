@@ -351,7 +351,11 @@ export function applyGlobalModelsDevFallback(
 			...model,
 			name: reference.name,
 			reasoning: reference.reasoning,
-			input: reference.input,
+			// Audio/video describe this deployment's route, not a same-id model on another host.
+			input: [
+				...reference.input.filter(modality => modality === "text" || modality === "image"),
+				...(model.vendorInput ?? model.input).filter(modality => modality === "audio" || modality === "video"),
+			],
 			// Fill unknown endpoint limits from same-id stencil.so references, but keep
 			// provider-specific values when discovery returned them explicitly.
 			contextWindow: model.contextWindow ?? reference.contextWindow,
