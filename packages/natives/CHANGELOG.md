@@ -5,6 +5,8 @@
 ### Breaking Changes
 
 - Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline HTML rendering or `Reader` for URL reads; interactive terminal browsing is no longer available.
+- Removed `htmlToMarkdown`, `htmlToText`, and `LynxSession`. Use `renderHtml` for offline rendering or `Reader` for URL reads; interactive terminal browsing is no longer provided.
+- `copyToClipboard` returns a promise so clipboard operations can complete off the rendering thread.
 
 ### Added
 
@@ -20,6 +22,13 @@
 - Fixed the Linux GNU native addon so it no longer requires `libm.so.6` for the Perl `POSIX` `acosh` and `asinh` builtins.
 - Fixed Wayland capture crashing on unreadable portal frame buffers while preserving capture from readable shared-memory frames on older PipeWire versions ([#19647](https://github.com/can1357/oh-my-pi/issues/19647))
 - Fixed `Shell.abort()` sometimes doing nothing to a `Shell.run` that was queued behind another run on the same shell, leaving the command and its child processes running ([#17105](https://github.com/can1357/oh-my-pi/issues/17105))
+- Preserved model tables and meaningful button labels while removing unrelated news and footer content from URL reads.
+- Kept sign-in instructions next to login prompts and omitted empty whitespace-only Markdown paragraphs.
+- Preserved source-code indentation and linked content cards in URL reads.
+
+- The linux-gnu native addon no longer links against `libm.so.6` for the Perl `POSIX` builtin's `acosh` and `asinh` ([#20522](https://github.com/can1357/oh-my-pi/pull/20522) by [@pedropaulovc](https://github.com/pedropaulovc))
+- Fixed in-project worktrees recursively copying their own storage directory.
+- Read the requested page content from Read the Docs and preserve its documentation structure.
 
 ## [19.2.1] - 2026-11-25
 

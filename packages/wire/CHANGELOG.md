@@ -6,6 +6,8 @@
 
 - Added the TSP `meter` style `wave`: bars that swing with the value, animated by the host, for a live voice or audio level.
 - Collab session streams carry context revisions and reset boundaries so guests can replay the selected context.
+- Added branch-scoped `context_revision` entries so clients can replay reduced context while preserving original history.
+- Added typed audio and video attachment blocks to session and RPC payloads.
 
 ## [19.2.1] - 2026-11-25
 

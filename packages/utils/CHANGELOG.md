@@ -10,6 +10,8 @@
 
 - Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
 
+- Removed the unused `getToolsDir()` export. Custom tool discovery is unchanged.
+- Pass the owning operation's cwd to `getWorktreesDir(cwd)` or `getWorktreeDir(cwd, segment)` to resolve relative storage.
 ### Fixed
 
 - Fixed 429 retry guidance to honor quota reset timestamps in `rests until <ISO-8601>` responses.

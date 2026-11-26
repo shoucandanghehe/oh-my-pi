@@ -22,6 +22,9 @@
 - Added multipart image edits for Codex image models served by compatible proxies.
 - Added `preferWebsockets: "only"` for Codex streaming and streamed compaction. Connection failures and busy session sockets no longer fall back to SSE in this mode.
 - Supported GPT-6 Responses and Codex sessions keep prior tool declarations when tools are added or temporarily disabled.
+- Added WebSocket-only mode for Codex requests and streamed compaction.
+- Added route-resolved audio and video preflight and supported wire encodings for OpenAI, OpenAI-compatible video ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)), and Google.
+- Supported GPT-6 Responses and Codex sessions retain earlier tool declarations when tools change.
 
 ### Removed
 
@@ -70,7 +73,9 @@
 - Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
 - The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
 - Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
-- Preserve prefix-bound GPT-6.2 reasoning during routine pruning and report provider-dropped reasoning items on Responses and Codex ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).
+- Fixed Antigravity replay of saved tool-result images and reasoning-off routed Claude requests.
+- Native judgments honor credential reset deadlines and `Retry-After` while remaining cancellable ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
+- OpenAI-compatible image editing supports proxies that require multipart uploads.
 
 ## [19.2.1] - 2026-11-25
 

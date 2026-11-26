@@ -32,6 +32,9 @@
 - Added Factory Droid's Gemini 4 Hydrogen (`gemini-4-hydrogen`), listed once the account's `gemini_4_hydrogen` feature flag enables it, with low, medium, high and xhigh thinking levels (default high), a 1,000,000-token context, Google's list price and Factory's 0.6× input credit rate ([#19173](https://github.com/can1357/oh-my-pi/issues/19173))
 
 - Enabled mid-conversation tool updates for GPT-6 Responses and Codex by default. Set `compat.supportsMidConversationToolChanges: false` for incompatible endpoints (based on [#18520](https://github.com/can1357/oh-my-pi/pull/18520) by [@Delije4](https://github.com/Delije4)).
+- Added vendor and route-specific audio/video capabilities for prompts and tool results ([#12443](https://github.com/can1357/oh-my-pi/pull/12443) by [@LaelLuo](https://github.com/LaelLuo)).
+- Added Codex GPT Image 2.5 and 2.6 generation and editing models.
+- Enabled mid-conversation tool changes for supported GPT-6 Responses and Codex models, with an opt-out for custom endpoints (based on [#18520](https://github.com/can1357/oh-my-pi/pull/18520) by [@Delije4](https://github.com/Delije4)).
 
 ### Changed
 
@@ -50,7 +53,6 @@
 - Fixed OpenRouter `typesafe/jev-router` being classified as a judge model, which aborted startup for custom providers registering the OpenRouter roster on the `openrouter` chat API ([#15244](https://github.com/can1357/oh-my-pi/issues/15244))
 - Seeded models now survive their provider's model exclusions ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Devin's Fast models (`-fast`) are no longer listed separately: each model carries its fast lane, which `/fast` switches on
-- Resolve effective media input from the selected wire model's capabilities and the provider's encoder, separately for messages and tool results.
 
 ### Added
 
@@ -59,6 +61,10 @@
 
 - Removed unused public compatibility, model-ID, host, and utility exports.
 - Removed Devin Fusion lead/sidekick model pairings from the model list; omp now lists the lead models directly without redundant entries.
+
+### Fixed
+
+- Preserved GPT-6.2 reasoning across routine tool-result pruning ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).
 
 ## [19.2.1] - 2026-11-25
 

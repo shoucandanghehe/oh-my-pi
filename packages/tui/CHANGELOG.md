@@ -41,6 +41,20 @@
 - Enabled kitty Unicode placeholder image rendering by default in Rex ([#19830](https://github.com/can1357/oh-my-pi/issues/19830))
 - Inline images inside tmux on terminals without Kitty Unicode placeholders (e.g. WezTerm) are no longer drawn at tmux's cursor; they use SIXEL when tmux renders it, else are skipped ([#19396](https://github.com/can1357/oh-my-pi/issues/19396))
 - Catppuccin, Rosé Pine, GitHub Dark and Celestial themes now draw composer and message text in their palette text color instead of the generic default ([#16374](https://github.com/can1357/oh-my-pi/issues/16374))
+### Added
+
+- Added an opt-in ANSI app viewport with split panes, independent focus and scrolling, and drag-to-dock controls.
+
+### Fixed
+
+- Code blocks in a streaming reply now reach scrollback line by line as they scroll off screen, instead of staying out of reach until the block ends ([#13676](https://github.com/can1357/oh-my-pi/issues/13676), [#20561](https://github.com/can1357/oh-my-pi/pull/20561) by [@Frexxis](https://github.com/Frexxis))
+- Reduced idle CPU use on Windows after `/restart` ([#20518](https://github.com/can1357/oh-my-pi/pull/20518) by [@ethancawse](https://github.com/ethancawse)).
+- Reopened lost Tern surfaces on an `unknown surface` reply, stopped frames if the reopen was rejected, and kept recognizable broken TSP replies out of the editor ([#20550](https://github.com/can1357/oh-my-pi/issues/20550)).
+- Typing in a Tern composer keeps echoing while an agent streams, instead of stalling for seconds when Tern is slow to acknowledge frames. ([#20463](https://github.com/can1357/oh-my-pi/pull/20463) by [@Xytronix](https://github.com/Xytronix))
+- Saved device calls retain their text and attachments when terminal transcripts reopen.
+- Native Windows consoles batch input to keep large pastes responsive ([#19783](https://github.com/can1357/oh-my-pi/issues/19783)).
+- Kitty input preserves IME text commits, and the ANSI viewport preserves pane-local selections and clipboard targets.
+- File and image links from OMP running in WSL open in Windows Tern.
 
 ## [19.2.1] - 2026-11-25
 

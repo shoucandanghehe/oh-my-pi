@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added isolated child loops that can advertise their parent's tool catalog for cache reuse while enforcing their own tool permissions.
+- Added a process-wide pause barrier at model-call boundaries and durable shutdown for parked loops.
+- Added route-resolved audio and video validation for turns, tool results, and remote compaction.
+
 ### Fixed
 
 - Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
