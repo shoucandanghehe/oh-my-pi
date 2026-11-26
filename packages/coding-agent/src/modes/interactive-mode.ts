@@ -1422,6 +1422,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		agentId: string,
 		close: () => void,
 		rows: () => number,
+		columns: () => number,
 		writeRaw?: (data: string) => void,
 	): AgentWorkspaceSurface {
 		if (!this.#agentPaneRef(agentId)) throw new Error(`Agent ${agentId} is not available in this session`);
@@ -1434,6 +1435,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			agentId,
 			close,
 			rows,
+			columns,
 			writeRaw,
 			registry: { get: id => this.#agentPaneRef(id) },
 			remote,
@@ -1443,6 +1445,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.sessionManager.getSessionId() === owner &&
 				(this.collabGuest?.agentRegistry ?? AgentRegistry.global()) === registry,
 			settings: this.settings,
+			// The ANSI workspace can hand its physical terminal to an editor.
+			// Native side panes use a relay and cannot run an editor on that PTY here.
+			editInTerminal: this.shell.native() ? undefined : run => this.suspend(run),
 			knownCommand: text => this.isKnownSlashCommand(text),
 		});
 	}
@@ -1788,8 +1793,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					await workspace.open(
 						"btw",
 						"BTW",
-						(close, supports) =>
-							create(close, () => workspace.get("btw")?.driver.rows ?? this.shell.size().rows, supports),
+						(close, supports, driver) =>
+							create(
+								close,
+								() => driver.rows,
+								() => driver.columns,
+								supports,
+							),
 						() => {},
 					);
 					return true;
@@ -1952,7 +1962,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#nativeWorkspace = workspace;
 			this.#nativeAgentPanes = new NativeAgentPanes({
 				workspace,
-				create: (id, close, rows, writeRaw) => this.createAgentWorkspaceSurface(id, close, rows, writeRaw),
+				create: (id, close, rows, columns, writeRaw) =>
+					this.createAgentWorkspaceSurface(id, close, rows, columns, writeRaw),
 				isRunning: id => this.#agentPaneRef(id)?.status === "running",
 				error: error =>
 					this.showError(`Native agent pane failed: ${error instanceof Error ? error.message : String(error)}`),
@@ -2012,7 +2023,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#ansiAgentPanes = ansi
 						? new NativeAgentPanes({
 								workspace: ansi,
-								create: (id, close, rows) => this.createAgentWorkspaceSurface(id, close, rows),
+								create: (id, close, rows, columns) =>
+									this.createAgentWorkspaceSurface(id, close, rows, columns),
 								isRunning: id => this.#agentPaneRef(id)?.status === "running",
 								error: error =>
 									this.showError(

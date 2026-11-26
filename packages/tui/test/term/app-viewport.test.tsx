@@ -7,6 +7,7 @@ import {
 	type Host,
 	type HostOptions,
 	settle,
+	type MainScrollScope,
 	signal,
 	startHost,
 	type Surface,
@@ -169,6 +170,52 @@ it("scrolls only main, anchoring to the same text through upstream growth and re
 		},
 		{ shell: "shell" },
 	);
+});
+
+it("restores remounted documents' reading points without saving hover scroll", async () => {
+	const scope = signal<MainScrollScope>({ key: "a" });
+	const tail = signal(["a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"]);
+	const surface = createSurface(() => ({
+		mainScrollScope: scope,
+		main: () =>
+			scope().key === "a" ? (
+				[
+					<rows lines={["old0", "old1"]} />,
+					<text>00abc 01abc 02abc 03abc 04abc 05abc 06abc 07abc</text>,
+					<rows lines={tail} />,
+				]
+			) : (
+				<rows lines={["b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7"]} />
+			),
+		dock: <text>dock</text>,
+	}));
+	await withHost(surface, async ({ host, memory, term, screen }) => {
+		expect(screen()[0]).toMatch(/^a4\b/);
+		await afterFrame(host, () => memory.feed("\x1b[1;3H\x1b[6~")); // Alt+Home, then PgDown.
+		expect(screen()[0]).toMatch(/^02abc 03abc/);
+
+		await afterFrame(host, () => scope.set({ key: "b" }));
+		expect(screen()[0]).toMatch(/^b4\b/);
+		await afterFrame(host, () => memory.feed("\x1b[1;3H"));
+		expect(screen()[0]).toMatch(/^b0\b/);
+
+		await afterFrame(host, () => scope.set({ key: "a" }));
+		expect(screen()[0]).toMatch(/^02abc 03abc/);
+		await afterFrame(host, () => scope.set({ key: "b", preview: true }));
+		expect(screen()[0]).toMatch(/^b0\b/);
+		await afterFrame(host, () => memory.feed("\x1b[6~"));
+		expect(screen()[0]).not.toMatch(/^b0\b/);
+
+		await afterFrame(host, () => {
+			term.resize(6, ROWS);
+			memory.resize(6, ROWS);
+			tail.set([...tail(), "a8"]);
+		});
+		await afterFrame(host, () => scope.set({ key: "a" }));
+		expect(screen()[0]).toMatch(/^02abc/);
+		await afterFrame(host, () => scope.set({ key: "b" }));
+		expect(screen()[0]).toMatch(/^b0\b/);
+	});
 });
 
 it("shows the tail before refining distant history, also after a width resize", async () => {

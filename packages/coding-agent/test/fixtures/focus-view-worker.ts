@@ -25,7 +25,7 @@ import { type } from "@oh-my-pi/omptype";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import { ExtensionRuntime } from "../../src/extensibility/extensions/loader";
+import { ExtensionRuntime, loadExtensionFromFactory } from "../../src/extensibility/extensions/loader";
 import { ExtensionRunner } from "../../src/extensibility/extensions/runner";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentSession } from "../../src/session/agent-session";
@@ -38,6 +38,7 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { authService } from "../../src/thread/services/auth";
 import { identityThreadService } from "../../src/thread/services/identity";
+import { EventBus } from "../../src/utils/event-bus";
 
 /** What the worker-side session reports about itself. */
 export interface FocusSessionReport {
@@ -190,13 +191,31 @@ const probe: FocusProbe = {
 			streamFn: heldStream,
 		});
 		const sessionManager = SessionManager.inMemory();
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("input", (event, ctx) => {
+					if (event.source !== "interactive" || !event.text.startsWith("owner:")) return;
+					const draft = event.text.slice("owner:".length);
+					ctx.ui.setStatus("worker-status", draft === "clear" ? undefined : `${id} extension status`);
+					ctx.ui.setWidget("worker-widget", draft === "clear" ? undefined : [`${id} extension widget`], {
+						placement: "belowEditor",
+					});
+					return { text: `${id} handled ${draft}` };
+				});
+			},
+			process.cwd(),
+			new EventBus(),
+			runtime,
+			"worker-input",
+		);
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated(overrides),
 			modelRegistry: registry,
 			toolRegistry: new Map([[lookup.name, lookup]]),
-			extensionRunner: new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), sessionManager, registry),
+			extensionRunner: new ExtensionRunner([extension], runtime, process.cwd(), sessionManager, registry),
 			agentId: id,
 		});
 		// Do not connect to a real provider when the mirror routes a prewarm here.

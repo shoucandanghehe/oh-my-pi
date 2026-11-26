@@ -9,6 +9,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
+import { startHost } from "@oh-my-pi/pi-tui";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
@@ -242,6 +244,57 @@ describe("focused view of a worker-homed agent session", () => {
 		expect((await probe.report("W2")).prewarmCount).toBe(0);
 	});
 
+	it("submits pane input through the owning worker and shows that worker's extension presentation", async () => {
+		const probe = await startWorker();
+		const registry = await mainRegistry();
+		await probe.open("W1", registry, {});
+		await probe.open("W2", registry, {});
+		const pane = mountAgentWorkspacePane({
+			agentId: "W1",
+			close: () => {},
+			rows: () => 24,
+			columns: () => 100,
+			registry: AgentRegistry.global(),
+			lifecycle: AgentLifecycleManager.global(),
+			settings: Settings.instance,
+			draft: new AgentPaneDraft(),
+			isCurrent: () => true,
+			knownCommand: () => false,
+		});
+		cleanups.push(() => {
+			pane.dispose?.();
+			pane.surface.dispose();
+		});
+		const term = memoryTerminal({ columns: 100, rows: 24 });
+		const host = await startHost({
+			surface: pane.surface,
+			theme: currentTheme,
+			driver: term.options,
+			native: false,
+		});
+		cleanups.push(() => host.stop());
+		term.feed("owner:my draft");
+		term.feed("\r");
+		await waitFor(async () => (await probe.report("W1")).userTexts.length > 0);
+		expect((await probe.report("W1")).userTexts).toEqual(["W1 handled my draft"]);
+		expect((await probe.report("W2")).userTexts).toEqual([]);
+		const dock = () =>
+			pane.surface
+				.dock()
+				.map(node => nodeText(node))
+				.join("\n");
+		const worker = mirrorOf("W1").presentation;
+		await waitFor(() => worker.getPresentation().statuses.size > 0, 2000);
+		expect(dock()).toContain("W1 extension widget");
+		expect(dock()).toContain("W1 extension status");
+		term.feed("owner:clear");
+		term.feed("\r");
+		await waitFor(async () => (await probe.report("W1")).userTexts.includes("W1 handled clear"));
+		await waitFor(() => worker.getPresentation().statuses.size === 0, 2000);
+		expect(dock()).not.toContain("W1 extension widget");
+		expect(dock()).not.toContain("W1 extension status");
+	});
+
 	it("attaches, rebuilds the transcript, streams deltas in order, and steers from the composer", async () => {
 		const probe = await startWorker();
 		await probe.open("W1", await mainRegistry(), {});
@@ -296,6 +349,7 @@ describe("focused view of a worker-homed agent session", () => {
 			agentId: "W1",
 			close: () => {},
 			rows: () => 24,
+			columns: () => 100,
 			registry: AgentRegistry.global(),
 			lifecycle: AgentLifecycleManager.global(),
 			settings: Settings.instance,
@@ -530,6 +584,7 @@ describe("queued messages of a focused worker-homed session", () => {
 			agentId: "W1",
 			close: () => {},
 			rows: () => 24,
+			columns: () => 100,
 			registry: AgentRegistry.global(),
 			lifecycle: AgentLifecycleManager.global(),
 			settings: Settings.instance,

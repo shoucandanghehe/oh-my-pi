@@ -64,25 +64,32 @@ function Block(props: {
 						hour12: model.deps.hour12,
 						actions: actions !== undefined,
 						onAction: act => actions?.prompt(act, block.text, block.timestamp),
+						allowAction: actions?.allowAction,
 					}}
 				/>
 			);
 		case "parentIrc":
 			return <ParentIrcMessage parentIrc={block.parentIrc} timestamp={block.timestamp} expanded={model.expanded} />;
-		case "assistant":
+		case "assistant": {
+			const message = block.actionMessage ?? block.message;
+			const allowAction = actions?.allowAction;
 			return (
 				<SideAssistantBlock
 					display={display}
 					model={{
 						message: block.message,
+						actionMessage: block.actionMessage,
+						linkTargets: model.linkTargets,
 						finalized: true,
 						contentOffset: block.contentOffset,
 						turnUsage: block.usage,
-						actions: actions !== undefined,
-						onAction: (act, copyText) => actions?.reply(act, block.message, copyText),
+						actions: actions !== undefined && block.actionMessage !== undefined,
+						allowAction: allowAction ? act => allowAction(act, message) : undefined,
+						onAction: (act, copyText) => actions?.reply(act, message, copyText),
 					}}
 				/>
 			);
+		}
 		case "tool":
 			return <SideToolCard call={block.call} display={display} />;
 		case "message":
@@ -144,7 +151,13 @@ function ViewerTranscript(props: {
 	return (
 		<>
 			{props.workspace ? blocks : <TranscriptBlocks>{blocks}</TranscriptBlocks>}
-			<SideReply message={model.streaming} tools={model.tools} display={display} live />
+			<SideReply
+				message={model.streaming}
+				tools={model.tools}
+				display={display}
+				linkTargets={model.linkTargets}
+				live
+			/>
 		</>
 	);
 }
@@ -181,7 +194,12 @@ export function AgentWorkspaceStatus(props: { readonly model: AgentTranscriptVie
 				{() => {
 					model.rev();
 					const status = model.ref()?.status;
-					return status && <badge text={status} tone={STATUS_TONE[status]} />;
+					return (
+						<>
+							{!model.live() && model.model && <text text={model.model} tone="muted" truncate="end" />}
+							{status && <badge text={status} tone={STATUS_TONE[status]} />}
+						</>
+					);
 				}}
 				<EscCloseButton />
 			</row>

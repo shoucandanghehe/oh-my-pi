@@ -187,7 +187,7 @@ import { emitSessionShutdownEvent, TOP_LEVEL_AGENT, UNAVAILABLE_ANNOTATIONS } fr
 import { extensionEventFromSessionEvent } from "../extensibility/extensions/lifecycle-mirror";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage, InputEventResult } from "../extensibility/extensions/types";
 import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import type { MCPEvalNamespaceCatalog } from "../mcp/eval-namespaces";
@@ -8026,6 +8026,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const model = this.model;
 		if (!model || this.#isDisposed || this.isStreaming) return;
 		void prewarmModelConnection(model);
+	}
+
+	async emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined> {
+		return this.extensionRunner?.emitInput(text, images, "interactive");
 	}
 
 	get isAborting(): boolean {
@@ -17991,6 +17995,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Get the extension runner (for setting UI context and error handlers).
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
+		return this.#extensionRunner;
+	}
+
+	get presentation(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
 	}
 

@@ -58,12 +58,12 @@ export interface AnsiWorkspace {
 	close(id: string): boolean;
 	/**
 	 * Open a pane, or focus it if already open. False means no room (the factory was not
-	 * called) or the existing pane is hidden. `rows` reports the reactive body height,
-	 * including the dock, excluding the title, and zero while hidden.
+	 * called) or the existing pane is hidden. `rows` and `columns` report the reactive body size
+	 * (including the dock, excluding the title), and zero while hidden.
 	 */
 	open(
 		id: string,
-		create: (close: () => void, rows: () => number) => WorkspaceSurface,
+		create: (close: () => void, rows: () => number, columns: () => number) => WorkspaceSurface,
 		options?: WorkspaceOpenOptions,
 	): boolean;
 }

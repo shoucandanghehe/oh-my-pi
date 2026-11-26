@@ -5,8 +5,12 @@
 import type { TspMenuEntry } from "@oh-my-pi/pi-wire";
 
 /** The hold-menu entries of a turn: its copy entry, Edit & resend (prompts only), Retry, Rewind and Fork. */
-export function turnHoldEntries(role: "user" | "assistant", copy: TspMenuEntry): TspMenuEntry[] {
-	return [
+export function turnHoldEntries(
+	role: "user" | "assistant",
+	copy: TspMenuEntry,
+	allowAction?: (act: string) => boolean,
+): TspMenuEntry[] {
+	const entries: TspMenuEntry[] = [
 		copy,
 		...(role === "user"
 			? [
@@ -27,4 +31,9 @@ export function turnHoldEntries(role: "user" | "assistant", copy: TspMenuEntry):
 			detail: "New session",
 		},
 	];
+	return allowAction
+		? entries.filter(entry =>
+				typeof entry === "string" ? allowAction(entry) : "id" in entry && allowAction(entry.id),
+			)
+		: entries;
 }

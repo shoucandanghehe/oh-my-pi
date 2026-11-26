@@ -20,7 +20,8 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner } from "../extensibility/extensions";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { ExtensionPresentationSource } from "../extensibility/extensions/presentation";
+import type { CompactOptions, ContextUsage, InputEventResult } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import type { TokenRateMeter } from "../utils/token-rate";
@@ -300,6 +301,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly modelRegistry: ModelRegistry;
 	/** Extension runner, when extensions are loaded. */
 	readonly extensionRunner: ExtensionRunner | undefined;
+	/** Presentation published by the session itself, including for a worker-homed session. */
+	readonly presentation?: ExtensionPresentationSource;
 	/** Stable session id. */
 	readonly sessionId: string;
 	/** Generation tok/s meter of this session. */
@@ -316,6 +319,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly isAutoThinking: boolean;
 	/** Best-effort model connection warm-up on the session's home thread. */
 	prewarmModelConnection(): void;
+	/** Apply interactive input hooks on the session's owning thread. */
+	emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined>;
 	/** Whether a compaction is in progress. */
 	readonly isCompacting: boolean;
 	/** Run lifecycle boundaries on the session's home thread, including prompt setup and suspended runs. */

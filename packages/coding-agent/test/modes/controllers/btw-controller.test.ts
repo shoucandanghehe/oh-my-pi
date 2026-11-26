@@ -1447,6 +1447,7 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 			mounted ??= create(
 				() => adapter.close(),
 				() => 24,
+				() => 80,
 				nativeSupports,
 			);
 			return true;
@@ -1545,6 +1546,8 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(sideRunner.hasUI()).toBe(false);
 		sideRunner.getUIContext().setStatus("fixture", "First topic extension status");
 		expect(draw()).toContain("First topic extension status");
+		sideRunner.getUIContext().setWidget("fixture", ["First topic extension widget"], { placement: "belowEditor" });
+		expect(draw()).toContain("First topic extension widget");
 		expect(draw()).toContain("high");
 		expect(draw()).not.toContain("reply for held after compact");
 		const newer = "unsent while compacting";
@@ -1559,6 +1562,7 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		});
 		await drawn(newer);
 		controller.closeView();
+		sideRunner.getUIContext().setWidget("fixture", ["Widget updated while closed"], { placement: "aboveEditor" });
 		releaseCompaction.resolve();
 		const sendDeadline = performance.now() + 1500;
 		while (mock.calls.length < 5 && performance.now() < sendDeadline) await yieldToIo();
@@ -1567,6 +1571,8 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(await controller.start("")).toBe(true);
 		await drawn("reply for held after compact", true);
 		await drawn(newer);
+		expect(draw()).toContain("Widget updated while closed");
+		expect(draw()).not.toContain("First topic extension widget");
 		expect(handoff).toHaveBeenCalledTimes(1);
 
 		send("/tree");
@@ -1607,9 +1613,13 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		await drawn("reply for second question");
 		expect(draw()).not.toContain("reply for quick question");
 		expect(draw()).not.toContain("First topic extension status");
+		expect(draw()).not.toContain("Widget updated while closed");
 		expect(mock.calls).toHaveLength(7);
 		press("tab");
 		await drawn("reply for quick question");
+		expect(draw()).toContain("Widget updated while closed");
+		sideRunner.getUIContext().setWidget("fixture", undefined);
+		expect(draw()).not.toContain("Widget updated while closed");
 
 		send("find side topic");
 		await drawn("Looking up the side topic");
@@ -1706,9 +1716,39 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(press("enter")).toBe(true);
 		await drawn("reply for second question");
 		expect(draw()).not.toContain("First topic");
+
+		expect(
+			click(
+				dockNode(node => node.props().title === "New")!,
+				"new",
+			),
+		).toBe(true);
+		expect(draw()).not.toContain("reply for second question");
+		send("/new");
+		controller.closeView();
+		expect(await controller.start("")).toBe(true);
+		expect(draw()).not.toContain("reply for second question");
+		const blankDraft = "unsent first question";
+		mounted?.surface.focused()?.handlers.onEdit?.({
+			from: 0,
+			to: 0,
+			text: blankDraft,
+			cursor: blankDraft.length,
+			len: 0,
+			type: "edit",
+			key: "",
+		});
+		expect(
+			click(
+				dockNode(node => node.props().title === "New")!,
+				"new",
+			),
+		).toBe(true);
+		expect(draw()).toContain(blankDraft);
 		await controller.dispose();
 		const records = await BtwSessionStore.readRecords(sessionManager.getArtifactsDir()!, cwd);
-		expect(records.map(record => record.turns.map(turn => turn.input))).toEqual([["second question"]]);
+		expect(records.map(record => record.turns.map(turn => turn.input))).toEqual([["second question"], []]);
+		expect(records.find(record => record.turns.length === 0)?.draft).toBe(blankDraft);
 		expect(
 			sessionManager
 				.getBranch()

@@ -124,6 +124,10 @@ export interface AssistantMessageModel {
 	readonly rewound?: Reactive<boolean>;
 	/** Whether a host handles transcript actions (controls are only shown when one does). */
 	readonly actions?: Reactive<boolean>;
+	/** Restrict controls in a view that does not own every transcript action. */
+	readonly allowAction?: (act: string) => boolean;
+	/** Original reply when this block renders only the lead before interleaved tool cards. */
+	readonly actionMessage?: AssistantMessage;
 	/** Live thinking speed (tok/s); shown from 0.05 up. */
 	readonly thinkingRate?: Reactive<number>;
 	/** Clock for thinking durations (ms; default `performance.now`). */
@@ -210,7 +214,7 @@ type ErrorPart =
 			code?: string;
 			text: string;
 			preview: string;
-			actions: boolean;
+			actions: readonly string[];
 			termHidden: boolean;
 			/** Rows the message keeps while collapsed. */
 			lines?: number;
@@ -538,7 +542,8 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		if (read(model.toolResultMedia)?.size) untrack(revise);
 	});
 
-	const answered = (): boolean => reply()?.answer.content.some(hasVisibleText) ?? false;
+	const actionMessage = () => model.actionMessage ?? reply()?.answer;
+	const answered = (): boolean => actionMessage()?.content.some(hasVisibleText) ?? false;
 	const rewound = (): boolean => flag(model.rewound, false);
 	const actions = (): boolean => flag(model.actions, false);
 	const usage = (): TurnUsageSummary | undefined => read(model.turnUsage);
@@ -557,24 +562,29 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		<col
 			role={() => (rewound() ? "omp.assistant.rewound" : "omp.assistant")}
 			actions={() => {
-				const at = reply()?.answer.timestamp;
+				const at = actionMessage()?.timestamp;
 				return usage() && answered() && at !== undefined && !rewound() && actions()
 					? {
-							hold: turnHoldEntries("assistant", {
-								id: "copy-answer",
-								label: "Copy reply",
-								icon: "copy",
-							}),
+							hold: turnHoldEntries(
+								"assistant",
+								{
+									id: "copy-answer",
+									label: "Copy reply",
+									icon: "copy",
+								},
+								model.allowAction,
+							),
 						}
 					: undefined;
 			}}
 			term={() => ({ thinkingDots: thinkingDots() })}
 			onAction={act => {
+				if (model.allowAction?.(act) === false) return;
 				if (act === "copy-error") {
 					const part = parts().get("error");
 					if (part?.kind === "error" && part.error.kind === "failed") model.onAction?.(act, part.error.text);
 				} else if (act === "copy-answer") {
-					const blocks = reply()?.answer.content.flatMap(block =>
+					const blocks = actionMessage()?.content.flatMap(block =>
 						block.type === "text" && hasVisibleText(block) ? [block.text.trim()] : [],
 					);
 					if (blocks?.length) model.onAction?.(act, blocks.join("\n\n"));
@@ -621,7 +631,8 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 				return (
 					<row key="turn-usage" role="omp.turn.usage" gap="xs" align="center" title={line.title}>
 						{answered() &&
-							actions() && [
+							actions() &&
+							model.allowAction?.("copy-answer") !== false && [
 								<icon
 									key="copy"
 									name="copy"
@@ -668,7 +679,10 @@ function errorPart(message: AssistantMessage, model: AssistantMessageModel): Err
 		code,
 		text: detail,
 		preview: presentation.text,
-		actions: message.stopReason === "error" && (model.actions === undefined ? false : read(model.actions)),
+		actions:
+			message.stopReason === "error" && read(model.actions)
+				? ["retry", "copy-error", "switch-model"].filter(act => model.allowAction?.(act) !== false)
+				: [],
 		termHidden: message.stopReason === "error" && pinned && !expanded,
 		...(expanded ? {} : { lines: ERROR_PREVIEW_ROWS }),
 	};
@@ -953,6 +967,7 @@ function FailedTurn(props: { error: () => ErrorPart | undefined }): JSXNode {
 		const e = props.error();
 		return e?.kind === "failed" ? e : undefined;
 	};
+	const has = (act: string): boolean => failed()?.actions.includes(act) === true;
 	const button = (act: string, label: string, keys: readonly string[], title: string): JSXNode => (
 		<row key={act} gap="xs" role="omp.error.action" actions={{ click: act }} title={title}>
 			<text text={label} />
@@ -984,11 +999,12 @@ function FailedTurn(props: { error: () => ErrorPart | undefined }): JSXNode {
 				lines={() => failed()?.lines}
 			/>
 			{() =>
-				failed()?.actions && (
+				!!failed()?.actions.length && (
 					<row key="actions" gap="sm" role="omp.error.actions">
-						{button("retry", "Retry", ["F5"], "Retry the failed turn")}
-						{button("copy-error", "Copy error", [], "Copy the error message")}
-						{button("switch-model", "Switch model", ["⌥P"], "Pick another model for this session")}
+						{has("retry") && button("retry", "Retry", ["F5"], "Retry the failed turn")}
+						{has("copy-error") && button("copy-error", "Copy error", [], "Copy the error message")}
+						{has("switch-model") &&
+							button("switch-model", "Switch model", ["⌥P"], "Pick another model for this session")}
 					</row>
 				)
 			}

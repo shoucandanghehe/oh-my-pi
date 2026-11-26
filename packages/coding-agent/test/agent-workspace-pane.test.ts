@@ -1,20 +1,29 @@
 import { expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createSurface, jsx, type PresentedFrame, startHost } from "@oh-my-pi/pi-tui";
 import { NativeSurfaces, TspConnection } from "@oh-my-pi/pi-tui/native/index";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { SgrState, tokens } from "@oh-my-pi/pi-tui/text/ansi";
 import { sliceColumns } from "@oh-my-pi/pi-tui/text/width";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import type { TspText } from "@oh-my-pi/pi-wire";
 import { FakeTern, ManualClock } from "../../tui/test/native/fake-tern";
 import { Settings } from "../src/config/settings";
+import type { ExtensionPresentationSource } from "../src/extensibility/extensions/presentation";
 import { AgentPaneDraft, type AgentWorkspaceSurface, mountAgentWorkspacePane } from "../src/modes/agent-workspace-pane";
 import { NativeAgentPanes } from "../src/modes/controllers/native-agent-panes";
 import type { NativeWorkspaceView } from "../src/modes/native-workspace/workspace";
 import { type AgentRef, AgentRegistry } from "../src/registry/agent-registry";
 import type { AgentViewSession } from "../src/session/agent-session-handle";
-import type { PromptOptions } from "../src/session/agent-session-types";
+import type { DequeuedMessage, PromptOptions, RestoredQueuedInput } from "../src/session/agent-session-types";
 import type { SessionTreeNode } from "../src/session/session-entries";
+import { waitFor } from "./collab/helpers/throttled-host";
 
 async function display(mount: AgentWorkspaceSurface) {
 	const tern = new FakeTern();
@@ -41,6 +50,14 @@ async function display(mount: AgentWorkspaceSurface) {
 			tern.input({ type: "key", key: { id, kind: "press", raw: id } });
 			refresh();
 		},
+		act(act: string) {
+			const node = [...doc.nodes.values()].find(
+				({ p }) => p.actions && typeof p.actions === "object" && Reflect.get(p.actions, "click") === act,
+			);
+			if (!node) throw new Error(`No native control for ${act}`);
+			tern.event({ ev: "action", sf: doc.root, id: node.id, act });
+			refresh();
+		},
 		resize(cols: number) {
 			tern.event({ ev: "resize", cols });
 			refresh();
@@ -54,10 +71,27 @@ async function display(mount: AgentWorkspaceSurface) {
 	};
 }
 
-function workspaceAgent(id: string) {
+function workspaceAgent(id: string, options: { cwd?: string; assistant?: AssistantMessage; parkedFile?: string } = {}) {
 	const draft = new AgentPaneDraft();
 	const prompts: { text: string; options?: PromptOptions }[] = [];
+	const copied: string[] = [];
 	const messages: AgentMessage[] = [{ role: "user", content: `transcript for ${id}`, timestamp: 0 }];
+	if (options.assistant) messages.push(options.assistant);
+	const steering: string[] = [];
+	const claimed: string[] = [];
+	const followUp: string[] = [];
+	const statuses = new Map<string, string>();
+	const presentationListeners = new Set<() => void>();
+	const presentation: ExtensionPresentationSource = {
+		getPresentation: () => ({ widgets: [], statuses }),
+		subscribePresentation(listener) {
+			presentationListeners.add(listener);
+			return () => presentationListeners.delete(listener);
+		},
+	};
+	const settings = Settings.isolated({});
+	const model = { ...getBundledModel("anthropic", "claude-sonnet-4-5")!, name: `model-${id}`, contextWindow: 10_000 };
+	let idleGate: Promise<void> | undefined;
 	let retryCount = 0;
 	let compacted: { instructions?: string; mode?: string } | undefined;
 	let compactionGate: Promise<void> | undefined;
@@ -83,24 +117,68 @@ function workspaceAgent(id: string) {
 	];
 	const session = {
 		instanceKey: `thread:${id}`,
+		settings,
+		model,
+		presentation,
+		state: { messages, model, thinkingLevel: "high" },
+		modelRegistry: { isUsingSubscription: () => false },
 		messages,
 		agent: { state: { streamMessage: null, pendingToolCalls: new Set<string>() }, getPendingToolResults: () => [] },
 		sessionManager: {
+			getCwd: () => options.cwd ?? process.cwd(),
+			getUsageStatistics: () => ({ input: 1_234, output: 766, cacheRead: 0, cacheWrite: 0, cost: 2.5 }),
+			getSessionName: () => undefined,
 			getSessionId: () => id,
 			getLeafId: () => "leaf",
 			getTree: () => roots,
 			getBranch: () => roots[0]!.children.map(node => node.entry),
 		},
 		hasPausedAgents: () => false,
-		queuedMessageCount: 0,
+		get isStreaming() {
+			return claimed.length > 0;
+		},
+		get hasInterruptibleInput() {
+			return claimed.length + steering.length + followUp.length > 0;
+		},
+		get queuedMessageCount() {
+			return steering.length + followUp.length;
+		},
+		getQueuedMessages: () => ({
+			steering: [...claimed, ...steering],
+			followUp: [...followUp],
+			liveSteered: claimed.length,
+		}),
+		popLastQueuedMessage(): DequeuedMessage | undefined {
+			const steer = steering.pop();
+			if (steer !== undefined) return { text: steer, queue: "steering" };
+			const follow = followUp.pop();
+			if (follow !== undefined) return { text: follow, queue: "followUp" };
+		},
+		async interruptAndRestoreQueue(restore: (input: RestoredQueuedInput) => void) {
+			restore({
+				steering: [...claimed.splice(0), ...steering.splice(0)].map(text => ({ text })),
+				followUp: followUp.splice(0).map(text => ({ text })),
+			});
+		},
+		getAdvisorCost: () => 0,
+		isFastModeActive: () => false,
+		getPrewalkState: () => undefined,
+		getAnthropicSlowModeLabel: () => undefined,
+		getAsyncJobSnapshot: () => null,
+		getContextUsage: () => ({ tokens: 2_500, contextWindow: 10_000, percent: 25 }),
+		prewarmModelConnection: () => {},
+		emitInteractiveInput: async () => undefined,
 		subscribe: () => () => {},
-		waitForIdle: async () => {},
+		waitForIdle: async () => {
+			await idleGate;
+		},
 		waitForAdmittedSubmissions: async () => {},
 		waitForRunEnd: async () => {},
 		buildTranscriptSessionContext: () => ({ messages }),
 		activeToolExecutionUpdates: () => [],
 		async prompt(text: string, options?: PromptOptions) {
 			prompts.push({ text, options });
+			options?.onPromptAdmitted?.();
 			prompted.resolve();
 			return true;
 		},
@@ -119,9 +197,27 @@ function workspaceAgent(id: string) {
 		},
 	} as unknown as AgentViewSession;
 	const registry = new AgentRegistry();
-	registry.register({ id, displayName: id, kind: "sub", status: "running", session });
+	registry.register({
+		id,
+		displayName: id,
+		kind: "sub",
+		status: options.parkedFile ? "parked" : "running",
+		sessionFile: options.parkedFile,
+		session: options.parkedFile ? null : session,
+	});
 	return {
 		prompts,
+		copied,
+		steering,
+		claimed,
+		followUp,
+		setStatus(key: string, text: string) {
+			statuses.set(key, text);
+			for (const listener of presentationListeners) listener();
+		},
+		holdIdle(gate: Promise<void>) {
+			idleGate = gate;
+		},
 		compactionStarted: compactionStarted.promise,
 		prompted: prompted.promise,
 		holdCompaction(gate: Promise<void>) {
@@ -142,6 +238,7 @@ function workspaceAgent(id: string) {
 					agentId: id,
 					close: () => {},
 					rows: () => 32,
+					columns: () => 100,
 					registry,
 					lifecycle: {
 						async ensureLive(key) {
@@ -149,13 +246,37 @@ function workspaceAgent(id: string) {
 							return session;
 						},
 					},
-					settings: Settings.isolated({}),
+					settings,
 					draft,
 					isCurrent: () => true,
 					knownCommand: text => text.startsWith("/settings"),
+					copyText: async text => {
+						copied.push(text);
+					},
 				}),
 			);
 		},
+	};
+}
+
+function answer(text: string, errorMessage?: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "openai-completions",
+		provider: "parity",
+		model: "agent-fixture",
+		usage: {
+			input: 22,
+			output: 12,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 34,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: errorMessage ? "error" : "stop",
+		errorMessage,
+		timestamp: 1,
 	};
 }
 
@@ -251,6 +372,150 @@ test("an agent pane sends later queued input only after its deferred compaction 
 	}
 });
 
+test("native queue Edit and dequeue restore pending agent input, while Ctrl+C restores the claimed steering", async () => {
+	const agent = workspaceAgent("queue ownership");
+	const idle = Promise.withResolvers<void>();
+	agent.holdIdle(idle.promise);
+	agent.claimed.push("claimed steering");
+	agent.steering.push("pending steering");
+	agent.followUp.push("older follow-up");
+	const pane = await agent.mount();
+	try {
+		pane.type("/queue /compact keep the evidence");
+		pane.press("enter");
+		await admit();
+		pane.type("held for compaction");
+		pane.press("ctrl+q");
+		await admit();
+		pane.refresh();
+		const dockText = JSON.stringify(pane.doc.shape("dock"));
+		for (const text of [
+			"claimed steering",
+			"pending steering",
+			"older follow-up",
+			"/compact keep the evidence",
+			"held for compaction",
+		]) {
+			expect(dockText).toContain(text);
+		}
+
+		pane.act("queue.edit");
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe("pending steering");
+		pane.press("alt+up");
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe("=> held for compaction\n\npending steering");
+		pane.press("alt+up");
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe(
+			"/queue /compact keep the evidence\n\n=> held for compaction\n\npending steering",
+		);
+		expect(agent.claimed).toEqual(["claimed steering"]);
+		expect(agent.followUp).toEqual(["older follow-up"]);
+		expect(agent.compaction).toBeUndefined();
+
+		pane.press("ctrl+c");
+		await admit();
+		pane.refresh();
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toStartWith("claimed steering\n\nolder follow-up");
+		expect(JSON.stringify(pane.doc.shape("dock"))).not.toContain('"role":"omp.queue"');
+	} finally {
+		idle.resolve();
+		pane.close();
+	}
+});
+
+test("agent transcript controls copy and retry only that pane, beside its own model and extension status", async () => {
+	const first = workspaceAgent("CopyAgent", { assistant: answer("partial agent answer", "fixture failure") });
+	const second = workspaceAgent("OtherAgent");
+	second.setStatus("hook", "other agent hook");
+	const left = await first.mount();
+	const right = await second.mount();
+	try {
+		left.act("copy-message");
+		left.act("copy-answer");
+		left.act("retry");
+		await admit();
+		expect(first.copied).toEqual(["transcript for CopyAgent", "partial agent answer"]);
+		expect(first.retries).toBe(1);
+		expect(second.copied).toEqual([]);
+		expect(second.retries).toBe(0);
+		expect(JSON.stringify(left.doc.shape("main"))).not.toContain("switch-model");
+
+		first.setStatus("hook", "copy agent hook");
+		left.refresh();
+		const status = JSON.stringify(left.doc.shape("dock"));
+		expect(status).toContain("model-CopyAgent");
+		expect(status).toContain("high");
+		expect(status).toContain("25.0%");
+		expect(status).toContain("copy agent hook");
+		expect(status).not.toContain("other agent hook");
+	} finally {
+		left.close();
+		right.close();
+	}
+});
+
+test("a live worktree and a parked journal resolve the same relative reply link from different roots", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-links-"));
+	const liveCwd = path.join(dir, "live");
+	const parkedCwd = path.join(dir, "parked");
+	const parkedFile = path.join(dir, "history.jsonl");
+	const report = answer("Here is [the report](notes.md#L3).");
+	await Bun.write(path.join(liveCwd, "notes.md"), "live report");
+	await Bun.write(path.join(liveCwd, "agent-pane-cwd-only.md"), "only in the live agent's cwd");
+	await Bun.write(path.join(parkedCwd, "notes.md"), "parked report");
+	await Bun.write(
+		parkedFile,
+		`${[
+			{ type: "session", id: "parked", cwd: parkedCwd, timestamp: "2026-11-26T00:00:00Z" },
+			{ type: "message", id: "reply", parentId: null, timestamp: "2026-11-26T00:00:01Z", message: report },
+		]
+			.map(entry => JSON.stringify(entry))
+			.join("\n")}\n`,
+	);
+	const live = await workspaceAgent("live", { cwd: liveCwd, assistant: report }).mount();
+	const parked = await workspaceAgent("parked", { parkedFile }).mount();
+	const livePath = `${pathToFileURL(path.join(liveCwd, "notes.md")).pathname}#L3`;
+	const parkedPath = `${pathToFileURL(path.join(parkedCwd, "notes.md")).pathname}#L3`;
+	const suggestion = (pane: typeof live, label: string) =>
+		[...pane.doc.nodes.values()].some(node => {
+			if (node.k !== "item") return false;
+			const text = node.p.label as TspText | undefined;
+			return (typeof text === "string" ? text : text?.map(span => span.t).join(""))?.includes(label);
+		});
+	try {
+		await waitFor(() => {
+			live.refresh();
+			parked.refresh();
+			return (
+				JSON.stringify(live.doc.shape("main")).includes(livePath) &&
+				JSON.stringify(parked.doc.shape("main")).includes(parkedPath)
+			);
+		}, "resolved reply links did not reach their own agent panes");
+		expect(JSON.stringify(live.doc.shape("main"))).not.toContain(parkedPath);
+		expect(JSON.stringify(parked.doc.shape("main"))).not.toContain(livePath);
+		expect(JSON.stringify(parked.doc.shape("dock"))).toContain("no live session");
+
+		parked.type("/tr");
+		await waitFor(() => {
+			parked.refresh();
+			return suggestion(parked, "tree");
+		}, "parked pane command completion did not offer /tree");
+		parked.press("tab");
+		expect(parked.doc.nodes.get(parked.doc.focus!)?.p.text).toBe("/tree ");
+
+		live.type("@agent-pane-cwd");
+		await waitFor(() => {
+			live.refresh();
+			return suggestion(live, "agent-pane-cwd-only.md");
+		}, "pane file completion did not find the file in its own worktree");
+		live.press("tab");
+		expect(live.doc.nodes.get(live.doc.focus!)?.p.text).toContain("agent-pane-cwd-only.md");
+	} finally {
+		live.close();
+		parked.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
 test("idle automatic agent panes close unless pinned, being used or still focused", async () => {
 	const clock = new ManualClock();
 	const panes = new Map<string, { view: NativeWorkspaceView; close: () => void }>();
@@ -263,13 +528,15 @@ test("idle automatic agent panes close unless pinned, being used or still focuse
 			async open(key, _title, create, close, preserveFocus) {
 				let pane = panes.get(key);
 				if (!pane) {
+					const driver = new FakeTern();
 					const surface = create(
 						() => {
 							panes.delete(key);
 						},
 						() => false,
+						driver,
 					);
-					pane = { view: { ...surface, driver: new FakeTern(), dispatch() {}, redescribe() {} }, close };
+					pane = { view: { ...surface, driver, dispatch() {}, redescribe() {} }, close };
 					panes.set(key, pane);
 				}
 				if (!preserveFocus) focused = key;

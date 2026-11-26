@@ -4,13 +4,17 @@
  * lists, click targets, maintenance rows, the folded todo, widget limits,
  * the editor gap, progress rows and the deferred preview.
  */
-import { describe, expect, test } from "bun:test";
-import { createRoot, type JSXNode, resolveChildren, signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { describe, expect, test, vi } from "bun:test";
+import { createRoot, createSurface, type JSXNode, resolveChildren, signal, type UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { ModelRegistry } from "../../../src/config/model-registry";
 import type { DownloadActivity } from "../../../src/downloads/activity";
+import { ExtensionRuntime } from "../../../src/extensibility/extensions/loader";
+import { ExtensionRunner } from "../../../src/extensibility/extensions/runner";
+import { SessionManager } from "../../../src/session/session-manager";
 import type { ObservableSession } from "../../../src/task/session-observer-registry";
 import {
 	BackgroundCompactionModel,
@@ -19,6 +23,7 @@ import {
 	EditorGap,
 	HookWidgets,
 	HookWidgetsModel,
+	PaneExtensionWidgets,
 	ProgressHud,
 	ProgressHudModel,
 	QueuedMessages,
@@ -33,6 +38,7 @@ import {
 	WorkingRow,
 	workingMessage,
 } from "../../../src/ui/dock";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 const NOW = 1_700_000_000_000;
 const env = staticEnvironment(loadThemeSync("dark"), { now: NOW });
@@ -248,6 +254,59 @@ describe("widgets and the editor gap", () => {
 			" replaced",
 			"rows at 80",
 		]);
+	});
+
+	test("pane widgets keep live JSX and repaint rows, then dispose rows when the owning session changes", () => {
+		const auth = createInMemoryAuthStorage();
+		const registry = new ModelRegistry(auth);
+		const first = new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), SessionManager.inMemory(), registry);
+		const next = new ExtensionRunner([], new ExtensionRuntime(), process.cwd(), SessionManager.inMemory(), registry);
+		const runner = signal<ExtensionRunner | undefined>(first);
+		const disposeRows = vi.fn();
+		const label = signal("first JSX");
+		let row = "first rows";
+		let requestRender: (() => void) | undefined;
+		first.getUIContext().setWidget("jsx", () => <text text={label} />);
+		first.getUIContext().setWidget(
+			"rows",
+			host => {
+				requestRender = host.requestRender;
+				return { render: width => [`${row} at ${width}`], dispose: disposeRows };
+			},
+			{ placement: "belowEditor" },
+		);
+		next.getUIContext().setWidget("rows", ["other session"]);
+		const size = () => ({ columns: 80, rows: 24 });
+		const surface = createSurface(() => ({
+			dock: (
+				<>
+					<PaneExtensionWidgets runner={runner} placement="aboveEditor" size={size} />
+					<text text="composer" />
+					<PaneExtensionWidgets runner={runner} placement="belowEditor" size={size} />
+				</>
+			),
+		}));
+		const rows = () =>
+			surface
+				.dock()
+				.flatMap(node => paintNode(env, node, size().columns).rows.map(line => stripEscapes(line).trimEnd()));
+		try {
+			expect(rows()).toEqual(["first JSX", "composer", "first rows at 80"]);
+			label.set("updated JSX");
+			row = "updated rows";
+			requestRender!();
+			expect(rows()).toEqual(["updated JSX", "composer", "updated rows at 80"]);
+			runner.set(next);
+			expect(rows()).toEqual([" other session", "composer"]);
+			expect(disposeRows).toHaveBeenCalledTimes(1);
+			first.getUIContext().setWidget("jsx", ["hidden session"]);
+			expect(rows()).toEqual([" other session", "composer"]);
+			runner.set(undefined);
+			expect(rows()).toEqual(["composer"]);
+		} finally {
+			surface.dispose();
+			auth.close();
+		}
 	});
 
 	test("the gap closes under a drawn status row in a band composer, never over widgets", () => {

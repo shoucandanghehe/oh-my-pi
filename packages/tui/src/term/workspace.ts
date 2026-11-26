@@ -295,7 +295,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 
 	open(
 		id: string,
-		create: (close: () => void, rows: () => number) => WorkspaceSurface,
+		create: (close: () => void, rows: () => number, columns: () => number) => WorkspaceSurface,
 		options: WorkspaceOpenOptions = {},
 	): boolean {
 		if (this.#disposed || !id) return false;
@@ -314,12 +314,14 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			if (constructing) closed = true;
 			else if (!closed && this.#panes.get(id) === pane) this.close(id);
 		};
-		const rows = (): number => {
-			const height = this.#geometry.read().panes.get(id)?.height ?? 0;
-			if (constructing) return rect.height - 1;
-			return !closed && this.#panes.get(id) === pane ? Math.max(0, height - 1) : 0;
+		const dimensions = () => {
+			const current = this.#geometry.read().panes.get(id);
+			if (constructing) return rect;
+			return !closed && this.#panes.get(id) === pane ? current : undefined;
 		};
-		const mount = create(close, rows);
+		const rows = () => Math.max(0, (dimensions()?.height ?? 0) - 1);
+		const columns = () => dimensions()?.width ?? 0;
+		const mount = create(close, rows, columns);
 		constructing = false;
 		if (closed) {
 			mount.surface.dispose();

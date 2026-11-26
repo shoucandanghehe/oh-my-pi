@@ -3,7 +3,7 @@ import { hasGraphics } from "../driver/output/ansi";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
 import { untrack } from "../reactive";
-import type { Surface } from "../surface";
+import type { MainScrollScope, Surface } from "../surface";
 import { stripEscapes, tokens } from "../text/ansi";
 import { textSizedRows } from "../text/osc";
 import { padTo, pieces, sliceColumns, visibleWidth } from "../text/width";
@@ -38,6 +38,15 @@ const REFINE_MS = 4;
 /** A row and column inside a node, independent of other nodes' heights. Negative rows are its separator. */
 interface Point extends Cell {
 	readonly node: UiNode;
+}
+
+/** A remounted document has fresh nodes; its stable block order locates the old point. */
+interface Bookmark {
+	readonly index: number;
+	readonly kind: UiNode["kind"];
+	readonly width: number;
+	readonly row: number;
+	readonly textOffset: number | undefined;
 }
 
 interface Selection {
@@ -111,6 +120,32 @@ function contentLength(line: string): number {
 	return plainText(line).replace(/\s+/gu, "").length;
 }
 
+function textOffsetAt(rows: readonly string[], { row, col }: Cell): number {
+	let offset = contentLength(sliceColumns(rows[row] ?? "", 0, col));
+	for (let i = 0; i < row && i < rows.length; i++) offset += contentLength(rows[i]!);
+	return offset;
+}
+
+function cellAtTextOffset(rows: readonly string[], offset: number, keepColumn = false): Cell {
+	let row = 0;
+	let col = 0;
+	for (; row < rows.length - 1; row++) {
+		const length = contentLength(rows[row]!);
+		if (offset < length) break;
+		offset -= length;
+	}
+	if (keepColumn && offset > 0) {
+		for (const piece of pieces(rows[row]!)) {
+			if (piece.escape) continue;
+			const length = contentLength(piece.text);
+			if (length > offset) break;
+			offset -= length;
+			col += piece.width;
+		}
+	}
+	return { row, col };
+}
+
 /** Rebase a block-relative point when the block between the same nodes is repainted. */
 function rebase(point: Point, before: Document, after: Document, keepColumn = false): Point | undefined {
 	const index = after.byNode.get(point.node);
@@ -125,23 +160,7 @@ function rebase(point: Point, before: Document, after: Document, keepColumn = fa
 		// Keep the text at the top (or under the selected cell), not the old wrap row. This
 		// is approximate for a painter whose decoration or content changes at the new width.
 		// Snap selection columns to grapheme starts before measuring the prefix.
-		let offset = contentLength(sliceColumns(previous.rows[row] ?? "", 0, col));
-		for (let i = 0; i < row && i < previous.rows.length; i++) offset += contentLength(previous.rows[i]!);
-		for (row = 0; row < current.block.rows.length - 1; row++) {
-			const length = contentLength(current.block.rows[row]!);
-			if (offset < length) break;
-			offset -= length;
-		}
-		col = 0;
-		if (keepColumn && offset > 0) {
-			for (const piece of pieces(current.block.rows[row]!)) {
-				if (piece.escape) continue;
-				const length = contentLength(piece.text);
-				if (length > offset) break;
-				offset -= length;
-				col += piece.width;
-			}
-		}
+		({ row, col } = cellAtTextOffset(current.block.rows, textOffsetAt(previous.rows, point), keepColumn));
 	}
 	row = Math.max(-current.lead, Math.min(row, current.block.rows.length - 1));
 	return { node: point.node, row, col: Math.min(col, visibleWidth(current.block.rows[row] ?? "")) };
@@ -189,6 +208,8 @@ export class AppViewport {
 	#view: View | undefined;
 	/** Undefined follows the transcript tail. */
 	#anchor: Point | undefined;
+	#scrollScope: MainScrollScope | undefined;
+	readonly #bookmarks = new Map<string, Bookmark>();
 	#selection: Selection | undefined;
 	#dragging = false;
 	#scrollbarGrab: number | undefined;
@@ -281,6 +302,24 @@ export class AppViewport {
 		this.endDrag();
 	}
 
+	#saveBookmark(key: string): void {
+		const anchor = this.#anchor;
+		const document = this.#view?.document;
+		const index = anchor && document?.byNode.get(anchor.node);
+		if (!anchor || !document || index === undefined) {
+			this.#bookmarks.delete(key);
+			return;
+		}
+		const rows = document.blocks[index]?.block?.rows;
+		this.#bookmarks.set(key, {
+			index,
+			kind: anchor.node.kind,
+			width: document.width,
+			row: anchor.row,
+			textOffset: rows && anchor.row >= 0 ? textOffsetAt(rows, anchor) : undefined,
+		});
+	}
+
 	/** Paint the visible `main` slice into the rows above the dock, leaving any unused space blank. */
 	paint(width: number, capacity: number, visible: number, rows: string[], hits: ViewportHit[]): Cell | null {
 		// Reserve one column so showing/hiding the chrome never changes transcript wrapping.
@@ -288,6 +327,17 @@ export class AppViewport {
 		const document = this.#document(contentWidth);
 		const previous = this.#view;
 		const before = previous?.document ?? document;
+		const scope = this.options.surface.mainScrollScope?.();
+		const oldScope = this.#scrollScope;
+		const switched = scope?.key !== oldScope?.key || scope?.preview !== oldScope?.preview;
+		let bookmark: Bookmark | undefined;
+		if (switched) {
+			if (oldScope && !oldScope.preview) this.#saveBookmark(oldScope.key);
+			this.#scrollScope = scope;
+			bookmark = scope && this.#bookmarks.get(scope.key);
+			this.#anchor = undefined;
+			this.clearSelection();
+		}
 		const geometry = () => {
 			const end = document.rows.end;
 			const maxTop = Math.max(0, end - Math.max(1, capacity));
@@ -301,7 +351,21 @@ export class AppViewport {
 			checked.add(index);
 			this.#measure(document, index);
 		};
-		if (this.#anchor) {
+		if (bookmark) {
+			const { index, kind, width, row, textOffset } = bookmark;
+			const entry = document.blocks[index];
+			if (entry?.node.kind === kind) {
+				measure(index);
+				if (entry.block?.rows.length) {
+					const cell =
+						width === contentWidth || textOffset === undefined
+							? { row, col: 0 }
+							: cellAtTextOffset(entry.block.rows, textOffset);
+					this.#anchor = rebase({ node: entry.node, ...cell }, document, document);
+				}
+			}
+		}
+		if (this.#anchor && !switched) {
 			const index = document.byNode.get(this.#anchor.node);
 			if (index !== undefined) measure(index);
 			this.#anchor = rebase(this.#anchor, before, document);

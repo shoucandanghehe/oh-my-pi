@@ -35,7 +35,12 @@ import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { OverlayLayers, Settings } from "../config/settings";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type {
+	CompactOptions,
+	ContextUsage,
+	InputEventResult,
+	WidgetPlacement,
+} from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import type { NavigateTreeResult } from "../session/agent-session";
@@ -153,6 +158,16 @@ export interface SessionQueuedEntry {
 	readonly claimed: boolean;
 }
 
+/** Worker widgets can cross the link as text; factories stay on their executing thread. */
+export interface SessionExtensionPresentation {
+	readonly widgets: readonly {
+		readonly key: string;
+		readonly placement: WidgetPlacement;
+		readonly content: readonly string[];
+	}[];
+	readonly statuses: readonly (readonly [string, string])[];
+}
+
 /** View-only data of a worker-homed session, published while main watches it (see the module doc). */
 export interface SessionViewState {
 	/** Provider-facing session id (`AgentSession.sessionId`). */
@@ -166,6 +181,7 @@ export interface SessionViewState {
 	toolNames: string[];
 	/** The worker's canonical names and labels; its render functions are not cloneable. */
 	toolRenderMetadata?: Record<string, AgentViewToolRenderMetadata>;
+	extensionPresentation: SessionExtensionPresentation;
 	/** The registered names that came from a built-in factory. */
 	builtInTools: string[];
 	pendingToolResults: ToolResultMessage[];
@@ -264,6 +280,7 @@ export type SessionHostProtocol = {
 	waitForSessionTransition: RpcMethod<[], void>;
 	waitForRunEnd: RpcMethod<[], void>;
 	prewarmModelConnection: RpcMethod<[], void>;
+	emitInteractiveInput: RpcMethod<[text: string, images?: ImageContent[]], InputEventResult | undefined>;
 	compact: RpcMethod<[instructions?: string, options?: CompactOptions], CompactionResult>;
 	navigateTree: RpcMethod<
 		[targetId: string, options?: { summarize?: boolean; requireIdle?: boolean }],

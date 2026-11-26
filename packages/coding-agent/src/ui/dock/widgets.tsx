@@ -16,8 +16,18 @@
  * a band-shaped composer closes while the status row above it draws (the
  * working row brings its own blank row). Natively the dock spaces itself.
  */
-import { type Accessor, computed, For, type JSXNode, signal } from "@oh-my-pi/pi-tui";
+import { type Accessor, computed, For, type JSXNode, onCleanup, signal, structural, structuralEffect } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { logger } from "@oh-my-pi/pi-utils";
+import {
+	EMPTY_EXTENSION_PRESENTATION,
+	type ExtensionPresentation,
+	type ExtensionPresentationSource,
+} from "../../extensibility/extensions/presentation";
+import type { ExtensionUiHost } from "../../extensibility/extensions/render-types";
+import type { WidgetPlacement } from "../../extensibility/extensions/types";
 import "../styles/dock";
+import { extensionTheme, renderExtension } from "../extensions/render-output";
 import { ansiSpans } from "../transcript/messages/spans";
 
 /** The rows escape hatch: old row renderers, drawn as a canvas. */
@@ -27,7 +37,7 @@ export interface WidgetRows {
 
 export type WidgetContent = readonly string[] | (() => JSXNode) | WidgetRows;
 
-export type WidgetPlacement = "aboveEditor" | "belowEditor";
+export type { WidgetPlacement } from "../../extensibility/extensions/types";
 
 /** Lines a line widget shows before its truncation notice. */
 export const MAX_WIDGET_LINES = 10;
@@ -140,6 +150,54 @@ export function HookWidgets(props: { readonly model: HookWidgetsModel; readonly 
 			</col>
 		);
 	};
+}
+
+/** Read a pane's current session snapshot, detaching when its source changes or the pane unmounts. */
+export function useExtensionPresentation(
+	runner: Accessor<ExtensionPresentationSource | undefined>,
+): Accessor<ExtensionPresentation> {
+	const source = structural(runner);
+	const snapshot = signal(EMPTY_EXTENSION_PRESENTATION);
+	structuralEffect(() => {
+		const current = source();
+		if (!current) {
+			snapshot.set(EMPTY_EXTENSION_PRESENTATION);
+			return;
+		}
+		const update = () => snapshot.set(current.getPresentation());
+		update();
+		onCleanup(current.subscribePresentation(update));
+	});
+	return snapshot;
+}
+
+/** Session-local extension widgets for an agent or BTW dock, not a binding to Main's UI. */
+export function PaneExtensionWidgets(props: {
+	readonly runner: Accessor<ExtensionPresentationSource | undefined>;
+	readonly placement: WidgetPlacement;
+	readonly size: ExtensionUiHost["size"];
+}): JSXNode {
+	const presentation = useExtensionPresentation(props.runner);
+	const widgets = structural(() => presentation().widgets.filter(widget => widget.placement === props.placement));
+	return (
+		<For each={widgets}>
+			{({ key, content }) => {
+				if (typeof content !== "function") return <Widget content={content} />;
+				const revision = signal(0);
+				const host: ExtensionUiHost = {
+					requestRender: () => revision.set(revision.peek() + 1),
+					size: props.size,
+					async suspend() {
+						throw new Error("Pane widgets cannot suspend the terminal");
+					},
+				};
+				return renderExtension(() => content(host, extensionTheme(currentTheme())), {
+					revision,
+					onError: error => logger.warn("Pane extension widget failed to render", { key, error }),
+				});
+			}}
+		</For>
+	);
 }
 
 /** The editor gap's inputs. */

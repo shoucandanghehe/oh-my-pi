@@ -40,7 +40,6 @@ export class BtwExtensionRuntime {
 	readonly tools: AgentTool[];
 	readonly sessionManager: SessionManager;
 	readonly modelRegistry: ModelRegistry;
-	readonly #statuses = new Map<string, string>();
 	readonly #agent: Agent;
 	session!: AgentSession;
 	#disposed = false;
@@ -67,7 +66,7 @@ export class BtwExtensionRuntime {
 	}
 
 	get statuses(): ReadonlyMap<string, string> {
-		return this.#statuses;
+		return this.runner.getPresentation().statuses;
 	}
 
 	async dispose(): Promise<void> {
@@ -227,16 +226,20 @@ export class BtwExtensionRuntime {
 			{
 				installFileFallbacks: false,
 				registerProviders: false,
-				setStatus: options.onStatusChange
-					? (key, text) => {
-							if (side.#statuses.get(key) === text) return;
-							if (text === undefined) side.#statuses.delete(key);
-							else side.#statuses.set(key, text);
-							options.onStatusChange?.();
-						}
-					: undefined,
 			},
 		);
+		const { onStatusChange } = options;
+		if (onStatusChange) {
+			let statuses = runner.getPresentation().statuses;
+			session.addDisposer(
+				runner.subscribePresentation(() => {
+					const next = runner.getPresentation().statuses;
+					if (next === statuses) return;
+					statuses = next;
+					onStatusChange();
+				}),
+			);
+		}
 		try {
 			await runner.emit({ type: "session_start" });
 		} catch (error) {

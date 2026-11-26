@@ -230,6 +230,7 @@ export class SessionPublisher {
 	readonly #unsubscribeRunState: () => void;
 	readonly #unsubscribeWakeState: () => void;
 	#unsubscribeEntries: (() => void) | undefined;
+	#unsubscribePresentation: (() => void) | undefined;
 
 	constructor(session: AgentSession, bridge: SessionBridgeClient) {
 		this.session = session;
@@ -294,11 +295,14 @@ export class SessionPublisher {
 		this.#watched = on;
 		if (on) {
 			this.#unsubscribeEntries ??= this.session.sessionManager.subscribeToEntries(() => this.schedule());
+			this.#unsubscribePresentation ??= this.session.presentation?.subscribePresentation(() => this.schedule());
 			this.flush();
 			return;
 		}
 		this.#unsubscribeEntries?.();
 		this.#unsubscribeEntries = undefined;
+		this.#unsubscribePresentation?.();
+		this.#unsubscribePresentation = undefined;
 		this.#view = undefined;
 		this.#viewSources = undefined;
 	}
@@ -314,6 +318,8 @@ export class SessionPublisher {
 		this.#unsubscribeWakeState();
 		this.#unsubscribeEntries?.();
 		this.#unsubscribeEntries = undefined;
+		this.#unsubscribePresentation?.();
+		this.#unsubscribePresentation = undefined;
 		this.#bridge.remote.notify("closed", this.#key);
 	}
 
@@ -494,12 +500,20 @@ export class SessionPublisher {
 					);
 		const steering = session.agent.peekSteeringQueue().filter(isUserAuthoredQueuedMessage);
 		const followUp = session.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage);
+		const presentation = session.presentation?.getPresentation();
 		return {
 			providerSessionId: session.sessionId,
 			sessionName: manager.getSessionName(),
 			leafId: manager.getLeafId(),
 			agentEffort: session.agent.state.thinkingLevel,
 			tools,
+			extensionPresentation: {
+				widgets:
+					presentation?.widgets.flatMap(({ key, placement, content }) =>
+						Array.isArray(content) ? [{ key, placement, content }] : [],
+					) ?? [],
+				statuses: [...(presentation?.statuses ?? [])],
+			},
 			toolNames: previous && reuse("toolNames") ? previous.toolNames : [...sources.toolNames],
 			toolRenderMetadata: Object.fromEntries(
 				sources.toolNames.flatMap(wireName => {
@@ -608,6 +622,8 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	waitForSessionTransition: async publisher => settle(publisher, publisher.session.waitForSessionTransition()),
 	waitForRunEnd: async publisher => settle(publisher, publisher.session.waitForRunEnd()),
 	prewarmModelConnection: publisher => publisher.session.prewarmModelConnection(),
+	emitInteractiveInput: async (publisher, text, images) =>
+		toWireData(await settle(publisher, publisher.session.emitInteractiveInput(text, images))),
 	compact: async (publisher, instructions, options) =>
 		toWireData(await settle(publisher, publisher.session.compact(instructions, options))),
 	navigateTree: async (publisher, id, options) =>

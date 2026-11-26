@@ -310,6 +310,10 @@
 - Clipboard paste keeps the attachment and subsequent keystrokes in the originating pane, including PNG-only Windows clipboard images pasted into WSL.
 - Interrupting a BTW or subagent reply returns uncommitted steering and queued input to that pane's draft, just as in Main.
 - BTW and subagent panes show streaming tool arguments and results in the same cards as Main.
+- Subagent panes show their own queued input and model status, complete commands and paths, and provide message-level copy and retry.
+- Relative transcript links in subagent panes open against the subagent's working directory, including after it parks.
+- BTW and subagent panes show session-local extension widgets; worker-homed panes also run input hooks on their own worker.
+- Switching or previewing BTW topics in ANSI preserves each topic's reading position. New reuses the current blank topic and keeps its draft.
 - Subagents retain their scoped MCP tools when browser settings change.
 - HTML exports from preview binaries embed the matching viewer for offline use.
 - Resuming an idle GPT-6.2 session retains earlier reasoning across superseded tool results ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).

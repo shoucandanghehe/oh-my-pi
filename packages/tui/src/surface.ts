@@ -15,9 +15,20 @@ import type { UiNode } from "./node";
 import { type Accessor, createRoot, type Signal, signal } from "./reactive";
 import type { JSXNode } from "./types";
 
+/**
+ * The ANSI viewport remembers each document's position independently.
+ * If a key's nodes are remounted, the reading point is restored by block order.
+ */
+export interface MainScrollScope {
+	readonly key: string;
+	/** Read the saved position, but do not write it back when leaving. */
+	readonly preview?: boolean;
+}
+
 /** What a program declares for each region. */
 export interface SurfaceTemplate {
 	readonly main?: JSXNode;
+	readonly mainScrollScope?: Accessor<MainScrollScope | undefined>;
 	readonly dock?: JSXNode;
 	readonly layer?: JSXNode;
 }
@@ -50,6 +61,7 @@ export function isSettled(node: UiNode): boolean {
 /** A mounted program UI. */
 export interface Surface {
 	readonly main: Accessor<readonly UiNode[]>;
+	readonly mainScrollScope?: Accessor<MainScrollScope | undefined>;
 	readonly dock: Accessor<readonly UiNode[]>;
 	readonly layer: Accessor<readonly UiNode[]>;
 	/** The node holding keyboard focus (an `editor`, `input`, `list`, `picker`, …), or null. */
@@ -67,6 +79,7 @@ export function createSurface(template: () => SurfaceTemplate): Surface {
 		const focused = signal<UiNode | null>(null);
 		return {
 			main: resolveChildren(regions.main),
+			mainScrollScope: regions.mainScrollScope,
 			dock: resolveChildren(regions.dock),
 			layer: resolveChildren(regions.layer),
 			focused,

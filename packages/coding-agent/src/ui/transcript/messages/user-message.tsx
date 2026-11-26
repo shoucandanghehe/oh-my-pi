@@ -49,6 +49,8 @@ export interface UserMessageModel {
 	readonly reaction?: Reactive<string | undefined>;
 	/** Whether a host handles transcript actions (controls are only shown when one does). */
 	readonly actions?: Reactive<boolean>;
+	/** Restrict transcript controls in a view that owns only some actions. */
+	readonly allowAction?: (act: string) => boolean;
 	/** Whether the terminal may mark this prompt (OSC 133) when it enters scrollback. */
 	readonly promptZones?: Reactive<boolean>;
 	/** The message identity, shared by new views of the same prompt after a transcript rebuild. */
@@ -74,22 +76,30 @@ function UserTools(props: { model: UserMessageModel }): JSXNode {
 	const { model } = props;
 	return (
 		<row key="tools" gap="xs" align="center" role="omp.user.tools">
-			<icon
-				key="copy"
-				name="copy"
-				role="omp.user.tool"
-				title="Copy message"
-				aria="Copy message"
-				actions={{ click: "copy-message" }}
-			/>
-			<icon
-				key="edit"
-				name="edit"
-				role="omp.user.tool"
-				title="Edit & resend: rewind to before this message and put it in the composer"
-				aria="Edit & resend"
-				actions={{ click: "edit-turn" }}
-			/>
+			{() =>
+				model.allowAction?.("copy-message") !== false && (
+					<icon
+						key="copy"
+						name="copy"
+						role="omp.user.tool"
+						title="Copy message"
+						aria="Copy message"
+						actions={{ click: "copy-message" }}
+					/>
+				)
+			}
+			{() =>
+				model.allowAction?.("edit-turn") !== false && (
+					<icon
+						key="edit"
+						name="edit"
+						role="omp.user.tool"
+						title="Edit & resend: rewind to before this message and put it in the composer"
+						aria="Edit & resend"
+						actions={{ click: "edit-turn" }}
+					/>
+				)
+			}
 			{model.timestamp !== undefined && [
 				<text key="dot" text="·" />,
 				<text
@@ -195,11 +205,15 @@ export function UserMessage(props: { model: UserMessageModel }): JSXNode {
 			actions={() =>
 				actions() && model.timestamp !== undefined
 					? {
-							hold: turnHoldEntries("user", {
-								id: "copy-message",
-								label: "Copy message",
-								icon: "copy",
-							}),
+							hold: turnHoldEntries(
+								"user",
+								{
+									id: "copy-message",
+									label: "Copy message",
+									icon: "copy",
+								},
+								model.allowAction,
+							),
 						}
 					: undefined
 			}
@@ -209,7 +223,9 @@ export function UserMessage(props: { model: UserMessageModel }): JSXNode {
 				steered: model.liveSteered === true,
 				reaction: read(model.reaction),
 			})}
-			onAction={act => model.onAction?.(act)}
+			onAction={act => {
+				if (model.allowAction?.(act) !== false) model.onAction?.(act);
+			}}
 		>
 			<Show when={actions}>
 				<UserTools model={model} />

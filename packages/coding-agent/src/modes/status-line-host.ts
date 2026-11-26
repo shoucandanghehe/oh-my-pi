@@ -33,20 +33,24 @@ import { cfgGoalStatusInFooter } from "../goals/settings";
 export type StatusLineHostSession = StatusLineSession &
 	Partial<Pick<AgentSession, "settings" | "modelRegistry" | "sessionId" | "fetchUsageReports">>;
 
+export function readStatusLineSettings(source = settings) {
+	return {
+		preset: cfgStatusLinePreset.get(source),
+		leftSegments: cfgStatusLineLeftSegments.get(source),
+		rightSegments: cfgStatusLineRightSegments.get(source),
+		separator: cfgStatusLineSeparator.get(source),
+		showHookStatus: cfgStatusLineShowHookStatus.get(source),
+		segmentOptions: cfgStatusLineSegmentOptions.get(source),
+		sessionAccent: cfgStatusLineSessionAccent.get(source),
+		transparent: cfgStatusLineTransparent.get(source),
+		compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(source),
+		contextLine: cfgStatusLineContextLine.get(source),
+	};
+}
+
 /** Application policy and runtime services consumed by the portable status renderer. */
 export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
-	getSettings: () => ({
-		preset: cfgStatusLinePreset.get(settings),
-		leftSegments: cfgStatusLineLeftSegments.get(settings),
-		rightSegments: cfgStatusLineRightSegments.get(settings),
-		separator: cfgStatusLineSeparator.get(settings),
-		showHookStatus: cfgStatusLineShowHookStatus.get(settings),
-		segmentOptions: cfgStatusLineSegmentOptions.get(settings),
-		sessionAccent: cfgStatusLineSessionAccent.get(settings),
-		transparent: cfgStatusLineTransparent.get(settings),
-		compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
-		contextLine: cfgStatusLineContextLine.get(settings),
-	}),
+	getSettings: readStatusLineSettings,
 	gitEnabled: () => cfgGitEnabled.get(settings),
 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),
 	// Read per frame: skip the `settings` proxy trap and hit the instance getter directly.

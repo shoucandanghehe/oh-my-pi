@@ -32,7 +32,7 @@ import { type AiuTotals, sessionAiu } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
 import type { CollabStatus, StatusLineModel } from "../types";
-import { statusLineHost } from "../status-line-host";
+import { readStatusLineSettings, statusLineHost } from "../status-line-host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "../view-model/status-line/loop";
 import {
 	type CodexResetFireworksEvent,
@@ -126,6 +126,7 @@ export class SessionStatusLine implements StatusLineModel {
 	/** Wall clock, advanced once a second while a segment shows time. */
 	readonly #clock = signal(Date.now());
 	readonly #saved: Signal<StatusLineSettings>;
+	readonly #workspacePane: boolean;
 	readonly #preview = signal<Partial<StatusLineSettings> | undefined>(undefined);
 	readonly #hooks = signal<ReadonlyMap<string, string>>(new Map());
 	readonly #awaiting = signal(false);
@@ -210,7 +211,7 @@ export class SessionStatusLine implements StatusLineModel {
 		this.#toolRevision();
 		const session = this.#session;
 		const model = session.state.model ?? session.model;
-		this.#syncUsage(model?.provider, model?.id);
+		if (!this.#workspacePane) this.#syncUsage(model?.provider, model?.id);
 		return session.getAnthropicSlowModeLabel();
 	});
 	readonly #speculation = computed(() => {
@@ -265,10 +266,15 @@ export class SessionStatusLine implements StatusLineModel {
 		};
 	});
 
-	constructor(session: AgentViewSession) {
+	constructor(session: AgentViewSession, { workspacePane = false }: { workspacePane?: boolean } = {}) {
 		this.#session = session;
-		this.#saved = signal(statusLineHost.getSettings());
+		this.#workspacePane = workspacePane;
+		this.#saved = signal(this.#readSettings());
 		this.#attach(session);
+	}
+
+	#readSettings(): StatusLineSettings {
+		return this.#workspacePane ? readStatusLineSettings(this.#session.settings) : statusLineHost.getSettings();
 	}
 
 	/** Called with the first PR the active branch resolves to (terminal title). */
@@ -428,13 +434,13 @@ export class SessionStatusLine implements StatusLineModel {
 
 	previewSettings(settings: Partial<StatusLineSettings> | undefined): void {
 		this.#preview.set(settings);
-		if (settings === undefined) this.#saved.set(statusLineHost.getSettings());
+		if (settings === undefined) this.#saved.set(this.#readSettings());
 		this.#syncClock();
 	}
 
 	/** Re-read the saved `statusLine.*` settings (after a settings change). */
 	reloadSettings(): void {
-		this.#saved.set(statusLineHost.getSettings());
+		this.#saved.set(this.#readSettings());
 		this.#syncClock();
 	}
 
@@ -726,7 +732,7 @@ export class SessionStatusLine implements StatusLineModel {
 		if (this.#checkoutHomed) return {};
 		const wantsGit = segments.includes("git") || segments.includes("pr");
 		const wantsPath = segments.includes("path");
-		if (!statusLineHost.gitEnabled() || (!wantsGit && !wantsPath)) return {};
+		if ((!wantsGit && !wantsPath) || !statusLineHost.gitEnabled()) return {};
 		const snapshot = this.#vcs();
 		const cwd = getProjectDir();
 		if (!this.#vcsInFlight && (this.#vcsStale || snapshot?.cwd !== cwd)) {

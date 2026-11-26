@@ -10,11 +10,14 @@
  * read-only.
  */
 import type * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, batch, signal, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../../config/settings";
+import { resolveMarkdownLinkHrefs } from "../../../internal-urls/hyperlink-targets";
+import { extractUriScheme } from "../../../internal-urls";
 import type { AgentHubRemote } from "../../../modes/view-model/overlays/agent-hub";
 import type {
 	AgentTranscriptEntry,
@@ -29,6 +32,7 @@ import {
 	userMessageDisplayText,
 } from "../../../session/transcript/transcript-entry";
 import { splitAssistantMessageToolTimeline } from "../../../session/transcript/transcript-render-helpers";
+import { type LinkTargetHost, refreshAssistantMessageLinkTargets } from "../../../session/transcript/link-targets";
 import { SideToolCalls } from "../../transcript/side-tool-calls";
 import type { ToolCall, ToolCallOptions } from "../../transcript/tool-block";
 import type { LineValue } from "./common";
@@ -55,6 +59,8 @@ export interface ViewerTranscriptActions {
 	prompt(act: string, text: string, timestamp: number): void;
 	/** A reply's control or hold-menu entry (`copy-answer`, `retry-turn`, …). */
 	reply(act: string, message: AssistantMessage, copyText?: string): void;
+	/** A restricted view may offer only copy and retry, without any Main turn operations. */
+	allowAction?(act: string, message?: AssistantMessage): boolean;
 }
 
 /** The progress snapshot behind the stats row. */
@@ -141,6 +147,7 @@ export type ViewerBlock =
 			readonly kind: "assistant";
 			readonly id: string;
 			readonly message: AssistantMessage;
+			readonly actionMessage?: AssistantMessage;
 			readonly contentOffset?: number;
 			readonly usage: TurnUsageSummary | undefined;
 	  }
@@ -168,6 +175,14 @@ interface LocalState {
 	/** Bytes after the last complete line. */
 	readonly pending: string;
 	readonly sentinels: readonly Sentinel[];
+}
+
+interface ViewerLinks {
+	readonly owner: AgentViewSession | string;
+	readonly cwd: string;
+	readonly host: LinkTargetHost;
+	readonly pending: Set<AssistantMessage>;
+	running: boolean;
 }
 
 function readRange(source: AgentTranscriptSource["fs"], file: string, offset: number, length: number): Buffer {
@@ -212,6 +227,9 @@ export class AgentTranscriptViewerModel {
 	readonly rev = signal(0);
 	readonly blocks = signal<readonly ViewerBlock[]>([]);
 	readonly streaming = signal<AssistantMessage | undefined>(undefined);
+	readonly live = signal<AgentViewSession | undefined>(undefined);
+	readonly cwd = signal<string | undefined>(undefined);
+	readonly linkTargets = signal<ReadonlyMap<string, string>>(new Map());
 	/** Tools and thinking expanded (Ctrl+O). */
 	readonly expanded = signal(false);
 	readonly runner = signal<ExtensionRunner | undefined>(undefined);
@@ -239,6 +257,7 @@ export class AgentTranscriptViewerModel {
 	#remoteToken = 0;
 
 	#local: LocalState | undefined;
+	#links: ViewerLinks | undefined;
 	#live:
 		| {
 				session: AgentViewSession;
@@ -328,6 +347,8 @@ export class AgentTranscriptViewerModel {
 			if (this.remoteUnavailable) return "Transcript lives on the host — not available.";
 			return this.hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
+		if (this.live.peek()) return "No messages yet.";
+		if (this.#localUnavailable === "missing") return "This agent’s session file is missing or unreadable.";
 		return this.ref()?.sessionFile ? "No messages yet." : "No session file available yet.";
 	}
 
@@ -364,6 +385,8 @@ export class AgentTranscriptViewerModel {
 		if (this.#live) {
 			batch(() => {
 				this.#live = undefined;
+				this.live.set(undefined);
+				this.#bindLinks(undefined, undefined);
 				this.#local = undefined;
 				this.tools.bind(undefined);
 				this.runner.set(undefined);
@@ -403,6 +426,9 @@ export class AgentTranscriptViewerModel {
 
 	#refreshLive(session: AgentViewSession): void {
 		batch(() => {
+			this.live.set(session);
+			const cwd = session.sessionManager.getCwd();
+			const linksChanged = this.#bindLinks(session, cwd);
 			this.tools.bind(session);
 			this.runner.set(isLocalAgentSession(session) ? session.extensionRunner : undefined);
 			this.settings.set(session.settings);
@@ -410,13 +436,17 @@ export class AgentTranscriptViewerModel {
 			const count = session.messages.length;
 			const streaming = session.isStreaming;
 			const old = this.#live;
-			if (!(old?.session === session && old.leaf === leaf && old.count === count && old.streaming === streaming)) {
+			if (
+				linksChanged ||
+				!(old?.session === session && old.leaf === leaf && old.count === count && old.streaming === streaming)
+			) {
 				const messages = session.buildTranscriptSessionContext({
 					collapseCompactedHistory: true,
 					keepInFlightToolCalls: true,
 				}).messages;
 				const previous = old?.session === session ? old.messages : [];
 				const extendsBranch =
+					!linksChanged &&
 					previous.length > 0 &&
 					previous.length <= messages.length &&
 					previous.every((message, index) => message === messages[index]);
@@ -435,6 +465,10 @@ export class AgentTranscriptViewerModel {
 			}
 			const stream = this.tools.stream(session.agent.state.streamMessage, this.#live?.messages ?? []);
 			this.tools.syncExecution();
+			if (stream && (linksChanged || stream !== this.streaming.peek())) {
+				this.#links?.pending.add(stream);
+				this.#resolveLinks();
+			}
 			this.streaming.set(stream);
 		});
 	}
@@ -442,6 +476,7 @@ export class AgentTranscriptViewerModel {
 	#clearLocal(reason: string): void {
 		if (!this.#local && this.#localUnavailable === reason) return;
 		this.#local = undefined;
+		this.#bindLinks(undefined, undefined);
 		this.#localUnavailable = reason;
 		this.model = undefined;
 		this.#rebuild([]);
@@ -501,7 +536,12 @@ export class AgentTranscriptViewerModel {
 			sentinels: sentinelsOf(data),
 		};
 		this.model = undefined;
-		this.#rebuild(this.#messages(this.deps.transcript.parseEntries(complete)));
+		const entries = this.deps.transcript.parseEntries(complete);
+		const header = entries.find(entry => entry.type === "session");
+		batch(() => {
+			this.#bindLinks(file, header?.cwd);
+			this.#rebuild(this.#messages(entries));
+		});
 	}
 
 	#appendLocal(file: string, stat: fs.Stats, state: LocalState, allowAsync: boolean): void {
@@ -521,7 +561,10 @@ export class AgentTranscriptViewerModel {
 		const { complete, pending } = splitComplete(state.pending + chunk);
 		this.#local = { ...state, size: stat.size, mtimeMs: stat.mtimeMs, pending, sentinels };
 		const previousModel = this.model;
-		const parsed = complete ? this.#messages(this.deps.transcript.parseEntries(complete)) : [];
+		const entries = complete ? this.deps.transcript.parseEntries(complete) : [];
+		const header = entries.find(entry => entry.type === "session");
+		if (header) this.#bindLinks(file, header.cwd);
+		const parsed = this.#messages(entries);
 		if (parsed.length > 0) this.#append(parsed);
 		else if (this.model !== previousModel) this.touch();
 	}
@@ -586,7 +629,7 @@ export class AgentTranscriptViewerModel {
 				if (!this.model && entry.message.role === "assistant") this.model = entry.message.model;
 			} else if (entry.type === "model_change") {
 				this.model = entry.model;
-			} else {
+			} else if (entry.type !== "session") {
 				const message = customMessageEntryMessage(entry);
 				if (message)
 					messages.push({
@@ -651,6 +694,7 @@ export class AgentTranscriptViewerModel {
 					break;
 				}
 				case "assistant": {
+					this.#links?.pending.add(message);
 					const usage = this.#tally.add(message, this.#turnStartedAt);
 					// Independent panes follow the live tool timeline. Keep the Hub's full reply
 					// as the source of its existing copy and turn actions.
@@ -665,7 +709,7 @@ export class AgentTranscriptViewerModel {
 									retryRecovery: message.retryRecovery,
 								}
 							: lead;
-					added.push({ kind: "assistant", id: entry.id, message: shown, usage });
+					added.push({ kind: "assistant", id: entry.id, message: shown, actionMessage: message, usage });
 					for (const part of message.content) {
 						if (part.type !== "toolCall") continue;
 						const call = this.tools.commit(part, message);
@@ -709,7 +753,72 @@ export class AgentTranscriptViewerModel {
 			}
 		}
 		if (added.length > 0) this.blocks.set([...untrack(this.blocks), ...added]);
+		this.#resolveLinks();
 		this.touch();
+	}
+
+	#bindLinks(owner: AgentViewSession | string | undefined, cwd: string | undefined): boolean {
+		if (typeof cwd !== "string" || !path.isAbsolute(cwd)) {
+			cwd = undefined;
+			owner = undefined;
+		}
+		if (this.#links?.owner === owner && this.#links?.cwd === cwd) return false;
+		this.cwd.set(cwd);
+		this.linkTargets.set(new Map());
+		this.#links =
+			owner && cwd
+				? {
+						owner,
+						cwd,
+						host: {
+							viewSession: {},
+							resolveAssistantMessageLinkHrefs: hrefs => {
+								if (typeof owner === "string") {
+									// A persisted header locates files; it does not supply live internal-URL capabilities.
+									return resolveMarkdownLinkHrefs(
+										hrefs.filter(href => {
+											const scheme = extractUriScheme(href);
+											return !scheme || scheme === "file";
+										}),
+										{ cwd },
+									);
+								}
+								const manager = owner.sessionManager;
+								return resolveMarkdownLinkHrefs(hrefs, {
+									cwd,
+									sessionFile: owner.sessionFile,
+									settings: owner.settings,
+									localProtocolOptions: {
+										getArtifactsDir: () => manager.getArtifactsDir(),
+										getSessionId: () => manager.getSessionId(),
+									},
+									skills: owner.skills,
+									rules: owner.ttsrManager?.getRules(),
+								});
+							},
+						},
+						pending: new Set(),
+						running: false,
+					}
+				: undefined;
+		return true;
+	}
+
+	#resolveLinks(): void {
+		const source = this.#links;
+		if (!source || source.running || source.pending.size === 0) return;
+		const messages = [...source.pending];
+		source.pending.clear();
+		source.running = true;
+		void refreshAssistantMessageLinkTargets(source.host, messages)
+			.then(targets => {
+				if (!this.#disposed && this.#links === source) this.linkTargets.set(targets);
+			})
+			.catch(error => logger.debug("transcript viewer: link resolution failed", { error: String(error) }))
+			.finally(() => {
+				source.running = false;
+				if (!this.#disposed && this.#links === source) this.#resolveLinks();
+			});
 	}
 
 	// ─── Input ────────────────────────────────────────────────────────────

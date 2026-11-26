@@ -13,7 +13,13 @@ interface AgentPane {
 
 interface NativeAgentPaneOptions {
 	workspace: Pick<NativeWorkspace, "open" | "get" | "isFocused" | "close"> | AnsiWorkspace;
-	create(id: string, close: () => void, rows: () => number, writeRaw?: (data: string) => void): AgentWorkspaceSurface;
+	create(
+		id: string,
+		close: () => void,
+		rows: () => number,
+		columns: () => number,
+		writeRaw?: (data: string) => void,
+	): AgentWorkspaceSurface;
 	isRunning(id: string): boolean;
 	error(error: unknown): void;
 	clock?: NativeClock;
@@ -101,12 +107,13 @@ export class NativeAgentPanes {
 				await workspace.open(
 					key,
 					id,
-					close => {
+					(close, _supports, driver) => {
 						const mounted = this.options.create(
 							id,
 							close,
-							() => workspace.get(key)?.driver.rows ?? 24,
-							data => workspace.get(key)?.driver.writeRaw(data),
+							() => driver.rows,
+							() => driver.columns,
+							data => driver.writeRaw(data),
 						);
 						entry.protect = mounted.protectedFromAutoClose;
 						return mounted;
@@ -117,8 +124,8 @@ export class NativeAgentPanes {
 			} else {
 				const opened = workspace.open(
 					key,
-					(close, rows) => {
-						const mounted = this.options.create(id, close, rows);
+					(close, rows, columns) => {
+						const mounted = this.options.create(id, close, rows, columns);
 						entry.protect = mounted.protectedFromAutoClose;
 						const petrification = manual ? undefined : signal<number | undefined>(undefined);
 						entry.petrification = petrification;

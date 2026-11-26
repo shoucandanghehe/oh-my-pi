@@ -50,6 +50,12 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import {
+	EMPTY_EXTENSION_PRESENTATION,
+	type ExtensionPresentation,
+	type ExtensionPresentationSource,
+	type ExtensionWidget,
+} from "./presentation";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
 import { sanitizeDisplayLine } from "../inventory/display-text";
 import type { TodoPhase } from "../../tools/details/todo";
@@ -623,8 +629,43 @@ export interface ExtensionHostUIContext extends ExtensionUIContext {
 	setOwnedWidget?(owner: string, key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
 }
 
-export class ExtensionRunner {
-	#uiContext: ExtensionHostUIContext;
+export class ExtensionRunner implements ExtensionPresentationSource {
+	#presentation = EMPTY_EXTENSION_PRESENTATION;
+	readonly #presentationListeners = new Set<() => void>();
+	/** A local presentation surface, not an interactive UI binding. */
+	readonly #passiveUI = Object.assign(Object.create(noOpUIContext) as ExtensionUIContext, {
+		setWidget: (key, content, options) => {
+			const { widgets } = this.#presentation;
+			const index = widgets.findIndex(widget => widget.key === key);
+			let next: readonly ExtensionWidget[];
+			if (content === undefined) {
+				if (index === -1) return;
+				next = widgets.toSpliced(index, 1);
+			} else {
+				const placement = options?.placement ?? "aboveEditor";
+				const widget: ExtensionWidget = {
+					key,
+					placement,
+					content: typeof content === "function" ? content : [...content],
+				};
+				next =
+					index === -1
+						? [...widgets, widget]
+						: widgets[index]?.placement === placement
+							? widgets.toSpliced(index, 1, widget)
+							: [...widgets.toSpliced(index, 1), widget];
+			}
+			this.#publishPresentation({ ...this.#presentation, widgets: next });
+		},
+		setStatus: (key, text) => {
+			if (this.#presentation.statuses.get(key) === text) return;
+			const statuses = new Map(this.#presentation.statuses);
+			if (text === undefined) statuses.delete(key);
+			else statuses.set(key, text);
+			this.#publishPresentation({ ...this.#presentation, statuses });
+		},
+	} satisfies Pick<ExtensionUIContext, "setWidget" | "setStatus">);
+	#uiContext: ExtensionHostUIContext = this.#passiveUI;
 	#ownedUi = new Map<string, ExtensionUIContext>();
 	#interactiveUI = false;
 	#mode: ExtensionMode = "print";
@@ -929,7 +970,6 @@ export class ExtensionRunner {
 		/** Builds `ctx.annotations`; supplied by the host that wires the bundled `/annotate` command. */
 		createAnnotations?: ExtensionAnnotationsFactory,
 	) {
-		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#createAnnotations = createAnnotations;
 		this.#asyncJobs = asyncJobs;
@@ -993,8 +1033,6 @@ export class ExtensionRunner {
 		options?: {
 			installFileFallbacks?: boolean;
 			registerProviders?: boolean;
-			/** Publish local status without enabling interactive or Main-owned UI. */
-			setStatus?: ExtensionUIContext["setStatus"];
 		},
 	): void {
 		// Copy actions into the shared runtime (all extension APIs reference this)
@@ -1055,21 +1093,10 @@ export class ExtensionRunner {
 			this.#compactFn = commandContextActions.compact;
 		}
 
-		const setStatus = options?.setStatus;
-		this.#interactiveUI = uiContext !== undefined && uiContext !== noOpUIContext;
+		const host = uiContext === this.#passiveUI ? undefined : uiContext;
+		this.#interactiveUI = host !== undefined;
 		this.#uiContext =
-			uiContext && this.#trackUserWait
-				? trackUserWaits(uiContext, this.#trackUserWait)
-				: (uiContext ??
-					(setStatus
-						? {
-								...noOpUIContext,
-								get theme() {
-									return noOpUIContext.theme;
-								},
-								setStatus,
-							}
-						: noOpUIContext));
+			host && this.#trackUserWait ? trackUserWaits(host, this.#trackUserWait) : (host ?? this.#passiveUI);
 		this.#ownedUi.clear();
 		this.#mode = mode;
 		this.#initialized = true;
@@ -1249,6 +1276,22 @@ export class ExtensionRunner {
 		});
 		cache?.set(owner, bound);
 		return bound;
+	}
+
+	getPresentation(): ExtensionPresentation {
+		return this.#presentation;
+	}
+
+	subscribePresentation(listener: () => void): () => void {
+		this.#presentationListeners.add(listener);
+		return () => {
+			this.#presentationListeners.delete(listener);
+		};
+	}
+
+	#publishPresentation(presentation: ExtensionPresentation): void {
+		this.#presentation = presentation;
+		for (const listener of this.#presentationListeners) listener();
 	}
 
 	hasUI(): boolean {

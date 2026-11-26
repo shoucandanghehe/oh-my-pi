@@ -46,6 +46,7 @@
 - Added an opt-in ANSI app viewport with split panes, independent focus and scrolling, and drag-to-dock controls.
 - ANSI transcripts show visible content first on open and resize, with a draggable scrollbar and a return-to-bottom control.
 - ANSI pane docking previews the moved content, and automatic placement can reflow panes into a grid while keeping their drafts and focus.
+- ANSI workspace surfaces can retain separate reading positions for different transcripts in the same pane.
 
 ### Fixed
 

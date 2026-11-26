@@ -42,6 +42,7 @@ import {
 import { isClipboardTerminalLocal, readClipboardContent, readImageFromClipboard } from "../../../utils/clipboard";
 import { Composer, type ComposerSlots } from "../../composer/composer";
 import { queuedLine } from "../../dock/queue";
+import { PaneExtensionWidgets } from "../../dock/widgets";
 import { Overlays } from "../../shell/overlays";
 import { SideToolCalls } from "../../transcript/side-tool-calls";
 import { UserMessage } from "../../transcript/messages/user-message";
@@ -73,12 +74,14 @@ export type BtwQueueEdit =
 interface BtwPaneOptions {
 	readonly cwd: string;
 	readonly rows: () => number;
+	readonly columns: () => number;
 	/** Presence distinguishes a Tern workspace surface from an ANSI pane. */
 	readonly nativeSupports?: (kind: string) => boolean;
 	readonly keybindings: KeybindingsManager;
 	readonly revision: () => number;
 	threads(): readonly BtwThread[];
 	selected(): BtwThread | undefined;
+	loadPresentation(key: string): void;
 	select(key: string): void;
 	setDraft(key: string, draft: BtwPaneDraft): void;
 	persistDraft(key: string): void;
@@ -168,6 +171,14 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 					newThread: () => this.#action("new"),
 				});
 			}
+			effect(() => {
+				const key = this.#selected();
+				if (key !== undefined) untrack(() => options.loadPresentation(key));
+			});
+			const presentation = () => this.#displayed()?.conversation.extensionRunner;
+			const size = () => ({ rows: options.rows(), columns: options.columns() });
+			const above = <PaneExtensionWidgets runner={presentation} placement="aboveEditor" size={size} />;
+			const below = <PaneExtensionWidgets runner={presentation} placement="belowEditor" size={size} />;
 			return {
 				main: () => {
 					const approval = this.#approval();
@@ -182,9 +193,16 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						/>
 					);
 				},
+				mainScrollScope: options.nativeSupports
+					? undefined
+					: () => {
+							if (this.#approval()) return undefined;
+							const key = this.#displayed()?.key;
+							if (key !== undefined) return { key, preview: this.ansiRail?.preview() === key };
+						},
 				dock: () => {
 					const approval = this.#approval();
-					return approval ? this.#confirmation(approval) : [this.#chrome, composer.node];
+					return approval ? this.#confirmation(approval) : [this.#chrome, above, composer.node, below];
 				},
 				layer: () => this.#overlays.nodes(),
 			};
@@ -369,10 +387,15 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		if (this.#disposed) return;
 		const thread = this.#thread();
 		if (thread?.key !== this.#draftKey) {
+			const previous = this.#draftKey;
+			const draft = this.#draft();
 			this.#menu.set(undefined);
-			this.saveDraft();
 			this.#loadDraft();
 			this.ansiRail?.selectionChanged(thread?.key);
+			if (previous !== undefined) {
+				this.options.setDraft(previous, draft);
+				this.options.persistDraft(previous);
+			}
 		}
 	}
 

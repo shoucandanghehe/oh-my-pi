@@ -64,6 +64,7 @@ export interface BtwWorkspaceAdapter {
 		create: (
 			close: () => void,
 			rows: () => number,
+			columns: () => number,
 			nativeSupports?: (kind: string) => boolean,
 		) => NativeWorkspaceSurface,
 	): Promise<boolean>;
@@ -877,7 +878,7 @@ export class BtwController {
 			const { manager } = workspace;
 			const previous = manager.activeKey;
 			this.#dismissQuick(true);
-			const key = this.#createThread(workspace, input, title);
+			const key = this.#createThread(workspace, input, { title });
 			if (!key) return false;
 			if (this.#pane && previous) manager.select(previous);
 			const quick = { workspace, key, panel: new BtwPanelState(title) };
@@ -946,15 +947,29 @@ export class BtwController {
 		const { manager } = workspace;
 		try {
 			if (key && !manager.select(key)) return false;
-			const opened = await this.workspace.open((close, rows, nativeSupports) => {
+			const opened = await this.workspace.open((close, rows, columns, nativeSupports) => {
 				const pane = new BtwConversationPane({
 					cwd: workspace.owner.sessionManager.getCwd(),
 					rows,
+					columns,
 					nativeSupports,
 					keybindings: this.ctx.keybindings,
 					revision: this.#durableRevision,
 					threads: () => manager.children,
 					selected: () => (manager.activeKey === undefined ? undefined : manager.thread(manager.activeKey)),
+					loadPresentation: key => {
+						const thread = manager.thread(key);
+						if (!thread || thread.conversation.extensionRunner) return;
+						void manager.session(key).then(
+							() => {
+								if (this.#owns(workspace)) this.#refreshDurable();
+							},
+							error => {
+								if (this.#owns(workspace) && manager.activeKey === key)
+									this.ctx.showError(sanitizeErrorLine(error));
+							},
+						);
+					},
 					select: key => {
 						manager.select(key);
 						manager.markRead(key);
@@ -962,7 +977,7 @@ export class BtwController {
 					setDraft: (key, draft) => manager.setDraft(key, draft.text, draft.images, draft.imageLinks),
 					persistDraft: key => manager.persistDraft(key),
 					submit: (key, input, mode) => this.#sendThreadInput(workspace, key, input, mode),
-					newThread: () => void this.#createThread(workspace, ""),
+					newThread: () => void this.#createThread(workspace, "", { reuseBlank: true }),
 					cancel: key => this.#stopThread(workspace, key),
 					dequeue: key => this.#dequeueThread(workspace, key),
 					editQueued: (key, message) => this.#editThreadQueue(workspace, key, message),
@@ -1004,15 +1019,24 @@ export class BtwController {
 		}
 	}
 
-	#createThread(workspace: DurableWorkspace, input: string, title?: string): string | undefined {
+	#createThread(
+		workspace: DurableWorkspace,
+		input: string,
+		options?: { title?: string; reuseBlank?: boolean },
+	): string | undefined {
 		if (!this.#owns(workspace) || this.#branchInFlight || this.#transitionCount > 0) return undefined;
+		if (options?.reuseBlank) {
+			const { manager } = workspace;
+			const active = manager.activeKey === undefined ? undefined : manager.thread(manager.activeKey);
+			if (active?.phase === "ready" && active.request === undefined && active.turns.length === 0) return active.key;
+		}
 		const model = workspace.owner.model;
 		const leafId = workspace.owner.sessionManager.getLeafId();
 		if (!model || !leafId) {
 			this.ctx.showError(!model ? "No active model available for BTW." : "Cannot start BTW before Main has a leaf");
 			return undefined;
 		}
-		return workspace.manager.createChild(input, leafId, { provider: model.provider, id: model.id }, title);
+		return workspace.manager.createChild(input, leafId, { provider: model.provider, id: model.id }, options?.title);
 	}
 
 	async #deleteThread(workspace: DurableWorkspace, key: string): Promise<void> {
@@ -1041,13 +1065,13 @@ export class BtwController {
 		let key = source;
 		let question = text;
 		if (command?.name === "new") {
+			question = command.args;
+			key = this.#createThread(workspace, question, { reuseBlank: !question && !input.images.length });
+			if (!key) return false;
 			if (source) {
 				manager.setDraft(source, "");
 				manager.persistDraft(source);
 			}
-			question = command.args;
-			key = this.#createThread(workspace, question);
-			if (!key) return false;
 			if (!question && !input.images.length) return true;
 		} else if (command) {
 			switch (command.name) {

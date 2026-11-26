@@ -162,6 +162,7 @@ export function SideReply(props: {
 	readonly live?: boolean;
 	readonly hideThinking?: Accessor<boolean>;
 	readonly proseOnlyThinking?: boolean;
+	readonly linkTargets?: Accessor<ReadonlyMap<string, string>>;
 }): JSXNode {
 	const { message, live, display, hideThinking, proseOnlyThinking } = props;
 	const timeline = computed(() => {
@@ -189,6 +190,7 @@ export function SideReply(props: {
 				finalized: () => !isTransient(),
 				transient: isTransient,
 				hideThinking,
+				linkTargets: props.linkTargets,
 				proseOnlyThinking,
 				reacts: false,
 			}}

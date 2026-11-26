@@ -46,7 +46,8 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import type { ExtensionRunner } from "../extensibility/extensions";
-import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { ExtensionPresentation, ExtensionPresentationSource } from "../extensibility/extensions/presentation";
+import type { CompactOptions, ContextUsage, InputEventResult } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -115,6 +116,7 @@ import {
 	restoreStreamedToolArgs,
 	type SessionAbortOptions,
 	type SessionEntriesDelta,
+	type SessionExtensionPresentation,
 	type SessionHostProtocol,
 	type SessionMessagesDelta,
 	type SessionMirrorState,
@@ -193,6 +195,7 @@ function emptyViewState(): SessionViewState {
 		tools: [],
 		toolNames: [],
 		builtInTools: [],
+		extensionPresentation: { widgets: [], statuses: [] },
 		pendingToolResults: [],
 		runToolCallIds: [],
 		systemPrompt: [],
@@ -298,6 +301,23 @@ export class RemoteAgentSession implements AgentViewSession {
 	readonly #ruleSource: AgentViewRuleSource;
 	readonly #listeners = new Set<AgentSessionEventListener>();
 	readonly #runStateListeners = new Set<(state: SessionRunState) => void>();
+	readonly #presentationListeners = new Set<() => void>();
+	#presentation: ExtensionPresentation = {
+		widgets: [],
+		statuses: new Map(),
+	};
+	readonly presentation: ExtensionPresentationSource = {
+		getPresentation: () => this.#presentation,
+		subscribePresentation: listener => {
+			const first = !this.#hasViewObservers();
+			this.#presentationListeners.add(listener);
+			if (first) this.#watch(true);
+			return () => {
+				if (!this.#presentationListeners.delete(listener)) return;
+				if (!this.#hasViewObservers()) this.#watch(false);
+			};
+		},
+	};
 	#closed: string | undefined;
 
 	constructor(init: RemoteAgentSessionInit) {
@@ -360,12 +380,12 @@ export class RemoteAgentSession implements AgentViewSession {
 			getTree: () => this.#entryIndex.tree(this.#entries),
 			appendLabelChange: (id, label) => this.#command("appendLabelChange", id, label),
 			subscribeToEntries: observer => {
-				const first = this.#entryObservers.size === 0 && this.#listeners.size === 0;
+				const first = !this.#hasViewObservers();
 				this.#entryObservers.add(observer);
 				if (first) this.#watch(true);
 				return () => {
 					if (!this.#entryObservers.delete(observer)) return;
-					if (this.#entryObservers.size === 0 && this.#listeners.size === 0) this.#watch(false);
+					if (!this.#hasViewObservers()) this.#watch(false);
 				};
 			},
 			getConversationTip: () => conversationTip(this.#entries, this.#entryIndex.branchView()),
@@ -552,6 +572,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	prewarmModelConnection(): void {
 		void this.#command("prewarmModelConnection").catch(() => {});
+	}
+
+	emitInteractiveInput(text: string, images?: ImageContent[]): Promise<InputEventResult | undefined> {
+		return this.#command("emitInteractiveInput", text, images);
 	}
 
 	getSessionStats(): SessionStats {
@@ -880,13 +904,17 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#notify("refreshIdleMaintenance");
 	}
 
+	#hasViewObservers(): boolean {
+		return this.#listeners.size > 0 || this.#entryObservers.size > 0 || this.#presentationListeners.size > 0;
+	}
+
 	subscribe(listener: AgentSessionEventListener): () => void {
-		const first = this.#listeners.size === 0 && this.#entryObservers.size === 0;
+		const first = !this.#hasViewObservers();
 		this.#listeners.add(listener);
 		if (first) this.#watch(true);
 		return () => {
 			if (!this.#listeners.delete(listener)) return;
-			if (this.#listeners.size === 0 && this.#entryObservers.size === 0) this.#watch(false);
+			if (!this.#hasViewObservers()) this.#watch(false);
 		};
 	}
 
@@ -974,6 +1002,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#entryIndex.setLeaf(state.leafId);
 		this.#syncViewDerived(state);
 		this.#reseedTokenRate();
+		this.#applyExtensionPresentation(state.extensionPresentation);
 	}
 
 	/** Bridge only: merge a view-state patch from the publisher. */
@@ -983,6 +1012,12 @@ export class RemoteAgentSession implements AgentViewSession {
 		if (patch.restorableQueue) this.#pruneSettled(patch.restorableQueue);
 		if (patch.leafId !== undefined) this.#entryIndex.setLeaf(patch.leafId);
 		this.#syncViewDerived(patch);
+		if (patch.extensionPresentation) this.#applyExtensionPresentation(patch.extensionPresentation);
+	}
+
+	#applyExtensionPresentation(presentation: SessionExtensionPresentation): void {
+		this.#presentation = { widgets: presentation.widgets, statuses: new Map(presentation.statuses) };
+		for (const listener of this.#presentationListeners) listener();
 	}
 
 	/** Bridge only: apply an entry-list change; locally appended entries give way to the worker's. */
@@ -1067,6 +1102,8 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#listeners.clear();
 		this.#runStateListeners.clear();
 		this.#entryObservers.clear();
+		this.#applyExtensionPresentation({ widgets: [], statuses: [] });
+		this.#presentationListeners.clear();
 	}
 
 	/** Keep the event-derived mirror (stream message, running tool updates, tok/s meter) current. */

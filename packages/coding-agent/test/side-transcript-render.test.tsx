@@ -35,7 +35,7 @@ function sideSession(label: string) {
 		get isStreaming() {
 			return state.streamMessage !== null || state.pendingToolCalls.size > 0;
 		},
-		sessionManager: { getLeafId: () => String(saved.length) },
+		sessionManager: { getLeafId: () => String(saved.length), getCwd: () => process.cwd() },
 		settings: Settings.isolated({ "display.smoothStreaming": false }),
 		extensionRunner: {
 			getMessageRenderer: (customType: string) =>
