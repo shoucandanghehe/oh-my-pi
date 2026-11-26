@@ -1,6 +1,7 @@
 import type { Settings } from "../config/settings";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
@@ -49,7 +50,6 @@ import {
 	type HookMessage,
 	normalizeCustomMessagePayload,
 	type PythonExecutionMessage,
-	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
@@ -65,6 +65,7 @@ import {
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
+	type ContextRevisionValue,
 	type CredentialPinEntry,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
@@ -80,8 +81,11 @@ import {
 	type ModelUsageEntry,
 	type ModelUsageRecord,
 	lastSelfSelectedLeafId,
+	markRehydratedSessionEntries,
 	type NewSessionOptions,
 	parseSessionOrigin,
+	rawSessionEntry,
+	replayContextRevisions,
 	type ResetBoundaryEntry,
 	type ServiceTierChangeEntry,
 	sessionEntryLeafId,
@@ -154,8 +158,6 @@ import { recordSessionRecap, recordSessionTitle } from "./session-index";
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
-/** `model_usage` purpose carrying the billed usage of an assistant turn removed by `discardEntryDurably`. */
-const DISCARDED_TURN_USAGE_PURPOSE = "discarded-turn";
 /**
  * Read-back-and-retry passes one full rewrite makes after meeting another
  * writer's entries. Each pass re-reads the file, so only a writer that appends
@@ -457,6 +459,9 @@ function entryUsage(entry: SessionEntry): Usage | undefined {
 function normalizeLoadedUsage(entries: SessionEntry[]): number {
 	let repaired = 0;
 	for (const entry of entries) {
+		if (entry.type === "context_revision" && Array.isArray(entry.revisions)) {
+			repaired += normalizeLoadedUsage(entry.revisions.filter(revision => revision?.type === "message"));
+		}
 		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
 			repaired++;
 		}
@@ -628,7 +633,7 @@ export function conversationTip(
 	branch: readonly SessionEntry[],
 ): SessionEntry | undefined {
 	const branchTip = branch.findLast(movesConversation);
-	return branchTip && branchTip === entries.findLast(movesConversation) ? branchTip : undefined;
+	return branchTip && branchTip.id === entries.findLast(movesConversation)?.id ? branchTip : undefined;
 }
 
 /**
@@ -695,7 +700,8 @@ export class SessionEntryIndex {
 			cache.generation === this.#generation - 1 &&
 			cache.leaf === previousLeaf &&
 			entry.parentId === previousLeaf &&
-			entry.parentId !== null
+			entry.parentId !== null &&
+			entry.type !== "context_revision"
 		) {
 			cache.branch.push(entry);
 			cache.leaf = entry.id;
@@ -880,7 +886,7 @@ export class SessionEntryIndex {
 			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
 		}
 		branch.reverse();
-		return branch;
+		return replayContextRevisions(branch);
 	}
 
 	tree(entries: readonly SessionEntry[]): SessionTreeNode[] {
@@ -1391,6 +1397,7 @@ export class SessionManager {
 	 * session's, and the retried rewrite republishes them with the rest.
 	 */
 	#adoptForeignEntries(foreign: readonly SessionEntry[], diskSize: number): void {
+		markRehydratedSessionEntries(foreign);
 		const leaf = this.#index.leafId();
 		let adopted = 0;
 		for (const entry of foreign) {
@@ -2663,7 +2670,7 @@ export class SessionManager {
 		this.#artifactManager = null;
 		this.#artifactManagerLocalRoot = null;
 
-		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		markRehydratedSessionEntries(this.#entries);
 	}
 
 	/**
@@ -3732,10 +3739,8 @@ export class SessionManager {
 	}
 
 	/**
-	 * The live header and entries, for collab replication. Nothing is copied:
-	 * the host mutates entries in place on rewrite paths, so callers must not
-	 * mutate what this returns and must serialize it synchronously, before any
-	 * such rewrite can run.
+	 * The live header and raw journal, for collab replication. Callers must not
+	 * mutate the records and must serialize synchronously to capture this snapshot.
 	 */
 	snapshotForReplication(): { header: SessionHeader; entries: readonly SessionEntry[] } {
 		return { header: this.#header, entries: this.#entries };
@@ -3955,10 +3960,51 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/**
-	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
-	 * outputs). Use sparingly.
-	 */
+	/** Commit context replacements as a branch-local journal entry, never as edits to prior records. */
+	async appendContextRevision(
+		revisions: readonly ContextRevisionValue[],
+		source = { sessionId: this.getSessionId(), leafId: this.getLeafId() },
+	): Promise<void> {
+		if (revisions.length === 0) return;
+		const replacements = structuredClone(revisions);
+		await this.appendEntriesAtomically(() => {
+			const path = this.getBranch();
+			const sourceIndex = source.leafId === null ? -1 : path.findIndex(entry => entry.id === source.leafId);
+			// New messages may extend a snapshot while artifacts are written, but
+			// rewinds and context changes must not reapply its obsolete view.
+			if (
+				this.getSessionId() !== source.sessionId ||
+				(source.leafId !== null && sourceIndex < 0) ||
+				path
+					.slice(sourceIndex + 1)
+					.some(
+						entry =>
+							entry.type === "context_revision" ||
+							entry.type === "compaction" ||
+							entry.type === "branch_summary" ||
+							entry.type === "reset_boundary",
+					)
+			) {
+				throw new Error("Active branch changed before context revision commit");
+			}
+			const branch = new Map(path.map(entry => [entry.id, entry]));
+			for (const revision of replacements) {
+				const target = branch.get(revision.id);
+				if (!target || target.type !== revision.type) {
+					throw new Error(`Context revision target ${revision.id} is not on the active branch`);
+				}
+			}
+			const changed = replacements.filter(revision => !isDeepStrictEqual(branch.get(revision.id), revision));
+			if (changed.length === 0) return;
+			this.#recordEntry({
+				type: "context_revision",
+				...this.#freshEntryFields(),
+				revisions: changed,
+			});
+		});
+	}
+
+	/** Persist structural/header updates; conversation content changes must use appendContextRevision. */
 	async rewriteEntries(): Promise<void> {
 		this.#bodyRevision++;
 		if (!this.#persist || !this.#sessionFile) return;
@@ -4108,6 +4154,7 @@ export class SessionManager {
 		return undefined;
 	}
 
+	/** Raw journal record. Callers must not mutate it; context versions are read through getBranch. */
 	getEntry(id: string): SessionEntry | undefined {
 		return this.#index.get(id);
 	}
@@ -4186,21 +4233,6 @@ export class SessionManager {
 		return lazyImageDataSync(this.#blobs, data);
 	}
 
-	/** Strip stale OpenAI Responses replay metadata from loaded assistant entries. */
-	sanitizeLoadedOpenAIResponsesReplayMetadata(): boolean {
-		let changed = false;
-		for (const entry of this.#entries) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const sanitized = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
-			if (sanitized === entry.message) continue;
-
-			entry.message = sanitized;
-			changed = true;
-		}
-		if (changed) this.#bodyRevision++;
-		return changed;
-	}
-
 	getHeader(): SessionHeader | null {
 		return this.#header;
 	}
@@ -4240,7 +4272,7 @@ export class SessionManager {
 		this.#taskSiblingCandidate = undefined;
 	}
 
-	/** All session entries (excludes header). Returns a shallow copy. */
+	/** Raw journal records, excluding the header. The array is copied; callers must not mutate its records. */
 	getEntries(): SessionEntry[] {
 		return [...this.#entries];
 	}
@@ -4274,59 +4306,19 @@ export class SessionManager {
 		this.#setLeaf(null);
 	}
 
-	/**
-	 * Durably move the active branch past a discarded entry.
-	 *
-	 * The loader reconstructs the active branch from the last physical journal
-	 * entry, so changing the in-memory leaf alone is lost on reload. Known
-	 * metadata children are chained onto the discarded entry's parent before the
-	 * entry is removed. If any child may carry content, the subtree is preserved
-	 * off-branch instead. Both paths append a metadata-only branch marker and
-	 * rewrite the journal, making the selected path durable.
-	 *
-	 * A removed assistant turn was still billed, so its usage is re-journaled as
-	 * an off-branch `model_usage` entry; session totals and `omp stats` keep
-	 * counting it. A subtree preserved off-branch keeps its own usage.
-	 */
+	/** Keep a failed turn as evidence off-branch and durably select its parent. */
 	async discardEntryDurably(entryId: string): Promise<void> {
 		const entry = this.#index.get(entryId);
 		if (!entry) return;
-		const children = this.#index.childrenOf(entryId);
-		const canReparentChildren = children.every(child => child.type === "service_tier_change");
-		let leafId = entry.parentId;
-		if (canReparentChildren) {
-			for (const child of children) {
-				child.parentId = leafId;
-				leafId = child.id;
+		await this.appendEntriesAtomically(() => {
+			this.branchWithSummary(entry.parentId, "", {
+				kind: DISCARDED_ENTRY_BRANCH_MARKER,
+				discardedEntryId: entryId,
+			});
+			for (const child of this.#index.childrenOf(entryId)) {
+				if (child.type === "service_tier_change") this.appendServiceTierChange(child.serviceTier);
 			}
-			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
-			this.#index.rebuild(this.#entries);
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				const { api, provider, model, usage, stopReason, errorMessage } = entry.message;
-				// Off-branch like late usage: totals count every entry, and the kept
-				// chain stays made of entries collab guests replicate.
-				this.#recordEntry({
-					type: "model_usage",
-					id: generateId(this.#index),
-					parentId: leafId,
-					timestamp: entry.timestamp,
-					runtime: currentRuntimeIdentity(),
-					activeLeafId: leafId,
-					purpose: DISCARDED_TURN_USAGE_PURPOSE,
-					api,
-					provider,
-					model,
-					usage,
-					stopReason,
-					...(errorMessage === undefined ? {} : { errorMessage }),
-				});
-			}
-		}
-		this.branchWithSummary(leafId, "", {
-			kind: DISCARDED_ENTRY_BRANCH_MARKER,
-			discardedEntryId: entryId,
 		});
-		await this.rewriteEntries();
 	}
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
@@ -4357,7 +4349,7 @@ export class SessionManager {
 	 */
 	createBranchedSession(leafId: string, options?: { copyArtifacts?: boolean }): string | undefined {
 		const sourceSessionFile = this.#sessionFile;
-		const branchPath = this.getBranch(leafId);
+		const branchPath = this.#index.pathTo(leafId).map(rawSessionEntry);
 		if (branchPath.length === 0) throw new Error(`Entry ${leafId} not found`);
 
 		// Drop label entries from the path; recreate them fresh from the resolved map.
@@ -4366,7 +4358,12 @@ export class SessionManager {
 		const entriesToKeep: SessionEntry[] = [];
 		for (const entry of branchPath) {
 			if (entry.type === "label") continue;
-			entriesToKeep.push(entry.activeLeafId === undefined ? entry : { ...entry, activeLeafId: undefined });
+			const parentId = entriesToKeep.at(-1)?.id ?? null;
+			entriesToKeep.push(
+				entry.parentId === parentId && entry.activeLeafId === undefined
+					? entry
+					: { ...entry, parentId, activeLeafId: undefined },
+			);
 		}
 		const keptIds = new Set(entriesToKeep.map(entry => entry.id));
 		const labelsToCarry: Array<{ targetId: string; label: string }> = [];
@@ -4559,7 +4556,7 @@ export class SessionManager {
 		manager.#hasTitleSlot = true;
 		manager.#entries = history;
 		manager.#index.rebuild(history);
-		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		markRehydratedSessionEntries(history);
 		if (options?.repairInterruptedTail) {
 			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
 			manager.#index.rebuild(history);
@@ -4585,6 +4582,7 @@ export class SessionManager {
 	 */
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
 		for (const entry of history) {
+			if (entry.type === "context_revision") SessionManager.#resetInheritedUsageCost(entry.revisions);
 			resetUsageCost(entryUsage(entry));
 			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
 				resetTaskResultBilling(entry.message.details);

@@ -5,6 +5,9 @@
 ### Added
 
 - Added a `gitlab` tool renderer for shared sessions and HTML exports.
+### Changed
+
+- Shared sessions follow the host's branch-local context revisions without applying them to unrelated branches.
 
 ## [19.1.0] - 2026-11-21
 

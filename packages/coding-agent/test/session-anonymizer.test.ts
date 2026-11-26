@@ -181,6 +181,27 @@ describe("SessionAnonymizer", () => {
 		expect(at(toolResult, "message", "details")).toEqual({ matchCount: 1, searchPath: cwd });
 	});
 
+	test("redacts revision payloads while keeping their branch and target IDs joinable", () => {
+		const anonymizer = new SessionAnonymizer();
+		const entry = {
+			type: "message",
+			id: "private-agent-entry",
+			parentId: null,
+			message: { role: "user", content: "hunter2", timestamp: 1 },
+		};
+		const original = anonymizer.entry(entry);
+		const revised = anonymizer.entry({
+			type: "context_revision",
+			id: "private-revision",
+			parentId: entry.id,
+			revisions: [{ ...entry, message: { ...entry.message, content: "launch codes" } }],
+		});
+		expect(revised).toMatchObject({ type: "context_revision", parentId: at(original, "id") });
+		expect(at(revised, "revisions", 0, "id")).toBe(at(original, "id"));
+		expect(at(revised, "revisions", 0, "message", "content")).toMatch(/^\[redacted #\d+:/);
+		expect(JSON.stringify(revised)).not.toContain("launch codes");
+	});
+
 	test("keeps a retry fallback's models and trigger but redacts its reason like a provider error", () => {
 		const entry = new SessionAnonymizer().entry({
 			type: "model_change",

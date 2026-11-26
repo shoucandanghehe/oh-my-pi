@@ -119,6 +119,7 @@
 - URL reads keep cookies across redirects, follow meta refresh, and fall back to the headless browser when a site blocks plain fetch.
 - URL reads use the native reader for X, YouTube, docs.rs, Discourse, and Mastodon; raw reads still skip site-specific rendering.
 - Debugger attach detects the target executable natively, and Windows eval probes no longer need `taskkill.exe` for cleanup.
+- Pruning, `/shake`, and retry recovery preserve the original session history; resume and forks use the revised context on their selected branch.
 
 ### Fixed
 

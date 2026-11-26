@@ -1565,6 +1565,7 @@ export class SelectorController {
 			}
 			const treeRewind = turn ? undefined : this.#treeRewindBoundary(entryId, realLeafId);
 			const branch = this.ctx.sessionManager.getBranch();
+			const contextRevision = branch.findLast(entry => entry.type === "context_revision")?.id;
 			const at = branch.findIndex(e => e.id === entryId);
 			const dropped =
 				at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
@@ -1584,6 +1585,8 @@ export class SelectorController {
 			const fastRewind =
 				treeRewind !== undefined &&
 				this.ctx.sessionManager.getLeafId() === treeRewind.expectedLeafId &&
+				contextRevision ===
+					this.ctx.sessionManager.getBranch().findLast(entry => entry.type === "context_revision")?.id &&
 				this.ctx.truncateTranscriptFromMessage(treeRewind.message);
 			if (turn) {
 				await this.#rebuildEditedTranscript();
@@ -1794,6 +1797,9 @@ export class SelectorController {
 					// the post-navigation transcript is a strict prefix of the rendered
 					// one and the tail can be dropped in place.
 					const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
+					const contextRevision = this.ctx.sessionManager
+						.getBranch()
+						.findLast(entry => entry.type === "context_revision")?.id;
 
 					// Loop until user makes a complete choice or cancels to tree.
 					// Shift+Enter in the tree selector pre-answers "Summarize" and
@@ -1888,6 +1894,8 @@ export class SelectorController {
 							!result.summaryEntry &&
 							!result.askReanswerCommitted &&
 							this.ctx.sessionManager.getLeafId() === treeRewind.expectedLeafId &&
+							contextRevision ===
+								this.ctx.sessionManager.getBranch().findLast(entry => entry.type === "context_revision")?.id &&
 							this.ctx.truncateTranscriptFromMessage(treeRewind.message);
 						if (!fastRewind) {
 							await this.ctx.renderInitialMessages({ clearTerminalHistory: true });

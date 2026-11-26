@@ -37,7 +37,7 @@ beforeAll(installInMemoryRelay);
 afterAll(uninstallInMemoryRelay);
 
 describe("discarded entry branch replication", () => {
-	it("keeps the pre-discard conversation connected on a guest snapshot", async () => {
+	it("keeps the selected branch and its revisions connected through omitted metadata", async () => {
 		const manager = SessionManager.inMemory();
 		const priorId = manager.appendMessage({ role: "user", content: "prior", timestamp: Date.now() });
 		const discardedId = manager.appendMessage({
@@ -60,6 +60,14 @@ describe("discarded entry branch replication", () => {
 		await manager.discardEntryDurably(discardedId);
 		const markerId = manager.getBranch().at(-1)?.id;
 		if (!markerId) throw new Error("Expected a durable branch marker");
+		manager.appendLabelChange(priorId, "not replicated");
+		const original = manager.getEntry(priorId);
+		if (original?.type !== "message") throw new Error("Expected the prior user entry");
+		await manager.appendContextRevision([
+			{ ...original, message: { role: "user", content: "revised", timestamp: 1 } },
+		]);
+		const revisionId = manager.getLeafId();
+		if (revisionId === null) throw new Error("Expected a context revision");
 		const reminderId = manager.appendMessage({ role: "developer", content: "retry", timestamp: Date.now() });
 
 		const host = new CollabHost(makeHostContext(manager));
@@ -85,7 +93,10 @@ describe("discarded entry branch replication", () => {
 				if (frame.t !== "snapshot-chunk") continue;
 				for (const entry of frame.entries) guest.ingestReplicatedEntry(entry);
 			}
-			expect(guest.getBranch().map(entry => entry.id)).toEqual([priorId, markerId, reminderId]);
+			expect(guest.getBranch().map(entry => entry.id)).toEqual([priorId, markerId, revisionId, reminderId]);
+			expect(guest.getEntry(discardedId)).toBeDefined();
+			expect(guest.getEntry(priorId)).toMatchObject({ message: { content: "prior" } });
+			expect(guest.buildSessionContext().messages[0]).toMatchObject({ content: "revised" });
 		} finally {
 			socket?.close();
 			await host.stop("test done");

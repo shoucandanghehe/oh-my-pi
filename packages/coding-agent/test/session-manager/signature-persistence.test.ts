@@ -163,7 +163,7 @@ describe("SessionManager signature persistence", () => {
 		expect((reloadedToolEntry.message.details as { images?: ImageContent[] }).images).toEqual([detailImage]);
 	});
 
-	it("rehydrates assistant replay metadata in memory without rewriting the session file", async () => {
+	it("keeps original Copilot replay data while sanitizing the resumed model context", async () => {
 		using tempDir = TempDir.createSync("@pi-session-rehydrate-persistence-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
 		const providerPayload = {
@@ -212,10 +212,11 @@ describe("SessionManager signature persistence", () => {
 		await session.close();
 
 		const reloaded = await SessionManager.open(sessionFile);
-		const assistant = getAssistantMessage(reloaded);
+		expect(getAssistantMessage(reloaded).providerPayload).toEqual(providerPayload);
+		const assistant = reloaded.buildSessionContext().messages.find(message => message.role === "assistant");
+		if (assistant?.role !== "assistant") throw new Error("Expected resumed assistant context");
 
-		// GitHub Copilot rejects replayed assistant-side native history on a warmed
-		// session, so its replay metadata is stripped in memory after rehydration.
+		// Copilot's prior-connection replay state stays in the journal, not the new request.
 		expect(assistant.providerPayload).toBeUndefined();
 		const thinking = assistant.content[0];
 		expect(thinking).toMatchObject({ type: "thinking", thinking: "reasoning" });
@@ -278,10 +279,7 @@ describe("SessionManager signature persistence", () => {
 		await reloaded.close();
 	}, 15_000);
 
-	it("truncates oversized content in INVALID server-tool blocks instead of preserving them", async () => {
-		// A corrupt/forward-version block that fails isAnthropicServerToolHistoryBlock
-		// must NOT take the atomic path: oversized strings inside it truncate
-		// like any other payload (the predicate mirrors the truncate guard).
+	it("preserves oversized unrecognized server-tool content in the journal", async () => {
 		using tempDir = TempDir.createSync("@pi-session-invalid-server-tool-persistence-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
 		const oversizedPayload = "W".repeat(600_000);
@@ -314,8 +312,8 @@ describe("SessionManager signature persistence", () => {
 		});
 		await session.flush();
 		const raw = await fs.readFile(session.getSessionFile()!, "utf-8");
-		expect(raw).not.toContain(oversizedPayload);
-		expect(raw).toContain("[Session persistence truncated large content]");
+		expect(raw).toContain(oversizedPayload);
+		expect(raw).not.toContain("[Session persistence truncated large content]");
 		await session.close();
 	});
 
@@ -492,14 +490,12 @@ describe("SessionManager signature persistence", () => {
 
 		const reloaded = await SessionManager.open(sessionFile);
 		expect(getAssistantMessage(reloaded).providerPayload).toEqual(providerPayload);
-		// The paired result itself is truncated, so its turn no longer matches the
-		// payload's digest and the Cursor provider rebuilds it from content.
 		const result = reloaded
 			.getEntries()
 			.flatMap(entry => (entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []));
 		expect(result[0]?.content[0]).toMatchObject({
 			type: "text",
-			text: expect.stringContaining("[Session persistence truncated large content]"),
+			text: output,
 		});
 		await reloaded.close();
 	}, 15_000);

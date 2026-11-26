@@ -129,7 +129,7 @@ describe("session atomic reasoning persistence", () => {
 		expect(redactedThinking.data.endsWith(truncationNotice)).toBe(false);
 	});
 
-	it("still truncates oversized UNSIGNED thinking and text blocks", () => {
+	it("preserves oversized unsigned thinking and text blocks for replay", () => {
 		using tempDir = TempDir.createSync("@pi-session-atomic-unsigned-");
 		const blobStore = new BlobStore(tempDir.path());
 
@@ -146,13 +146,11 @@ describe("session atomic reasoning persistence", () => {
 
 		const thinking = message.content[0];
 		if (thinking?.type !== "thinking") throw new Error("Expected thinking block");
-		expect(thinking.thinking.length).toBeLessThan(600_000);
-		expect(thinking.thinking.endsWith(truncationNotice)).toBe(true);
+		expect(thinking.thinking).toBe("y".repeat(600_000));
 
 		const text = message.content[1];
 		if (text?.type !== "text") throw new Error("Expected text block");
-		expect(text.text.length).toBeLessThan(600_000);
-		expect(text.text.endsWith(truncationNotice)).toBe(true);
+		expect(text.text).toBe("z".repeat(600_000));
 	});
 
 	it("survives a full JSONL string round-trip for signed thinking", () => {

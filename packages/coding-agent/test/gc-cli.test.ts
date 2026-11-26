@@ -3153,6 +3153,36 @@ describe("runGcCommand replay data stripping", () => {
 		expect(JSON.parse(lines[9]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
 	}
 
+	test("strips old revision snapshots without stripping the active replay turn", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		const old = {
+			...JSON.parse(assistant([{ type: "thinking", thinking: "old", thinkingSignature: "EqQBold" }])),
+			id: "old",
+			parentId: null,
+		};
+		const latest = {
+			...JSON.parse(assistant([{ type: "thinking", thinking: "kept", thinkingSignature: "EqQBkept" }])),
+			id: "latest",
+			parentId: "user",
+		};
+		const lines = [
+			header(id),
+			JSON.stringify(old),
+			JSON.stringify({ type: "context_revision", id: "r1", parentId: "old", revisions: [old] }),
+			JSON.stringify({ ...JSON.parse(prompt("next turn")), id: "user", parentId: "r1" }),
+			JSON.stringify(latest),
+			JSON.stringify({ type: "context_revision", id: "r2", parentId: "latest", revisions: [latest] }),
+		];
+		await writeTranscript(file, lines, 40);
+
+		await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		const after = (await Bun.file(file).text()).split("\n");
+		expect(JSON.parse(after[2]).revisions[0].message.content).toEqual([{ type: "thinking", thinking: "old" }]);
+		expect(after[5]).toBe(lines[5]);
+	});
+
 	test("a trailing turn dropped on resume leaves the earlier turn latest", async () => {
 		const id = Bun.randomUUIDv7();
 		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);

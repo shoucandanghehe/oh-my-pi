@@ -126,10 +126,18 @@ function stripBlock(block: Record<string, unknown>): boolean {
 
 /**
  * Remove provider replay data from one parsed session record, in place.
- * Returns whether anything was removed; records other than messages are never touched.
+ * Returns whether anything was removed; only messages and message revisions are stripped.
  */
 function stripRecord(record: unknown): boolean {
-	if (!isRecord(record) || record.type !== "message" || !isRecord(record.message)) return false;
+	if (!isRecord(record)) return false;
+	if (record.type === "context_revision" && Array.isArray(record.revisions)) {
+		let changed = false;
+		for (const revision of record.revisions) {
+			if (isRecord(revision) && revision.type === "message") changed = stripRecord(revision) || changed;
+		}
+		return changed;
+	}
+	if (record.type !== "message" || !isRecord(record.message)) return false;
 	const message = record.message;
 	let changed = false;
 	if (message.role === "assistant") {
@@ -171,6 +179,13 @@ function parseFileEntry(text: string, index: number): FileEntry | undefined {
 		if (message.role === "assistant" && !Array.isArray(message.content)) return undefined;
 		if (message.role === "toolResult" && typeof message.toolName !== "string") message.toolName = "";
 		(entry.message as TaggedMessage)[LINE_INDEX] = index;
+	}
+	if (entry.type === "context_revision" && Array.isArray(entry.revisions)) {
+		for (const revision of entry.revisions) {
+			if (revision?.type === "message" && isRecord(revision.message)) {
+				(revision.message as TaggedMessage)[LINE_INDEX] = index;
+			}
+		}
 	}
 	return entry;
 }
@@ -244,7 +259,7 @@ export async function planStrip(file: string, idleBeforeMs: number): Promise<Str
 		const entry = parseFileEntry(text, index);
 		if (!entry) continue;
 		fileEntries.push(entry);
-		if (entry.type === "message" && REPLAY_KEY_RE.test(text)) {
+		if ((entry.type === "message" || entry.type === "context_revision") && REPLAY_KEY_RE.test(text)) {
 			const record = parseRecord(text);
 			if (isRecord(record)) candidates.push({ index, byteLength: bytes.length, record });
 		}

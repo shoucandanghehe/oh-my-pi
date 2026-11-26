@@ -652,6 +652,11 @@ function containsBlobRef(value: unknown): boolean {
  * resumes as text instead of sending malformed image data to the provider.
  */
 function repairTruncatedSnapcompactFrames(entry: FileEntry): void {
+	if (entry.type === "context_revision" && Array.isArray(entry.revisions)) {
+		for (const revision of entry.revisions) {
+			if (revision?.type === "compaction") repairTruncatedSnapcompactFrames(revision);
+		}
+	}
 	if (entry.type !== "compaction") return;
 	const archive = snapcompact.getPreservedArchive(entry.preserveData);
 	if (!archive?.frames.some(frame => isPersistenceTruncatedString(frame.data))) return;

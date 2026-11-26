@@ -86,6 +86,52 @@ describe("GuestClient frame apply", () => {
 		expect(snap.activeTools.size).toBe(0);
 	});
 
+	it("replays context revisions for live and cold snapshots without leaking them to another branch", () => {
+		const original: SessionEntry = {
+			type: "message",
+			id: "e1",
+			parentId: null,
+			timestamp: HEADER.timestamp,
+			message: { role: "user", content: "original evidence", timestamp: 1 },
+		};
+		const revision: SessionEntry = {
+			type: "context_revision",
+			id: "revision",
+			parentId: "e1",
+			timestamp: HEADER.timestamp,
+			revisions: [{ ...original, message: { role: "user", content: "[elided]", timestamp: 1 } }],
+		};
+		const client = liveClient([original]);
+		client.applyFrameForTest({ t: "entry", entry: revision });
+		expect(client.getSnapshot().entries[0]).toMatchObject({ message: { content: "[elided]" } });
+		expect(liveClient([original, revision]).getSnapshot().entries[0]).toMatchObject({
+			message: { content: "[elided]" },
+		});
+		const late: SessionEntry = {
+			...original,
+			id: "late",
+			parentId: "e1",
+			activeLeafId: "revision",
+			message: { role: "user", content: "off-branch late result", timestamp: 2 },
+		};
+		client.applyFrameForTest({ t: "entry", entry: late });
+		expect(client.getSnapshot().entries[0]).toMatchObject({ message: { content: "[elided]" } });
+		expect(liveClient([original, revision, late]).getSnapshot().entries[0]).toMatchObject({
+			message: { content: "[elided]" },
+		});
+		client.applyFrameForTest({
+			t: "entry",
+			entry: {
+				...original,
+				id: "sibling",
+				parentId: "e1",
+				message: { role: "user", content: "another branch", timestamp: 2 },
+			},
+		});
+		expect(client.getSnapshot().entries[0]).toMatchObject({ message: { content: "original evidence" } });
+		expect(original.message.content).toBe("original evidence");
+	});
+
 	it("welcome readOnly flag lands in the snapshot", () => {
 		const client = new GuestClient(LINK, "tester");
 		expect(client.getSnapshot().readOnly).toBe(false);

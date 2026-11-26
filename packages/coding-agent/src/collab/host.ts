@@ -110,6 +110,8 @@ const WIRE_SESSION_ENTRY_TYPES: Record<WireSessionEntry["type"], true> = {
 	custom_message: true,
 	compaction: true,
 	branch_summary: true,
+	context_revision: true,
+	reset_boundary: true,
 	model_change: true,
 	thinking_level_change: true,
 };
@@ -124,6 +126,28 @@ function isWireAgentEvent(event: AgentSessionEvent): event is AgentSessionEvent 
 
 function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEntry & WireSessionEntry {
 	return entry.type in WIRE_SESSION_ENTRY_TYPES;
+}
+
+/** Metadata not sent to guests must not disconnect a revision from its targets. */
+function reparentReplicatedEntry(
+	entry: ReplicatedEntry,
+	omittedParent: (id: string) => string | null | undefined,
+): ReplicatedEntry {
+	const wireAncestor = (id: string | null): string | null => {
+		const seen = new Set<string>();
+		while (id !== null && !seen.has(id)) {
+			seen.add(id);
+			const parent = omittedParent(id);
+			if (parent === undefined) return id;
+			id = parent;
+		}
+		return null;
+	};
+	const parentId = wireAncestor(entry.parentId);
+	const activeLeafId = entry.activeLeafId === undefined ? undefined : wireAncestor(entry.activeLeafId);
+	return parentId === entry.parentId && activeLeafId === entry.activeLeafId
+		? entry
+		: { ...entry, parentId, activeLeafId };
 }
 
 /**
@@ -575,7 +599,12 @@ export class CollabHost {
 		this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
 		this.#ctx.sessionManager.onEntryAppended = entry => {
 			if (isWireSessionEntry(entry) && this.#broadcastAllowed()) {
-				const bounded = serializeReplicatedEntry(entry);
+				const bounded = serializeReplicatedEntry(
+					reparentReplicatedEntry(entry, id => {
+						const ancestor = this.#ctx.sessionManager.getEntry(id);
+						return ancestor && !isWireSessionEntry(ancestor) ? ancestor.parentId : undefined;
+					}),
+				);
 				const shrunk = bounded.value;
 				if (shrunk.type === "custom_message" && shrunk.customType === COLLAB_ENTRY_OMITTED_CUSTOM_TYPE) {
 					// The live path also emits a guest-visible notice: guests only
@@ -932,7 +961,17 @@ export class CollabHost {
 		// copy. Chunk frames are assembled from these strings only as the
 		// transport drains.
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
-		const snapshotEntries = this.#serializeSnapshotEntries(snapshot.entries.filter(isWireSessionEntry));
+		const omittedParents = new Map<string, string | null>();
+		const retained: ReplicatedEntry[] = [];
+		for (const entry of snapshot.entries) {
+			if (isWireSessionEntry(entry)) retained.push(entry);
+			else omittedParents.set(entry.id, entry.parentId);
+		}
+		const snapshotEntries = this.#serializeSnapshotEntries(
+			omittedParents.size === 0
+				? retained
+				: retained.map(entry => reparentReplicatedEntry(entry, id => omittedParents.get(id))),
+		);
 		const state = this.#buildState();
 		const welcome = encodeFrame({
 			t: "welcome",
@@ -1019,11 +1058,21 @@ export class CollabHost {
 			let source = entry;
 			// `"image` covers every image carrier the stripper handles: `image`
 			// content blocks, `images` arrays, and file-mention `image` fields.
-			if (stripImages && entry.type === "message" && (text === null || text.includes('"image'))) {
+			if (
+				stripImages &&
+				(entry.type === "message" || entry.type === "context_revision") &&
+				(text === null || text.includes('"image'))
+			) {
 				// The JSON round-trip is exactly what a guest would receive; an entry
 				// that does not serialize goes through the depth-bounded walk instead.
 				const copy: ReplicatedEntry = text === null ? copyForReplication(entry) : JSON.parse(text);
-				const removed = copy.type === "message" ? stripImagesFromMessage(copy.message) : 0;
+				let removed = 0;
+				if (copy.type === "message") removed += stripImagesFromMessage(copy.message);
+				if (copy.type === "context_revision") {
+					for (const revision of copy.revisions) {
+						if (revision.type === "message") removed += stripImagesFromMessage(revision.message);
+					}
+				}
 				if (removed > 0) {
 					stripped += removed;
 					source = copy;

@@ -62,7 +62,7 @@ import {
 	isUserAuthoredQueuedMessage,
 	toRestoredQueuedMessage,
 } from "../session/queued-messages";
-import type { SessionEntry } from "../session/session-entries";
+import { type ContextRevisionValue, type SessionEntry } from "../session/session-entries";
 import { isRpcProxy, type RpcServe } from "./rpc";
 import {
 	SESSION_STATE_READERS as read,
@@ -171,6 +171,12 @@ function settingsSource(settings: Settings): SessionSettingsSource {
 
 /** `entry` as the transcript shows it: model-authored text with secret placeholders restored. */
 function displayEntry(entry: SessionEntry, obfuscator: SecretObfuscator): SessionEntry {
+	if (entry.type === "context_revision") {
+		return {
+			...entry,
+			revisions: entry.revisions.map(revision => displayEntry(revision, obfuscator) as ContextRevisionValue),
+		};
+	}
 	if (entry.type === "message" && entry.message.role === "assistant") {
 		const content = deobfuscateAssistantContent(obfuscator, entry.message.content);
 		return content === entry.message.content ? entry : { ...entry, message: { ...entry.message, content } };

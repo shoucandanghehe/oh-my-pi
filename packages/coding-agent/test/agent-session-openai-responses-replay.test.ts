@@ -200,12 +200,9 @@ function expectAssistantReplayMetadataSanitized(message: AssistantMessage): void
 }
 
 function expectAssistantReplayMetadataPreserved(message: AssistantMessage): void {
-	// Non-Copilot Responses-family turns (OpenAI, OpenAI-Codex, Azure) keep their
-	// native replay payload across rehydration so remote compaction can rebuild
-	// faithful native history. The encrypted reasoning lives in
-	// `providerPayload.items`; the per-block `thinkingSignature` was a byte-for-byte
-	// duplicate of that reasoning item, so persistence drops it — the payload is the
-	// durable copy replay actually reads.
+	// Native replay stays in the raw journal, and in effective rehydrated
+	// contexts for Responses-family providers other than Copilot.
+	// Encrypted reasoning is stored in `providerPayload.items` without its duplicate thinking signature.
 	const payload = message.providerPayload;
 	expect(payload?.type).toBe("openaiResponsesHistory");
 	const reasoning =
@@ -352,7 +349,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected persisted assistant message");
 		}
-		expectAssistantReplayMetadataSanitized(persistedAssistant);
+		expectAssistantReplayMetadataPreserved(persistedAssistant);
 
 		const runtimeAssistant = findRuntimeAssistant(session, assistantText);
 		expectAssistantReplayMetadataSanitized(runtimeAssistant);
@@ -405,7 +402,12 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (forkedAssistant.role !== "assistant") {
 			throw new Error("Expected forked assistant message");
 		}
-		expectAssistantReplayMetadataSanitized(forkedAssistant);
+		expectAssistantReplayMetadataPreserved(forkedAssistant);
+		const replayedAssistant = forkedSessionManager
+			.buildSessionContext()
+			.messages.find(message => message.role === "assistant" && getTextContent(message) === assistantText);
+		if (replayedAssistant?.role !== "assistant") throw new Error("Expected the assistant in the fork context");
+		expectAssistantReplayMetadataSanitized(replayedAssistant);
 
 		const forkedUser = findPersistedMessageEntry(forkedSessionManager, "user", "Fork summary").message;
 		if (forkedUser.role !== "user") {
@@ -701,7 +703,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected persisted assistant message after switch");
 		}
-		expectAssistantReplayMetadataSanitized(persistedAssistant);
+		expectAssistantReplayMetadataPreserved(persistedAssistant);
 		const persistedUser = findPersistedMessageEntry(session.sessionManager, "user", "Older summary").message;
 		if (persistedUser.role !== "user") {
 			throw new Error("Expected switched user message");
@@ -755,7 +757,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected archived branch assistant entry");
 		}
-		expectAssistantReplayMetadataSanitized(persistedAssistant);
+		expectAssistantReplayMetadataPreserved(persistedAssistant);
 	});
 
 	it("resets provider session state when starting a brand-new session", async () => {

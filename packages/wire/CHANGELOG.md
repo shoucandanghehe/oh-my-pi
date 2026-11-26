@@ -5,6 +5,7 @@
 ### Added
 
 - Added the TSP `meter` style `wave`: bars that swing with the value, animated by the host, for a live voice or audio level.
+- Collab session streams carry context revisions and reset boundaries so guests can replay the selected context.
 
 ## [19.2.1] - 2026-11-25
 

@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
+	AssistantMessage,
 	MediaContent,
 	MessageAttribution,
 	ServiceTierByFamily,
@@ -14,6 +15,7 @@ import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { DelegationRole } from "../task/model-policy";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 import type { RuntimeIdentity } from "./runtime-identity";
+import { sanitizeRehydratedOpenAIResponsesAssistantMessage } from "./messages";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -344,6 +346,7 @@ declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
 		titleChange: TitleChangeEntry;
 		credentialPin: CredentialPinEntry;
 		modelUsage: ModelUsageEntry;
+		contextRevision: ContextRevisionEntry;
 	}
 }
 
@@ -454,6 +457,77 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	excludeFromContext?: boolean;
 }
 
+/** A context-only replacement of an existing entry; its original journal record remains intact. */
+export type ContextRevisionValue = SessionMessageEntry | CustomMessageEntry | CompactionEntry;
+
+export function isContextRevisionValue(entry: SessionEntry): entry is ContextRevisionValue {
+	return entry.type === "message" || entry.type === "custom_message" || entry.type === "compaction";
+}
+
+/** Replacements apply only to ancestors on the branch containing this entry. */
+export interface ContextRevisionEntry extends SessionEntryBase {
+	type: "context_revision";
+	revisions: ContextRevisionValue[];
+}
+
+const rawContextEntries = new WeakMap<SessionEntry, SessionEntry>();
+const rehydratedAssistantMessages = new WeakMap<AssistantMessage, AssistantMessage>();
+
+/** Preserve raw provenance when a projected branch is sliced or replayed at an older leaf. */
+export function rawSessionEntry(entry: SessionEntry): SessionEntry {
+	return rawContextEntries.get(entry) ?? entry;
+}
+
+/** Loaded provider replay metadata belongs to a previous live connection, not the raw journal. */
+export function markRehydratedSessionEntries(entries: readonly SessionEntry[]): void {
+	for (const entry of entries) {
+		if (entry.type === "context_revision" && Array.isArray(entry.revisions)) {
+			for (const revision of entry.revisions) {
+				if (revision?.type === "message") markRehydratedSessionEntries([revision]);
+			}
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			const message = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
+			if (message !== entry.message) rehydratedAssistantMessages.set(entry.message, message);
+		}
+	}
+}
+
+/** Replay branch-local revisions without changing raw entries or their tree identity. */
+export function replayContextRevisions(path: readonly SessionEntry[]): SessionEntry[] {
+	const projected = path.map(rawSessionEntry);
+	const positions = new Map<string, number>();
+	for (const [index, entry] of projected.entries()) {
+		if (entry.type === "context_revision" && Array.isArray(entry.revisions)) {
+			for (const revision of entry.revisions) {
+				if (!revision || !isContextRevisionValue(revision)) continue;
+				const targetIndex = positions.get(revision.id);
+				if (targetIndex === undefined) continue;
+				const target = projected[targetIndex];
+				if (target.type !== revision.type) continue;
+				projected[targetIndex] = {
+					...revision,
+					id: target.id,
+					parentId: target.parentId,
+					timestamp: target.timestamp,
+					runtime: target.runtime,
+					activeLeafId: target.activeLeafId,
+				};
+				rawContextEntries.set(projected[targetIndex], rawSessionEntry(target));
+			}
+		}
+		positions.set(entry.id, index);
+	}
+	for (const [index, entry] of projected.entries()) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const message = rehydratedAssistantMessages.get(entry.message);
+		if (!message) continue;
+		const sanitized = { ...entry, message };
+		rawContextEntries.set(sanitized, rawSessionEntry(entry));
+		projected[index] = sanitized;
+	}
+	return projected;
+}
+
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
@@ -471,7 +545,8 @@ export type SessionEntry =
 	| SessionInitEntry
 	| ModeChangeEntry
 	| CredentialPinEntry
-	| ResetBoundaryEntry;
+	| ResetBoundaryEntry
+	| ContextRevisionEntry;
 
 /** Leaf selected when replaying one entry; an off-branch entry restores the active leaf captured at append time. */
 export function sessionEntryLeafId(entry: SessionEntry): string | null {

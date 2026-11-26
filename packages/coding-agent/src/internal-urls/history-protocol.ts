@@ -46,7 +46,7 @@ import {
 	type PythonExecutionMessage,
 } from "../session/messages";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
-import type { SessionEntry } from "../session/session-entries";
+import { rawSessionEntry, type SessionEntry } from "../session/session-entries";
 import historyPromptDoc from "../prompts/internal-urls/history.md" with { type: "text" };
 import { artifactsDirsFromRegistry, sessionFilesFromDisk } from "./registry-helpers";
 import type {
@@ -391,7 +391,7 @@ export function formatCurrentBranchFullHistory(
 		"",
 	];
 	for (const entry of entries) {
-		renderRawEntry(lines, entry, options.includeThinking);
+		renderRawEntry(lines, rawSessionEntry(entry), options.includeThinking);
 		lines.push("");
 	}
 	return `${lines.join("\n").trim()}\n`;

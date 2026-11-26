@@ -73,6 +73,7 @@ type Rule =
 	| "sessionPath"
 	| "runtime"
 	| "judgment"
+	| "revisions"
 	| "fallback";
 
 const FALLBACK_CAUSE_RULES: Record<string, Rule> = { from: "identity", trigger: "enum", reason: "error" };
@@ -356,6 +357,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	parentSession: "sessionPath",
 	previousSessionFiles: "sessionPath",
 	runtime: "runtime",
+	revisions: "revisions",
 	judgment: "judgment",
 	fallback: "fallback",
 	content: "content",
@@ -1555,6 +1557,17 @@ export class SessionAnonymizer {
 				return isObject(value) ? this.#runtimeStamp(value) : this.#opaque(value);
 			case "judgment":
 				return isObject(value) ? this.#judgmentRecord(value) : this.#opaque(value);
+			case "revisions":
+				return !fromTool && parent.type === "context_revision" && Array.isArray(value)
+					? value.map(revision =>
+							isObject(revision) &&
+							(revision.type === "message" ||
+								revision.type === "custom_message" ||
+								revision.type === "compaction")
+								? this.#struct(revision)
+								: this.#opaque(revision),
+						)
+					: this.#opaque(value);
 			case "fallback":
 				return isObject(value) ? this.#fallbackCause(value, fromTool) : this.#opaque(value);
 			case "name":

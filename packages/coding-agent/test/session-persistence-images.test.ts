@@ -218,6 +218,47 @@ describe("session image persistence", () => {
 		expect(resolvedImage?.data).toBe(imageData);
 	});
 
+	it("restores media and full text inside persisted context revisions", async () => {
+		using tempDir = TempDir.createSync("@session-revision-persistence-");
+		const blobStore = new BlobStore(tempDir.path());
+		const imageData = Buffer.alloc(1500, 9).toString("base64");
+		const originalText = `${"retained history\n".repeat(40_000)}final evidence`;
+		const original: FileEntry = {
+			type: "context_revision",
+			id: "revision-1",
+			parentId: "result-1",
+			timestamp: new Date(1).toISOString(),
+			revisions: [
+				{
+					type: "message",
+					id: "result-1",
+					parentId: "call-1",
+					timestamp: new Date(0).toISOString(),
+					message: {
+						role: "toolResult",
+						toolCallId: "tc1",
+						toolName: "read",
+						content: [text(originalText), png(imageData)],
+						isError: false,
+						timestamp: 0,
+					},
+				},
+			],
+		};
+		const persisted = prepareEntryForPersistence(original, blobStore);
+		const encoded = JSON.stringify(persisted);
+		expect(encoded).not.toContain(imageData);
+		const loaded: FileEntry[] = [JSON.parse(encoded)];
+		await resolveBlobRefsInEntries(loaded, blobStore);
+		const revision = loaded[0];
+		if (revision?.type !== "context_revision") throw new Error("Expected context revision");
+		const result = revision.revisions[0];
+		if (result?.type !== "message" || result.message.role !== "toolResult") {
+			throw new Error("Expected revised tool result");
+		}
+		expect(result.message.content).toEqual([text(originalText), png(imageData)]);
+	});
+
 	it("re-externalizes an image mutated in place, into each blob store, and after a forgotten write", () => {
 		using firstDir = TempDir.createSync("@session-image-memo-a-");
 		using secondDir = TempDir.createSync("@session-image-memo-b-");

@@ -646,15 +646,16 @@ export class CollabGuestLink {
 				// (prevents double-render). They keep the replica file, the agent's
 				// message array (/dump, context estimates), and todos current.
 				this.#ctx.sessionManager.ingestReplicatedEntry(frame.entry);
-				if (frame.entry.type === "message") {
+				if (frame.entry.type === "message" && frame.entry.activeLeafId === undefined) {
 					this.#ctx.session.agent.replaceMessages([...this.#ctx.session.messages, frame.entry.message]);
-				} else if (frame.entry.type === "compaction" || frame.entry.type === "branch_summary") {
-					// Compaction/branch entries rewrite the host's model context: the
-					// pre-boundary transcript collapses behind a summary. Appending
-					// the entry alone leaves the replica holding the stale full
-					// history, so rebuild the message array from the ingested entries
-					// exactly as the host does after appendCompaction/branchWithSummary
-					// (session-maintenance.ts, agent-session.ts).
+				} else if (
+					frame.entry.type === "compaction" ||
+					frame.entry.type === "branch_summary" ||
+					frame.entry.type === "context_revision" ||
+					frame.entry.type === "reset_boundary"
+				) {
+					// These records change the selected model context, not just its tail.
+					// Rebuild the replica after ingestion so /dump and estimates see it.
 					this.#ctx.session.agent.replaceMessages(this.#ctx.session.buildDisplaySessionContext().messages);
 				}
 				break;
