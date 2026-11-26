@@ -54,7 +54,11 @@ export const defaultPresenter: ToolPresenter = {
 		return {
 			head: defaultHead(args, state),
 			...(tone ? { tone } : {}),
-			body: output ? <ansi text={output} /> : hasMedia ? undefined : <text spans={[{ t: "(no output)", s: "muted" }]} wrap="word" />,
+			body: output ? (
+				<ansi text={output} />
+			) : hasMedia ? undefined : (
+				<text spans={[{ t: "(no output)", s: "muted" }]} wrap="word" />
+			),
 			term: { look: "default" },
 		};
 	},

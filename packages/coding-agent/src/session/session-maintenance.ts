@@ -71,6 +71,7 @@ import { replaysNativeResponsesHistory } from "@oh-my-pi/pi-ai/providers/openai-
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
+import { usesOpenAIReasoningPrefixBinding } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isRecord, logger, prompt, Snowflake, spillUrl, toError, withLoopPhase } from "@oh-my-pi/pi-utils";
@@ -898,10 +899,9 @@ export class SessionMaintenance {
 				supersedeComplete: isCompleteReadResult,
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
-				// Never re-write summarized-away entries; only flush the whole sent
-				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
+				// Cold caches usually permit deeper pruning, but OpenAI's encrypted reasoning still binds its prefix.
 				keepBoundaryId,
-				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+				idleFlushMs: usesOpenAIReasoningPrefixBinding(model) ? Number.POSITIVE_INFINITY : PRUNE_IDLE_FLUSH_MS,
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				suffixTokenLimit: model?.thinking?.prefixBinding === true ? 0 : undefined,
 				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,

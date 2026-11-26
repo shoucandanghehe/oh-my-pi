@@ -27,7 +27,10 @@ export async function saveMediaToTemp(media: readonly { data: string; mimeType: 
 		const mime = item.mimeType.toLowerCase();
 		const image = mime.startsWith("image/");
 		const extension = Object.hasOwn(MEDIA_EXTENSIONS, mime) ? MEDIA_EXTENSIONS[mime] : image ? "png" : "bin";
-		const filepath = path.join(os.tmpdir(), `omp-${image ? "image" : "media"}-${Bun.hash(bytes).toString(16)}.${extension}`);
+		const filepath = path.join(
+			os.tmpdir(),
+			`omp-${image ? "image" : "media"}-${Bun.hash(bytes).toString(16)}.${extension}`,
+		);
 		await Bun.write(filepath, bytes);
 		paths.push(filepath);
 	}

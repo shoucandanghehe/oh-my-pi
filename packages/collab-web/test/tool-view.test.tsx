@@ -16,10 +16,16 @@ it("renders just the intent label before and after execution metadata arrives", 
 
 it("renders tool audio and video in the shared browser and HTML export card", () => {
 	const html = renderToStaticMarkup(
-		<ToolView name="read" defaultOpen result={{ content: [
-			{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" },
-			{ type: "video", mimeType: "video/mp4", data: "AAAA" },
-		] }} />,
+		<ToolView
+			name="read"
+			defaultOpen
+			result={{
+				content: [
+					{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" },
+					{ type: "video", mimeType: "video/mp4", data: "AAAA" },
+				],
+			}}
+		/>,
 	);
 	expect(html).toMatch(/<audio[^>]*src="data:audio\/wav;base64,UklGRg=="/);
 	expect(html).toMatch(/<video[^>]*src="data:video\/mp4;base64,AAAA"/);

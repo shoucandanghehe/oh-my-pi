@@ -51,12 +51,16 @@ export function isExternalizableMediaPosition(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
-	if (typeof value !== "object" || value === null || !("data" in value) || typeof value.data !== "string") return false;
+	if (typeof value !== "object" || value === null || !("data" in value) || typeof value.data !== "string")
+		return false;
 	const type = "type" in value ? value.type : undefined;
 	const typed = type === "image" || type === "audio" || type === "video";
 	if (key === TEXT_CONTENT_KEY) return typed;
 	if (key !== "image" && key !== "images" && key !== SNAPCOMPACT_FRAMES_KEY) return false;
-	return typed || ("mimeType" in value && typeof value.mimeType === "string" && /^(?:image|audio|video)\//i.test(value.mimeType));
+	return (
+		typed ||
+		("mimeType" in value && typeof value.mimeType === "string" && /^(?:image|audio|video)\//i.test(value.mimeType))
+	);
 }
 
 function shouldExternalizeMediaPayload(

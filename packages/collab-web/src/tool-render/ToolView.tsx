@@ -113,7 +113,9 @@ export function ToolView(props: ToolViewProps): ReactNode {
 					<div className="tv-body">
 						{label && <div className="tv-intent">{label}</div>}
 						{renderer.Body ? <renderer.Body {...renderProps} /> : null}
-						{props.result?.content.map((block, index) => <MediaAttachment key={index} block={block} />)}
+						{props.result?.content.map((block, index) => (
+							<MediaAttachment key={index} block={block} />
+						))}
 					</div>
 				)}
 				{partial && (

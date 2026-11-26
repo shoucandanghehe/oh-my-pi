@@ -102,7 +102,9 @@ export function isUserTurnEntry(entry: TranscriptEntryLike): boolean {
 		const content = entry.message.content;
 		return typeof content === "string"
 			? content.trim().length > 0
-			: content.some(block => block.type === "text" ? block.text.trim().length > 0 : block.type === "audio" || block.type === "video");
+			: content.some(block =>
+					block.type === "text" ? block.text.trim().length > 0 : block.type === "audio" || block.type === "video",
+				);
 	}
 	return isUserRequestEntry(entry);
 }

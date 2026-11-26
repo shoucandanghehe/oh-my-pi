@@ -313,7 +313,9 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 		// A models.yml naming a modality the catalog does not know must not take
 		// the whole config down: the file loads with the modality dropped, and
 		// the warning names that modality plus the catalog's own vocabulary.
-		const file = writeModelsFile([{ id: "media-model", input: [...catalogInputModalities(), "document"].join(", ") }]);
+		const file = writeModelsFile([
+			{ id: "media-model", input: [...catalogInputModalities(), "document"].join(", ") },
+		]);
 		const config = ModelsConfigFile.relocate(file);
 		const result = config.tryLoad();
 		expect(result.status).toBe("ok");

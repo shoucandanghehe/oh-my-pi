@@ -10086,7 +10086,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					() => !signal.aborted && this.#promptGeneration === generation,
 				);
 		laps.lap("prewalkRouteMs");
-		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued", attachments);
+		const preparation = await this.#prepareAgentStart(
+			message,
+			prompt,
+			images,
+			generation,
+			signal,
+			"queued",
+			attachments,
+		);
 		laps.lap("agentStartMs");
 		const decision = await autoPrewalk?.decision;
 		laps.lap("prewalkJudgeMs");

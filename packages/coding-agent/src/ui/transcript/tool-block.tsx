@@ -233,11 +233,13 @@ export class ToolCall {
 			const args = this.#args();
 			const result = this.#result();
 			// Saved device dispatches used the write tool's name, not its filesystem result shape.
-			const legacyDevice = this.name === "write" && isRecord(result?.details) &&
-				isRecord(result.details.xdev) && typeof result.details.xdev.tool === "string";
-			const presenter = legacyDevice || (result && !this.#partial() && isInterruptSkip(result))
-				? defaultPresenter
-				: this.presenter;
+			const legacyDevice =
+				this.name === "write" &&
+				isRecord(result?.details) &&
+				isRecord(result.details.xdev) &&
+				typeof result.details.xdev.tool === "string";
+			const presenter =
+				legacyDevice || (result && !this.#partial() && isInterruptSkip(result)) ? defaultPresenter : this.presenter;
 			const call = presenter.call?.(args, state);
 			let view = call;
 			if (result) {
