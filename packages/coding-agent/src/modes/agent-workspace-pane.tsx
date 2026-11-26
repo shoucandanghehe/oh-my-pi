@@ -8,9 +8,9 @@ import type { AgentLifecycleApi } from "../registry/agent-lifecycle";
 import type { AgentHubRegistry } from "../registry/agent-hub-types";
 import type { AgentRef } from "../registry/agent-registry";
 import { type AgentViewSession, isAgentViewSession } from "../session/agent-session-handle";
-import type { AgentSession } from "../session/agent-session";
 import { parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { type CompactionQueuedMessage, sessionCommandQueue } from "../session/session-command-queue";
 import { lookupBuiltinSlashCommand } from "../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../slash-commands/helpers/draft";
 import { parseSlashCommand } from "../slash-commands/helpers/parse";
@@ -30,6 +30,7 @@ import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import { compactImageMarkers, shiftImageMarkers } from "./view-model/prompt/composer-attachments";
 import { parseQueueShorthand, splitQueuedMessages } from "./view-model/prompt/queue-input";
 import { materializeImageChipLinks } from "./utils/ui-helpers";
+import { conversationPosition } from "./utils/conversation-position";
 
 interface Draft {
 	text: string;
@@ -37,15 +38,6 @@ interface Draft {
 	links?: (string | undefined)[];
 	cursor?: number;
 }
-
-/** These actions run on the session's home thread, if the view exposes them. */
-type PaneSession = AgentViewSession &
-	Partial<Pick<AgentSession, "compact" | "navigateTree">> & {
-		readonly sessionManager: AgentViewSession["sessionManager"] &
-			Partial<Pick<AgentSession["sessionManager"], "getTree" | "appendLabelChange">>;
-		hasPausedAgents?(): boolean;
-		continuePausedAgents?(): Promise<{ complete: boolean; skipped: readonly string[] }>;
-	};
 
 /** A draft outlives its renderer; asynchronous failures still go back to this agent's draft. */
 export class AgentPaneDraft {
@@ -115,7 +107,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		const session = ref()?.session;
 		return session && isAgentViewSession(session) ? session : undefined;
 	};
-	const ensure = async (): Promise<PaneSession> => {
+	const ensure = async (): Promise<AgentViewSession> => {
 		if (!ref() || !lifecycle) throw new Error(`Agent ${agentId} is unavailable`);
 		const session = await lifecycle.ensureLive(agentId);
 		if (!isAgentViewSession(session) || current()?.instanceKey !== session.instanceKey) {
@@ -147,13 +139,10 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		model.touch();
 	}
 
-	function tree(session: PaneSession): void {
-		const navigate = session.navigateTree;
-		const readTree = session.sessionManager.getTree;
-		if (!navigate || !readTree) throw new Error("Tree navigation is not available for this agent");
+	function tree(session: AgentViewSession): void {
 		if (session.isStreaming || session.isCompacting)
 			throw new Error("Wait for this agent before navigating its tree");
-		const roots = readTree.call(session.sessionManager);
+		const roots = session.sessionManager.getTree();
 		if (!roots.length) throw new Error("This agent has no session entries");
 		const sheet = overlays.show(
 			() => (
@@ -166,8 +155,8 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 						onSelect={(id, { summarize }) => {
 							sheet.close();
 							if (current() !== session) return;
-							void navigate
-								.call(session, id, { summarize, requireIdle: true })
+							void session
+								.navigateTree(id, { summarize, requireIdle: true })
 								.then(result => {
 									if (!result.cancelled && result.editorText !== undefined) {
 										draft.restore({ text: result.editorText, images: result.editorImages });
@@ -178,7 +167,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 						}}
 						onLabelChange={(id, label) => {
 							if (current() === session) {
-								void Promise.resolve(session.sessionManager.appendLabelChange?.(id, label)).catch(error =>
+								void Promise.resolve(session.sessionManager.appendLabelChange(id, label)).catch(error =>
 									notice(String(error)),
 								);
 							}
@@ -204,6 +193,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			if (
 				messages.some(message => {
 					const name = parseSlashCommand(message)?.name;
+					if (name === "compact" && message === messages[0]) return false;
 					return (
 						name !== undefined && (lookupBuiltinSlashCommand(name) !== undefined || options.knownCommand(message))
 					);
@@ -251,21 +241,96 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		if (command?.name === "compact") {
 			if (!session.compact) throw new Error("Compaction is not available for this agent");
 			if (images?.length) throw new Error("/compact does not accept attachments");
-			if (mode === "followUp") throw new Error("Deferred compaction is not supported in agent panes");
+			const queue = sessionCommandQueue(session);
 			const args = parseCompactArgs(command.args);
 			if ("error" in args) throw new Error(args.error);
-			await session.compact(args.instructions, { mode: args.mode });
+			const restore = () => {
+				const { request, messages } = queue.takeForRestore();
+				for (const message of messages)
+					draft.restore({ text: message.text, images: message.images, links: message.imageLinks });
+				if (request) draft.restore({ text: `/queue ${request.text}` });
+			};
+			const flush = () =>
+				queue.drain(session, {
+					execute: message => admit(session, message),
+					restore,
+					changed: () => model.poll(),
+				});
+			if (mode === "followUp" || queue.holdsInput) {
+				queue.request = {
+					...conversationPosition(session.sessionManager),
+					text,
+					instructions: args.instructions,
+					mode: args.mode,
+				};
+				for (const followUp of followUps ?? []) queue.messages.push({ text: followUp, mode: "followUp" });
+				void queue
+					.run(session, {
+						settleSubmissions: () => Promise.resolve(),
+						hasPendingSubmission: () => false,
+						isCurrent: () => options.isCurrent() && current() === session,
+						execute: async request => {
+							await session.compact(request.instructions, { mode: request.mode });
+						},
+						flush,
+						restore,
+						changed: () => model.poll(),
+					})
+					.catch(error => {
+						restore();
+						notice(String(error));
+					});
+			} else {
+				queue.origin = conversationPosition(session.sessionManager);
+				try {
+					await session.compact(args.instructions, { mode: args.mode });
+				} finally {
+					await flush();
+				}
+			}
 			return;
 		}
-		if (session.hasPausedAgents?.()) throw new Error("This agent is paused; run /continue before sending");
-		const result = await session.extensionRunner?.emitInput(text, images, "interactive");
+		if (session.hasPausedAgents()) throw new Error("This agent is paused; run /continue before sending");
+		const queue = sessionCommandQueue(session);
+		if (queue.holdsInput || session.isCompacting) {
+			queue.origin ??= conversationPosition(session.sessionManager);
+			queue.messages.push({ text, images, imageLinks: input.links, mode });
+			for (const followUp of followUps ?? []) queue.messages.push({ text: followUp, mode: "followUp" });
+			model.poll();
+			return;
+		}
+		await admit(session, { text, images, mode }, followUps, submittedGeneration);
+	}
+
+	async function admit(
+		session: AgentViewSession,
+		input: CompactionQueuedMessage,
+		followUps?: string[],
+		submittedGeneration = generation,
+	): Promise<void> {
+		let { text, images } = input;
+		const queue = sessionCommandQueue(session);
+		const prepare = Promise.resolve(session.extensionRunner?.emitInput(text, images, "interactive"));
+		queue.trackSubmission(
+			prepare.then(
+				() => {},
+				() => {},
+			),
+		);
+		const result = await prepare;
 		if (result?.handled) return;
 		if (result?.text !== undefined) text = result.text.trim();
 		images = result?.images ?? images;
 		if (!text && !images?.length) return;
 		if (submittedGeneration !== generation || current() !== session)
 			throw new Error("The pane's target changed before sending");
-		await session.prompt(text, { images, followUps, streamingBehavior: mode, runCommands: false, throwOnDrop: true });
+		await session.prompt(text, {
+			images,
+			followUps,
+			streamingBehavior: input.mode,
+			runCommands: false,
+			throwOnDrop: true,
+		});
 	}
 
 	function submit(text: string, mode: "steer" | "followUp"): void {

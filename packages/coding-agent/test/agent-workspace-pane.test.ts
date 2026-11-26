@@ -56,6 +56,9 @@ function workspaceAgent(id: string) {
 	const messages: AgentMessage[] = [{ role: "user", content: `transcript for ${id}`, timestamp: 0 }];
 	let retryCount = 0;
 	let compacted: { instructions?: string; mode?: string } | undefined;
+	let compactionGate: Promise<void> | undefined;
+	const compactionStarted = Promise.withResolvers<void>();
+	const prompted = Promise.withResolvers<void>();
 	let navigated: string | undefined;
 	const roots: SessionTreeNode[] = [
 		{
@@ -78,11 +81,23 @@ function workspaceAgent(id: string) {
 		instanceKey: `thread:${id}`,
 		messages,
 		agent: { state: { streamMessage: null } },
-		sessionManager: { getLeafId: () => "leaf", getTree: () => roots },
+		sessionManager: {
+			getSessionId: () => id,
+			getLeafId: () => "leaf",
+			getTree: () => roots,
+			getBranch: () => roots[0]!.children.map(node => node.entry),
+		},
+		hasPausedAgents: () => false,
+		queuedMessageCount: 0,
+		subscribe: () => () => {},
+		waitForIdle: async () => {},
+		waitForAdmittedSubmissions: async () => {},
+		waitForRunEnd: async () => {},
 		buildTranscriptSessionContext: () => ({ messages }),
 		activeToolExecutionUpdates: () => [],
 		async prompt(text: string, options?: PromptOptions) {
 			prompts.push({ text, options });
+			prompted.resolve();
 			return true;
 		},
 		async retry() {
@@ -91,6 +106,8 @@ function workspaceAgent(id: string) {
 		},
 		async compact(instructions?: string, options?: { mode?: string }) {
 			compacted = { instructions, mode: options?.mode };
+			compactionStarted.resolve();
+			await compactionGate;
 		},
 		async navigateTree(entryId: string) {
 			navigated = entryId;
@@ -101,6 +118,11 @@ function workspaceAgent(id: string) {
 	registry.register({ id, displayName: id, kind: "sub", status: "running", session });
 	return {
 		prompts,
+		compactionStarted: compactionStarted.promise,
+		prompted: prompted.promise,
+		holdCompaction(gate: Promise<void>) {
+			compactionGate = gate;
+		},
 		get retries() {
 			return retryCount;
 		},
@@ -199,6 +221,29 @@ test("native agent panes target their own transcript, draft and slash actions af
 	} finally {
 		left.close();
 		right.close();
+	}
+});
+
+test("an agent pane sends later queued input only after its deferred compaction completes", async () => {
+	const agent = workspaceAgent("queued compact");
+	const gate = Promise.withResolvers<void>();
+	agent.holdCompaction(gate.promise);
+	const pane = await agent.mount();
+	try {
+		pane.type("/queue /compact keep the conclusion");
+		pane.press("enter");
+		await agent.compactionStarted;
+		expect(agent.compaction?.instructions).toBe("keep the conclusion");
+		pane.type("the next request");
+		pane.press("enter");
+		await admit();
+		expect(agent.prompts).toEqual([]);
+		gate.resolve();
+		await agent.prompted;
+		expect(agent.prompts.map(prompt => prompt.text)).toEqual(["the next request"]);
+	} finally {
+		gate.resolve();
+		pane.close();
 	}
 });
 

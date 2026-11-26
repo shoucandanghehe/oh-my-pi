@@ -98,7 +98,16 @@ panelSuite({
 		let height = 24;
 		const tick = (ms: number) => (d: Driver) => d.env.setNow((now += ms));
 		return {
-			view: () => <PauseScreen sessionName={name} since={since} work={work} onResume={noop} />,
+			view: () => (
+				<PauseScreen
+					sessionName={name}
+					since={since}
+					work={work}
+					ready={() => isSettled(work())}
+					onResume={noop}
+					onExit={noop}
+				/>
+			),
 			height: () => height,
 			steps: {
 				"tick 7s": tick(7_000),

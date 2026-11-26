@@ -17,7 +17,7 @@ spyOn(process.stdout, "write").mockImplementation(chunk => {
 	return true;
 });
 const nativeCopies: string[] = [];
-spyOn(natives, "copyToClipboard").mockImplementation(text => {
+spyOn(natives, "copyToClipboard").mockImplementation(async text => {
 	nativeCopies.push(text);
 });
 

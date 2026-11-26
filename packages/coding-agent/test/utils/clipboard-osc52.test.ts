@@ -21,7 +21,7 @@ describe("copyToClipboard OSC 52 routing", () => {
 	beforeEach(() => {
 		// Linux keeps macOS runs off the real pbcopy; the native write is stubbed.
 		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-		vi.spyOn(natives, "copyToClipboard").mockImplementation(() => {});
+		vi.spyOn(natives, "copyToClipboard").mockResolvedValue(undefined);
 	});
 
 	afterEach(() => {
