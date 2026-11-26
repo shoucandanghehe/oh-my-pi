@@ -37,7 +37,7 @@ import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentViewSession } from "../session/agent-session-handle";
-import type { DroppedPrompt } from "../session/agent-session-types";
+import type { DroppedPrompt, PausedExitParticipant } from "../session/agent-session-types";
 import type { CompactMode } from "../session/compact-modes";
 import type { ToolActivityMode } from "./settings";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
@@ -722,6 +722,10 @@ export interface InteractiveModeContext {
 	playWelcomeIntro(): void;
 	/** Close and quit. Operator quits are cancellable by extensions; pass `cancellable: false` for forced closes. */
 	shutdown(options?: { cancellable?: boolean }): Promise<void>;
+
+	/** Close from the process-wide durable pause barrier; false when the close is refused. */
+	shutdownWhilePaused(): Promise<boolean>;
+	getPausedExitParticipants?(): readonly PausedExitParticipant[];
 	/** Restart with the original launch flags, resuming this session. Refuse if the working directory was removed. */
 	restart(): Promise<void>;
 	/** Request graceful shutdown at the next fully settled boundary, including background turns. */

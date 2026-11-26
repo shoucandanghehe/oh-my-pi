@@ -49,6 +49,7 @@ export interface RestoreOutcome {
  * a resumed turn waiting on such a job finds it), then its own interrupted turn.
  */
 export async function restoreSession(session: AgentSession, options: RestoreOptions = {}): Promise<RestoreOutcome> {
+	if (session.hasPausedAgents()) return { turn: false, subagents: [] };
 	const subagents = await restoreSubagents(session, options);
 	const turn = await session.restoreInterruptedTurn();
 	return { turn, subagents };

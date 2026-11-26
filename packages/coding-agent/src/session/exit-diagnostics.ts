@@ -1,11 +1,13 @@
 import { createSyntheticToolResultMessage, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, MessageAttribution, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { type AsyncJobManagerApi, formatAsyncJobLabel } from "../async/job-manager";
 import { EVAL_STATE_CONTEXT_TYPE, isEvalStateContext } from "../eval/state";
 import type { SessionEntry } from "./session-entries";
 
 export const TOOL_EXECUTION_START_CUSTOM_TYPE = "tool_execution_start";
 export const SESSION_EXIT_CUSTOM_TYPE = "session_exit";
+export const AGENTS_PAUSED_CUSTOM_TYPE = "agents_paused";
+export const AGENTS_CONTINUED_CUSTOM_TYPE = "agents_continued";
 
 /**
  * Compact projection of tool-call arguments persisted with the start marker.
@@ -40,9 +42,64 @@ export interface PendingToolCallDiagnostic {
 /** Session shutdown marker written during normal and fatal process teardown. */
 export interface SessionExitData {
 	reason: string;
-	kind: "normal" | "signal" | "fatal" | "process_exit";
+	kind: "normal" | "signal" | "fatal" | "process_exit" | "paused";
 	recordedAt: string;
 	pendingToolCalls?: PendingToolCallDiagnostic[];
+}
+
+/** Raw, not-yet-recorded input parked before the first model request. */
+export interface PausedPendingPrompt {
+	text: string;
+	images?: ImageContent[];
+	attribution?: MessageAttribution;
+}
+
+export interface AgentsPausedData {
+	pausedAt: string;
+	agentIds: string[];
+	pendingPrompt?: PausedPendingPrompt;
+}
+
+function isPausedPendingPrompt(value: unknown): value is PausedPendingPrompt {
+	return (
+		isObject(value) &&
+		typeof value.text === "string" &&
+		(value.attribution === undefined || value.attribution === "user" || value.attribution === "agent") &&
+		(value.images === undefined ||
+			(Array.isArray(value.images) &&
+				value.images.every(
+					image =>
+						isObject(image) &&
+						image.type === "image" &&
+						typeof image.data === "string" &&
+						typeof image.mimeType === "string",
+				)))
+	);
+}
+
+/** Latest active pause marker on the branch, never across a reset. */
+export function readAgentsPaused(
+	entries: readonly SessionEntry[],
+): (AgentsPausedData & { markerId: string }) | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]!;
+		if (entry.type === "reset_boundary") return undefined;
+		if (entry.type !== "custom") continue;
+		if (entry.customType === AGENTS_CONTINUED_CUSTOM_TYPE) return undefined;
+		if (entry.customType !== AGENTS_PAUSED_CUSTOM_TYPE) continue;
+		if (!isObject(entry.data)) return undefined;
+		const { pausedAt, agentIds, pendingPrompt } = entry.data;
+		if (
+			typeof pausedAt !== "string" ||
+			!Array.isArray(agentIds) ||
+			!agentIds.every(id => typeof id === "string") ||
+			(pendingPrompt !== undefined && !isPausedPendingPrompt(pendingPrompt))
+		) {
+			return undefined;
+		}
+		return { pausedAt, agentIds, pendingPrompt, markerId: entry.id };
+	}
+	return undefined;
 }
 
 interface PendingToolCallRecord extends PendingToolCallDiagnostic {
@@ -87,7 +144,7 @@ function readSessionExit(entry: SessionEntry): SessionExitData | undefined {
 	const { reason, kind, recordedAt } = entry.data;
 	if (
 		typeof reason !== "string" ||
-		(kind !== "normal" && kind !== "signal" && kind !== "fatal" && kind !== "process_exit") ||
+		(kind !== "normal" && kind !== "signal" && kind !== "fatal" && kind !== "process_exit" && kind !== "paused") ||
 		typeof recordedAt !== "string"
 	) {
 		return undefined;
@@ -161,6 +218,7 @@ function findUnfinishedTurn(
 	entries: readonly SessionEntry[],
 	options?: InterruptedTurnOptions,
 ): UnfinishedTurn | undefined {
+	if (readAgentsPaused(entries)) return undefined;
 	let exitIndex = -1;
 	let exit: SessionExitData | undefined;
 	for (let index = entries.length - 1; index >= 0; index--) {
@@ -178,7 +236,7 @@ function findUnfinishedTurn(
 	if (!exit || tailIndex > exitIndex) {
 		if (!options?.assumeExit) return undefined;
 		exit = { reason: "restore", kind: "process_exit", recordedAt: new Date().toISOString() };
-	} else if (exit.kind === "normal" && !exit.pendingToolCalls?.length) {
+	} else if (exit.kind === "paused" || (exit.kind === "normal" && !exit.pendingToolCalls?.length)) {
 		return undefined;
 	}
 	if (tail.role === "assistant" && !tail.content.some(isToolCallContent)) return undefined;
@@ -244,9 +302,11 @@ function isFalseAbortAfterSnapshot(entries: readonly SessionEntry[], abortIndex:
  * abort only closed an idle eval snapshot ({@link isFalseAbortAfterSnapshot}).
  */
 export function hasRestorableTurn(entries: readonly SessionEntry[]): boolean {
+	if (readAgentsPaused(entries)) return false;
 	const tailIndex = findTailIndex(entries);
 	for (let index = entries.length - 1; index > tailIndex; index--) {
-		if (readSessionExit(entries[index]!)?.kind === "normal") return false;
+		const kind = readSessionExit(entries[index]!)?.kind;
+		if (kind === "normal" || kind === "paused") return false;
 	}
 	const tail = tailIndex >= 0 ? entries[tailIndex]! : undefined;
 	if (tail?.type === "message" && isInterruptedTurnAbort(tail.message)) {

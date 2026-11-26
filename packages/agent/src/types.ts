@@ -205,8 +205,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	loadCursorExecHandlers?: () => Promise<CursorExecHandlers>;
 	model: Model;
 
-	/** Reports whether this loop has reached a safe process-pause boundary. */
+	/** Reports whether this loop is parked at the model boundary. */
 	onPauseChange?: (paused: boolean) => void;
+	/** Drain already emitted turn events before acknowledging a process pause. */
+	awaitPauseDelivery?: () => Promise<void> | undefined;
 
 	/**
 	 * When to interrupt tool execution for steering messages.

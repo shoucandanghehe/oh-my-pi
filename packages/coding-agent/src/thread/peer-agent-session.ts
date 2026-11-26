@@ -25,6 +25,7 @@ import type {
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import type {
 	AgentSessionDisposeOptions,
+	PausedTurnContinuation,
 	PromptOptions,
 	SessionStats,
 	SteerOptions,
@@ -217,6 +218,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 
 	prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		return mainBridge().remote.call("prompt", this, text, options);
+	}
+
+	continuePausedTurn(): Promise<PausedTurnContinuation> {
+		return mainBridge().remote.call("continuePausedTurn", this);
 	}
 
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {

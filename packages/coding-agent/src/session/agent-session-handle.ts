@@ -36,6 +36,7 @@ import type {
 	DequeuedMessage,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
+	PausedTurnContinuation,
 	Prewalk,
 	PromptOptions,
 	ResolvedRoleModel,
@@ -165,6 +166,8 @@ export interface AgentSessionHandle {
 	waitForIrcReplies(): Promise<void>;
 	/** Send a prompt (or steer/follow up while streaming, per `options.streamingBehavior`). */
 	prompt(text: string, options?: PromptOptions): Promise<boolean>;
+	/** Continue the durable transcript tail without injecting a recovery prompt. */
+	continuePausedTurn(): Promise<PausedTurnContinuation>;
 	/** Queue a steering message for the next step boundary. */
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void>;
 	/** Abort the current operation and wait for the agent to become idle. */

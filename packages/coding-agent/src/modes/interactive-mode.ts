@@ -1161,6 +1161,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#autocompleteProviderFactories: AutocompleteProviderFactory[] = [];
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
+	#pausedExitRequested = false;
 	readonly #version: string;
 	/** The startup changelog under the welcome card, kept so a live config-warning change can rebuild the header (#10048). */
 	#headerAfter: (() => JSXNode) | undefined;
@@ -2108,11 +2109,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => {
 				this.#closeAttempt?.abort();
-				this.session.beginDispose();
+				if (!this.#pausedExitRequested) this.session.beginDispose();
 				this.statusLine.dispose();
 			},
 			saveDraft: text => this.sessionManager.saveDraft(text),
 			disposeSession: async reason => {
+				if (this.#pausedExitRequested) {
+					await this.session.disposeForPausedExit();
+					return;
+				}
 				await this.#btwController.dispose();
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,
@@ -7007,11 +7012,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * cancellable and first ask extensions through `session_before_shutdown`.
 	 */
 	async shutdown(options?: { cancellable?: boolean }): Promise<void> {
+		await this.#shutdown(options?.cancellable !== false, false);
+	}
+
+	shutdownWhilePaused(): Promise<boolean> {
+		return this.#shutdown(true, true);
+	}
+
+	async #shutdown(cancellable: boolean, paused: boolean): Promise<boolean> {
 		if (this.#isShuttingDown) {
 			// Another close request ends the pending attempt's prompts; that
 			// attempt keeps ownership of teardown and can no longer be cancelled.
 			this.#closeAttempt?.abort();
-			return;
+			return true;
 		}
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
@@ -7021,26 +7034,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		// matching the Ctrl+C hard-abort exit code in input-controller.
 		if (this.#teardownFailed) {
 			await this.#quitHostOwned(130);
-			return;
+			return true;
 		}
-		const signal = this.#beginClose();
+		const signal = this.#beginClose(paused ? "Saving paused session…" : "Closing session…");
 		// Reversible decisions first: nothing has been stopped yet, so a refusal
 		// leaves the session exactly as it was.
-		if (options?.cancellable !== false && !(await this.session.confirmClose(signal))) {
+		if (cancellable && !(await this.session.confirmClose(signal))) {
 			this.#abandonClose();
 			this.showStatus("Session close cancelled");
 			// The refusal covers only this quit, not a pending `ctx.shutdown()`.
 			if (this.shutdownRequested) void this.checkShutdownRequested();
-			return;
+			return false;
 		}
 		// A signal teardown or stop() took over while extensions were asked.
-		if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return;
-		const worktreePlan = await this.#planOwnedWorktreeExit(signal);
+		if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return false;
+		this.#pausedExitRequested = paused;
+		const worktreePlan = paused ? [] : await this.#planOwnedWorktreeExit(signal);
 		try {
 			await this.#teardown({ clearResume: true });
 		} catch (error) {
+			this.#pausedExitRequested = false;
 			this.#handleTeardownError("close", error);
-			return;
+			return false;
 		}
 		for (const message of await removeExitWorktrees(worktreePlan)) {
 			process.stderr.write(`${chalk.yellow(message)}\n`);
@@ -7052,10 +7067,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.#resumableSessionId();
 		if (sessionId) {
 			// Command on its own line so triple-click selects just the command (#11001).
-			process.stderr.write(`\n${chalk.dim("Resume this session with")}\n${chalk.dim(resumeCommand(sessionId))}\n`);
+			const hint = paused ? "Paused session. Resume with" : "Resume this session with";
+			process.stderr.write(`\n${chalk.dim(hint)}\n${chalk.dim(resumeCommand(sessionId))}\n`);
+			if (paused) process.stderr.write(`${chalk.dim("Then run /continue.")}\n`);
 		}
 
 		await this.#quitHostOwned(0);
+		return true;
 	}
 
 	#handleTeardownError(action: "close" | "restart", error: unknown): void {
@@ -7188,10 +7206,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
 	}
 
-	/** Claim the one-shot `shutdown()`/`restart()` close before any await. */
-	#beginClose(): AbortSignal {
+	/**
+	 * Claim the one-shot `shutdown()`/`restart()` close and acknowledge it before
+	 * any await: worktree exit planning, live commands, and BTW history writes can
+	 * all stall, and the user must see a reason for the pause.
+	 */
+	#beginClose(status = "Closing session…"): AbortSignal {
 		this.#isShuttingDown = true;
 		this.#closeAttempt = new AbortController();
+		this.showStatus(status);
 		return this.#closeAttempt.signal;
 	}
 
@@ -7224,7 +7247,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// session is disposed, under the same still-closing progress notice.
 			await this.collabController.shutdown("host exited");
 			await this.#liveCommandController.stop();
-			await this.#btwController.dispose();
+			if (!this.#pausedExitRequested) await this.#btwController.dispose();
 			this.#omfgController.dispose();
 			this.#cleanseController.dispose();
 			this.#focusController.dispose();
@@ -7237,6 +7260,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			// before `init()` completed falls back to a direct dispose.
 			if (this.#signalTeardown) {
 				await this.#signalTeardown();
+			} else if (this.#pausedExitRequested) {
+				await this.sessionManager.saveDraft(this.#inputController.getDraftText());
+				await this.session.disposeForPausedExit();
 			} else {
 				await this.session.dispose({
 					mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS,

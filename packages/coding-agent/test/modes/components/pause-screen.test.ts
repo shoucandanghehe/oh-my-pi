@@ -22,12 +22,13 @@ interface PauseRun {
 	screen(): string;
 }
 
-function startPause(session: object = idleSession()): PauseRun {
+function startPause(session: object = idleSession(), shutdownWhilePaused?: () => Promise<boolean>): PauseRun {
 	const statuses: string[] = [];
 	const ctx = createInteractiveModeContext({
 		showStatus: (message: string) => {
 			statuses.push(message);
 		},
+		...(shutdownWhilePaused ? { shutdownWhilePaused } : {}),
 	});
 	// The session itself, not merged into the fixture's: the test moves its state while the screen polls.
 	Object.defineProperty(ctx, "session", { value: session, configurable: true });
@@ -217,6 +218,30 @@ describe("pause screen", () => {
 				run.term.dispose();
 			}
 			expect(agentPauseGate.paused).toBe(false);
+		});
+
+		it("won't exit before the barrier, and invokes paused shutdown without releasing it", async () => {
+			const participant = agentPauseGate.registerParticipant();
+			const shutdownWhilePaused = vi.fn(async () => {
+				expect(agentPauseGate.ready).toBe(true);
+				return true;
+			});
+			const run = startPause(idleSession(), shutdownWhilePaused);
+			try {
+				expect(run.screen()).not.toContain("exit paused");
+				run.term.press("q");
+				expect(shutdownWhilePaused).not.toHaveBeenCalled();
+				expect(agentPauseGate.paused).toBe(true);
+				participant.setReady(true);
+				expect(run.screen()).toContain("exit paused");
+				run.term.press("q");
+				await run.done;
+				expect(shutdownWhilePaused).toHaveBeenCalledTimes(1);
+				expect(run.statuses.some(message => message.includes("Resumed after"))).toBe(false);
+			} finally {
+				participant.dispose();
+				run.term.dispose();
+			}
 		});
 
 		it("is a no-op when the gate is already engaged elsewhere", async () => {

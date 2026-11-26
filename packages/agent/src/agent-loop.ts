@@ -58,7 +58,7 @@ import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi
 import { cloneJsonTree, Laps, logger, sanitizeText, structuredCloneJSON, toError } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { LiveSteeringChannel } from "./live-steering";
-import { agentPauseGate } from "./pause";
+import { agentPauseGate, PAUSE_SHUTDOWN_ABORT_REASON } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import { SpeculativeOperationCoordinator } from "./speculative-execution";
 import {
@@ -131,11 +131,18 @@ export function resolveToolConcurrency(
 	}
 }
 
-async function waitForProcessPause(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
+async function waitForProcessPause(
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	loopId: symbol,
+): Promise<void> {
 	try {
 		while (agentPauseGate.paused && !signal?.aborted) {
+			const delivery = config.awaitPauseDelivery?.();
+			if (delivery) await delivery;
+			if (!agentPauseGate.paused || signal?.aborted) return;
 			config.onPauseChange?.(true);
-			await agentPauseGate.waitUntilResumed(signal);
+			await agentPauseGate.waitUntilResumed(signal, loopId);
 		}
 	} finally {
 		config.onPauseChange?.(false);
@@ -742,11 +749,9 @@ export function unpairedToolCallTail(messages: readonly AgentMessage[]): Assista
  * Continue an agent loop from the current context without adding a new message.
  * Used for retries - context already has user message or tool results.
  *
- * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm` — except for an assistant tail with unpaired runnable
- * tool calls (see {@link unpairedToolCallTail}), which resumes by executing
- * those calls first. Any other assistant tail is rejected here; other invalid
- * tails cannot be validated since `convertToLlm` is only called once per turn.
+ * The last message must convert to a `user` or `toolResult` message
+ * via `convertToLlm`, except for an assistant with unpaired runnable tool calls
+ * (which run first) or a non-terminal `pause_turn` (which re-samples the model).
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -758,7 +763,12 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue: no messages in context");
 	}
 
-	if (context.messages[context.messages.length - 1].role === "assistant" && !unpairedToolCallTail(context.messages)) {
+	const tail = context.messages.at(-1);
+	if (
+		tail?.role === "assistant" &&
+		tail.stopDetails?.type !== "pause_turn" &&
+		!unpairedToolCallTail(context.messages)
+	) {
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
@@ -1181,6 +1191,7 @@ async function runLoop(
 	const invokeAgentSpan = startInvokeAgentSpan(telemetry, config.model);
 	const stepCounter = { count: 0 };
 	let caughtError: unknown;
+	const loopId = agentPauseGate.registerLoop();
 	try {
 		await runInActiveSpan(invokeAgentSpan, () =>
 			runLoopBody(
@@ -1193,6 +1204,7 @@ async function runLoop(
 				invokeAgentSpan,
 				stepCounter,
 				initialMessages,
+				loopId,
 				streamFn,
 			),
 		);
@@ -1200,6 +1212,7 @@ async function runLoop(
 		caughtError = err;
 		throw err;
 	} finally {
+		agentPauseGate.unregisterLoop(loopId);
 		finishInvokeAgentSpan(telemetry, invokeAgentSpan, {
 			stepCount: stepCounter.count,
 			errorObject: caughtError,
@@ -1296,7 +1309,8 @@ async function runLoopBody(
 	invokeAgentSpan: Span | undefined,
 	stepCounter: StepCounter,
 	initialMessages: AgentMessage[],
-	streamFn?: StreamFn,
+	loopId: symbol,
+	streamFn: StreamFn | undefined,
 ): Promise<void> {
 	let deadlineTimer: Timer | undefined;
 	if (config.deadline !== undefined) {
@@ -1438,12 +1452,14 @@ async function runLoopBody(
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
-				// Park at the turn boundary while the process-wide pause gate is
-				// engaged (host /pause). An external abort releases the park so a
-				// cancelled run still unwinds while everything else stays frozen.
+				// Every committed tool call settles before the next model boundary.
 				if (agentPauseGate.paused) {
-					await waitForProcessPause(config, signal);
+					await waitForProcessPause(config, signal, loopId);
 					deliveryLaps?.lap("pausedMs");
+				}
+				if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
 				}
 				let laps = deliveryLaps;
 				deliveryLaps = undefined;
@@ -1579,11 +1595,11 @@ async function runLoopBody(
 				let message: AssistantMessage;
 				let inputsEmitted = false;
 				try {
-					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
 						currentContext,
 						config,
 						signal,
+						loopId,
 						stream,
 						telemetry,
 						invokeAgentSpan,
@@ -1624,6 +1640,10 @@ async function runLoopBody(
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
 				} catch (err) {
+					if (err === PAUSE_SHUTDOWN_ABORT_REASON) {
+						endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+						return;
+					}
 					if (!inputsEmitted) {
 						if (signal?.aborted && (await endAbortedBeforeModel(turnMessages, turnOpen))) return;
 						emitTurnInputs();
@@ -2181,6 +2201,7 @@ async function streamAssistantResponse(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
+	loopId: symbol,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
@@ -2341,6 +2362,12 @@ async function streamAssistantResponse(
 		return await runInActiveSpan(chatSpan, async () => {
 			if (model.api === "cursor-agent" && !config.cursorExecHandlers && config.loadCursorExecHandlers) {
 				config.cursorExecHandlers = await config.loadCursorExecHandlers();
+			}
+			// Credential and Cursor handler preparation can yield. The final check
+			// must be immediately before the request, with no async gap after it.
+			if (agentPauseGate.paused) await waitForProcessPause(config, signal, loopId);
+			if (signal?.aborted && signal.reason === PAUSE_SHUTDOWN_ABORT_REASON) {
+				throw PAUSE_SHUTDOWN_ABORT_REASON;
 			}
 			onProviderStart?.();
 			let response = await streamFunction(model, llmContext, {
@@ -3548,18 +3575,6 @@ async function executeToolCalls(
 		};
 	});
 
-	// Derive batch readiness from existing dispatch records, not extra participants.
-	const refreshPauseState = (): void => {
-		config.onPauseChange?.(
-			agentPauseGate.paused &&
-				!signal?.aborted &&
-				!speculationCoordinator?.isRunning &&
-				records.some(record => !record.started && !record.skipped && !record.toolResultMessage) &&
-				!records.some(record => record.started && !record.toolResultMessage),
-		);
-	};
-	if (speculationCoordinator) speculationCoordinator.onIdle = refreshPauseState;
-
 	const isToolAborted = (record: (typeof records)[number]): boolean =>
 		signal?.aborted === true ||
 		(record.signal.aborted && !(record.handlesToolInterrupt && record.signal.reason === TOOL_INTERRUPT_ABORT_REASON));
@@ -3715,15 +3730,8 @@ async function executeToolCalls(
 			record.skipped = true;
 			return;
 		}
-		// Park before starting this tool while the process-wide pause gate is
-		// engaged. Tools already executing are unaffected (pausing never aborts);
-		// a batch interrupted mid-pause unwinds via the signal checks below.
-		while (agentPauseGate.paused && !record.signal.aborted) {
-			refreshPauseState();
-			await agentPauseGate.waitUntilResumed(record.signal);
-		}
-		config.onPauseChange?.(false);
-
+		// Pause is not cancellation: tools committed by this response must
+		// produce their results before the next model call can be parked.
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a
 		// failure recorded there surfaces here at the record's scheduled slot so
@@ -4068,13 +4076,7 @@ async function executeToolCalls(
 			concurrency === "shared" && sharedEffects.length > 0
 				? Promise.allSettled(sharedEffects).then(() => undefined)
 				: undefined;
-		const task = start.then(async () => {
-			try {
-				await runTool(record, index, earlierEffectsSettled);
-			} finally {
-				refreshPauseState();
-			}
-		});
+		const task = start.then(() => runTool(record, index, earlierEffectsSettled));
 		tasks.push(task);
 		if (concurrency === "exclusive") {
 			lastExclusive = task;
@@ -4101,8 +4103,6 @@ async function executeToolCalls(
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
-		if (speculationCoordinator) speculationCoordinator.onIdle = undefined;
-		config.onPauseChange?.(false);
 		steeringWatchAbortController.abort();
 		await steeringWatchPromise?.catch(() => undefined);
 		clearInterval(steeringWatchTimer);

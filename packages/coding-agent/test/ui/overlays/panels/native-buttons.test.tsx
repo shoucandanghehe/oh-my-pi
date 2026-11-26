@@ -198,13 +198,17 @@ describe("button-like controls in Tern", () => {
 		expect(closed).toBe(1);
 	});
 
-	it("resumes from the pause screen's primary button", async () => {
+	it("updates pause actions when the barrier becomes ready and routes their clicks", async () => {
 		await using ui = await nativeShell();
 		let resumed = 0;
+		let exited = 0;
+		const ready = signal(false);
 		ui.shell.dock.slot("ask").set(() =>
 			PauseScreen({
 				since: () => 0,
 				work: () => ({ unsettledTurns: 0, unfinishedJobs: 0 }),
+				ready,
+				onExit: () => exited++,
 				onResume: () => resumed++,
 			}),
 		);
@@ -216,5 +220,10 @@ describe("button-like controls in Tern", () => {
 		});
 		ui.click("button", "resume");
 		expect(resumed).toBe(1);
+		expect(() => ui.node("button", "exit")).toThrow();
+		ready.set(true);
+		expect(ui.node("button", "exit").p).toMatchObject({ text: "Exit paused", keys: ["q"] });
+		ui.click("button", "exit");
+		expect(exited).toBe(1);
 	});
 });

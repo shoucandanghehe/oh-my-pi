@@ -43,6 +43,7 @@ import type {
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import type {
 	AgentSessionDisposeOptions,
+	PausedTurnContinuation,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
 	Prewalk,
@@ -229,6 +230,7 @@ export interface SessionAbortOptions {
  */
 export type SessionHostProtocol = {
 	prompt: RpcMethod<[text: string, options?: PromptOptions], boolean>;
+	continuePausedTurn: RpcMethod<[], PausedTurnContinuation>;
 	steer: RpcMethod<[text: string, images?: ImageContent[], options?: SteerOptions], void>;
 	abort: RpcMethod<[options?: SessionAbortOptions], void>;
 	dispose: RpcMethod<[options?: AgentSessionDisposeOptions], void>;
@@ -305,6 +307,7 @@ export type SessionBridgeProtocol = {
 	subscribe: RpcMethod<[session: AgentSessionHandle, listener: AgentSessionEventListener], () => void>;
 	subscribeRunState: RpcMethod<[session: AgentSessionHandle, listener: (state: SessionRunState) => void], () => void>;
 	prompt: RpcMethod<[session: AgentSessionHandle, text: string, options?: PromptOptions], boolean>;
+	continuePausedTurn: RpcMethod<[session: AgentSessionHandle], PausedTurnContinuation>;
 	steer: RpcMethod<[session: AgentSessionHandle, text: string, images?: ImageContent[], options?: SteerOptions], void>;
 	abort: RpcMethod<[session: AgentSessionHandle, options?: SessionAbortOptions], void>;
 	dispose: RpcMethod<[session: AgentSessionHandle, options?: AgentSessionDisposeOptions], void>;

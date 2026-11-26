@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 import { RpcClosedError } from "../../src/thread/rpc";
 import type { ThreadService, WorkerPeer } from "../../src/thread/services";
@@ -87,6 +88,27 @@ describe("SubagentWorker", () => {
 		expect(worker.threadId).toMatch(/^w[1-9][0-9]*$/);
 		expect(probe.installed).toEqual([worker]);
 		expect(await worker.link.call("ping", 42)).toBe(42);
+	});
+
+	it("requires the worker to join the current pause epoch, and does not count worker death as an ack", async () => {
+		agentPauseGate.pause();
+		try {
+			const worker = startWorker();
+			expect(agentPauseGate.ready).toBe(false);
+			await worker.ready;
+			expect(agentPauseGate.ready).toBe(true);
+			expect(await worker.link.call("preparePausedExit")).toEqual([]);
+			worker.terminate("worker lost while paused");
+			expect(agentPauseGate.ready).toBe(false);
+		} finally {
+			agentPauseGate.resume();
+		}
+		agentPauseGate.pause();
+		try {
+			expect(agentPauseGate.ready).toBe(true);
+		} finally {
+			agentPauseGate.resume();
+		}
 	});
 
 	it("closes the link, rejects pending calls, and reports the exit once when the worker crashes", async () => {

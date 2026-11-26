@@ -42,7 +42,10 @@ if (!model) throw new Error("Missing bundled test model");
 const mock = createMockModel({
 	responses: [
 		{ content: [{ type: "toolCall", name: "probe", arguments: {} }], stopReason: "toolUse" },
-		{ content: ["finished"] },
+		() => {
+			events.push(["resumed-model", held]);
+			return { content: ["finished"] };
+		},
 	],
 });
 const auth = createInMemoryAuthStorage();
@@ -63,10 +66,8 @@ const session = new AgentSession({
 	toolRegistry: new Map([[tool.name, tool]]),
 });
 const parked = Promise.withResolvers<void>();
-const originalWait = agentPauseGate.waitUntilResumed.bind(agentPauseGate);
-const wait = spyOn(agentPauseGate, "waitUntilResumed").mockImplementation(signal => {
-	parked.resolve();
-	return originalWait(signal);
+const stopWatching = agentPauseGate.onWaitersChange(() => {
+	if (agentPauseGate.ready && agentPauseGate.modelWaiterCount > 0) parked.resolve();
 });
 let pauseInjected = false;
 const unsubscribe = agent.subscribe(event => {
@@ -92,7 +93,7 @@ try {
 	await session.abort();
 	await running?.catch(() => undefined);
 	unsubscribe();
-	wait.mockRestore();
+	stopWatching();
 	await session.dispose();
 	start.mockRestore();
 	auth.close();

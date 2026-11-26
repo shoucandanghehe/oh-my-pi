@@ -237,6 +237,7 @@ function serveBridge(): RpcServe<MainSessionBridge, SessionBridgeProtocol> {
 		subscribeRunState: (bridge, session, listener) =>
 			bridge.forward(listener, forward => session.subscribeRunState(forward)),
 		prompt: (_bridge, session, text, options) => session.prompt(text, options),
+		continuePausedTurn: (_bridge, session) => session.continuePausedTurn(),
 		steer: (_bridge, session, text, images, options) => session.steer(text, images, options),
 		abort: (_bridge, session, options) => session.abort(options),
 		dispose: (_bridge, session, options) => session.dispose(options),

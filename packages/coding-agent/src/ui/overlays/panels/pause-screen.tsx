@@ -1,15 +1,9 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
- * The pause screen: the session is held (every agent stops at its next
- * step) until the user resumes. Shows how long it has been paused, whether
- * outstanding work has settled, what pausing means, and a Resume button
- * (escape, enter or space in the terminal).
- *
- * The native tree is written once when the screen opens; the clock counts
- * on from there and the terminal redraws its own look from the live state.
+ * Displays the model-boundary barrier and the remaining work while paused.
+ * Resume stays in this process; exit saves the paused turn for `/continue`.
  */
-import { type Accessor, type JSXNode, untrack } from "@oh-my-pi/pi-tui";
-import type { TspSpan } from "@oh-my-pi/pi-wire";
+import type { Accessor, JSXNode } from "@oh-my-pi/pi-tui";
 import type { PauseWorkStatus } from "../../../modes/view-model/overlays/pause-screen";
 import "../../styles/panels/pause-screen";
 import { appInterruptKeys, matchesAppInterrupt } from "../../../config/keybindings/matchers";
@@ -33,13 +27,15 @@ export interface PauseScreenProps {
 	readonly since: Accessor<number>;
 	/** Outstanding turns and jobs (the controller polls until settled). */
 	readonly work: Accessor<PauseWorkStatus>;
+	readonly ready: Accessor<boolean>;
 	onResume(): void;
+	onExit(): void;
 }
 
 const FACTS: ReadonlyArray<readonly [icon: string, head: string, body: string]> = [
-	["users", "Every agent holds", "Main agent, subagents and advisor stop at their next step."],
-	["activity", "Running calls finish", "A reply or tool already under way completes; nothing new starts."],
-	["message", "Queued messages wait", "Steering and follow-ups already queued send after you resume."],
+	["users", "Every agent holds", "Agents and advisors stop before their next model request."],
+	["activity", "Committed tools finish", "An in-flight reply and the tools it calls finish before the hold."],
+	["message", "Queued messages wait", "Steering and follow-ups send when you resume in this process."],
 	["pen", "The repo is yours", "Edit files freely, then tell the agent what changed."],
 ];
 
@@ -52,24 +48,29 @@ export function isSettled(work: PauseWorkStatus): boolean {
 const RESUME_KEYS: ReadonlySet<string> = new Set(["enter", "space", "ctrl+c"]);
 
 export function PauseScreen(props: PauseScreenProps): JSXNode {
-	const work = untrack(props.work);
-	const settled = isSettled(work);
+	const settled = () => props.ready() && isSettled(props.work());
 	const interruptKey = appInterruptKeys()[0] ?? "escape";
-	const settlement: TspSpan = settled
-		? { s: "success", t: "Paused — ready to suspend" }
-		: { s: "warning", t: "Pausing — waiting for work to settle" };
+	const settlement = () =>
+		settled()
+			? [{ s: "success", t: "Paused — ready to suspend" }]
+			: [{ s: "warning", t: "Pausing — waiting for work to settle" }];
 	return (
 		<col
 			role={rowsRole("omp.pause")}
 			gap="md"
-			term={() => ({ since: props.since(), session: props.sessionName, work: props.work() })}
+			term={() => ({ since: props.since(), session: props.sessionName, work: props.work(), ready: props.ready() })}
 			onKey={key => {
+				if (key.id === "q") {
+					if (props.ready()) props.onExit();
+					return true;
+				}
 				if (!RESUME_KEYS.has(key.id) && !matchesAppInterrupt(key)) return false;
 				props.onResume();
 				return true;
 			}}
 			onAction={act => {
 				if (act === "resume") props.onResume();
+				else if (act === "exit" && props.ready()) props.onExit();
 			}}
 		>
 			<row key="hero" role="omp.pause.hero" align="center" gap="md">
@@ -86,21 +87,21 @@ export function PauseScreen(props: PauseScreenProps): JSXNode {
 				</col>
 			</row>
 			<col key="settlement-status" role="omp.pause.settlement-status" gap="sm">
-				<text key="settlement" role="omp.pause.settlement" spans={[settlement]} />
-				{!settled && (
-					<text
-						key="unsettled-turns"
-						role="omp.pause.unsettled-turn-count"
-						spans={[{ s: "muted", t: `Unsettled turns: ${work.unsettledTurns}` }]}
-					/>
-				)}
-				{!settled && (
-					<text
-						key="unfinished-jobs"
-						role="omp.pause.unfinished-job-count"
-						spans={[{ s: "muted", t: `Unfinished jobs: ${work.unfinishedJobs}` }]}
-					/>
-				)}
+				<text key="settlement" role="omp.pause.settlement" spans={settlement} />
+				{() =>
+					!isSettled(props.work()) && (
+						<col key="work-counts" gap="sm">
+							<text
+								role="omp.pause.unsettled-turn-count"
+								spans={() => [{ s: "muted", t: `Unsettled turns: ${props.work().unsettledTurns}` }]}
+							/>
+							<text
+								role="omp.pause.unfinished-job-count"
+								spans={() => [{ s: "muted", t: `Unfinished jobs: ${props.work().unfinishedJobs}` }]}
+							/>
+						</col>
+					)
+				}
 			</col>
 			<col key="facts" role="omp.pause.facts" gap="md">
 				{FACTS.map(([icon, head, body], index) => (
@@ -115,6 +116,16 @@ export function PauseScreen(props: PauseScreenProps): JSXNode {
 			</col>
 			<row key="actions" role="omp.actions" align="center" gap="sm">
 				<spacer grow={1} />
+				{() =>
+					props.ready() && (
+						<ActionButton
+							id="exit"
+							label="Exit paused"
+							title="Exit paused; resume later with /continue"
+							keys={kbdOf("q")}
+						/>
+					)
+				}
 				<ActionButton
 					id="resume"
 					label="Resume"

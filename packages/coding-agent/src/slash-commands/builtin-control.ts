@@ -49,36 +49,56 @@ function pauseWorkStatus(root: AgentSession): PauseWorkStatus {
 /** How often the pause screen re-reads outstanding work. */
 const PAUSE_WORK_POLL_MS = 1_000;
 
-/**
- * Engage the global pause gate and hold the fullscreen pause screen until the
- * user resumes. No-op when the gate is already engaged. Always releases the
- * gate on the way out (including teardown throws) — a leaked pause would
- * freeze every agent in the process with no UI left to release it.
- */
+/** A cancelled paused exit returns to the sheet without releasing the model barrier. */
 async function runPauseScreen(ctx: InteractiveModeContext): Promise<void> {
 	if (!agentPauseGate.pause()) return;
+	let exited = false;
+	let unsubscribe: (() => void) | undefined;
+	let timer: Timer | undefined;
 	try {
 		const startedAt = Date.now();
 		const work = signal(pauseWorkStatus(ctx.session), {
 			equals: (a, b) => a.unsettledTurns === b.unsettledTurns && a.unfinishedJobs === b.unfinishedJobs,
 		});
-		const timer = setInterval(() => work.set(pauseWorkStatus(ctx.session)), PAUSE_WORK_POLL_MS);
-		const resumed = Promise.withResolvers<void>();
-		await presentFullscreen(ctx.shell, () => ({
-			view: () =>
-				PauseScreen({
-					sessionName: ctx.sessionName,
-					since: () => startedAt,
-					work,
-					onResume: () => resumed.resolve(),
-				}),
-			sheet: PAUSE_SHEET,
-			done: resumed.promise,
-			dispose: () => clearInterval(timer),
-		}));
+		const ready = signal(agentPauseGate.ready);
+		const update = () => {
+			ready.set(agentPauseGate.ready);
+			if (!ctx.session.isDisposed) work.set(pauseWorkStatus(ctx.session));
+		};
+		unsubscribe = agentPauseGate.onWaitersChange(update);
+		timer = setInterval(update, PAUSE_WORK_POLL_MS);
+		while (!ctx.session.isDisposed) {
+			const closed = Promise.withResolvers<"resume" | "exit">();
+			const action = await presentFullscreen(ctx.shell, () => ({
+				view: () =>
+					PauseScreen({
+						sessionName: ctx.sessionName,
+						since: () => startedAt,
+						work,
+						ready,
+						onResume: () => closed.resolve("resume"),
+						onExit: () => {
+							if (agentPauseGate.ready) closed.resolve("exit");
+						},
+					}),
+				sheet: PAUSE_SHEET,
+				done: closed.promise,
+			}));
+			if (action === "resume") break;
+			try {
+				exited = await ctx.shutdownWhilePaused();
+				if (exited) break;
+			} catch (error) {
+				ctx.showError(errorMessage(error));
+				if (!ctx.session.isDisposed) continue;
+				break;
+			}
+		}
 	} finally {
+		clearInterval(timer);
+		unsubscribe?.();
 		const heldMs = agentPauseGate.resume();
-		if (heldMs !== undefined) {
+		if (!exited && !ctx.session.isDisposed && heldMs !== undefined) {
 			ctx.showStatus(`Resumed after ${formatCoarseDuration(heldMs)} — agents are running again.`);
 		}
 	}
@@ -156,10 +176,35 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "pause",
 		icon: "pause",
-		description: "Freeze all agents (main, subagents, advisor) until resumed",
+		description: "Hold agents before the next model call; resume here or exit when ready",
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runPauseScreen(runtime.ctx);
+		},
+	},
+	{
+		name: "continue",
+		description: "Continue agents after resuming a session that exited paused",
+		handleTui: async (_command, runtime) => {
+			clearSubmittedText(runtime);
+			const { ctx } = runtime;
+			if (!ctx.session.hasPausedAgents()) {
+				ctx.showStatus("Nothing to continue — this session did not exit paused.");
+				return;
+			}
+			try {
+				const result = await ctx.session.continuePausedAgents(ctx.getPausedExitParticipants?.());
+				const detail = result.skipped.length ? ` (${result.skipped.join("; ")})` : "";
+				if (!result.complete) {
+					ctx.showError(`Continue incomplete${detail}`);
+				} else if (result.continued === 0) {
+					ctx.showStatus(`Pause cleared${detail}`);
+				} else {
+					ctx.showStatus(`Continued ${result.continued} ${result.continued === 1 ? "agent" : "agents"}${detail}`);
+				}
+			} catch (error) {
+				ctx.showError(errorMessage(error));
+			}
 		},
 	},
 	{

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
-import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
+import { Agent, agentLoop, agentPauseGate, PAUSE_SHUTDOWN_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool, StreamFn } from "@oh-my-pi/pi-agent-core/types";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { createUserMessage } from "./helpers";
@@ -60,17 +60,10 @@ function runLoop(mock: MockModel, tools: AgentTool[] = [], options: LoopOptions 
 
 function observeGateWait() {
 	const parked = Promise.withResolvers<void>();
-	const originalWait = agentPauseGate.waitUntilResumed;
-	agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
-		parked.resolve();
-		return originalWait.call(agentPauseGate, signal);
-	};
-	return {
-		parked: parked.promise,
-		restore() {
-			agentPauseGate.waitUntilResumed = originalWait;
-		},
-	};
+	const restore = agentPauseGate.onWaitersChange(() => {
+		if (agentPauseGate.ready && agentPauseGate.modelWaiterCount > 0) parked.resolve();
+	});
+	return { parked: parked.promise, restore };
 }
 
 describe("agentPauseGate", () => {
@@ -84,67 +77,40 @@ describe("agentPauseGate", () => {
 		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [] };
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
 
-		const parked = Promise.withResolvers<void>();
-		const originalWait = agentPauseGate.waitUntilResumed;
-		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
-			parked.resolve();
-			return originalWait.call(agentPauseGate, signal);
-		};
+		const gate = observeGateWait();
 		expect(agentPauseGate.pause()).toBe(true);
 		expect(agentPauseGate.pause()).toBe(false); // already engaged
 
 		const result = agentLoop([createUserMessage("hi")], context, config, undefined, mock.stream).result();
-		await parked.promise;
+		await gate.parked;
 		expect(mock.calls.length).toBe(0); // parked before the first provider call
 
 		try {
+			expect(agentPauseGate.ready).toBe(true);
 			expect(agentPauseGate.resume()).toBeGreaterThanOrEqual(0);
 			const messages = await result;
 			expect(mock.calls.length).toBe(1);
 			expect(messages[messages.length - 1].role).toBe("assistant");
 		} finally {
-			agentPauseGate.waitUntilResumed = originalWait;
+			gate.restore();
 		}
 	});
 
-	it("holds tool execution at the tool boundary when paused mid-turn", async () => {
-		const executed: string[] = [];
-		// Signal exactly when the loop parks on the gate. A test-local manual
-		// patch (not vi.spyOn) so a sibling file's restoreAllMocks cannot remove
-		// it, and a gate regression that never parks hangs this await (test
-		// timeout) instead of racing past a vacuous assertion.
-		const toolBoundary = Promise.withResolvers<void>();
-		const originalWait = agentPauseGate.waitUntilResumed;
-		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
-			toolBoundary.resolve();
-			return originalWait.call(agentPauseGate, signal);
-		};
-		const mock = createMockModel({
-			responses: [
-				() => {
-					// Engage the gate while the model response is being produced: the
-					// turn's tool batch must park before the tool starts.
-					agentPauseGate.pause();
-					return { content: [{ type: "toolCall" as const, name: "echo", arguments: { msg: "frozen" } }] };
-				},
-				{ content: ["done"] },
-			],
-		});
-		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [makeEchoTool(executed)] };
-		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
-
+	it("ends a durable pause without an aborted assistant turn", async () => {
+		const gate = observeGateWait();
+		const controller = new AbortController();
+		const mock = createMockModel({ responses: [{ content: ["never sent"] }] });
 		try {
-			const result = agentLoop([createUserMessage("run echo")], context, config, undefined, mock.stream).result();
-			await toolBoundary.promise;
-			expect(executed).toEqual([]); // tool parked, not started
-			expect(mock.calls.length).toBe(1); // and no follow-up model call either
-
-			agentPauseGate.resume();
-			await result;
-			expect(executed).toEqual(["frozen"]);
-			expect(mock.calls.length).toBe(2);
+			agentPauseGate.pause();
+			const result = runLoop(mock, [], {}, controller.signal);
+			await gate.parked;
+			expect(agentPauseGate.ready).toBe(true);
+			controller.abort(PAUSE_SHUTDOWN_ABORT_REASON);
+			expect((await result).some(message => message.role === "assistant")).toBe(false);
+			expect(mock.calls).toHaveLength(0);
+			expect(agentPauseGate.paused).toBe(true);
 		} finally {
-			agentPauseGate.waitUntilResumed = originalWait;
+			gate.restore();
 		}
 	});
 
@@ -154,12 +120,7 @@ describe("agentPauseGate", () => {
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
 		const abortController = new AbortController();
 
-		const parked = Promise.withResolvers<void>();
-		const originalWait = agentPauseGate.waitUntilResumed;
-		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
-			parked.resolve();
-			return originalWait.call(agentPauseGate, signal);
-		};
+		const gate = observeGateWait();
 		agentPauseGate.pause();
 		const result = agentLoop(
 			[createUserMessage("hi")],
@@ -168,7 +129,7 @@ describe("agentPauseGate", () => {
 			abortController.signal,
 			mock.stream,
 		).result();
-		await parked.promise;
+		await gate.parked;
 		abortController.abort("user interrupt");
 
 		// The run must terminate as aborted promptly (not stay parked until
@@ -183,7 +144,7 @@ describe("agentPauseGate", () => {
 			}
 			expect(agentPauseGate.paused).toBe(true); // aborting one run never resumes the process
 		} finally {
-			agentPauseGate.waitUntilResumed = originalWait;
+			gate.restore();
 		}
 	});
 
@@ -215,7 +176,7 @@ describe("agentPauseGate", () => {
 		expect(transitions).toEqual([true, false]);
 	});
 
-	it("acknowledges a provider-boundary pause before executing a returned tool", async () => {
+	it("finishes a tool returned by an in-flight response before acknowledging pause", async () => {
 		const started = Promise.withResolvers<void>(),
 			release = Promise.withResolvers<void>();
 		const paused = Promise.withResolvers<void>(),
@@ -247,7 +208,7 @@ describe("agentPauseGate", () => {
 		agentPauseGate.pause();
 		release.resolve();
 		await paused.promise;
-		expect(executed).toEqual([]);
+		expect(executed).toEqual(["once"]);
 		expect(mock.calls).toHaveLength(1);
 		expect(finished).toBe(false);
 		agentPauseGate.resume();
@@ -258,7 +219,7 @@ describe("agentPauseGate", () => {
 		expect(transitions.at(-1)).toBe(false);
 	});
 
-	it("waits for a running parallel tool before acknowledging and releasing the next", async () => {
+	it("does not acknowledge the barrier until all committed tool results finish", async () => {
 		const started = Promise.withResolvers<void>(),
 			release = Promise.withResolvers<void>();
 		const paused = Promise.withResolvers<void>();
@@ -267,7 +228,6 @@ describe("agentPauseGate", () => {
 		const mock = createMockModel({
 			responses: [{ content: [echoCall("first"), echoCall("second")] }, { content: ["done"] }],
 		});
-		const gateWait = observeGateWait();
 		try {
 			const result = runLoop(
 				mock,
@@ -288,43 +248,59 @@ describe("agentPauseGate", () => {
 				},
 			);
 			await started.promise;
-			await gateWait.parked;
+			expect(agentPauseGate.ready).toBe(false);
 			expect(transitions).not.toContain(true);
-			expect(executed).toEqual([]);
 			release.resolve();
 			await paused.promise;
 			expect(transitions).toContain(true);
-			expect(executed).toEqual(["first"]);
+			expect(executed.toSorted()).toEqual(["first", "second"]);
 			agentPauseGate.resume();
 			await result;
-			expect(executed).toEqual(["first", "second"]);
+			expect(executed).toHaveLength(2);
 			expect(mock.calls).toHaveLength(2);
 		} finally {
-			gateWait.restore();
+			release.resolve();
 		}
 	});
 
-	it("pauses after asynchronous beforeModelCall preparation and before the provider call", async () => {
-		const entered = Promise.withResolvers<void>(),
-			release = Promise.withResolvers<void>();
-		const paused = Promise.withResolvers<void>(),
-			mock = createMockModel({ responses: [{ content: ["done"] }] });
-		const result = runLoop(mock, [], {
-			beforeModelCall: async () => {
-				entered.resolve();
-				await release.promise;
+	it("rechecks the barrier after async credential preparation before the provider starts", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const gate = observeGateWait();
+		const provider = Promise.withResolvers<"provider">();
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const stream: StreamFn = (...args) => {
+			provider.resolve("provider");
+			return mock.stream(...args);
+		};
+		const result = agentLoop(
+			[createUserMessage("hold")],
+			{ systemPrompt: ["Test"], messages: [], tools: [] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				getApiKey: async () => {
+					entered.resolve();
+					await release.promise;
+					return undefined;
+				},
 			},
-			onPauseChange: value => {
-				if (value) paused.resolve();
-			},
-		});
-		await entered.promise;
-		agentPauseGate.pause();
-		release.resolve();
-		await paused.promise;
-		expect(mock.calls).toHaveLength(0);
-		agentPauseGate.resume();
-		await result;
+			undefined,
+			stream,
+		).result();
+		try {
+			await entered.promise;
+			agentPauseGate.pause();
+			release.resolve();
+			const boundary = await Promise.race([gate.parked.then(() => "paused"), provider.promise]);
+			expect(boundary).toBe("paused");
+			expect(mock.calls).toHaveLength(0);
+		} finally {
+			release.resolve();
+			agentPauseGate.resume();
+			gate.restore();
+			await result;
+		}
 		expect(mock.calls).toHaveLength(1);
 	});
 

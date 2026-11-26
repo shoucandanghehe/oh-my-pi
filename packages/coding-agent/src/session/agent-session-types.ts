@@ -83,6 +83,24 @@ export interface AgentSessionDisposeOptions {
 	 * `omp --restore` goes on with it. `SIGINT` and `MANUAL` stop it, as a quit does.
 	 */
 	reason?: postmortem.Reason;
+	/** A durable pause ends parked loops without synthesizing an aborted turn. */
+	pausedExit?: boolean;
+}
+
+/** Outcome of continuing one agent on the thread that owns its transcript. */
+export type PausedTurnContinuation = "continued" | "busy" | "empty transcript" | "already idle";
+
+export interface ContinuePausedAgentsResult {
+	continued: number;
+	skipped: string[];
+	complete: boolean;
+}
+
+/** Non-registry conversation owner that participates in durable pause/continue. */
+export interface PausedExitParticipant {
+	readonly label: string;
+	prepareForPausedExit(): void;
+	continuePaused(): Promise<ContinuePausedAgentsResult>;
 }
 
 /** Listener notified when command metadata changes. */

@@ -19,6 +19,7 @@ interface PauseTerm {
 	readonly since: number;
 	readonly session?: string;
 	readonly work: { readonly unsettledTurns: number; readonly unfinishedJobs: number };
+	readonly ready: boolean;
 }
 
 /** Narrowest screen that gets the full layout. */
@@ -26,8 +27,8 @@ const FULL_MIN_WIDTH = 64;
 const GLYPH_ROWS = 7;
 const GLYPH = "█████    █████";
 const FACT_LINES = [
-	"Main agent, subagents, and advisor hold at their next step.",
-	"In-flight calls finish; nothing new starts until you resume.",
+	"Agents and advisors hold before their next model request.",
+	"In-flight replies and committed tools finish before the hold.",
 ];
 
 function center(text: string, width: number): string {
@@ -38,14 +39,16 @@ function center(text: string, width: number): string {
 
 function settlementLines(theme: Theme, term: Partial<PauseTerm>): string[] {
 	const work = term.work ?? { unsettledTurns: 0, unfinishedJobs: 0 };
-	if (work.unsettledTurns === 0 && work.unfinishedJobs === 0) {
-		return [theme.fg("success", "Paused — ready to suspend")];
+	const hasUnfinishedWork = work.unsettledTurns > 0 || work.unfinishedJobs > 0;
+	if (term.ready && !hasUnfinishedWork) return [theme.fg("success", "Paused — ready to suspend")];
+	const status = [theme.fg("warning", "Pausing — waiting for work to settle")];
+	if (hasUnfinishedWork) {
+		status.push(
+			theme.fg("muted", `Unsettled turns: ${work.unsettledTurns}`),
+			theme.fg("muted", `Unfinished jobs: ${work.unfinishedJobs}`),
+		);
 	}
-	return [
-		theme.fg("warning", "Pausing — waiting for work to settle"),
-		theme.fg("muted", `Unsettled turns: ${work.unsettledTurns}`),
-		theme.fg("muted", `Unfinished jobs: ${work.unfinishedJobs}`),
-	];
+	return status;
 }
 
 defineRolePainter("col", "omp.pause", (node, cx): Block => {
@@ -68,10 +71,11 @@ defineRolePainter("col", "omp.pause", (node, cx): Block => {
 	for (const fact of FACT_LINES) full.push(`${factLead}${theme.fg("muted", fact)}`);
 	for (const line of settlement) full.push(center(line, width));
 	const resumeHint = `${interrupt} · ${keyLabel(theme, "enter")} · ${keyLabel(theme, "space")} — resume`;
-	full.push(center(clock, width), "", center(theme.fg("dim", resumeHint), width));
+	const exitHint = term.ready ? ` · ${keyLabel(theme, "q")} — exit paused` : "";
+	full.push(center(clock, width), "", center(theme.fg("dim", `${resumeHint}${exitHint}`), width));
 
 	const title = center(theme.style("strong", theme.fg("accent", "▌▌ P A U S E D")), width);
-	const resume = center(theme.fg("dim", `${interrupt} to resume`), width);
+	const resume = center(theme.fg("dim", `${interrupt} to resume${exitHint}`), width);
 	const compact: string[] = [];
 	if (sessionLine) compact.push(center(sessionLine, width));
 	compact.push(title, "", center(clock, width), ...settlement.map(line => center(line, width)), resume);
@@ -79,10 +83,13 @@ defineRolePainter("col", "omp.pause", (node, cx): Block => {
 	if (width >= FULL_MIN_WIDTH && full.length <= height) lines.push(...full);
 	else if (compact.length <= height) lines.push(...compact);
 	else if (height <= 1) {
-		const settled = (term.work?.unsettledTurns ?? 0) === 0 && (term.work?.unfinishedJobs ?? 0) === 0;
+		const settled = term.ready && (term.work?.unsettledTurns ?? 0) === 0 && (term.work?.unfinishedJobs ?? 0) === 0;
 		lines.push(
 			center(
-				theme.fg(settled ? "success" : "warning", `${settled ? "Paused" : "Pausing"} · ${interrupt} to resume`),
+				theme.fg(
+					settled ? "success" : "warning",
+					`${settled ? "Paused" : "Pausing"} · ${interrupt} to resume${exitHint}`,
+				),
 				width,
 			),
 		);

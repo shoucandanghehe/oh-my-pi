@@ -837,6 +837,11 @@ export class SessionAdvisors {
 		this.#stopAdvisorRuntime();
 	}
 
+	/** Use the pause-shutdown reason before tearing down the runtimes. */
+	abort(reason: unknown): void {
+		for (const advisor of this.#advisors) advisor.agent.abort(reason);
+	}
+
 	/**
 	 * Pause advisor work while old-session recorder feeds remain attached, then
 	 * detach only after any active prompt has settled.

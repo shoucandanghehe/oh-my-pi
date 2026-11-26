@@ -27,6 +27,7 @@ import {
 	AgentBusyError,
 	type AgentEvent,
 	type AgentMessage,
+	agentPauseGate,
 	type AgentPreModelCallStop,
 	type AgentState,
 	type AgentTool,
@@ -38,6 +39,8 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	lastContextMessage,
+	PAUSE_SHUTDOWN_ABORT_REASON,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -246,7 +249,9 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { hasLiveOwnedService } from "../launch/services";
 import { USER_AWAIT_ID } from "../registry/agent-awaits";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
@@ -296,7 +301,7 @@ import type { TodoPhase } from "../tools/details/todo";
 import { ToolError } from "../tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
 import { registerLocalSession } from "../thread/session-directory";
-import { prewarmSubagentWorker } from "../thread/subagent-worker";
+import { existingSubagentWorkerPool, prewarmSubagentWorker } from "../thread/subagent-worker";
 import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
@@ -345,12 +350,15 @@ import type {
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
 	DequeuedMessage,
+	ContinuePausedAgentsResult,
 	DroppedPrompt,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
 	FollowUpOptions,
 	FreshSessionResult,
 	ModelCycleResult,
+	PausedExitParticipant,
+	PausedTurnContinuation,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -416,11 +424,16 @@ import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost, type PythonExecuteOptions } from "./eval-runner";
 import {
+	AGENTS_CONTINUED_CUSTOM_TYPE,
+	AGENTS_PAUSED_CUSTOM_TYPE,
+	type AgentsPausedData,
 	collectPendingToolCalls,
 	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
 	hasRestorableTurn,
 	INTERRUPTED_TURN_ERROR,
+	type PausedPendingPrompt,
+	readAgentsPaused,
 	restoreTerminatedBashJobs,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
@@ -1375,6 +1388,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
+	#preparedPausedPrompt:
+		| { message: Extract<AgentMessage, { role: "user" }>; input: PausedPendingPrompt; markerId?: string }
+		| undefined;
+	#exitingPaused = false;
+	#pausedContinuation: Promise<ContinuePausedAgentsResult> | undefined;
+	#continuingPausedTurn = false;
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -1618,7 +1637,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (paused) {
 			this.#releasePowerAssertion();
 			this.#endComputerTurn();
-		} else if (this.#promptInFlightCount > 0) {
+		} else if (!this.#exitingPaused && this.#promptInFlightCount > 0) {
 			this.#acquirePowerAssertion();
 			this.#resumeComputerTurn();
 		}
@@ -4299,11 +4318,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.sessionManager.appendCustomEntry(TOOL_EXECUTION_START_CUSTOM_TYPE, data);
 	}
 
-	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
+	#recordSessionExit(reason: postmortem.Reason | "dispose", pausedExit = false): void {
 		if (this.#exitRecorded) return;
 		this.#exitRecorded = true;
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
+			!pausedExit &&
 			pendingToolCalls.length === 0 &&
 			!this.sessionManager.getEntries().some(entry => entry.type === "message" && entry.message.role === "assistant")
 		) {
@@ -4314,8 +4334,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// the marker would fork the conversation into an "open-elsewhere" copy
 		// just to say a reader exited, and any pending tool calls are the owner's.
 		if (this.sessionManager.isOwnedElsewhere()) return;
-		const kind: SessionExitData["kind"] =
-			reason === "dispose" || reason === postmortem.Reason.MANUAL
+		const kind: SessionExitData["kind"] = pausedExit
+			? "paused"
+			: reason === "dispose" || reason === postmortem.Reason.MANUAL
 				? "normal"
 				: reason === postmortem.Reason.UNCAUGHT_EXCEPTION || reason === postmortem.Reason.UNHANDLED_REJECTION
 					? "fatal"
@@ -4323,7 +4344,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						? "process_exit"
 						: "signal";
 		const data: SessionExitData = {
-			reason,
+			reason: pausedExit ? AGENTS_PAUSED_CUSTOM_TYPE : reason,
 			kind,
 			recordedAt: new Date().toISOString(),
 		};
@@ -4333,7 +4354,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.sessionManager.flushSync();
 			// Only pending tool calls or an abnormal teardown are noteworthy; a
 			// clean dispose logs at debug so routine exits don't read as problems.
-			const exitLog = pendingToolCalls.length > 0 || kind !== "normal" ? logger.warn : logger.debug;
+			const exitLog =
+				pendingToolCalls.length > 0 || (kind !== "normal" && kind !== "paused") ? logger.warn : logger.debug;
 			exitLog("Session exit recorded", {
 				sessionId: this.sessionManager.getSessionId(),
 				sessionFile: this.sessionManager.getSessionFile(),
@@ -4349,6 +4371,94 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+	}
+
+	/** Persist a latch on this branch without adding anything to model context. */
+	recordAgentsPaused(agentIds: string[], pendingPrompt?: PausedPendingPrompt): void {
+		const previous = readAgentsPaused(this.sessionManager.getBranch());
+		const staged = this.#preparedPausedPrompt;
+		const pending = pendingPrompt ?? previous?.pendingPrompt;
+		const data: AgentsPausedData = {
+			pausedAt: new Date().toISOString(),
+			agentIds: [...new Set([...(previous?.agentIds ?? []), ...agentIds].filter(id => id.length > 0))],
+			...(pending && !(staged && this.#sessionMessageAlreadyPersisted(staged.message))
+				? { pendingPrompt: structuredClone(pending) }
+				: {}),
+		};
+		const markerId = this.sessionManager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, data);
+		if (data.pendingPrompt && staged) staged.markerId = markerId;
+		this.sessionManager.flushSync();
+	}
+
+	hasPausedAgents(): boolean {
+		return readAgentsPaused(this.sessionManager.getBranch()) !== undefined;
+	}
+
+	/** Flush through the last committed tool result before any paused exit marker is written. */
+	async preparePausedExit(): Promise<{ active: boolean; pendingPrompt?: PausedPendingPrompt }> {
+		if (!agentPauseGate.ready) throw new Error("Agents have not reached the model-boundary pause barrier");
+		if (!this.agent.isPaused && (this.isStreaming || this.#admittedSubmissionCount > 0)) {
+			throw new Error("An agent is still preparing or settling a turn");
+		}
+		await this.settleInFlightMessagePersistence();
+		if (collectPendingToolCalls(this.sessionManager.getBranch()).length > 0) {
+			throw new Error("Cannot exit paused with an unrecorded tool result");
+		}
+		if (!this.sessionManager.getSessionFile()) {
+			if (this.#agentKind !== "main" && !this.agent.isPaused) return { active: false };
+			throw new Error("Paused exit requires a persistent session");
+		}
+		await this.sessionManager.ensureOnDisk();
+		if (!agentPauseGate.ready || (!this.agent.isPaused && (this.isStreaming || this.#admittedSubmissionCount > 0))) {
+			throw new Error("An agent left the pause barrier during exit preparation");
+		}
+		const staged = this.#preparedPausedPrompt;
+		const pendingPrompt = staged && !this.#sessionMessageAlreadyPersisted(staged.message) ? staged.input : undefined;
+		return { active: this.agent.isPaused, pendingPrompt };
+	}
+
+	abortForPausedExit(): void {
+		if (this.#exitingPaused) return;
+		this.#exitingPaused = true;
+		this.agent.abort(PAUSE_SHUTDOWN_ABORT_REASON);
+		this.#advisors.abort(PAUSE_SHUTDOWN_ABORT_REASON);
+	}
+
+	/** Coordinate the local and worker phases of a durable process pause. */
+	async disposeForPausedExit(participants: readonly PausedExitParticipant[] = []): Promise<void> {
+		if (this.#agentKind !== "main") throw new Error("Only the main session can coordinate a paused exit");
+		if (!agentPauseGate.ready) throw new Error("Agents have not reached the model-boundary pause barrier");
+		const pool = existingSubagentWorkerPool();
+		const sessions = new Set<AgentSession>([this]);
+		const ids = new Set<string>();
+		for (const ref of AgentRegistry.global().list()) {
+			if (ref.kind === "sub" && ref.session && isLocalAgentSession(ref.session)) sessions.add(ref.session);
+		}
+		try {
+			const [remoteIds, ...local] = await Promise.all([
+				pool?.preparePausedExit() ?? Promise.resolve([]),
+				...[...sessions].map(async session => ({ session, ...(await session.preparePausedExit()) })),
+			]);
+			if (!agentPauseGate.ready) throw new Error("An agent left the pause barrier during exit preparation");
+			for (const id of remoteIds) ids.add(id);
+			let pendingPrompt: PausedPendingPrompt | undefined;
+			for (const entry of local) {
+				const id = entry.session === this ? MAIN_AGENT_ID : entry.session.getAgentId();
+				if (!id || !entry.active) continue;
+				ids.add(id);
+				if (entry.session === this) pendingPrompt = entry.pendingPrompt;
+				else if (entry.pendingPrompt) entry.session.recordAgentsPaused([id], entry.pendingPrompt);
+			}
+			for (const participant of participants) participant.prepareForPausedExit();
+			this.recordAgentsPaused([...ids], pendingPrompt);
+		} catch (error) {
+			pool?.cancelPausedExit();
+			throw error;
+		}
+		for (const session of sessions) session.abortForPausedExit();
+		const disposeWorkers = pool?.disposePausedExit();
+		this.#cancelOwnAsyncJobs(ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
+		await Promise.all([disposeWorkers, ...[...sessions].map(session => session.dispose({ pausedExit: true }))]);
 	}
 
 	#queuedExtensionEvents: AgentSessionEvent[] = [];
@@ -4792,7 +4902,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 	}
 
-	#persistMessageEnd(message: AgentMessage, promptGeneration: number): void {
+	async #persistMessageEnd(message: AgentMessage, promptGeneration: number): Promise<void> {
 		// Session transitions may replace the transcript before a queued commit
 		// runs. Never append the previous conversation to the replacement session.
 		if (this.#promptGeneration !== promptGeneration) {
@@ -4835,6 +4945,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (message.role === "assistant" && this.#recovery.isClassifierRefusal(message)) {
 			this.sessionManager.appendCustomEntry(PROVIDER_REFUSAL_CUSTOM_TYPE, providerRefusalData(message));
 			return;
+		}
+		const replay = this.#preparedPausedPrompt;
+		if (replay?.message === message && replay.markerId) {
+			const paused = readAgentsPaused(this.sessionManager.getBranch());
+			if (paused?.markerId === replay.markerId && paused.pendingPrompt) {
+				// Commit the exact user message and consumption of its replay intent together.
+				// A crash between two independent writes could otherwise send that input twice.
+				await this.sessionManager.appendEntriesAtomically(() => {
+					this.#persistSessionMessageIfMissing(message);
+					this.sessionManager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, {
+						pausedAt: paused.pausedAt,
+						agentIds: paused.agentIds,
+					});
+				});
+				return;
+			}
 		}
 		this.#persistSessionMessageIfMissing(message);
 	}
@@ -5398,6 +5524,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const endLoop = (options?: LoopEndOptions) => this.#endLoop(event, activeMessages, loopEpoch, options);
+			if (this.#exitingPaused) {
+				endLoop();
+				return;
+			}
 			await this.#goalRuntime.onAgentEnd({ currentUsage: () => this.#goalUsage() });
 			const fallbackAssistant = settledMessages.findLast(
 				(message): message is AssistantMessage => message.role === "assistant",
@@ -5920,6 +6050,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	#scheduleAgentContinue(options: ScheduledAgentContinueOptions): void {
+		if (!this.#continuingPausedTurn && this.hasPausedAgents()) return;
 		const request: ScheduledAgentContinueRequest = {
 			schedulerToken: ++this.#agentContinueSchedulerToken,
 			options,
@@ -7306,6 +7437,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
+		if (options.pausedExit) this.abortForPausedExit();
 		this.beginDispose();
 		// Stop cache warming before the drain windows below: an armed tick firing
 		// mid-dispose would issue a paid warm request and persist usage into the
@@ -7316,7 +7448,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#cacheWarmer.onRefreshEnd = undefined;
 			this.#cacheWarmer.cancel();
 		}
-		this.#recordSessionExit(options.reason ?? "dispose");
+		this.#recordSessionExit(options.reason ?? "dispose", options.pausedExit);
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
@@ -7344,7 +7476,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// stopping it: label it as interrupted so `omp --restore` goes on with it.
 		const abortReason = cutsTurnOff(options.reason) ? INTERRUPTED_TURN_ERROR : undefined;
 		const postPromptDrain = this.#cancelPostPromptTasks(abortReason);
-		this.agent.abort(abortReason);
+		if (!options.pausedExit) this.agent.abort(abortReason);
 		try {
 			await withTimeout(
 				postPromptDrain,
@@ -9233,6 +9365,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * @throws {Error} when there is no conversation to resume.
 	 */
 	async resume(options?: { onAdmitted?: () => void }): Promise<void> {
+		if (this.hasPausedAgents()) throw new Error("This session exited paused. Use /continue to resume its agents.");
 		const onAdmitted = options?.onAdmitted;
 		if (!this.isStreaming) return this.#resumeIdle(onAdmitted);
 		// waitForIdle() reads a pending unwind as busy. Hold one from the interrupt
@@ -9303,7 +9436,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 	}
 
-	async #prompt(text: string, options?: PromptOptions): Promise<boolean> {
+	async #prompt(text: string, options?: PromptOptions, pausedMarkerId?: string): Promise<boolean> {
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -9329,9 +9462,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Locally handled commands and failed dispatches release that claim.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
+			if (!release)
+				return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps, pausedMarkerId);
 			try {
-				return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
+				return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps, pausedMarkerId);
 			} finally {
 				release(outcome.sessionClaimed);
 			}
@@ -9360,6 +9494,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		submittedAt: number,
 		outcome: PromptDispatchOutcome,
 		followUps: PromptFollowUps | undefined,
+		pausedMarkerId: string | undefined,
 	): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
@@ -9570,6 +9705,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		let turnError: unknown;
 		let dispatched = false;
 		const refusalBeforeDispatch = this.#costCapRefusal;
+		// The loop publishes user input at provider start. At a pause before that
+		// point retain the raw input to replay through preparation after a cold open.
+		const prepared =
+			message.role === "user"
+				? {
+						message,
+						input: { text: templated, images: options?.images, attribution: promptAttribution },
+						markerId: pausedMarkerId,
+					}
+				: undefined;
+		if (prepared) this.#preparedPausedPrompt = prepared;
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
@@ -9587,6 +9733,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			throw error;
 		} finally {
+			if (this.#preparedPausedPrompt === prepared) this.#preparedPausedPrompt = undefined;
 			// Clean up residual eager-todo directive if the prompt never consumed it
 			// (e.g., compaction aborted, validation failed).
 			this.#toolChoiceQueue.removeByLabel("eager-todo");
@@ -11151,6 +11298,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return false;
 		}
 		if (this.isStreaming) return false;
+		if (this.hasPausedAgents()) return false;
 		// A deliberate user interrupt holds follow-ups until explicit input resumes the
 		// session. A queued steer may still wake it; the drain starts with queued input
 		// regardless of the existing context tail.
@@ -14172,6 +14320,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Retry the last failed assistant turn when the session is idle. */
 	async retry(): Promise<boolean> {
+		if (!this.#continuingPausedTurn && this.hasPausedAgents()) return false;
 		const didRetry = await this.#recovery.retry(this.#prunedTerminalFailure);
 		// A manual retry is the user resuming the run they interrupted, so it lifts the
 		// interrupt's auto-resume suppression the same way a typed prompt does.
@@ -14213,6 +14362,147 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			restoreTerminatedBashJobs(branch, this.#asyncJobManager, this.getAgentId());
 		}
 		return restored;
+	}
+
+	/** Continue one journaled turn on the thread that owns its transcript. */
+	async continuePausedTurn(): Promise<PausedTurnContinuation> {
+		if (
+			agentPauseGate.paused ||
+			this.#isDisposed ||
+			this.#continuingPausedTurn ||
+			this.isStreaming ||
+			this.isCompacting ||
+			this.isRetrying
+		) {
+			return "busy";
+		}
+		const paused = readAgentsPaused(this.sessionManager.getBranch());
+		const pending = paused?.pendingPrompt;
+		const tail = lastContextMessage(this.agent.state.messages);
+		if (!tail && !pending) return "empty transcript";
+		if (!pending && collectPendingToolCalls(this.sessionManager.getBranch()).length > 0) {
+			throw new Error("The paused transcript contains a tool call without a recorded result");
+		}
+		if (
+			!pending &&
+			tail?.role === "assistant" &&
+			tail.stopReason !== "error" &&
+			tail.stopReason !== "aborted" &&
+			tail.stopDetails?.type !== "pause_turn" &&
+			!this.agent.hasQueuedMessages()
+		) {
+			if (this.#agentKind !== "main" && paused) this.#recordAgentsContinued(paused, 0);
+			return "already idle";
+		}
+
+		this.#continuingPausedTurn = true;
+		try {
+			if (paused && pending) {
+				await this.#admitSubmission(() =>
+					this.#prompt(
+						pending.text,
+						{
+							images: pending.images,
+							attribution: pending.attribution,
+							expandPromptTemplates: false,
+							runCommands: false,
+							throwOnDrop: true,
+						},
+						paused.markerId,
+					),
+				);
+			} else if (tail?.role === "assistant" && (tail.stopReason === "error" || tail.stopReason === "aborted")) {
+				if (!(await this.retry())) throw new Error("Failed continuation is not retryable");
+			} else {
+				const observation = this.#startTurnObservation([]);
+				const inFlightEpoch = this.#beginInFlight();
+				let error: unknown;
+				try {
+					await this.agent.continue();
+				} catch (cause) {
+					error = cause;
+					throw cause;
+				} finally {
+					this.#endInFlight(inFlightEpoch);
+					void this.#finishTurnObservation(observation, error);
+				}
+			}
+			await this.waitForIdle();
+			const current = readAgentsPaused(this.sessionManager.getBranch());
+			if (pending && current?.pendingPrompt) throw new Error("Paused prompt was not persisted");
+			if (this.agent.state.error) throw new Error(this.agent.state.error);
+			const last = lastContextMessage(this.agent.state.messages);
+			if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+				throw new Error(last.errorMessage || `Continuation ${last.stopReason}`);
+			}
+			if (this.#agentKind !== "main" && current) this.#recordAgentsContinued(current, 1);
+			return "continued";
+		} finally {
+			this.#continuingPausedTurn = false;
+		}
+	}
+
+	/** Resume the recorded roster once; keep the latch when any target cannot continue. */
+	continuePausedAgents(participants: readonly PausedExitParticipant[] = []): Promise<ContinuePausedAgentsResult> {
+		return (this.#pausedContinuation ??= this.#continuePausedAgents(participants).finally(() => {
+			this.#pausedContinuation = undefined;
+		}));
+	}
+
+	async #continuePausedAgents(participants: readonly PausedExitParticipant[]): Promise<ContinuePausedAgentsResult> {
+		const paused = readAgentsPaused(this.sessionManager.getBranch());
+		if (!paused) return { continued: 0, skipped: ["no paused turn on this branch"], complete: false };
+		await registerPersistedSubagents(AgentRegistry.global(), this.sessionManager.getSessionFile());
+
+		const lifecycle = AgentLifecycleManager.global();
+		const targets = [...new Set(paused.agentIds)].map(id => ({
+			label: id,
+			run: async (): Promise<ContinuePausedAgentsResult> => {
+				const target = id === MAIN_AGENT_ID ? this : await lifecycle.ensureLive(id);
+				const result = await target.continuePausedTurn();
+				return result === "continued"
+					? { continued: 1, skipped: [], complete: true }
+					: { continued: 0, skipped: [result], complete: result === "already idle" };
+			},
+		}));
+		for (const participant of participants) {
+			targets.push({ label: participant.label, run: () => participant.continuePaused() });
+		}
+		const results = await Promise.all(
+			targets.map(async ({ label, run }): Promise<ContinuePausedAgentsResult> => {
+				try {
+					const result = await run();
+					return {
+						...result,
+						skipped: (result.complete || result.skipped.length > 0 ? result.skipped : ["incomplete"]).map(
+							detail => `${label}: ${detail}`,
+						),
+					};
+				} catch (error) {
+					return { continued: 0, skipped: [`${label}: ${toError(error).message}`], complete: false };
+				}
+			}),
+		);
+		const continued = results.reduce((total, result) => total + result.continued, 0);
+		const skipped = results.flatMap(result => result.skipped);
+		const complete = results.every(result => result.complete);
+		if (complete) {
+			const current = readAgentsPaused(this.sessionManager.getBranch());
+			if (current?.pausedAt !== paused.pausedAt) {
+				return { continued, skipped: [...skipped, "the paused branch changed"], complete: false };
+			}
+			this.#recordAgentsContinued(current, continued);
+		}
+		return { continued, skipped, complete };
+	}
+
+	#recordAgentsContinued(paused: AgentsPausedData, continued: number): void {
+		this.sessionManager.appendCustomEntry(AGENTS_CONTINUED_CUSTOM_TYPE, {
+			continuedAt: new Date().toISOString(),
+			agentIds: paused.agentIds,
+			continued,
+		});
+		this.sessionManager.flushSync();
 	}
 
 	// =========================================================================

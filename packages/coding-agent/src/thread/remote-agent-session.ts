@@ -65,6 +65,7 @@ import {
 } from "../session/agent-session-handle";
 import type {
 	AgentSessionDisposeOptions,
+	PausedTurnContinuation,
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
@@ -828,6 +829,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
 		return this.#command("steer", text, images, options);
+	}
+
+	continuePausedTurn(): Promise<PausedTurnContinuation> {
+		return this.#command("continuePausedTurn");
 	}
 
 	abort(options?: SessionAbortOptions): Promise<void> {

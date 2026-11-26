@@ -314,6 +314,8 @@ describe("sheets Tern draws", () => {
 					PauseScreen({
 						since: () => 0,
 						work: () => ({ unsettledTurns: 0, unfinishedJobs: 0 }),
+						ready: () => true,
+						onExit: () => {},
 						onResume: () => resumed.resolve(),
 					}),
 				sheet: PAUSE_SHEET,

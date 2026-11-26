@@ -175,14 +175,12 @@ describe("AgentSession computer display hold per turn", () => {
 		expect(computerTurnInFlight(owner)).toBeUndefined();
 	});
 
-	it("releases the display hold once a paused agent parks, and resumes it before the next tool", async () => {
-		const target = createSession([{ ...step, delayMs: 50 }, { content: ["done"] }]);
+	it("holds through committed tools, then releases at the model boundary and resumes before new work", async () => {
+		const target = createSession([{ ...step, delayMs: 50 }, step, { content: ["done"] }]);
 		let paused = false;
 		const parked = Promise.withResolvers<void>();
-		const waitUntilResumed = agentPauseGate.waitUntilResumed.bind(agentPauseGate);
-		const wait = spyOn(agentPauseGate, "waitUntilResumed").mockImplementation(signal => {
-			parked.resolve();
-			return waitUntilResumed(signal);
+		const stopWatching = agentPauseGate.onWaitersChange(() => {
+			if (agentPauseGate.ready && agentPauseGate.modelWaiterCount > 0) parked.resolve();
 		});
 		const unsubscribe = target.agent.subscribe(event => {
 			if (event.type === "message_start" && event.message.role === "assistant" && !paused) {
@@ -194,18 +192,21 @@ describe("AgentSession computer display hold per turn", () => {
 		try {
 			await parked.promise;
 			expect(target.agent.isPaused).toBe(true);
-			expect(steps).toEqual([]);
+			expect(steps).toEqual([{ turn: 1, releases: 0 }]);
 			expect(computerTurnInFlight(owner)).toBeUndefined();
 			agentPauseGate.resume();
 			await running;
-			expect(steps).toEqual([{ turn: 2, releases: 1 }]);
+			expect(steps).toEqual([
+				{ turn: 1, releases: 0 },
+				{ turn: 2, releases: 1 },
+			]);
 			expect(resumes).toEqual(["1->2"]);
 			expect(releases).toEqual([1, 2]);
 		} finally {
 			agentPauseGate.resume();
 			await target.abort();
 			await running.catch(() => undefined);
-			wait.mockRestore();
+			stopWatching();
 			unsubscribe();
 		}
 	});

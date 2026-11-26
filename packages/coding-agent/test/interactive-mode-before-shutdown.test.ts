@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -91,7 +91,7 @@ describe("InteractiveMode pre-quit extension gate", () => {
 			flags: new Map(),
 			shortcuts: new Map(),
 		};
-		const manager = SessionManager.inMemory(tempDir.path());
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		const runner = new ExtensionRunner([extension], new ExtensionRuntime(), tempDir.path(), manager, modelRegistry);
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model, systemPrompt: ["test"], tools: [], messages: [] } }),
@@ -183,6 +183,26 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(session.isDisposed).toBe(true);
 		expect(shutdownEvents).toBe(1);
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
+	});
+
+	it("honors a refused paused exit, then uses durable teardown on the next request", async () => {
+		beforeShutdown = () => (attempts === 1 ? { cancel: true } : undefined);
+		const pausedExit = vi.spyOn(session, "disposeForPausedExit");
+		agentPauseGate.pause();
+		try {
+			expect(await mode.shutdownWhilePaused()).toBe(false);
+			expect(agentPauseGate.paused).toBe(true);
+			expect(session.isDisposed).toBe(false);
+			expect(pausedExit).not.toHaveBeenCalled();
+			expect(postmortem.quit).not.toHaveBeenCalled();
+
+			expect(await mode.shutdownWhilePaused()).toBe(true);
+			expect(pausedExit).toHaveBeenCalledTimes(1);
+			expect(session.isDisposed).toBe(true);
+			expect(postmortem.quit).toHaveBeenCalledTimes(1);
+		} finally {
+			agentPauseGate.resume();
+		}
 	});
 
 	it.each([

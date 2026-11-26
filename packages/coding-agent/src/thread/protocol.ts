@@ -46,6 +46,7 @@ export type SubagentMainApi = {
 	ping: RpcMethod<[nonce: number], number>;
 	/** Route a follow-up turn of a session not homed on the calling worker to its home thread. */
 	runFollowUpTurn: RpcMethod<[options: FollowUpTurnOptions], SingleResult>;
+	pauseState: RpcMethod<[epoch: number, ready: boolean], void>;
 };
 
 /** Methods a subagent host worker serves to the main thread. */
@@ -62,6 +63,9 @@ export type SubagentWorkerApi = {
 	runFollowUpTurn: RpcMethod<[options: FollowUpTurnOptions], SingleResult>;
 	/** Cold-revive a parked subagent here from its transcript; main receives the session's mirror. */
 	revivePersisted: RpcMethod<[spec: PersistedReviveSpec, expected: AgentRef], AgentSessionHandle>;
+	setPaused: RpcMethod<[paused: boolean, epoch: number], void>;
+	preparePausedExit: RpcMethod<[], string[]>;
+	disposePausedExit: RpcMethod<[], void>;
 };
 
 /** Link held by the main thread for one worker. */

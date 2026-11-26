@@ -1899,7 +1899,9 @@ export class Agent {
 				// A dequeue hook may withdraw the queued input while the drain starts.
 				if (options?.queuedOnly) return;
 				if (!literalTail) throw new Error("No messages to continue from");
-				if (literalTail === tail) throw new Error("Cannot continue from message role: assistant");
+				if (literalTail === tail && (tail.role !== "assistant" || tail.stopDetails?.type !== "pause_turn")) {
+					throw new Error("Cannot continue from message role: assistant");
+				}
 			}
 
 			await this.#runLoop(undefined, undefined, signal, true);
@@ -1957,6 +1959,8 @@ export class Agent {
 		this.#state.streamMessage = null;
 		this.#state.error = undefined;
 		this.#isPaused = false;
+		let pendingTurnEnds = 0;
+		let pauseDelivery: PromiseWithResolvers<void> | undefined;
 
 		// Clear Cursor tool result buffer at start of each run
 		this.#cursorToolResultBuffer = [];
@@ -2141,9 +2145,12 @@ export class Agent {
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			onTurnEndEmitted: () => {
 				requestModel = undefined;
+				pendingTurnEnds++;
 			},
+			awaitPauseDelivery: () =>
+				pendingTurnEnds > 0 ? (pauseDelivery ??= Promise.withResolvers<void>()).promise : undefined,
 			onPauseChange: paused => {
-				if (this.#isPaused === paused) return;
+				if (this.#abortController !== loopAbortController || this.#isPaused === paused) return;
 				this.#isPaused = paused;
 				this.#emitPauseChanged(paused);
 			},
@@ -2259,6 +2266,10 @@ export class Agent {
 
 				// Emit to listeners
 				this.#emit(event);
+				if (event.type === "turn_end" && --pendingTurnEnds === 0) {
+					pauseDelivery?.resolve();
+					pauseDelivery = undefined;
+				}
 			}
 
 			// Handle any remaining partial message
@@ -2415,6 +2426,10 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
+			if (pauseDelivery) {
+				loopAbortController.abort();
+				pauseDelivery.resolve();
+			}
 			this.#isPaused = false;
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);
 			resolveRun?.();
