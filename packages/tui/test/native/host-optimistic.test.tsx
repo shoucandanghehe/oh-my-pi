@@ -117,10 +117,11 @@ describe("startHost optimistic native start in a Tern pane", () => {
 		expect(before).not.toContain("\x1b[?1049h");
 	});
 
-	it("renders natively before the hello reply and stays native once it arrives", async () => {
-		const h = await start({ TERM_PROGRAM: "tern" });
+	it("renders natively before and after the hello reply even with the app viewport opt-in", async () => {
+		const h = await start({ TERM_PROGRAM: "tern", PI_TUI_RENDER_BACKEND: "app-viewport" });
 		// Nothing answered yet: the surface is already open and drawn natively.
 		expect(h.host.native).toBe(true);
+		expect(h.host.renderBackend).toBe("native");
 		expect(nativeRendering()).toBe(true);
 		expect(h.host.hour12).toBeUndefined();
 		expect(h.sent("o")).toBe(1);
@@ -128,11 +129,13 @@ describe("startHost optimistic native start in a Tern pane", () => {
 		expect(h.sent("f")).toBeGreaterThanOrEqual(1);
 		// Drawn by the terminal from the frame, not painted as rows.
 		expect(rows(h.out())).not.toContain("hello there");
+		expect(h.out()).not.toContain("\x1b[?1049h");
 
 		// The reply, then the DA1 sentinels of the startup probes, in order.
 		h.feed(HELLO_REPLY);
 		h.feed(DA1 + DA1 + DA1);
 		expect(h.host.native).toBe(true);
+		expect(h.host.renderBackend).toBe("native");
 		expect(h.host.hour12).toBe(true);
 		expect(h.changes()).toBe(1);
 		// Past the confirm deadline: still native, the surface never reopened.
@@ -173,6 +176,16 @@ describe("startHost optimistic native start in a Tern pane", () => {
 		expect(h.changes()).toBe(1);
 		expect(h.out()).toContain('\x1b_tsp;x;{"id"');
 		await Bun.sleep(40);
+		expect(rows(h.out())).toContain("hello there");
+	});
+
+	it("uses the opted-in app viewport only after Tern declines", async () => {
+		const h = await start({ TERM_PROGRAM: "tern", PI_TUI_RENDER_BACKEND: "app-viewport" });
+		expect(h.host.renderBackend).toBe("native");
+		h.feed(DA1 + DA1 + DA1);
+		expect(h.host.renderBackend).toBe("app-viewport");
+		expect(h.changes()).toBe(1);
+		expect(h.out()).toContain("\x1b[?1049h");
 		expect(rows(h.out())).toContain("hello there");
 	});
 

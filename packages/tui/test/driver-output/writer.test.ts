@@ -136,6 +136,21 @@ describe("images", () => {
 		expect(vt.since(again)).toBe("");
 	});
 
+	it("uploads images to the alternate screen, not the screen the application leaves behind", () => {
+		const upload = "\x1b_Ga=t,i=7;AAAA\x1b\\";
+		const vt = new Vt({
+			images: {
+				takeSequences: screen => (screen === "alternate" ? upload : ""),
+			},
+		});
+		const mark = vt.writes.length;
+		vt.present({ viewport: [], cursor: null, fullscreen: ["caption"] });
+		const bytes = vt.since(mark);
+		expect(bytes.indexOf("\x1b[?1049h")).toBeGreaterThanOrEqual(0);
+		expect(bytes.indexOf("\x1b[?1049h")).toBeLessThan(bytes.indexOf(upload));
+		expect(bytes.indexOf(upload)).toBeLessThan(bytes.indexOf("caption"));
+	});
+
 	it("rewrites rows carrying graphics in place instead of shifting them", () => {
 		const vt = new Vt({ rows: 6, sync: false });
 		const image = "\x1b_Ga=p,i=1\x1b\\";
@@ -342,6 +357,19 @@ describe("display reset", () => {
 		).toBe(2);
 		expect(vt.writes.length).toBe(mark + 1);
 		expect(vt.transcript()).toEqual([...lines("new", 1, 5), "status"]);
+	});
+
+	it("repaints an erased alternate screen without clearing the normal buffer", () => {
+		const vt = new Vt({ rows: 4, shell: ["shell output"] });
+		const frame = { viewport: [], cursor: null, fullscreen: ["app viewport"] };
+		vt.present(frame);
+		vt.term.write("\x1b[2J");
+		expect(vt.screen()[0]).toBe("");
+		vt.writer.resetDisplay();
+		vt.present(frame);
+		expect(vt.screen()[0]).toBe("app viewport");
+		vt.writer.stop();
+		expect(vt.transcript()).toEqual(["shell output"]);
 	});
 });
 

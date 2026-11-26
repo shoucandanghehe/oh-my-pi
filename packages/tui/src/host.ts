@@ -61,6 +61,10 @@ export interface HostOptions extends Pick<
 	readonly intercept?: (event: InputEvent) => boolean;
 	/** Render natively when the terminal speaks TSP. Default true. */
 	readonly native?: boolean;
+	/** Clipboard handling for selected transcript text in the ANSI app viewport. Defaults to OSC 52. */
+	readonly onAppViewportSelectionCopy?: (text: string) => void;
+	/** Paste requested by a right click without an active transcript selection in the ANSI app viewport. */
+	readonly onAppViewportPasteRequest?: () => void;
 	/** Blank rows between two non-empty main blocks in the terminal renderer. Default 1. */
 	readonly separator?: (above: UiNode, below: UiNode) => number;
 	/** Frame-rate cap of the terminal renderer: shortest gap between frames in ms (may change). Default 16. */
@@ -110,12 +114,14 @@ export interface Host {
 	 * terminal renderer (see {@link startHost}, {@link Host.onChange}).
 	 */
 	readonly native: boolean;
+	/** Active renderer (reactive). The app viewport only applies to an ANSI host. */
+	readonly renderBackend: "native" | "inline" | "app-viewport";
 	/**
 	 * The terminal's clock from the TSP hello (`false`: 24-hour), reactive;
 	 * undefined in the terminal renderer, before an optimistic start's reply, or when Tern doesn't say.
 	 */
 	readonly hour12: boolean | undefined;
-	/** `listener` runs after {@link Host.native} or {@link Host.hour12} changed. Returns the removal. */
+	/** `listener` runs after {@link Host.renderBackend} or {@link Host.hour12} changed. Returns the removal. */
 	onChange(listener: () => void): () => void;
 	readonly driver: ProcessTerminalDriver;
 	/**
@@ -240,6 +246,7 @@ const HELLO_CONFIRM_GRACE_MS = 100;
 type Renderer = Pick<
 	Host,
 	| "native"
+	| "renderBackend"
 	| "hour12"
 	| "retired"
 	| "replayHistory"
@@ -273,14 +280,17 @@ type Renderer = Pick<
  */
 export async function startHost(options: HostOptions): Promise<Host> {
 	const native = options.native ?? true;
+	const env = options.driver?.env ?? Bun.env;
+	const appViewport = env.PI_TUI_RENDER_BACKEND === "app-viewport";
 	const watchdog = new LoopWatchdog();
 	let stopped = false;
 	let haltRenderer: (() => void) | undefined;
 	let cancelConfirmation: (() => void) | undefined;
+	let mouseTracking: MouseTracking | undefined;
 	const driver = createTerminalDriver(
 		{
 			isLoopStalled: () => watchdog.isStalled(),
-			deferShellLine: () => options.screen?.() === "fullscreen",
+			deferShellLine: () => !appViewport && options.screen?.() === "fullscreen",
 			...options.driver,
 			...(native ? { hello: encodeHelloQuery(options.version ? { ver: options.version } : {}) } : {}),
 		},
@@ -293,7 +303,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		},
 	);
 	// Both read the reply to the driver's `hello` probe, so they exist before it starts.
-	const optimistic = native && isTernPane(options.driver?.env ?? Bun.env);
+	const optimistic = native && isTernPane(env);
 	const assumed = optimistic ? TspConnection.assume(driver) : undefined;
 	// A terminal that answers the hello batch's DA1 first speaks no TSP: rows start without waiting out the deadline.
 	const connecting =
@@ -376,6 +386,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		nativeSurface.set(true);
 		return {
 			native: true,
+			renderBackend: "native",
 			get hour12() {
 				return connection.hello.hour12;
 			},
@@ -408,7 +419,6 @@ export async function startHost(options: HostOptions): Promise<Host> {
 	};
 
 	const termRenderer = (): Renderer => {
-		let mouse: MouseTracking = "off";
 		options.beforeTerminalRenderer?.();
 		const presenting = tapFrames(driver, frame => {
 			for (const listener of frameListeners) listener(frame);
@@ -418,6 +428,11 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			driver: debug ? debug.tap(presenting) : presenting,
 			theme: options.theme,
 			images: driverImages(driver.images, () => driver.capabilities),
+			...(appViewport ? { appViewport } : {}),
+			...(options.onAppViewportSelectionCopy
+				? { onAppViewportSelectionCopy: options.onAppViewportSelectionCopy }
+				: {}),
+			...(options.onAppViewportPasteRequest ? { onAppViewportPasteRequest: options.onAppViewportPasteRequest } : {}),
 			...(options.separator ? { separator: options.separator } : {}),
 			...(options.frameInterval === undefined ? {} : { frameInterval: options.frameInterval }),
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
@@ -446,8 +461,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			backend.stop();
 		};
 		backend.start();
+		if (appViewport) driver.setMouse(mouseTracking ?? "drag");
 		return {
 			native: false,
+			renderBackend: appViewport ? "app-viewport" : "inline",
 			hour12: undefined,
 			retired: node => backend.retired(node),
 			replayHistory: () => driver.resetDisplay(),
@@ -457,8 +474,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			checkoutShown: () => false,
 			requestFrame: () => backend.requestRender(),
 			setMouse(tracking) {
-				mouse = tracking;
-				driver.setMouse(tracking, options.screen?.() === "fullscreen");
+				driver.setMouse(tracking, !appViewport && options.screen?.() === "fullscreen");
 				if (tracking === "off") backend.clearHover();
 			},
 			scroll: by => backend.scroll(by),
@@ -472,17 +488,19 @@ export async function startHost(options: HostOptions): Promise<Host> {
 				try {
 					return await run();
 				} finally {
-					await driver.start();
-					// A fullscreen session that never wrote history has nothing to redraw on the normal
-					// screen (a reset would clear it at exit): its next frame paints the alternate screen whole.
-					const fullscreen = options.screen?.() === "fullscreen";
-					if (fullscreen) driver.setMouse(mouse, true);
-					if (!fullscreen || backend.wroteHistory) driver.resetDisplay();
-					backend.start();
+					if (!stopped) {
+						await driver.start();
+						// Fullscreen-only sessions have no normal-screen content to replay.
+						const fullscreen = !appViewport && options.screen?.() === "fullscreen";
+						if (fullscreen) driver.setMouse(mouseTracking ?? "off", true);
+						if (!appViewport && (!fullscreen || backend.wroteHistory)) driver.resetDisplay();
+						backend.start();
+						if (appViewport) driver.setMouse(mouseTracking ?? "drag");
+					}
 				}
 			},
 			stop() {
-				// Graceful shutdown: the whole transcript goes into terminal history before the terminal is handed back.
+				// The inline transcript goes into history; the app viewport leaves the normal buffer alone.
 				try {
 					backend.flush();
 				} finally {
@@ -497,6 +515,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		get native() {
 			revision();
 			return renderer.native;
+		},
+		get renderBackend() {
+			revision();
+			return renderer.renderBackend;
 		},
 		get hour12() {
 			revision();
@@ -519,7 +541,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			changeListeners.add(listener);
 			return () => changeListeners.delete(listener);
 		},
-		setMouse: tracking => renderer.setMouse(tracking),
+		setMouse(tracking) {
+			mouseTracking = tracking;
+			renderer.setMouse(tracking);
+		},
 		scroll: by => renderer.scroll(by),
 		openSearch: () => renderer.openSearch(),
 		copySelection: () => renderer.copySelection(),

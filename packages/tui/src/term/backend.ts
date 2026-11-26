@@ -18,6 +18,9 @@
  * writes everything into history at shutdown. The protocol, its invariants and
  * how they map here: docs/tui-core-renderer.md.
  *
+ * The opt-in app viewport keeps `main` scrollable on the alternate screen
+ * instead, sharing the painters, dock, layers, input router and writer.
+ *
  * Input becomes the same events a Tern terminal sends: keys first offer
  * themselves to `onKey` handlers from the focused node up, then to the
  * focused kind's widget (an editor turns them into `edit` events); clicks
@@ -53,6 +56,7 @@ import {
 import { isSettled, type Surface } from "../surface";
 import type { Theme } from "../theme/contract";
 import { padTo, sliceColumns, truncate, visibleWidth } from "../text/width";
+import { AppViewport, type ViewportHit } from "./app-viewport";
 import {
 	type Block,
 	type Cell,
@@ -62,9 +66,9 @@ import {
 	paintNode,
 	type PointerHover,
 } from "./paint";
-import { TranscriptSearch } from "./transcript-search";
 import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
 import { TranscriptPointer } from "./transcript-pointer";
+import { TranscriptSearch } from "./transcript-search";
 import { type WidgetContext, widgetContext, widgetFor } from "./widgets";
 import "./painters";
 
@@ -112,6 +116,12 @@ export interface TermBackendOptions {
 	readonly surface: Surface;
 	readonly driver: TerminalDriver;
 	readonly theme: Accessor<Theme>;
+	/** Keep `main` scrollable on the alternate screen instead of retiring it into terminal history. */
+	readonly appViewport?: boolean;
+	/** Copy selected transcript text (OSC 52 when omitted). */
+	readonly onAppViewportSelectionCopy?: (text: string) => void;
+	/** A right click without transcript text selected. */
+	readonly onAppViewportPasteRequest?: () => void;
 	/**
 	 * Blank rows between two consecutive non-empty `main` blocks (the
 	 * transcript's separator; compact runs pack with 0). Default 1.
@@ -373,6 +383,7 @@ function lowerBound(values: readonly number[], value: number): number {
 export class TermBackend {
 	readonly #surface: Surface;
 	readonly #driver: TerminalDriver;
+	readonly #appViewport: AppViewport | undefined;
 	readonly #options: TermBackendOptions;
 	readonly #env: PaintEnvironment;
 	// A content frame can absorb a tick in the same millisecond as the last sample. Clock readers
@@ -411,7 +422,7 @@ export class TermBackend {
 	readonly #retiring = new Set<UiNode>();
 	#nextPin: Pin | undefined;
 	#nextHistoryId = 1;
-	#hits: { readonly hit: Hit; readonly top: number; readonly left: number }[] = [];
+	#hits: ViewportHit[] = [];
 	/** Layer stack these hits were painted for; queued reports cannot click through a newly opened modal. */
 	#hitLayer: readonly UiNode[] | undefined;
 	/** The driver lost history: the next frame replays the committed ledger. */
@@ -436,7 +447,18 @@ export class TermBackend {
 	constructor(options: TermBackendOptions) {
 		this.#surface = options.surface;
 		this.#driver = options.driver;
-		this.#options = options;
+		this.#options = options.appViewport ? { ...options, screen: undefined } : options;
+		if (options.appViewport) {
+			this.#appViewport = new AppViewport({
+				surface: options.surface,
+				paint: (node, width) => this.#paint(node, width),
+				separator: options.separator ?? (() => 1),
+				copy:
+					options.onAppViewportSelectionCopy ??
+					(text => options.driver.writeRaw(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`)),
+				...(options.onAppViewportPasteRequest ? { paste: options.onAppViewportPasteRequest } : {}),
+			});
+		}
 		this.#hyperlinks = signal(options.driver.capabilities.hyperlinks);
 		const terminalHyperlinks = this.#hyperlinks;
 		const hyperlinks: Accessor<boolean> = options.hyperlinks
@@ -486,8 +508,7 @@ export class TermBackend {
 			}),
 			this.#driver.onReplay(() => {
 				// A batch still unwritten (a replay included) is prepared again for the new display.
-				this.#replay = true;
-				this.#pending = undefined;
+				if (!this.#appViewport) this.#requestReplay();
 				this.requestRender();
 			}),
 		);
@@ -508,6 +529,7 @@ export class TermBackend {
 		for (const off of this.#unsubscribe.splice(0)) off();
 		this.#disposeWatch?.();
 		this.#disposeWatch = undefined;
+		this.#appViewport?.pause();
 	}
 
 	/**
@@ -515,10 +537,10 @@ export class TermBackend {
 	 * terminal history (every live `main` block as it is now, settled or not,
 	 * after the ledger a pending replay still owes) and keeps the dock as the
 	 * viewport. A driver that cannot write inline yet (mid-resize) writes it
-	 * when it stops. Call it last, right before {@link stop}.
+	 * when it stops. The app viewport has no terminal history to flush.
 	 */
 	flush(): void {
-		if (!this.#running) return;
+		if (!this.#running || this.#appViewport) return;
 		if (this.#options.screen?.() === "fullscreen" && this.#options.exitTranscript?.() === false) return;
 		// An unwritten batch was never written: the flush batch takes its rows (a replay stays owed).
 		this.#pending = undefined;
@@ -882,7 +904,7 @@ export class TermBackend {
 		const width = Math.max(1, this.#driver.columns);
 		const height = Math.max(1, this.#driver.rows);
 		const flush = this.#flushing;
-		const hits: { hit: Hit; top: number; left: number }[] = [];
+		const hits: ViewportHit[] = [];
 		let cursor: Cell | null = null;
 
 		// The shutdown flush writes the transcript inline: transient layers are no part of it.
@@ -890,10 +912,15 @@ export class TermBackend {
 		if (this.#hitLayer !== layer) this.#pointer?.blur();
 		this.#pointerCovers.length = 0;
 		this.#hitLayer = layer;
+		if (layer.length > 0) this.#appViewport?.endDrag();
 		/** Draw a layer node over `rows` (centered, or at its `top`/`bottom` anchor). */
 		const place = (rows: string[], node: UiNode): void => {
 			// Modal sheets own the pointer everywhere, including their margins and non-interactive rows.
-			if (node.kind === "overlay" && (node.props() as { modal?: boolean }).modal) hits.length = 0;
+			const props = node.kind === "overlay" ? node.props() : undefined;
+			if (props && "modal" in props && props.modal) {
+				hits.length = 0;
+				if (this.#appViewport) cursor = null;
+			}
 			const overlayCols = node.kind === "overlay" ? overlayWidth(node, width) : width;
 			const block = this.#paint(node, overlayCols);
 			const anchor = layerAnchor(node);
@@ -920,6 +947,14 @@ export class TermBackend {
 					: undefined;
 			composite(rows, block, top, left, width, fullscreenSession);
 			restore?.();
+			if (this.#appViewport && node.kind === "overlay" && block.rows.length > 0) {
+				hits.push({
+					hit: { node, row: 0, col: 0, width: overlayCols, height: block.rows.length },
+					top,
+					left,
+					occludes: true,
+				});
+			}
 			if (block.cursor) cursor = { row: top + block.cursor.row, col: left + block.cursor.col };
 			for (const hit of block.hits ?? []) hits.push({ hit, top, left });
 		};
@@ -967,6 +1002,26 @@ export class TermBackend {
 			covering += Math.min(block.covering ?? 0, block.rows.length);
 		}
 
+		const appendDock = (rows: string[], dockTop = rows.length): void => {
+			for (const { block, top } of dock) {
+				const row = dockTop + top;
+				for (let i = Math.max(0, -row); i < block.rows.length; i++) rows.push(block.rows[i]!);
+				if (block.cursor && row + block.cursor.row >= 0)
+					cursor = { row: row + block.cursor.row, col: block.cursor.col };
+				for (const hit of block.hits ?? []) hits.push({ hit, top: row, left: 0 });
+			}
+		};
+		if (this.#appViewport) {
+			const dockTop = height - dockRows;
+			const visible = Math.max(0, dockTop);
+			const capacity = Math.max(0, dockTop + covering);
+			const rows = Array.from({ length: visible }, () => "");
+			cursor = this.#appViewport.paint(width, capacity, visible, rows, hits);
+			appendDock(rows, dockTop);
+			for (const node of layer) place(rows, node);
+			this.#hits = hits;
+			return { viewport: [], cursor, fullscreen: rows };
+		}
 		// The committed prefix of main stays in history; the rest is live.
 		const main = this.#surface.main();
 		let start = 0;
@@ -1250,12 +1305,7 @@ export class TermBackend {
 			if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd, above);
 		} else if (joinedEnd > 0) dropCutImages(viewport, 0, joinedEnd);
 		const dockTop = viewport.length;
-		for (const placed of dock) {
-			viewport.push(...placed.block.rows);
-			if (placed.block.cursor)
-				cursor = { row: dockTop + placed.top + placed.block.cursor.row, col: placed.block.cursor.col };
-			for (const hit of placed.block.hits ?? []) hits.push({ hit, top: dockTop + placed.top, left: 0 });
-		}
+		appendDock(viewport);
 		// Covering dock rows hide the live rows they draw over (still live: they come back when it closes).
 		const hidden = covering > 0 ? Math.min(dockTop, viewport.length - height) : 0;
 		if (hidden > 0) {
@@ -1520,6 +1570,7 @@ export class TermBackend {
 		const focused = this.#surface.focused();
 		const path = focused ? pathTo(this.#regions(), focused) : [];
 		if (bubbleKey(path, key)) return;
+		if (this.#surface.layer().length === 0 && this.#appViewport?.key(key)) return;
 		if (focused && path.length > 0) {
 			const widget = widgetFor(focused);
 			if (widget?.key?.(focused, key, this.#widgetContext(path))) return;
@@ -1538,8 +1589,11 @@ export class TermBackend {
 			return;
 		}
 		const pointer =
-			this.#window?.wheel && (!this.#hitLayer?.length || this.#searchable()) ? this.#pointer : undefined;
+			this.#window?.wheel && (!this.#hitLayer.length || this.#searchable()) ? this.#pointer : undefined;
 		if (pointer?.capture(mouse, viewportRow)) return;
+		const appViewport = this.#hitLayer.length === 0 ? this.#appViewport : undefined;
+		if (appViewport?.drag(mouse, viewportRow)) return;
+		if (mouse.action === "press" && mouse.button === "left") appViewport?.clearSelection();
 		const cover =
 			pointer &&
 			this.#pointerCovers.findLast(
@@ -1549,10 +1603,12 @@ export class TermBackend {
 		const firstHit = cover ? cover.firstHit : 0;
 		this.#trackHover(viewportRow, mouse.col, firstHit);
 		for (let i = this.#hits.length - 1; i >= firstHit; i--) {
-			const { hit, top, left } = this.#hits[i]!;
+			const { hit, top, left, clipAt, occludes } = this.#hits[i]!;
+			if (clipAt !== undefined && viewportRow >= clipAt) continue;
 			const row = viewportRow - top - hit.row;
 			const col = mouse.col - left - hit.col;
 			if (row < 0 || col < 0 || row >= hit.height || col >= hit.width) continue;
+			if (occludes) return;
 			const path = pathTo(this.#regions(), hit.node);
 			if (path.length === 0) continue;
 			const widget = widgetFor(hit.node);
@@ -1571,19 +1627,20 @@ export class TermBackend {
 				return;
 			}
 		}
-		if (pointer && !cover) {
-			pointer.input(mouse, viewportRow);
-		}
+		if (pointer && !cover) pointer.input(mouse, viewportRow);
+		appViewport?.mouse(mouse, viewportRow);
 	}
 
 	/** Point the hover state at the topmost hit under the pointer (painters band it via `cx.hovered`). */
 	#trackHover(viewportRow: number, column: number, firstHit: number): void {
 		let next: PointerHover | null = null;
 		for (let i = this.#hits.length - 1; i >= firstHit; i--) {
-			const { hit, top, left } = this.#hits[i]!;
+			const { hit, top, left, clipAt, occludes } = this.#hits[i]!;
+			if (clipAt !== undefined && viewportRow >= clipAt) continue;
 			const row = viewportRow - top - hit.row;
 			const col = column - left - hit.col;
 			if (row < 0 || col < 0 || row >= hit.height || col >= hit.width) continue;
+			if (occludes) break;
 			next = {
 				node: hit.node,
 				...(hit.item === undefined ? {} : { item: hit.item }),
@@ -1599,6 +1656,7 @@ export class TermBackend {
 	/** Forget the hit under the pointer (pointer tracking went off: no report would ever clear it). */
 	clearHover(): void {
 		if (this.#pointer?.blur()) this.requestRender();
+		this.#appViewport?.endDrag();
 		if (this.#hover.peek() !== null) this.#hover.set(null);
 	}
 

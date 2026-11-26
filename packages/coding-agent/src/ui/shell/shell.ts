@@ -115,6 +115,8 @@ export class Shell {
 	#host: Host | undefined;
 	#theme: Accessor<Theme> | undefined;
 
+	onAppViewportPasteRequest: (() => void) | undefined;
+
 	constructor() {
 		this.overlays = new Overlays({
 			focused: () => this.surface.focused(),
@@ -188,6 +190,8 @@ export class Shell {
 			...(options.version ? { version: options.version } : {}),
 			onKey: key => (options.onKey?.(key) ?? false) || this.#globalKeys.toReversed().some(handler => handler(key)),
 			intercept: event => this.#intercept(event, this.#interceptors.length - 1),
+			onAppViewportSelectionCopy: text => void copyToClipboard(text),
+			onAppViewportPasteRequest: () => this.onAppViewportPasteRequest?.(),
 			...(options.native === undefined ? {} : { native: options.native }),
 			...(options.driver ? { driver: options.driver } : {}),
 			...(options.frameInterval !== undefined ? { frameInterval: options.frameInterval } : {}),
@@ -208,15 +212,11 @@ export class Shell {
 		this.#unwatchMouse = createRoot(dispose => {
 			effect(() => {
 				const inline = this.#inlineMouse();
-				// Fullscreen owns button drags; native surfaces keep their existing mouse mode.
-				const fullscreen = !host.native && options.screen?.() === "fullscreen";
-				const tracking = !fullscreen
-					? inline
-					: options.fullscreenMouse?.() === false
-						? "off"
-						: inline === "any"
-							? "any"
-							: "drag";
+				const backend = host.renderBackend;
+				const fullscreen = backend === "inline" && options.screen?.() === "fullscreen";
+				let tracking = inline;
+				if (backend === "app-viewport" && inline === "off") tracking = "drag";
+				if (fullscreen) tracking = options.fullscreenMouse?.() === false ? "off" : inline === "any" ? "any" : "drag";
 				host.setMouse(this.overlays.mouse() ?? tracking);
 			});
 			return dispose;
