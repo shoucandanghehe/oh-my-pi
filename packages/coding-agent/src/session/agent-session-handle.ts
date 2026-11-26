@@ -9,6 +9,7 @@
  * view additionally reads {@link AgentViewSession}.
  */
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ServiceTier, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { IrcMessage } from "../irc/irc-types";
@@ -19,20 +20,21 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner } from "../extensibility/extensions";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import type { TokenRateMeter } from "../utils/token-rate";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { currentThreadId } from "../thread/identity";
-import type { AgentSession } from "./agent-session";
+import type { AgentSession, NavigateTreeResult } from "./agent-session";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import type {
 	AgentSessionDisposeOptions,
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
+	ContinuePausedAgentsResult,
 	DequeuedMessage,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
@@ -51,7 +53,7 @@ import type { CustomMessage } from "./messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import type { AdvisorStatusOverviewEntry } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
-import type { ModelUsageRecord, SessionEntry, UsageStatistics } from "./session-entries";
+import type { ModelUsageRecord, SessionEntry, SessionTreeNode, UsageStatistics } from "./session-entries";
 
 /** Session-manager reads other agents' code performs on a session it does not own. */
 export interface AgentSessionManagerHandle {
@@ -196,6 +198,11 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	getBranch(fromId?: string): SessionEntry[];
 	/** Id of the current leaf entry. */
 	getLeafId(): string | null;
+	/** Tree computed from this session's entries and labels. */
+	getTree(): SessionTreeNode[];
+	appendLabelChange(targetId: string, label: string | undefined): string | Promise<string>;
+	/** Observe committed journal entries. */
+	subscribeToEntries(observer: (entry: SessionEntry) => void): () => void;
 	/** The newest entry that moves the conversation, when the active branch ends at it (`conversationTip`). */
 	getConversationTip(): SessionEntry | undefined;
 	/** Append a custom entry (a worker-homed session appends on its home thread). */
@@ -313,6 +320,13 @@ export interface AgentViewSession extends AgentSessionHandle {
 	readonly isTtsrAbortPending: boolean;
 	/** Whether input is queued that an interrupt would act on. */
 	readonly hasInterruptibleInput: boolean;
+	compact(instructions?: string, options?: CompactOptions): Promise<CompactionResult>;
+	navigateTree(
+		targetId: string,
+		options?: { summarize?: boolean; requireIdle?: boolean },
+	): Promise<NavigateTreeResult>;
+	hasPausedAgents(): boolean;
+	continuePausedAgents(): Promise<ContinuePausedAgentsResult>;
 	/** Tool execution updates of tools still running, for mid-tool attach. */
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[];
 	/** Await persistence of messages already emitted. */

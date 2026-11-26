@@ -33,6 +33,7 @@
  * with an error naming the worker, and treats `dispose` as already done.
  */
 import { type AgentMessage, type AgentTool, ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ServiceTier, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
 import { AUTO_THINKING } from "../thinking/levels";
 import { type ConfiguredThinkingLevel } from "../utils/render-utils";
@@ -45,11 +46,11 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import type { ExtensionRunner } from "../extensibility/extensions";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { AgentSession } from "../session/agent-session";
+import type { AgentSession, NavigateTreeResult } from "../session/agent-session";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import {
 	type AgentModelChange,
@@ -69,6 +70,7 @@ import type {
 	AsyncJobInspection,
 	AsyncJobSnapshot,
 	AsyncJobTree,
+	ContinuePausedAgentsResult,
 	DequeuedMessage,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
@@ -89,6 +91,7 @@ import {
 	runningJobWidgets,
 } from "../session/async-job-views";
 import { BlobStore, type BlobPutOptions, type BlobPutResult, lazyImageDataSync } from "../session/blob-store";
+import { readAgentsPaused } from "../session/exit-diagnostics";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import { resolveRoleModelCycle, serviceTierForModel } from "../session/model-controls";
@@ -276,6 +279,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	#builtInTools = new Set<string>();
 	#runToolCallIds = new Set<string>();
 	readonly #activeUpdates = new Map<string, ToolExecutionUpdateEvent>();
+	readonly #entryObservers = new Set<(entry: SessionEntry) => void>();
 	#entries: SessionEntry[] = [];
 	readonly #entryIndex = new SessionEntryIndex();
 	/** Custom entries appended here and not yet echoed back by the home worker. */
@@ -345,6 +349,17 @@ export class RemoteAgentSession implements AgentViewSession {
 			getEntries: () => [...this.#entries],
 			getBranch: fromId => this.#entryIndex.pathTo(fromId),
 			getLeafId: () => this.#entryIndex.leafId(),
+			getTree: () => this.#entryIndex.tree(this.#entries),
+			appendLabelChange: (id, label) => this.#command("appendLabelChange", id, label),
+			subscribeToEntries: observer => {
+				const first = this.#entryObservers.size === 0 && this.#listeners.size === 0;
+				this.#entryObservers.add(observer);
+				if (first) this.#watch(true);
+				return () => {
+					if (!this.#entryObservers.delete(observer)) return;
+					if (this.#entryObservers.size === 0 && this.#listeners.size === 0) this.#watch(false);
+				};
+			},
 			getConversationTip: () => conversationTip(this.#entries, this.#entryIndex.branchView()),
 			appendCustomEntry: (customType, data) => this.#appendCustomEntry(customType, data),
 			flush: () => this.#command("flushSession"),
@@ -525,6 +540,25 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[] {
 		return [...this.#activeUpdates.values()];
+	}
+
+	compact(instructions?: string, options?: CompactOptions): Promise<CompactionResult> {
+		return this.#command("compact", instructions, options);
+	}
+
+	navigateTree(
+		targetId: string,
+		options?: { summarize?: boolean; requireIdle?: boolean },
+	): Promise<NavigateTreeResult> {
+		return this.#command("navigateTree", targetId, options);
+	}
+
+	hasPausedAgents(): boolean {
+		return readAgentsPaused(this.#entryIndex.branchView()) !== undefined;
+	}
+
+	continuePausedAgents(): Promise<ContinuePausedAgentsResult> {
+		return this.#command("continuePausedAgents");
 	}
 
 	settleInFlightMessagePersistence(): Promise<void> {
@@ -798,12 +832,12 @@ export class RemoteAgentSession implements AgentViewSession {
 	}
 
 	subscribe(listener: AgentSessionEventListener): () => void {
-		const first = this.#listeners.size === 0;
+		const first = this.#listeners.size === 0 && this.#entryObservers.size === 0;
 		this.#listeners.add(listener);
 		if (first) this.#watch(true);
 		return () => {
 			if (!this.#listeners.delete(listener)) return;
-			if (this.#listeners.size === 0) this.#watch(false);
+			if (this.#listeners.size === 0 && this.#entryObservers.size === 0) this.#watch(false);
 		};
 	}
 
@@ -905,13 +939,22 @@ export class RemoteAgentSession implements AgentViewSession {
 				this.#entries.push(entry);
 				this.#entryIndex.insert(entry);
 			}
-			return;
+		} else {
+			const kept = delta.kind === "replace" ? [] : this.#entries.filter(entry => !this.#provisional.has(entry));
+			this.#provisional.clear();
+			this.#entries = [...kept, ...delta.entries];
+			this.#entryIndex.rebuild(this.#entries);
+			this.#entryIndex.setLeaf(this.#view.leafId);
 		}
-		const kept = delta.kind === "replace" ? [] : this.#entries.filter(entry => !this.#provisional.has(entry));
-		this.#provisional.clear();
-		this.#entries = [...kept, ...delta.entries];
-		this.#entryIndex.rebuild(this.#entries);
-		this.#entryIndex.setLeaf(this.#view.leafId);
+		for (const entry of delta.entries) {
+			for (const observer of this.#entryObservers) {
+				try {
+					observer(entry);
+				} catch (error) {
+					logger.warn("Remote session entry observer failed", { key: this.instanceKey, error: String(error) });
+				}
+			}
+		}
 	}
 
 	/** Bridge only: dispatch one forwarded event to subscribers. */
@@ -968,6 +1011,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#withdrawnQueued.clear();
 		this.#listeners.clear();
 		this.#runStateListeners.clear();
+		this.#entryObservers.clear();
 	}
 
 	/** Keep the event-derived mirror (stream message, running tool updates, tok/s meter) current. */

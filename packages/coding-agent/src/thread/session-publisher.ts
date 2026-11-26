@@ -222,6 +222,7 @@ export class SessionPublisher {
 	readonly #unsubscribe: () => void;
 	readonly #unsubscribeRunState: () => void;
 	readonly #unsubscribeWakeState: () => void;
+	#unsubscribeEntries: (() => void) | undefined;
 
 	constructor(session: AgentSession, bridge: SessionBridgeClient) {
 		this.session = session;
@@ -285,9 +286,12 @@ export class SessionPublisher {
 	watch(on: boolean): void {
 		this.#watched = on;
 		if (on) {
+			this.#unsubscribeEntries ??= this.session.sessionManager.subscribeToEntries(() => this.schedule());
 			this.flush();
 			return;
 		}
+		this.#unsubscribeEntries?.();
+		this.#unsubscribeEntries = undefined;
 		this.#view = undefined;
 		this.#viewSources = undefined;
 	}
@@ -301,6 +305,8 @@ export class SessionPublisher {
 		this.#unsubscribe();
 		this.#unsubscribeRunState();
 		this.#unsubscribeWakeState();
+		this.#unsubscribeEntries?.();
+		this.#unsubscribeEntries = undefined;
 		this.#bridge.remote.notify("closed", this.#key);
 	}
 
@@ -564,6 +570,17 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 	watch: (publisher, on) => publisher.watch(on),
 	settleInFlightMessagePersistence: async publisher =>
 		settle(publisher, publisher.session.settleInFlightMessagePersistence()),
+	compact: async (publisher, instructions, options) =>
+		toWireData(await settle(publisher, publisher.session.compact(instructions, options))),
+	navigateTree: async (publisher, id, options) =>
+		toWireData(await settle(publisher, publisher.session.navigateTree(id, options))),
+	appendLabelChange: (publisher, id, label) => {
+		const result = publisher.session.sessionManager.appendLabelChange(id, label);
+		publisher.flush();
+		return result;
+	},
+	continuePausedAgents: async publisher =>
+		toWireData(await settle(publisher, publisher.session.continuePausedAgents())),
 	setThinkingLevel: (publisher, level, persist) => {
 		publisher.session.setThinkingLevel(level, persist);
 		publisher.schedule();

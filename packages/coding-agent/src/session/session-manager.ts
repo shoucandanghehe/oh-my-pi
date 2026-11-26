@@ -1146,6 +1146,13 @@ export class SessionManager {
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
+	readonly #entryObservers = new Set<(entry: SessionEntry) => void>();
+
+	/** Observe appends at the journal's existing commit notification boundary. */
+	subscribeToEntries(observer: (entry: SessionEntry) => void): () => void {
+		this.#entryObservers.add(observer);
+		return () => this.#entryObservers.delete(observer);
+	}
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -2217,6 +2224,13 @@ export class SessionManager {
 				callback(entry);
 			} catch (err) {
 				logger.warn("collab entry hook failed", { error: String(err) });
+			}
+		}
+		for (const observer of this.#entryObservers) {
+			try {
+				observer(entry);
+			} catch (error) {
+				logger.warn("Session entry observer failed", { error: String(error) });
 			}
 		}
 	}

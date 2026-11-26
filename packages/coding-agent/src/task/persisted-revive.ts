@@ -25,6 +25,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
 import type { ArtifactManagerApi } from "../session/artifacts";
 import type { CostGateApi } from "../session/cost-gate";
+import { readAgentsPaused } from "../session/exit-diagnostics";
 import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
 import { revivePersistedPlaced } from "../thread/executor-routing";
@@ -247,10 +248,15 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		);
 	}
 	if (!hasConversationalHistory(entries)) {
-		await reopened.close();
-		throw new Error(
-			`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
-		);
+		// A parked first request has journaled its intent, but not committed a
+		// user message. Only the active pause marker owned by this agent counts.
+		const paused = readAgentsPaused(reopened.getBranch());
+		if (!paused?.pendingPrompt || !paused.agentIds.includes(ref.id)) {
+			await reopened.close();
+			throw new Error(
+				`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
+			);
+		}
 	}
 	const resolveParentSession = () =>
 		ref.parentId === spec.rootAgentId ? spec.root : registry.get(ref.parentId ?? "")?.session;

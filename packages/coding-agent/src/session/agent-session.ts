@@ -14497,7 +14497,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Continue one journaled turn on the thread that owns its transcript. */
-	async continuePausedTurn(): Promise<PausedTurnContinuation> {
+	continuePausedTurn(): Promise<PausedTurnContinuation> {
+		return this.#continuePausedTurn(true);
+	}
+
+	async #continuePausedTurn(clearChildMarker: boolean): Promise<PausedTurnContinuation> {
 		if (
 			agentPauseGate.paused ||
 			this.#isDisposed ||
@@ -14523,7 +14527,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			tail.stopDetails?.type !== "pause_turn" &&
 			!this.agent.hasQueuedMessages()
 		) {
-			if (this.#agentKind !== "main" && paused) this.#recordAgentsContinued(paused, 0);
+			if (clearChildMarker && this.#agentKind !== "main" && paused) this.#recordAgentsContinued(paused, 0);
 			return "already idle";
 		}
 
@@ -14567,7 +14571,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
 				throw new Error(last.errorMessage || `Continuation ${last.stopReason}`);
 			}
-			if (this.#agentKind !== "main" && current) this.#recordAgentsContinued(current, 1);
+			if (clearChildMarker && this.#agentKind !== "main" && current) this.#recordAgentsContinued(current, 1);
 			return "continued";
 		} finally {
 			this.#continuingPausedTurn = false;
@@ -14590,8 +14594,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const targets = [...new Set(paused.agentIds)].map(id => ({
 			label: id,
 			run: async (): Promise<ContinuePausedAgentsResult> => {
-				const target = id === MAIN_AGENT_ID ? this : await lifecycle.ensureLive(id);
-				const result = await target.continuePausedTurn();
+				let result: PausedTurnContinuation;
+				if (id === MAIN_AGENT_ID || id === this.#agentId) {
+					// This coordinator owns the marker, including on a worker-homed pane.
+					result = await this.#continuePausedTurn(false);
+				} else {
+					const target = await lifecycle.ensureLive(id);
+					result = await target.continuePausedTurn();
+				}
 				return result === "continued"
 					? { continued: 1, skipped: [], complete: true }
 					: { continued: 0, skipped: [result], complete: result === "already idle" };

@@ -18,6 +18,7 @@ import { Settings } from "../../src/config/settings";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
+import { registerPersistedSubagents } from "../../src/registry/persisted-agents";
 import { AgentSession } from "../../src/session/agent-session";
 import type { AgentSessionHandle } from "../../src/session/agent-session-handle";
 import { AgentStorage } from "../../src/session/agent-storage";
@@ -25,6 +26,7 @@ import type { AuthStorage } from "../../src/session/auth-storage";
 import { CostGate } from "../../src/session/cost-gate";
 import { readAgentsPaused, SESSION_EXIT_CUSTOM_TYPE } from "../../src/session/exit-diagnostics";
 import { convertToLlm } from "../../src/session/messages";
+import type { SessionTreeNode } from "../../src/session/session-entries";
 import { SessionManager } from "../../src/session/session-manager";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../../src/task/executor";
 import { createPersistedSubagentReviverFactory } from "../../src/task/persisted-revive";
@@ -427,6 +429,98 @@ describe("subagent runs routed into pooled workers", () => {
 				content: [{ type: "text", text: expect.stringContaining("persisted tool payload") }],
 			});
 			expect(server.pauseTaskRequests).toBe(2);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"continues a cold worker pane and publishes that pane's tree commands before their replies",
+		async () => {
+			const id = "PausedPane";
+			const sessions = path.join(root, "sessions");
+			const main = rootSession(SessionManager.create(cwd, sessions));
+			const mainFile = main.sessionFile;
+			if (!mainFile) throw new Error("Missing main transcript");
+			agentPauseGate.pause();
+			const running = runSubprocess(
+				runOptions(id, "worker-only request", {
+					sessionFile: mainFile,
+					artifactsDir: mainFile.slice(0, -".jsonl".length),
+				}),
+			);
+			await waitFor(() => Boolean(AgentRegistry.global().get(id)?.session?.isStreaming) && agentPauseGate.ready);
+			const original = mirrorOf(AgentRegistry.global().get(id)?.session);
+			await main.disposeForPausedExit();
+			await running;
+			pool.dispose();
+			agentPauseGate.resume();
+			pool = new SubagentWorkerPool({ maxWorkers: () => 1, hostsOnMain: false, idleMs: 600_000 });
+			setSubagentWorkerPoolForTests(pool);
+
+			const reopened = await SessionManager.open(mainFile, sessions, undefined, { suppressBreadcrumb: true });
+			const mainLeaf = reopened.getLeafId();
+			const resumed = rootSession(reopened);
+			const lifecycle = AgentLifecycleManager.global();
+			lifecycle.setPersistedSubagentReviverFactory(
+				createPersistedSubagentReviverFactory({
+					session: resumed,
+					authStorage,
+					modelRegistry,
+					settings,
+					enableLsp: false,
+					eventBus,
+				}),
+				() => 0,
+			);
+			await registerPersistedSubagents(AgentRegistry.global(), mainFile);
+			const pane = mirrorOf(await lifecycle.ensureLive(id));
+			expect(pane.home).not.toBe(original.home);
+			const manager = pane.sessionManager;
+			const appended: string[] = [];
+			const detach = manager.subscribeToEntries(entry => appended.push(entry.id));
+			try {
+				await pane.settleInFlightMessagePersistence();
+				expect(readAgentsPaused(manager.getBranch())?.agentIds).toEqual([id]);
+				expect(pane.hasPausedAgents()).toBe(true);
+				expect(pane.messages).toEqual([]);
+				expect(await pane.continuePausedAgents()).toEqual({ continued: 1, skipped: [], complete: true });
+				expect(pane.hasPausedAgents()).toBe(false);
+				expect(pane.messages.at(-1)).toMatchObject({
+					role: "assistant",
+					content: [{ type: "text", text: "pong" }],
+				});
+				expect(resumed.hasPausedAgents()).toBe(true);
+
+				const user = manager.getBranch().find(entry => entry.type === "message" && entry.message.role === "user");
+				if (!user) throw new Error("Worker continuation did not persist its user message");
+				const labelId = await manager.appendLabelChange(user.id, "worker bookmark");
+				expect(appended).toContain(labelId);
+				const pending = [...manager.getTree()];
+				let labeled: SessionTreeNode | undefined;
+				while (pending.length) {
+					const node = pending.pop()!;
+					if (node.entry.id === user.id) {
+						labeled = node;
+						break;
+					}
+					pending.push(...node.children);
+				}
+				expect(labeled?.label).toBe("worker bookmark");
+
+				const compactError = await pane.compact("focus text", { mode: "snapcompact" }).then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				expect(String(compactError)).toContain("/compact snapcompact does not take focus instructions");
+				expect(await pane.navigateTree(user.id, { summarize: false, requireIdle: true })).toMatchObject({
+					cancelled: false,
+					editorText: expect.stringContaining("worker-only request"),
+				});
+				expect(manager.getLeafId()).toBe(user.parentId);
+				expect(reopened.getLeafId()).toBe(mainLeaf);
+			} finally {
+				detach();
+			}
 		},
 		TEST_TIMEOUT_MS,
 	);

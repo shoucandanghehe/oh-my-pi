@@ -20,6 +20,7 @@
  * references to the originals.
  */
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ServiceTierByFamily, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { IrcMessage } from "../irc/irc-types";
@@ -29,9 +30,10 @@ import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { OverlayLayers, Settings } from "../config/settings";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState } from "../goals/state";
+import type { NavigateTreeResult } from "../session/agent-session";
 import type {
 	AgentModelChange,
 	AgentModelSelectionState,
@@ -43,6 +45,7 @@ import type {
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import type {
 	AgentSessionDisposeOptions,
+	ContinuePausedAgentsResult,
 	PausedTurnContinuation,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
@@ -242,6 +245,13 @@ export type SessionHostProtocol = {
 	/** Start (true) or stop (false) forwarding the full event stream and the view state. */
 	watch: RpcMethod<[on: boolean], void>;
 	settleInFlightMessagePersistence: RpcMethod<[], void>;
+	compact: RpcMethod<[instructions?: string, options?: CompactOptions], CompactionResult>;
+	navigateTree: RpcMethod<
+		[targetId: string, options?: { summarize?: boolean; requireIdle?: boolean }],
+		NavigateTreeResult
+	>;
+	appendLabelChange: RpcMethod<[targetId: string, label: string | undefined], string>;
+	continuePausedAgents: RpcMethod<[], ContinuePausedAgentsResult>;
 	setThinkingLevel: RpcMethod<[level: ConfiguredThinkingLevel | undefined, persist?: boolean], void>;
 	/**
 	 * Retire queued message `id` (main restored it): take it out of its queue,
