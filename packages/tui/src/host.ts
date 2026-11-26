@@ -33,6 +33,7 @@ import {
 	type TermBackendOptions,
 	type TranscriptScroll,
 } from "./term/backend";
+import type { AnsiWorkspace, WorkspacePaneMinimum } from "./workspace";
 import type { Theme } from "./theme/contract";
 import type { FramePlan, InputEvent, TerminalDriver } from "./driver/contract";
 import type { MouseTracking } from "./driver/io";
@@ -61,6 +62,8 @@ export interface HostOptions extends Pick<
 	readonly intercept?: (event: InputEvent) => boolean;
 	/** Render natively when the terminal speaks TSP. Default true. */
 	readonly native?: boolean;
+	/** The main pane's minimum size when the ANSI workspace is split. */
+	readonly ansiWorkspaceMainMinimum?: WorkspacePaneMinimum;
 	/** Clipboard handling for selected transcript text in the ANSI app viewport. Defaults to OSC 52. */
 	readonly onAppViewportSelectionCopy?: (text: string) => void;
 	/** Paste requested by a right click without an active transcript selection in the ANSI app viewport. */
@@ -116,6 +119,8 @@ export interface Host {
 	readonly native: boolean;
 	/** Active renderer (reactive). The app viewport only applies to an ANSI host. */
 	readonly renderBackend: "native" | "inline" | "app-viewport";
+	/** Split independent surfaces inside the ANSI app viewport; unavailable on other renderers. */
+	readonly ansiWorkspace: AnsiWorkspace | undefined;
 	/**
 	 * The terminal's clock from the TSP hello (`false`: 24-hour), reactive;
 	 * undefined in the terminal renderer, before an optimistic start's reply, or when Tern doesn't say.
@@ -247,6 +252,7 @@ type Renderer = Pick<
 	Host,
 	| "native"
 	| "renderBackend"
+	| "ansiWorkspace"
 	| "hour12"
 	| "retired"
 	| "replayHistory"
@@ -387,6 +393,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		return {
 			native: true,
 			renderBackend: "native",
+			ansiWorkspace: undefined,
 			get hour12() {
 				return connection.hello.hour12;
 			},
@@ -429,6 +436,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			theme: options.theme,
 			images: driverImages(driver.images, () => driver.capabilities),
 			...(appViewport ? { appViewport } : {}),
+			...(options.ansiWorkspaceMainMinimum ? { ansiWorkspaceMainMinimum: options.ansiWorkspaceMainMinimum } : {}),
 			...(options.onAppViewportSelectionCopy
 				? { onAppViewportSelectionCopy: options.onAppViewportSelectionCopy }
 				: {}),
@@ -459,12 +467,14 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		haltRenderer = () => {
 			debug?.stop();
 			backend.stop();
+			backend.workspace?.dispose();
 		};
 		backend.start();
 		if (appViewport) driver.setMouse(mouseTracking ?? "drag");
 		return {
 			native: false,
 			renderBackend: appViewport ? "app-viewport" : "inline",
+			ansiWorkspace: backend.workspace,
 			hour12: undefined,
 			retired: node => backend.retired(node),
 			replayHistory: () => driver.resetDisplay(),
@@ -505,6 +515,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 					backend.flush();
 				} finally {
 					backend.stop();
+					backend.workspace?.dispose();
 				}
 			},
 		};
@@ -519,6 +530,10 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		get renderBackend() {
 			revision();
 			return renderer.renderBackend;
+		},
+		get ansiWorkspace() {
+			revision();
+			return stopped ? undefined : renderer.ansiWorkspace;
 		},
 		get hour12() {
 			revision();

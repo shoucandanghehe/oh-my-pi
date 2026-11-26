@@ -38,8 +38,8 @@ import { dropCutImages, holdsImage } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
 import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
 import { clipViewportImages, maskOverlayImages } from "../driver/images/viewport";
+import { normalizeRow } from "../driver/output/ansi";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
-import type { KeyEvent } from "../events";
 import type { ScrollRequest, UiNode } from "../node";
 import {
 	type Accessor,
@@ -56,6 +56,7 @@ import {
 import { isSettled, type Surface } from "../surface";
 import type { Theme } from "../theme/contract";
 import { padTo, sliceColumns, truncate, visibleWidth } from "../text/width";
+import type { WorkspacePaneMinimum, WorkspaceSurface } from "../workspace";
 import { AppViewport, type ViewportHit } from "./app-viewport";
 import {
 	type Block,
@@ -69,11 +70,14 @@ import {
 import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
 import { TranscriptPointer } from "./transcript-pointer";
 import { TranscriptSearch } from "./transcript-search";
+import { type InputFrame, TerminalWorkspace, type WorkspacePane, type WorkspaceRect } from "./workspace";
 import { type WidgetContext, widgetContext, widgetFor } from "./widgets";
 import "./painters";
 
 /** Tick of a block drawing smooth motion (a shimmer sweep), ms. */
 const SMOOTH_TICK_MS = 1000 / 20;
+
+const DROP_ARROW = { left: "◀", right: "▶", top: "▲", bottom: "▼" } as const;
 
 /**
  * Where a session draws: `inline` on the normal screen (settled blocks retire into terminal
@@ -112,12 +116,12 @@ interface SessionWindow {
 }
 
 /** Options of a {@link TermBackend}. */
-export interface TermBackendOptions {
-	readonly surface: Surface;
+export interface TermBackendOptions extends WorkspaceSurface {
 	readonly driver: TerminalDriver;
 	readonly theme: Accessor<Theme>;
 	/** Keep `main` scrollable on the alternate screen instead of retiring it into terminal history. */
 	readonly appViewport?: boolean;
+	readonly ansiWorkspaceMainMinimum?: WorkspacePaneMinimum;
 	/** Copy selected transcript text (OSC 52 when omitted). */
 	readonly onAppViewportSelectionCopy?: (text: string) => void;
 	/** A right click without transcript text selected. */
@@ -127,10 +131,6 @@ export interface TermBackendOptions {
 	 * transcript's separator; compact runs pack with 0). Default 1.
 	 */
 	readonly separator?: (above: UiNode, below: UiNode) => number;
-	/** Keys nothing on the focus path consumed (global shortcuts). Return true when handled. */
-	readonly onKey?: (key: KeyEvent) => boolean;
-	/** Sees every decoded input event before routing; true consumes it. */
-	readonly intercept?: (event: InputEvent) => boolean;
 	/** Shortest gap between frames, ms (a frame-rate cap; may change at runtime). Default 16. */
 	readonly frameInterval?: Reactive<number>;
 	/** Force OSC 8 hyperlinks on or off; undefined follows the terminal's capability. */
@@ -383,7 +383,7 @@ function lowerBound(values: readonly number[], value: number): number {
 export class TermBackend {
 	readonly #surface: Surface;
 	readonly #driver: TerminalDriver;
-	readonly #appViewport: AppViewport | undefined;
+	readonly workspace: TerminalWorkspace | undefined;
 	readonly #options: TermBackendOptions;
 	readonly #env: PaintEnvironment;
 	// A content frame can absorb a tick in the same millisecond as the last sample. Clock readers
@@ -422,9 +422,8 @@ export class TermBackend {
 	readonly #retiring = new Set<UiNode>();
 	#nextPin: Pin | undefined;
 	#nextHistoryId = 1;
-	#hits: ViewportHit[] = [];
-	/** Layer stack these hits were painted for; queued reports cannot click through a newly opened modal. */
-	#hitLayer: readonly UiNode[] | undefined;
+	/** Input map of the inline frame; workspace panes retain their own. */
+	#inlineInput: InputFrame | undefined;
 	/** The driver lost history: the next frame replays the committed ledger. */
 	#replay = false;
 	/** Fullscreen transcript window top; undefined while it follows the tail. */
@@ -449,15 +448,20 @@ export class TermBackend {
 		this.#driver = options.driver;
 		this.#options = options.appViewport ? { ...options, screen: undefined } : options;
 		if (options.appViewport) {
-			this.#appViewport = new AppViewport({
-				surface: options.surface,
-				paint: (node, width) => this.#paint(node, width),
-				separator: options.separator ?? (() => 1),
-				copy:
-					options.onAppViewportSelectionCopy ??
-					(text => options.driver.writeRaw(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`)),
-				...(options.onAppViewportPasteRequest ? { paste: options.onAppViewportPasteRequest } : {}),
-			});
+			this.workspace = new TerminalWorkspace(
+				options,
+				mount =>
+					new AppViewport({
+						surface: mount.surface,
+						paint: (node, width) => this.#paint(node, width),
+						separator: options.separator ?? (() => 1),
+						copy:
+							options.onAppViewportSelectionCopy ??
+							(text => options.driver.writeRaw(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`)),
+						...(options.onAppViewportPasteRequest ? { paste: options.onAppViewportPasteRequest } : {}),
+					}),
+				options.ansiWorkspaceMainMinimum,
+			);
 		}
 		this.#hyperlinks = signal(options.driver.capabilities.hyperlinks);
 		const terminalHyperlinks = this.#hyperlinks;
@@ -475,18 +479,34 @@ export class TermBackend {
 		this.#textSizing = signal(options.driver.capabilities.textSizing);
 		const terminalTextSizing = this.#textSizing;
 		const allowTextSizing = options.textSizing;
+		const images = options.images;
 		this.#env = {
 			theme: options.theme,
 			clock: smooth => {
 				this.#scheduleTick(smooth === true);
 				return (options.clock ?? this.#clock)();
 			},
-			focus: options.surface.focused,
+			focus: () =>
+				this.workspace
+					? this.workspace.pane(this.workspace.active())!.mount.surface.focused()
+					: options.surface.focused(),
 			reduceMotion: this.#reduceMotion,
 			hover: this.#hover,
 			hyperlinks,
-			...(allowTextSizing ? { textSizing: () => allowTextSizing() && terminalTextSizing() } : {}),
-			...(options.images ? { images: options.images } : {}),
+			...(allowTextSizing
+				? { textSizing: () => !this.workspace?.split() && allowTextSizing() && terminalTextSizing() }
+				: {}),
+			// Full-width inline graphics can escape a pane's rectangle. Composed panes use
+			// cell-based Kitty placements where supported, otherwise the painter's text fallback.
+			...(images
+				? {
+						images: {
+							cell: () => images.cell(),
+							rows: (source, request) =>
+								images.rows(source, this.workspace?.split() ? { ...request, cells: true } : request),
+						},
+					}
+				: {}),
 		};
 	}
 
@@ -496,11 +516,15 @@ export class TermBackend {
 		this.#running = true;
 		this.#pointerFocused = true;
 		this.#clock.set(Date.now());
+		this.workspace?.resize(this.#driver.columns, this.#driver.rows);
 		// Restarted (after a suspend): what the terminal holds is unknown, history is written again.
 		if (this.#committed.size > 0 || this.#emitted.size > 0) this.#requestReplay();
 		this.#unsubscribe.push(
 			this.#driver.onInput(event => this.#routeInput(event, true)),
-			this.#driver.onResize(() => this.requestRender()),
+			this.#driver.onResize((width, height) => {
+				this.workspace?.resize(width, height);
+				this.requestRender();
+			}),
 			this.#driver.onCapabilities(capabilities => {
 				this.#hyperlinks.set(capabilities.hyperlinks);
 				this.#textSizing.set(capabilities.textSizing);
@@ -508,7 +532,7 @@ export class TermBackend {
 			}),
 			this.#driver.onReplay(() => {
 				// A batch still unwritten (a replay included) is prepared again for the new display.
-				if (!this.#appViewport) this.#requestReplay();
+				if (!this.workspace) this.#requestReplay();
 				this.requestRender();
 			}),
 		);
@@ -529,7 +553,7 @@ export class TermBackend {
 		for (const off of this.#unsubscribe.splice(0)) off();
 		this.#disposeWatch?.();
 		this.#disposeWatch = undefined;
-		this.#appViewport?.pause();
+		this.workspace?.pause();
 	}
 
 	/**
@@ -540,7 +564,7 @@ export class TermBackend {
 	 * when it stops. The app viewport has no terminal history to flush.
 	 */
 	flush(): void {
-		if (!this.#running || this.#appViewport) return;
+		if (!this.#running || this.workspace) return;
 		if (this.#options.screen?.() === "fullscreen" && this.#options.exitTranscript?.() === false) return;
 		// An unwritten batch was never written: the flush batch takes its rows (a replay stays owed).
 		this.#pending = undefined;
@@ -612,7 +636,7 @@ export class TermBackend {
 		if (!this.#search) {
 			this.#pointer?.reset();
 			this.#search = new TranscriptSearch(this.#anchor, this.#surface.focused(), this.#env, field =>
-				this.#widgetContext([field]),
+				this.#widgetContext([field], this.#surface, "main"),
 			);
 			this.requestRender();
 		}
@@ -901,25 +925,74 @@ export class TermBackend {
 	}
 
 	#compose(): FramePlan {
+		if (this.workspace) return this.#composeWorkspace(this.workspace);
 		const width = Math.max(1, this.#driver.columns);
 		const height = Math.max(1, this.#driver.rows);
+		return this.#composeSurface(this.#surface, width, height);
+	}
+
+	#composeWorkspace(workspace: TerminalWorkspace): FramePlan {
+		const { panes, sashes } = workspace.paintGeometry();
+		const active = workspace.active();
+		const split = panes.size > 1;
+		const fragments: { rect: WorkspaceRect; rows: readonly string[] }[] = [];
+		let cursor: Cell | null = null;
+		for (const [id, rect] of panes) {
+			const pane = workspace.pane(id)!;
+			const header = split ? 1 : 0;
+			const plan = this.#composeSurface(pane.mount.surface, rect.width, rect.height - header, pane);
+			if (!split) return plan;
+			const drop = workspace.dropPreview(id);
+			const title = `${drop ? DROP_ARROW[drop] : active === id ? "›" : " "} ${pane.label}`;
+			const bar = id === "main" ? title : `${padTo(truncate(title, rect.width - 2, ""), rect.width - 2)} ×`;
+			const theme = this.#options.theme();
+			fragments.push({ rect, rows: [theme.fg(drop || active === id ? "accent" : "dim", bar), ...plan.fullscreen!] });
+			if (active === id && plan.cursor && plan.cursor.row < rect.height - header) {
+				cursor = {
+					row: rect.y + header + plan.cursor.row,
+					col: rect.x + Math.min(rect.width - 1, plan.cursor.col),
+				};
+			}
+		}
+		for (const { rect, split: sash } of sashes) {
+			const line = this.#options.theme().fg("border", sash.axis === "x" ? "│" : "─".repeat(rect.width));
+			fragments.push({ rect, rows: Array.from({ length: rect.height }, () => line) });
+		}
+		const rows = Array.from({ length: this.#driver.rows }, () => "");
+		// For any given row, the rectangles form disjoint columns from left to right.
+		for (const { rect, rows: lines } of fragments.sort((a, b) => a.rect.x - b.rect.x)) {
+			for (let row = 0; row < rect.height; row++) {
+				const line = normalizeRow(lines[row] ?? "", rect.width);
+				rows[rect.y + row] += padTo(line, rect.width);
+			}
+		}
+		return { viewport: [], cursor, fullscreen: rows };
+	}
+
+	#composeSurface(surface: Surface, width: number, height: number, pane?: WorkspacePane): FramePlan {
+		const appViewport = pane?.viewport;
 		const flush = this.#flushing;
 		const hits: ViewportHit[] = [];
 		let cursor: Cell | null = null;
 
 		// The shutdown flush writes the transcript inline: transient layers are no part of it.
-		const layer = flush ? [] : this.#surface.layer();
-		if (this.#hitLayer !== layer) this.#pointer?.blur();
-		this.#pointerCovers.length = 0;
-		this.#hitLayer = layer;
-		if (layer.length > 0) this.#appViewport?.endDrag();
+		const layer = flush ? [] : surface.layer();
+		const input = { layer, hits };
+		if (pane) {
+			pane.input = input;
+			if (layer.length > 0) appViewport?.endDrag();
+		} else {
+			if (this.#inlineInput?.layer !== layer) this.#pointer?.blur();
+			this.#pointerCovers.length = 0;
+			this.#inlineInput = input;
+		}
 		/** Draw a layer node over `rows` (centered, or at its `top`/`bottom` anchor). */
 		const place = (rows: string[], node: UiNode): void => {
 			// Modal sheets own the pointer everywhere, including their margins and non-interactive rows.
 			const props = node.kind === "overlay" ? node.props() : undefined;
 			if (props && "modal" in props && props.modal) {
 				hits.length = 0;
-				if (this.#appViewport) cursor = null;
+				if (appViewport) cursor = null;
 			}
 			const overlayCols = node.kind === "overlay" ? overlayWidth(node, width) : width;
 			const block = this.#paint(node, overlayCols);
@@ -947,7 +1020,7 @@ export class TermBackend {
 					: undefined;
 			composite(rows, block, top, left, width, fullscreenSession);
 			restore?.();
-			if (this.#appViewport && node.kind === "overlay" && block.rows.length > 0) {
+			if (appViewport && node.kind === "overlay" && block.rows.length > 0) {
 				hits.push({
 					hit: { node, row: 0, col: 0, width: overlayCols, height: block.rows.length },
 					top,
@@ -970,7 +1043,6 @@ export class TermBackend {
 			for (const hit of block.hits ?? []) hits.push({ hit, top: 0, left: 0 });
 			// Sheets opened over a fullscreen layer (a help sheet over an app) draw on top of it.
 			for (const node of layer.slice(fullscreenAt + 1)) place(rows, node);
-			this.#hits = hits;
 			// The normal screen stays as it was under the alternate one: the viewport keeps its place.
 			this.#nextPin = this.#pin;
 			return { viewport: [], cursor, fullscreen: rows };
@@ -983,7 +1055,6 @@ export class TermBackend {
 			const session = this.#composeSession(width, height, hits, !modal);
 			cursor = session.cursor;
 			for (const node of layer) place(session.rows, node);
-			this.#hits = hits;
 			// The normal screen stays as it was under the alternate one.
 			this.#nextPin = this.#pin;
 			return { viewport: [], cursor, fullscreen: session.rows };
@@ -995,7 +1066,7 @@ export class TermBackend {
 		let dockRows = 0;
 		/** Dock rows drawn over the transcript (a completion popup): they take no room from `main`. */
 		let covering = 0;
-		for (const node of this.#surface.dock()) {
+		for (const node of surface.dock()) {
 			const block = this.#paint(node, width);
 			dock.push({ block, top: dockRows, left: 0 });
 			dockRows += block.rows.length;
@@ -1011,15 +1082,14 @@ export class TermBackend {
 				for (const hit of block.hits ?? []) hits.push({ hit, top: row, left: 0 });
 			}
 		};
-		if (this.#appViewport) {
+		if (appViewport) {
 			const dockTop = height - dockRows;
 			const visible = Math.max(0, dockTop);
 			const capacity = Math.max(0, dockTop + covering);
 			const rows = Array.from({ length: visible }, () => "");
-			cursor = this.#appViewport.paint(width, capacity, visible, rows, hits);
+			cursor = appViewport.paint(width, capacity, visible, rows, hits);
 			appendDock(rows, dockTop);
 			for (const node of layer) place(rows, node);
-			this.#hits = hits;
 			return { viewport: [], cursor, fullscreen: rows };
 		}
 		// The committed prefix of main stays in history; the rest is live.
@@ -1317,7 +1387,6 @@ export class TermBackend {
 
 		if (layer.length > 0) for (; free > 0; free--) viewport.push("");
 		for (const node of layer) place(viewport, node);
-		this.#hits = hits;
 		return { ...(history ? { history } : {}), viewport, cursor };
 	}
 
@@ -1356,7 +1425,7 @@ export class TermBackend {
 				this.#pointerFocused &&
 				!!this.#window?.wheel &&
 				!this.#search &&
-				this.#surface.layer() === this.#hitLayer &&
+				this.#surface.layer() === this.#inlineInput?.layer &&
 				this.#searchable(),
 			document: () => this.#index!.read(),
 			scroll: delta => this.scroll(delta),
@@ -1512,14 +1581,14 @@ export class TermBackend {
 		return { rows, cursor };
 	}
 
-	#regions(): UiNode[] {
-		return [...this.#surface.layer(), ...this.#surface.dock(), ...this.#surface.main()];
+	#regions(surface: Surface): UiNode[] {
+		return [...surface.layer(), ...surface.dock(), ...surface.main()];
 	}
 
-	#widgetContext(path: readonly UiNode[]): WidgetContext {
+	#widgetContext(path: readonly UiNode[], surface: Surface, paneId: string): WidgetContext {
 		return widgetContext(path, {
-			focus: next => this.#surface.focus(next),
-			pageRows: Math.max(1, this.#driver.rows - 2),
+			focus: next => surface.focus(next),
+			pageRows: Math.max(1, (this.workspace?.bodyHeight(paneId) ?? this.#driver.rows) - 2),
 		});
 	}
 
@@ -1540,24 +1609,52 @@ export class TermBackend {
 			(!this.#pointerFocused || this.#options.screen?.() !== "fullscreen")
 		)
 			return;
-		if (!this.#searchInput(event) && !(intercept && this.#options.intercept?.(event))) this.#onInput(event);
+		if (!this.#searchInput(event)) this.#onInput(event, intercept);
 	}
 
-	#onInput(event: InputEvent): void {
+	#onInput(event: InputEvent, intercept: boolean): void {
 		batch(() => {
+			const workspace = this.workspace;
+			let id = workspace?.active() ?? "main";
+			let pane = workspace?.pane(id);
+			if (workspace && event.type === "mouse") {
+				const screenRow = this.#driver.viewportRow ? this.#driver.viewportRow(event.mouse.row) : event.mouse.row;
+				const target = screenRow === null ? undefined : workspace.pointer({ ...event.mouse, row: screenRow });
+				if (!target) {
+					this.#hover.set(null);
+					return;
+				}
+				({ id, pane } = target);
+				event = { type: "mouse", mouse: target.mouse };
+			}
+			const mount = pane?.mount ?? this.#options;
+			if (intercept && mount.intercept?.(event)) return;
+			const { surface } = mount;
 			switch (event.type) {
-				case "key":
-					this.#onKey(event.key);
+				case "key": {
+					if (workspace?.key(event.key)) break;
+					const focused = surface.focused();
+					const path = focused ? pathTo(this.#regions(surface), focused) : [];
+					if (bubbleKey(path, event.key)) break;
+					if (surface.layer().length === 0 && pane?.viewport.key(event.key)) break;
+					if (
+						focused &&
+						path.length > 0 &&
+						widgetFor(focused)?.key?.(focused, event.key, this.#widgetContext(path, surface, id))
+					)
+						break;
+					mount.onKey?.(event.key);
 					break;
+				}
 				case "paste": {
-					const focused = this.#surface.focused();
-					const path = focused ? pathTo(this.#regions(), focused) : [];
+					const focused = surface.focused();
+					const path = focused ? pathTo(this.#regions(surface), focused) : [];
 					if (bubblePaste(path, event.paste)) break;
-					if (focused) widgetFor(focused)?.paste?.(focused, event.paste, this.#widgetContext(path));
+					if (focused) widgetFor(focused)?.paste?.(focused, event.paste, this.#widgetContext(path, surface, id));
 					break;
 				}
 				case "mouse":
-					this.#onMouse(event.mouse);
+					this.#onMouse(event.mouse, surface, id, pane);
 					break;
 				default:
 					break;
@@ -1566,32 +1663,23 @@ export class TermBackend {
 		this.requestRender();
 	}
 
-	#onKey(key: KeyEvent): void {
-		const focused = this.#surface.focused();
-		const path = focused ? pathTo(this.#regions(), focused) : [];
-		if (bubbleKey(path, key)) return;
-		if (this.#surface.layer().length === 0 && this.#appViewport?.key(key)) return;
-		if (focused && path.length > 0) {
-			const widget = widgetFor(focused);
-			if (widget?.key?.(focused, key, this.#widgetContext(path))) return;
-		}
-		this.#options.onKey?.(key);
-	}
-
-	#onMouse(mouse: MouseEvent): void {
-		if (this.#surface.layer() !== this.#hitLayer) {
-			this.clearHover();
+	#onMouse(mouse: MouseEvent, surface: Surface, id: string, pane?: WorkspacePane): void {
+		const input = pane ? pane.input : this.#inlineInput;
+		if (!input || surface.layer() !== input.layer) {
+			if (pane) {
+				pane.viewport.endDrag();
+				this.#hover.set(null);
+			} else this.clearHover();
 			return;
 		}
-		const viewportRow = this.#driver.viewportRow ? this.#driver.viewportRow(mouse.row) : mouse.row;
+		const viewportRow = !pane && this.#driver.viewportRow ? this.#driver.viewportRow(mouse.row) : mouse.row;
 		if (viewportRow === null) {
 			this.clearHover();
 			return;
 		}
-		const pointer =
-			this.#window?.wheel && (!this.#hitLayer.length || this.#searchable()) ? this.#pointer : undefined;
+		const pointer = !pane && this.#window?.wheel && (!input.layer.length || this.#searchable()) ? this.#pointer : undefined;
 		if (pointer?.capture(mouse, viewportRow)) return;
-		const appViewport = this.#hitLayer.length === 0 ? this.#appViewport : undefined;
+		const appViewport = input.layer.length === 0 ? pane?.viewport : undefined;
 		if (appViewport?.drag(mouse, viewportRow)) return;
 		if (mouse.action === "press" && mouse.button === "left") appViewport?.clearSelection();
 		const cover =
@@ -1601,18 +1689,18 @@ export class TermBackend {
 					viewportRow >= rect.top && viewportRow < rect.bottom && mouse.col >= rect.left && mouse.col < rect.right,
 			);
 		const firstHit = cover ? cover.firstHit : 0;
-		this.#trackHover(viewportRow, mouse.col, firstHit);
-		for (let i = this.#hits.length - 1; i >= firstHit; i--) {
-			const { hit, top, left, clipAt, occludes } = this.#hits[i]!;
+		this.#trackHover(input.hits, viewportRow, mouse.col, firstHit);
+		for (let i = input.hits.length - 1; i >= firstHit; i--) {
+			const { hit, top, left, clipAt, occludes } = input.hits[i]!;
 			if (clipAt !== undefined && viewportRow >= clipAt) continue;
 			const row = viewportRow - top - hit.row;
 			const col = mouse.col - left - hit.col;
 			if (row < 0 || col < 0 || row >= hit.height || col >= hit.width) continue;
 			if (occludes) return;
-			const path = pathTo(this.#regions(), hit.node);
+			const path = pathTo(this.#regions(surface), hit.node);
 			if (path.length === 0) continue;
 			const widget = widgetFor(hit.node);
-			if (widget?.mouse?.(hit.node, mouse, { row, col }, this.#widgetContext(path), hit)) {
+			if (widget?.mouse?.(hit.node, mouse, { row, col }, this.#widgetContext(path, surface, id), hit)) {
 				if (mouse.action === "press" && mouse.button === "left") pointer?.reset();
 				return;
 			}
@@ -1632,10 +1720,10 @@ export class TermBackend {
 	}
 
 	/** Point the hover state at the topmost hit under the pointer (painters band it via `cx.hovered`). */
-	#trackHover(viewportRow: number, column: number, firstHit: number): void {
+	#trackHover(hits: readonly ViewportHit[], viewportRow: number, column: number, firstHit: number): void {
 		let next: PointerHover | null = null;
-		for (let i = this.#hits.length - 1; i >= firstHit; i--) {
-			const { hit, top, left, clipAt, occludes } = this.#hits[i]!;
+		for (let i = hits.length - 1; i >= firstHit; i--) {
+			const { hit, top, left, clipAt, occludes } = hits[i]!;
 			if (clipAt !== undefined && viewportRow >= clipAt) continue;
 			const row = viewportRow - top - hit.row;
 			const col = column - left - hit.col;
@@ -1656,7 +1744,7 @@ export class TermBackend {
 	/** Forget the hit under the pointer (pointer tracking went off: no report would ever clear it). */
 	clearHover(): void {
 		if (this.#pointer?.blur()) this.requestRender();
-		this.#appViewport?.endDrag();
+		this.workspace?.endPointer();
 		if (this.#hover.peek() !== null) this.#hover.set(null);
 	}
 

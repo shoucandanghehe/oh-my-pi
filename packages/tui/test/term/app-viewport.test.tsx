@@ -1,6 +1,17 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { expect, it } from "bun:test";
-import { createSurface, type Host, type HostOptions, settle, signal, startHost, type Surface } from "@oh-my-pi/pi-tui";
+import {
+	createRoot,
+	createSurface,
+	effect,
+	type Host,
+	type HostOptions,
+	settle,
+	signal,
+	startHost,
+	type Surface,
+	type WorkspaceSurface,
+} from "@oh-my-pi/pi-tui";
 import { ALT_ENTER, ALT_LEAVE } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { type MemoryTerminal, memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
@@ -20,17 +31,22 @@ interface RunningHost {
 async function withHost(
 	surface: Surface,
 	use: (running: RunningHost) => Promise<void>,
-	options: Pick<HostOptions, "onAppViewportSelectionCopy" | "onAppViewportPasteRequest" | "onKey"> & {
+	options: Pick<
+		HostOptions,
+		"onAppViewportSelectionCopy" | "onAppViewportPasteRequest" | "onKey" | "ansiWorkspaceMainMinimum"
+	> & {
 		inline?: boolean;
 		shell?: string;
+		columns?: number;
+		rows?: number;
 	} = {},
 ): Promise<void> {
-	const { inline, shell, ...callbacks } = options;
-	const term = KittyTerminal.createSync({ columns: COLUMNS, rows: ROWS, scrollback: 100 });
+	const { inline, shell, columns = COLUMNS, rows = ROWS, ...callbacks } = options;
+	const term = KittyTerminal.createSync({ columns, rows, scrollback: 100 });
 	if (shell) term.write(`${shell}\r\n`);
 	const memory = memoryTerminal({
-		columns: COLUMNS,
-		rows: ROWS,
+		columns,
+		rows,
 		env: inline ? {} : { PI_TUI_RENDER_BACKEND: "app-viewport" },
 		onWrite: data => term.write(data),
 	});
@@ -77,6 +93,7 @@ it("uses the terminal's scrollback by default", async () => {
 		async ({ host, memory, term, screen }) => {
 			expect(host.renderBackend).toBe("inline");
 			expect(host.retired(node)).toBe(true);
+			expect(host.ansiWorkspace).toBeUndefined();
 			expect(term.scrollbackLine(0)?.trimEnd()).toBe("one");
 			expect(screen()).toEqual(["three", "four", "five", "six", "dock"]);
 			await host.stop();
@@ -210,4 +227,209 @@ it("blocks clicks through a floating sheet without disabling uncovered main hits
 		memory.feed("\x1b[<0;1;5M"); // In the dock, not in the still-mapped main block.
 		expect(clicked).toEqual(["four"]);
 	});
+});
+
+it("composes a recursive workspace, scopes scrolling and attachments, and closes locally", async () => {
+	const pasted: string[] = [];
+	const edits: string[] = [];
+	const disposed: string[] = [];
+	const main = createSurface(() => ({
+		main: <rows lines={Array.from({ length: 12 }, (_, i) => `main${i}`)} />,
+		dock: (
+			<editor
+				text=""
+				onPaste={paste => {
+					pasted.push(`main:${paste.text}`);
+					return true;
+				}}
+			/>
+		),
+	}));
+	main.focus(main.dock()[0]!);
+	const sizes: Record<string, number> = {};
+	const create =
+		(name: string) =>
+		(_close: () => void, rows: () => number): WorkspaceSurface => {
+			const dock = signal(`${name} dock`);
+			const surface = createSurface(() => ({
+				main: <rows lines={Array.from({ length: 12 }, (_, i) => `${name}${i}`)} />,
+				dock: (
+					<editor
+						text={dock}
+						onEdit={edit => {
+							if (edit.type === "edit") {
+								edits.push(name);
+								dock.set(dock().slice(0, edit.from) + edit.text + dock().slice(edit.to));
+							}
+						}}
+						onPaste={paste => {
+							pasted.push(`${name}:${paste.text}`);
+							return true;
+						}}
+					/>
+				),
+			}));
+			surface.focus(surface.dock()[0]!);
+			const stopMeasuring = createRoot(dispose => {
+				effect(() => {
+					sizes[name] = rows();
+				});
+				return dispose;
+			});
+			return {
+				surface,
+				intercept(event) {
+					if (event.type !== "key" || event.key.id !== "q") return false;
+					edits.push(`${name}:intercept`);
+					return true;
+				},
+				dispose() {
+					stopMeasuring();
+					disposed.push(name);
+				},
+			};
+		};
+	await withHost(
+		main,
+		async ({ host, memory, screen, term }) => {
+			const workspace = host.ansiWorkspace!;
+			await afterFrame(host, () => {
+				expect(workspace.open("b", create("b"), { target: "main", edge: "right", label: "Agent B" })).toBe(true);
+				expect(
+					workspace.open("c", create("c"), { target: "b", edge: "bottom", label: "Agent C", focus: false }),
+				).toBe(true);
+			});
+			expect(workspace.active()).toBe("b");
+			expect(sizes).toEqual({ b: 4, c: 4 });
+			expect(screen()[0]).toMatch(/Main\s+│› Agent B/);
+			expect(screen()[1]).toMatch(/^main3\s+│b9/);
+			expect(screen()[4]).toContain("b dock");
+			expect(screen()[6]).toContain("Agent C");
+			expect(screen()[10]).toContain("c dock");
+			expect(term.cursor.y).toBe(4);
+			await afterFrame(host, () => memory.feed("\x1b[<64;43;8M")); // Wheel in C, while B is active.
+			expect(screen()[7]).toMatch(/│c6$/);
+			expect(screen()[1]).toMatch(/│b9$/);
+			expect(workspace.active()).toBe("b");
+			memory.feed("qX\x1b[200~pasted\x1b[201~");
+			expect(edits).toEqual(["b:intercept", "b"]);
+			expect(pasted).toEqual(["b:pasted"]);
+			// Click C's title and route an app-recovered paste (e.g. an attachment marker).
+			await afterFrame(host, () => memory.feed("\x1b[<0;43;7M\x1b[<0;43;7m"));
+			host.dispatch({ type: "paste", paste: { text: "attachment" } });
+			expect(pasted).toEqual(["b:pasted", "c:attachment"]);
+			expect(term.cursor.y).toBe(10);
+			await afterFrame(host, () => memory.feed("\x1b[1;4H")); // Alt+Shift+Home returns to Main only.
+			expect(workspace.active()).toBe("main");
+			expect(disposed).toEqual([]);
+			memory.feed("\x1b[200~main paste\x1b[201~");
+			expect(pasted).toEqual(["b:pasted", "c:attachment", "main:main paste"]);
+			expect(workspace.focus("b")).toBe(true);
+			// Close C using its own header without dismantling B or the shared screen.
+			await afterFrame(host, () => memory.feed("\x1b[<0;77;7M"));
+			expect(workspace.active()).toBe("b");
+			expect(disposed).toEqual(["c"]);
+			expect(screen().join("\n")).not.toContain("Agent C");
+			expect(screen()[10]).toContain("b dock");
+			expect(sizes.b).toBe(10);
+			expect(memory.output.join("").split(ALT_ENTER)).toHaveLength(2);
+			await host.stop();
+			expect(disposed).toEqual(["c", "b"]);
+		},
+		{ columns: 77, rows: 11 },
+	);
+});
+
+it("clamps sash drags and parks panes through a too-small resize without losing the active input target", async () => {
+	const main = createSurface(() => ({ main: <text>main body</text> }));
+	let released = 0;
+	let measure: (() => number) | undefined;
+	await withHost(
+		main,
+		async ({ host, memory, screen, term }) => {
+			const workspace = host.ansiWorkspace!;
+			await afterFrame(host, () => {
+				expect(
+					workspace.open(
+						"side",
+						(_, rows) => {
+							measure = rows;
+							return {
+								surface: createSurface(() => ({ main: <text>side body</text> })),
+								dispose: () => released++,
+							};
+						},
+						{ minWidth: 22 },
+					),
+				).toBe(true);
+			});
+			expect(screen()[0]!.indexOf("│")).toBe(42);
+			await afterFrame(host, () => memory.feed("\x1b[<0;43;2M\x1b[<32;76;2M\x1b[<0;76;2m"));
+			expect(screen()[0]!.indexOf("│")).toBe(54); // Leave the right pane's 22-column minimum.
+			await afterFrame(host, () => {
+				term.resize(24, 8);
+				memory.resize(24, 8);
+			});
+			expect(workspace.active()).toBe("main");
+			expect(measure?.()).toBe(0);
+			expect(screen()[0]).toBe("main body");
+			expect(released).toBe(0);
+			expect(
+				workspace.open(
+					"overflow",
+					() => {
+						throw new Error("must not mount");
+					},
+					{ edge: "right" },
+				),
+			).toBe(false);
+			await afterFrame(host, () => {
+				term.resize(77, 11);
+				memory.resize(77, 11);
+			});
+			expect(workspace.active()).toBe("main");
+			expect(measure?.()).toBe(10);
+			expect(screen()[0]!.indexOf("│")).toBe(54);
+			expect(screen()[1]).toContain("side body");
+		},
+		{ columns: 77, rows: 11, ansiWorkspaceMainMinimum: { minWidth: 42 } },
+	);
+	expect(released).toBe(1);
+});
+
+it("previews and redocks a dragged pane without remounting it", async () => {
+	const surface = createSurface(() => ({ main: <text>main body</text> }));
+	const body = signal("side before");
+	let released = 0;
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			const workspace = host.ansiWorkspace!;
+			await afterFrame(host, () => {
+				expect(
+					workspace.open(
+						"side",
+						() => ({
+							surface: createSurface(() => ({ main: <text text={body} /> })),
+							dispose: () => released++,
+						}),
+						{ label: "Side" },
+					),
+				).toBe(true);
+			});
+			expect(screen()[1]).toMatch(/^main body\s+│side before$/);
+			await afterFrame(host, () => memory.feed("\x1b[<0;41;1M\x1b[<32;2;5M"));
+			expect(screen()[0]).toMatch(/^◀ Main\s+│› Side/);
+			expect(screen()[1]).toMatch(/^main body\s+│side before$/);
+			await afterFrame(host, () => memory.feed("\x1b[<0;2;5m"));
+			expect(screen()[0]).toMatch(/^› Side.*│  Main$/);
+			expect(screen()[1]).toMatch(/^side before\s+│main body$/);
+			expect(workspace.active()).toBe("side");
+			expect(released).toBe(0);
+			await afterFrame(host, () => body.set("side after"));
+			expect(screen()[1]).toMatch(/^side after\s+│main body$/);
+		},
+		{ columns: 77, rows: 11 },
+	);
+	expect(released).toBe(1);
 });

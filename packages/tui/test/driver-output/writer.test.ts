@@ -338,6 +338,20 @@ describe("fullscreen", () => {
 		expect(vt.present({ history: { id: 2, rows: ["b"] }, viewport: ["status"], cursor: null })).toBe(2);
 		expect(vt.transcript()).toEqual(["a", "b", "status"]);
 	});
+
+	it("blocks pointer reports while a different fullscreen hit map is stalled in the writer", () => {
+		const vt = new Vt({ rows: 5 });
+		const old = { viewport: [], cursor: null, fullscreen: ["main"] };
+		const next = { viewport: [], cursor: null, fullscreen: ["main │ side"] };
+		vt.present(old);
+		expect(vt.writer.viewportRow(0)).toBe(0);
+		vt.writer.hold(next);
+		expect(vt.screen()[0]).toBe("main");
+		expect(vt.writer.viewportRow(0)).toBeNull();
+		vt.present(next);
+		expect(vt.screen()[0]).toBe("main │ side");
+		expect(vt.writer.viewportRow(0)).toBe(0);
+	});
 });
 
 describe("display reset", () => {

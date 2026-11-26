@@ -264,6 +264,8 @@ export class FrameWriter {
 	 * so a graceful stop mid-resize still leaves its history and viewport.
 	 */
 	#deferred: FramePlan | undefined;
+	/** The backend prepared new hit geometry, but the driver held its frame for output backlog. */
+	#held = false;
 	/** Viewport rows a height shrink pushed into scrollback, oldest first (see `#pushedBy`). */
 	#pushed: string[] = [];
 	/** Where the cursor report after that shrink must find the cursor for `#pushed` to hold; undefined once checked. */
@@ -286,7 +288,7 @@ export class FrameWriter {
 
 	/** Map a pointer report into the frame actually on screen, never guessing an unknown inline anchor. */
 	viewportRow(screenRow: number): number | null {
-		if (!this.#started || screenRow < 0 || screenRow >= this.#rows) return null;
+		if (!this.#started || this.#held || screenRow < 0 || screenRow >= this.#rows) return null;
 		if (this.#alt) return this.#fullscreen && this.#altShown ? screenRow : null;
 		if (this.#stale || this.#anchoring || this.#deferred || !this.#topKnown()) return null;
 		const row = screenRow - this.#topLo;
@@ -325,6 +327,7 @@ export class FrameWriter {
 		this.#inlineWritten = false;
 		this.#replayAppends = false;
 		this.#deferred = undefined;
+		this.#held = false;
 		this.#pushed = [];
 		this.#pushedCursor = undefined;
 		this.#partialShellLine = deferShellLine && (!cursor || cursor.col > 0);
@@ -349,6 +352,7 @@ export class FrameWriter {
 	 */
 	present(frame: FramePlan): number | undefined {
 		if (!this.#started) return undefined;
+		this.#held = false;
 		if (frame.fullscreen) {
 			this.#deferred = undefined;
 			if (!this.#anchoring) this.#paintAlternate(frame.fullscreen, frame.cursor, "", true);
@@ -385,7 +389,9 @@ export class FrameWriter {
 	 * the writer stops, so a shutdown flush is not lost.
 	 */
 	hold(frame: FramePlan): void {
-		if (this.#started) this.#deferred = frame.fullscreen ? undefined : frame;
+		if (!this.#started) return;
+		this.#held = true;
+		this.#deferred = frame.fullscreen ? undefined : frame;
 	}
 
 	/** Whether a settled width change replays history (the policy rebuilds or appends it, not in place). */
