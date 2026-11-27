@@ -231,8 +231,10 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 
 	function canRetry(message: AssistantMessage): boolean {
 		if (!local || message.stopReason !== "error") return false;
-		const last = model.blocks().findLast(block => block.kind === "assistant" && block.actionMessage !== undefined);
-		return last?.kind === "assistant" && last.actionMessage === message;
+		const last = model
+			.blocks()
+			.findLast(block => block.kind === "assistant" && block.view().actionMessage !== undefined);
+		return last?.kind === "assistant" && last.view().actionMessage === message;
 	}
 
 	async function retry(session: AgentViewSession): Promise<void> {

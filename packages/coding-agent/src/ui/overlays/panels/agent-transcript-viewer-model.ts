@@ -13,7 +13,7 @@ import type * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type Accessor, batch, nativeRendering, signal, untrack } from "@oh-my-pi/pi-tui";
+import { type Accessor, batch, computed, nativeRendering, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../../config/settings";
 import { resolveMarkdownLinkHrefs } from "../../../internal-urls/hyperlink-targets";
@@ -34,6 +34,7 @@ import {
 } from "../../../session/transcript/transcript-entry";
 import {
 	parentIrcForDisplay,
+	sameAssistantTurn,
 	splitAssistantMessageToolTimeline,
 } from "../../../session/transcript/transcript-render-helpers";
 import { type LinkTargetHost, refreshAssistantMessageLinkTargets } from "../../../session/transcript/link-targets";
@@ -131,6 +132,15 @@ export interface AgentTranscriptViewerDeps {
 	readonly settings?: Settings;
 }
 
+interface ViewerAssistant {
+	readonly message: AssistantMessage;
+	readonly actionMessage?: AssistantMessage;
+	readonly contentOffset?: number;
+	readonly usage?: TurnUsageSummary;
+	readonly recorded: boolean;
+	readonly transient: boolean;
+}
+
 /** One block of the transcript. */
 export type ViewerBlock =
 	| {
@@ -150,11 +160,8 @@ export type ViewerBlock =
 	  }
 	| {
 			readonly kind: "assistant";
-			readonly id: string;
-			readonly message: AssistantMessage;
-			readonly actionMessage?: AssistantMessage;
-			readonly contentOffset?: number;
-			readonly usage: TurnUsageSummary | undefined;
+			id: string;
+			readonly view: Signal<ViewerAssistant>;
 	  }
 	| { readonly kind: "tool"; readonly id: string; readonly call: ToolCall }
 	| { readonly kind: "message"; readonly id: string; readonly message: AgentMessage }
@@ -231,7 +238,12 @@ export class AgentTranscriptViewerModel {
 	/** Bumped on every change either face shows. */
 	readonly rev = signal(0);
 	readonly blocks = signal<readonly ViewerBlock[]>([]);
-	readonly streaming = signal<AssistantMessage | undefined>(undefined);
+	readonly #streamTail = signal<{ message: AssistantMessage; blocks: readonly ViewerBlock[] } | undefined>(undefined);
+	readonly presentedBlocks = computed(() => {
+		const saved = this.blocks();
+		const tail = this.#streamTail();
+		return tail ? [...saved, ...tail.blocks] : saved;
+	});
 	readonly live = signal<AgentViewSession | undefined>(undefined);
 	readonly cwd = signal<string | undefined>(undefined);
 	readonly linkTargets = signal<ReadonlyMap<string, string>>(new Map());
@@ -418,7 +430,7 @@ export class AgentTranscriptViewerModel {
 				this.tools.bind(undefined);
 				this.runner.set(undefined);
 				this.settings.set(this.deps.settings);
-				this.streaming.set(undefined);
+				this.#streamTail.set(undefined);
 				this.#rebuild([]);
 			});
 		}
@@ -465,6 +477,7 @@ export class AgentTranscriptViewerModel {
 			const count = session.messages.length;
 			const streaming = session.isStreaming;
 			const old = this.#live;
+			if (old?.session !== session) this.#streamTail.set(undefined);
 			if (
 				linksChanged ||
 				!(old?.session === session && old.leaf === leaf && old.count === count && old.streaming === streaming)
@@ -494,11 +507,13 @@ export class AgentTranscriptViewerModel {
 			}
 			const stream = this.tools.stream(session.agent.state.streamMessage, this.#live?.messages ?? []);
 			this.tools.syncExecution();
-			if (stream && (linksChanged || stream !== this.streaming.peek())) {
+			const previousTail = this.#streamTail.peek();
+			if (stream && (linksChanged || stream !== previousTail?.message)) {
 				this.#links?.pending.add(stream);
 				this.#resolveLinks();
-			}
-			this.streaming.set(stream);
+				const reuse = previousTail && sameAssistantTurn(previousTail.message, stream) ? previousTail.blocks : [];
+				this.#streamTail.set({ message: stream, blocks: this.#replyBlocks(stream, "stream", false, reuse) });
+			} else if (!stream && previousTail) this.#streamTail.set(undefined);
 		});
 	}
 
@@ -730,6 +745,10 @@ export class AgentTranscriptViewerModel {
 
 	#append(entries: readonly SessionMessageEntryLike[]): void {
 		const added: ViewerBlock[] = [];
+		const tail = this.#streamTail.peek();
+		const persisted =
+			tail &&
+			entries.findLast(({ message }) => message.role === "assistant" && sameAssistantTurn(tail.message, message));
 		for (const entry of entries) {
 			const message = entry.message;
 			switch (message.role) {
@@ -773,35 +792,9 @@ export class AgentTranscriptViewerModel {
 				case "assistant": {
 					this.#links?.pending.add(message);
 					const usage = this.#tally.add(message, this.#turnStartedAt);
-					// Independent panes follow the live tool timeline. Keep the Hub's full reply
-					// as the source of its existing copy and turn actions.
-					const timeline = this.deps.liveSession ? splitAssistantMessageToolTimeline(message) : undefined;
-					const lead = timeline?.beforeTools ?? message;
-					const shown =
-						message.stopReason === "aborted" || message.stopReason === "error"
-							? {
-									...lead,
-									stopReason: message.stopReason,
-									errorMessage: message.errorMessage,
-									retryRecovery: message.retryRecovery,
-								}
-							: lead;
-					added.push({ kind: "assistant", id: entry.id, message: shown, actionMessage: message, usage });
-					for (const part of message.content) {
-						if (part.type !== "toolCall") continue;
-						const call = this.tools.commit(part, message);
-						added.push({ kind: "tool", id: part.id, call });
-						const after = timeline?.afterToolCalls.get(part.id);
-						if (after) {
-							added.push({
-								kind: "assistant",
-								id: `after:${part.id}`,
-								message: after,
-								usage: undefined,
-								contentOffset: timeline?.contentOffsets.get(part.id),
-							});
-						}
-					}
+					const reuse = persisted === entry && tail ? tail.blocks : [];
+					added.push(...this.#replyBlocks(message, entry.id, true, reuse, usage));
+					if (persisted === entry) this.#streamTail.set(undefined);
 					break;
 				}
 				case "toolResult": {
@@ -832,6 +825,74 @@ export class AgentTranscriptViewerModel {
 		if (added.length > 0) this.blocks.set([...untrack(this.blocks), ...added]);
 		this.#resolveLinks();
 		this.touch();
+	}
+
+	/** Project both stages through the same rows, adopting the live rows when the journal catches up. */
+	#replyBlocks(
+		message: AssistantMessage,
+		id: string,
+		recorded: boolean,
+		reuse: readonly ViewerBlock[],
+		usage?: TurnUsageSummary,
+	): ViewerBlock[] {
+		// The parked Hub's lead contains the full reply so its replay and turn actions stay unchanged.
+		const timeline = this.deps.liveSession ? splitAssistantMessageToolTimeline(message) : undefined;
+		const lead = timeline?.beforeTools ?? message;
+		const shown =
+			message.stopReason === "aborted" || message.stopReason === "error"
+				? {
+						...lead,
+						stopReason: message.stopReason,
+						errorMessage: message.errorMessage,
+						retryRecovery: message.retryRecovery,
+					}
+				: lead;
+		const byId = new Map(reuse.map(row => [row.id, row]));
+		const replyRow = (id: string, view: ViewerAssistant, old: ViewerBlock | undefined): ViewerBlock => {
+			if (old?.kind === "assistant") {
+				old.id = id;
+				old.view.set(view);
+				return old;
+			}
+			return { kind: "assistant", id, view: signal(view) };
+		};
+		const rows: ViewerBlock[] = [
+			replyRow(
+				id,
+				{
+					message: shown,
+					actionMessage: recorded ? message : undefined,
+					usage,
+					recorded,
+					transient: !recorded && !timeline?.hasToolCalls,
+				},
+				reuse[0],
+			),
+		];
+		for (const part of message.content) {
+			if (part.type !== "toolCall") continue;
+			const call = recorded ? this.tools.commit(part, message) : this.tools.get(part.id);
+			if (!call) continue;
+			const old = byId.get(part.id);
+			rows.push(old?.kind === "tool" && old.call === call ? old : { kind: "tool", id: part.id, call });
+			const after = timeline?.afterToolCalls.get(part.id);
+			if (after) {
+				const afterId = `after:${part.id}`;
+				rows.push(
+					replyRow(
+						afterId,
+						{
+							message: after,
+							contentOffset: timeline?.contentOffsets.get(part.id),
+							recorded,
+							transient: !recorded && part.id === timeline?.lastToolCallId,
+						},
+						byId.get(afterId),
+					),
+				);
+			}
+		}
+		return rows;
 	}
 
 	#bindLinks(owner: AgentViewSession | string | undefined, cwd: string | undefined): boolean {

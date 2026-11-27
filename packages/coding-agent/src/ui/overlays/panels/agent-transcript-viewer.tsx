@@ -22,7 +22,6 @@ import { SyntheticMessage, UserMessage } from "../../transcript/messages/user-me
 import {
 	SideAssistantBlock,
 	SideMessage,
-	SideReply,
 	SideToolCard,
 	type SideTranscriptDisplay,
 	sideTranscriptDisplay,
@@ -71,21 +70,23 @@ function Block(props: {
 		case "parentIrc":
 			return <ParentIrcMessage parentIrc={block.parentIrc} timestamp={block.timestamp} expanded={model.expanded} />;
 		case "assistant": {
-			const message = block.actionMessage ?? block.message;
+			const message = () => block.view().actionMessage ?? block.view().message;
 			const allowAction = actions?.allowAction;
 			return (
 				<SideAssistantBlock
 					display={display}
 					model={{
-						message: block.message,
-						actionMessage: block.actionMessage,
+						message: () => block.view().message,
+						actionMessage: () => block.view().actionMessage,
 						linkTargets: model.linkTargets,
-						finalized: true,
-						contentOffset: block.contentOffset,
-						turnUsage: block.usage,
-						actions: actions !== undefined && block.actionMessage !== undefined,
-						allowAction: allowAction ? act => allowAction(act, message) : undefined,
-						onAction: (act, copyText) => actions?.reply(act, message, copyText),
+						finalized: () => !block.view().transient,
+						transient: () => block.view().transient,
+						reacts: () => block.view().recorded,
+						contentOffset: () => block.view().contentOffset,
+						turnUsage: () => block.view().usage,
+						actions: () => actions !== undefined && block.view().actionMessage !== undefined,
+						allowAction: allowAction ? act => allowAction(act, message()) : undefined,
+						onAction: (act, copyText) => actions?.reply(act, message(), copyText),
 					}}
 				/>
 			);
@@ -147,19 +148,10 @@ function ViewerTranscript(props: {
 }): JSXNode {
 	const { model } = props;
 	const display = sideTranscriptDisplay(model.runner, model.settings, model.expanded);
-	const blocks = <For each={model.blocks}>{block => <Block model={model} block={block} display={display} />}</For>;
-	return (
-		<>
-			{props.workspace ? blocks : <TranscriptBlocks>{blocks}</TranscriptBlocks>}
-			<SideReply
-				message={model.streaming}
-				tools={model.tools}
-				display={display}
-				linkTargets={model.linkTargets}
-				live
-			/>
-		</>
+	const blocks = (
+		<For each={model.presentedBlocks}>{block => <Block model={model} block={block} display={display} />}</For>
 	);
+	return props.workspace ? blocks : <TranscriptBlocks>{blocks}</TranscriptBlocks>;
 }
 
 /** Main region of a standalone agent pane. The pane's scrollback belongs to its renderer. */
@@ -170,7 +162,7 @@ export function AgentWorkspaceTranscript(props: { readonly model: AgentTranscrip
 			<ViewerTranscript model={model} workspace />
 			{() => {
 				model.rev();
-				return model.blocks().length === 0 && !model.streaming() ? (
+				return model.presentedBlocks().length === 0 ? (
 					<text key="empty" tone="muted" text={sanitizeErrorLine(model.placeholder(), NATIVE_LINE_WIDTH)} />
 				) : undefined;
 			}}
@@ -281,7 +273,7 @@ export function AgentTranscriptViewer(props: { readonly model: AgentTranscriptVi
 				);
 			})}
 			{() =>
-				model.blocks().length > 0 || model.streaming()
+				model.presentedBlocks().length > 0
 					? transcript
 					: part(() => (
 							<text

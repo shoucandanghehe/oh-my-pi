@@ -127,7 +127,7 @@ export interface AssistantMessageModel {
 	/** Restrict controls in a view that does not own every transcript action. */
 	readonly allowAction?: (act: string) => boolean;
 	/** Original reply when this block renders only the lead before interleaved tool cards. */
-	readonly actionMessage?: AssistantMessage;
+	readonly actionMessage?: Reactive<AssistantMessage | undefined>;
 	/** Side replies have copy controls even when they do not show a turn usage summary. */
 	readonly copyAnswerWithoutUsage?: boolean;
 	/** Live thinking speed (tok/s); shown from 0.05 up. */
@@ -137,7 +137,7 @@ export interface AssistantMessageModel {
 	/** The emoji the reply opens with (undefined when it opens with none). */
 	readonly onReaction?: (emoji: string | undefined) => void;
 	/** The reply's opening emoji is a reaction (default true); false keeps it in the prose (a later reply, nothing to react on). */
-	readonly reacts?: boolean;
+	readonly reacts?: Reactive<boolean>;
 	/** `retry`, `copy-error`, `switch-model`, `copy-answer` and turn hold-menu actions. */
 	readonly onAction?: (act: string, copyText?: string) => void;
 	/** Extension text renderers: display-only transforms of each text block's Markdown, in order. */
@@ -145,7 +145,7 @@ export interface AssistantMessageModel {
 	/** Extension thinking renderers: drawn under each shown thinking block, in order. */
 	readonly thinkingRenderers?: Reactive<readonly AssistantThinkingRenderer[]>;
 	/** Index in the full reply of this segment's first block (a segment drawn after a tool call). */
-	readonly contentOffset?: number;
+	readonly contentOffset?: Reactive<number | undefined>;
 }
 
 /** Renderers that threw once: reported once, then their input is drawn. */
@@ -304,7 +304,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		const transient = flag(model.transient, false);
 		let reaction: string | undefined;
 		let reacted = false;
-		const reacts = model.reacts !== false;
+		const reacts = flag(model.reacts, true);
 		const content = answer.content.map(block => {
 			if (!reacts || reacted || block.type !== "text") return block;
 			reacted = true;
@@ -385,7 +385,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		const tokens = answer.usage.reasoningTokens ?? answer.usage.output;
 		const textRenderers = read(model.textRenderers) ?? [];
 		const hasThinkingRenderers = (read(model.thinkingRenderers)?.length ?? 0) > 0;
-		const offset = model.contentOffset ?? 0;
+		const offset = read(model.contentOffset) ?? 0;
 		let view: AssistantMessage | undefined;
 		let thinkingIndex = 0;
 		for (let i = 0; i < displayed.content.length; i++) {
@@ -544,7 +544,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		if (read(model.toolResultMedia)?.size) untrack(revise);
 	});
 
-	const actionMessage = () => model.actionMessage ?? reply()?.answer;
+	const actionMessage = () => read(model.actionMessage) ?? reply()?.answer;
 	const answered = (): boolean => actionMessage()?.content.some(hasVisibleText) ?? false;
 	const rewound = (): boolean => flag(model.rewound, false);
 	const actions = (): boolean => flag(model.actions, false);

@@ -19,6 +19,16 @@ export function parentIrcForDisplay(message: UserMessage): UserMessage["parentIr
 	return legacy ? { from: legacy[1], body: legacy[2] } : undefined;
 }
 
+/** Streaming and saved messages are snapshots of the same provider response. */
+export function sameAssistantTurn(left: AssistantAgentMessage, right: AssistantAgentMessage): boolean {
+	return (
+		left.timestamp === right.timestamp &&
+		left.provider === right.provider &&
+		left.model === right.model &&
+		(left.responseId === undefined || right.responseId === undefined || left.responseId === right.responseId)
+	);
+}
+
 /**
  * Whether an assistant turn has visible text, thinking, or image content — i.e.
  * content that closes the current read-tool run.

@@ -17,6 +17,7 @@ import {
 	settleWithJobFrame,
 	toolRenderName,
 } from "../../session/transcript/tool-execution";
+import { sameAssistantTurn } from "../../session/transcript/transcript-render-helpers";
 import { resolveEditToolMode } from "../../utils/edit-mode";
 import type { ToolCall, ToolCallOptions, ToolCallResult } from "./tool-block";
 import { createTranscriptToolCall } from "./tool-card-model";
@@ -37,12 +38,7 @@ function uncommittedAssistant(
 ): AssistantMessage | undefined {
 	if (stream?.role !== "assistant") return undefined;
 	const last = messages.findLast(message => message.role === "assistant");
-	return last?.timestamp === stream.timestamp &&
-		last.provider === stream.provider &&
-		last.model === stream.model &&
-		(last.responseId === undefined || stream.responseId === undefined || last.responseId === stream.responseId)
-		? undefined
-		: stream;
+	return last && sameAssistantTurn(last, stream) ? undefined : stream;
 }
 
 /** Tool cards owned by one side transcript. An id remains the same card from preview through result. */
