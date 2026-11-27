@@ -23,6 +23,7 @@ export type BtwPanelStatus = "streaming" | "complete" | "branching" | "aborted" 
 /** The panel's live state, driven by the btw controller. */
 export class BtwPanelState {
 	readonly answer = signal("");
+	readonly toolActivity = signal("");
 	readonly status = signal<BtwPanelStatus>("streaming");
 	readonly error = signal<string | undefined>(undefined);
 	readonly copied = signal(false);
@@ -237,6 +238,10 @@ export function BtwPanel(props: BtwPanelProps): JSXNode {
 				{() => busy() && <spinner />}
 				<text lines={1} truncate="end" spans={head} />
 			</row>
+			{() => {
+				const activity = state.toolActivity();
+				return activity && <text lines={1} truncate="end" spans={[{ t: activity, s: "muted" }]} />;
+			}}
 			{body}
 			{() => {
 				const { status, hints, note } = footer();

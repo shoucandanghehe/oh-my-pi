@@ -1,9 +1,12 @@
 import { serializeConversation } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message } from "@oh-my-pi/pi-ai";
+import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { jsx, type KeyEvent, type PasteEvent, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
+import { decodeStreamedToolArgs, streamingStringKeysForTool } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 import { replaceTabs } from "../../utils/text-width";
-import type { TspMenuEntry } from "@oh-my-pi/pi-wire";
+import { type TspMenuEntry, toolIntentLabel } from "@oh-my-pi/pi-wire";
 import { logger, prompt, Snowflake, toError, withTimeout } from "@oh-my-pi/pi-utils";
+import { sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
 import btwConversationPrompt from "../../prompts/system/btw-conversation.md" with { type: "text" };
 import btwHandoffPrompt from "../../prompts/system/btw-handoff.md" with { type: "text" };
 import type { AgentSession } from "../../session/agent-session";
@@ -46,6 +49,7 @@ import type { OverlayHandle, TranscriptBlock } from "../../ui/shell";
 import { actionKey } from "../../ui/keys/hints";
 import { canonicalKeyId } from "../../config/keybindings/key-id";
 import "../../ui/styles/apps/screen/look";
+import { toolCallSummary } from "../view-model/overlays/agent-activity";
 import { BTW_INJECT_LABEL, type BtwInjectState } from "../view-model/overlays/btw-inject";
 import { type BtwNoteAction, type BtwNoteHost } from "../view-model/overlays/btw-note";
 import { sanitizeErrorLine } from "../view-model/chrome/error-block";
@@ -834,6 +838,33 @@ export class BtwController {
 
 	#refreshDurable(): void {
 		this.#durableRevision.set(this.#durableRevision.peek() + 1);
+		const quick = this.#quick;
+		const thread = quick?.workspace.manager.thread(quick.key);
+		if (!quick || !thread) return;
+		const { request } = thread;
+		const messages = request
+			? [...request.messages, ...(request.streamMessage ? [request.streamMessage] : [])]
+			: (thread.turns.at(-1)?.intermediateMessages ?? []);
+		const calls = new Map<string, string>();
+		for (const message of messages) {
+			if (message.role !== "assistant") continue;
+			for (const part of message.content) {
+				if (part.type !== "toolCall") continue;
+				const partialJson = message === request?.streamMessage ? getStreamingPartialJson(part) : undefined;
+				const rawInput = part.customWireName !== undefined;
+				const args = partialJson
+					? decodeStreamedToolArgs(partialJson, {
+							rawInput,
+							fullArgs: part.arguments,
+							streamingStringKeys: streamingStringKeysForTool(part.name, rawInput),
+						})
+					: part.arguments;
+				const { summary, summaryIsToolIntent } = toolCallSummary(part.name, args);
+				const detail = summaryIsToolIntent ? toolIntentLabel(summary) : summary;
+				calls.set(part.id, sanitizeDisplaySingleLine(`${part.name.toUpperCase()} ${detail}`));
+			}
+		}
+		quick.panel.toolActivity.set([...calls.values()].join(" · "));
 	}
 
 	closeView(): void {
