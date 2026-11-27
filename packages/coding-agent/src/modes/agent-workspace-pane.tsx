@@ -30,7 +30,11 @@ import { QueueModel, QueuedMessages, type QueuedMessageEdit } from "../ui/dock/q
 import { PaneExtensionWidgets, useExtensionPresentation } from "../ui/dock/widgets";
 import { handleTranscriptKey } from "../ui/keys/transcript";
 import { AgentTranscriptViewerModel } from "../ui/overlays/panels/agent-transcript-viewer-model";
-import { AgentWorkspaceStatus, AgentWorkspaceTranscript } from "../ui/overlays/panels/agent-transcript-viewer";
+import {
+	AgentWorkspaceStatus,
+	AgentWorkspaceTranscript,
+	STATUS_TONE,
+} from "../ui/overlays/panels/agent-transcript-viewer";
 import { TreeSelector } from "../ui/overlays/pickers/tree-selector";
 import { Overlays } from "../ui/shell/overlays";
 import { StatusLine } from "../ui/status/status-line";
@@ -1004,6 +1008,22 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	}
 	return {
 		surface,
+		titleDetail(focused, width) {
+			model.rev();
+			const status = model.ref()?.status;
+			const name = model.live()?.model?.id ?? model.model;
+			const hints =
+				!focused || width < 34
+					? ""
+					: width < 48
+						? " · Esc"
+						: `${sendable ? " · Enter send" : ""}${options.showHub ? " · Hub" : ""} · Esc`;
+			return [
+				...(status ? [{ t: ` ${status}`, s: STATUS_TONE[status] }] : []),
+				...(name ? [{ t: ` · ${name}`, s: "muted" }] : []),
+				...(hints ? [{ t: hints, s: "dim" }] : []),
+			];
+		},
 		onKey,
 		isPrompt: isUserPrompt,
 		onPasteRequest: pasteNative,

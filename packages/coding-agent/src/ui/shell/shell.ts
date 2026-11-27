@@ -50,7 +50,7 @@ function ensureTerminalStylesLoaded(): void {
 }
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { copyToClipboard, isClipboardTerminalLocal } from "../../utils/clipboard";
-import { Dock, type DockSlot, NATIVE_DOCK, NATIVE_TAIL, TERMINAL_DOCK } from "./dock";
+import { Dock, type DockSlot, FULLSCREEN_DOCK, FULLSCREEN_TAIL, NATIVE_DOCK, NATIVE_TAIL, TERMINAL_DOCK } from "./dock";
 import { Overlays } from "./overlays";
 import { Transcript } from "./transcript";
 
@@ -100,6 +100,7 @@ export class Shell {
 	readonly surface: Surface;
 	readonly #native: Signal<boolean> = signal(false);
 	readonly #hour12: Signal<boolean | undefined> = signal<boolean | undefined>(undefined);
+	readonly #screen = signal<HostOptions["screen"]>(undefined);
 	readonly #size: Signal<TerminalSize> = signal<TerminalSize>({
 		columns: process.stdout.columns || 80,
 		rows: process.stdout.rows || 24,
@@ -123,11 +124,19 @@ export class Shell {
 			fallback: () => this.#home,
 		});
 		const terminalDock = this.dock.terminalViews();
+		const fullscreenTail = this.dock.views(FULLSCREEN_TAIL);
+		const fullscreenDock = this.dock.terminalViews(FULLSCREEN_DOCK);
 		const nativeDock = this.dock.views(NATIVE_DOCK);
 		const nativeTail = this.dock.views(NATIVE_TAIL);
 		this.surface = createSurface(() => ({
-			main: () => (this.#native() ? [this.transcript.nativeNodes, nativeTail] : this.transcript.nodes),
-			dock: () => (this.#native() ? nativeDock : terminalDock),
+			main: () =>
+				this.#native()
+					? [this.transcript.nativeNodes, nativeTail]
+					: this.#screen()?.() === "fullscreen"
+						? [this.transcript.nodes, fullscreenTail]
+						: this.transcript.nodes,
+			dock: () =>
+				this.#native() ? nativeDock : this.#screen()?.() === "fullscreen" ? fullscreenDock : terminalDock,
 			layer: this.overlays.nodes,
 		}));
 	}
@@ -140,6 +149,9 @@ export class Shell {
 
 	/** The terminal's size in cells (reactive; follows resizes once started). */
 	readonly size: Accessor<TerminalSize> = () => this.#size();
+
+	/** Size for content laid out inside Main (as opposed to workspace-wide overlays). */
+	readonly mainSize: Accessor<TerminalSize> = () => this.host?.ansiWorkspace?.mainSize() ?? this.size();
 
 	/** The running host (driver access, scrollback queries); undefined until started. */
 	get host(): Host | undefined {
@@ -154,9 +166,14 @@ export class Shell {
 		const host = this.#host;
 		if (!host || host.native) return Promise.resolve();
 		const { promise, resolve } = Promise.withResolvers<void>();
-		const stop = host.onFrame(() => {
-			stop();
+		const finish = (): void => {
+			stopFrame();
+			stopChange();
 			resolve();
+		};
+		const stopFrame = host.onFrame(finish);
+		const stopChange = host.onChange(() => {
+			if (host.native) finish();
 		});
 		// A change only schedules a frame when the last one read it: ask, whatever is on screen.
 		host.requestFrame();
@@ -197,7 +214,10 @@ export class Shell {
 			...(options.wheelLines ? { wheelLines: options.wheelLines } : {}),
 			...(options.scrollbar ? { scrollbar: options.scrollbar } : {}),
 			...(options.exitTranscript ? { exitTranscript: options.exitTranscript } : {}),
-			beforeTerminalRenderer: ensureTerminalStylesLoaded,
+			beforeTerminalRenderer: () => {
+				ensureTerminalStylesLoaded();
+				this.#screen.set(options.screen);
+			},
 		});
 		this.#host = host;
 		this.#unwatchMouse = createRoot(dispose => {
@@ -208,7 +228,7 @@ export class Shell {
 				const tracking = fullscreen
 					? options.fullscreenMouse?.() === false
 						? "off"
-						: inline === "any" || host.ansiWorkspace?.pointerMotion()
+						: inline === "any"
 							? "any"
 							: "drag"
 					: inline;
@@ -238,7 +258,7 @@ export class Shell {
 		if (!theme || this.#native.peek()) return undefined;
 		ensureTerminalStylesLoaded();
 		const env = staticEnvironment(untrack(theme));
-		const { columns } = this.#size.peek();
+		const { columns } = this.mainSize();
 		let rows = 0;
 		const measure = (view: unknown): void => {
 			if (typeof view === "function") measure(untrack(view as () => unknown));
@@ -246,7 +266,8 @@ export class Shell {
 			else if (typeof view === "object" && view !== null && "kind" in view)
 				rows += renderBlock(view as UiNode, columns, { env }).rows.length;
 		};
-		for (const name of TERMINAL_DOCK.slice(TERMINAL_DOCK.indexOf(slot) + 1)) measure(this.dock.slot(name).view);
+		const slots = this.#screen()?.() === "fullscreen" ? FULLSCREEN_DOCK : TERMINAL_DOCK;
+		for (const name of slots.slice(slots.indexOf(slot) + 1)) measure(this.dock.slot(name).view);
 		return rows;
 	}
 
@@ -261,6 +282,7 @@ export class Shell {
 		this.#unwatchMouse?.();
 		this.#unwatchMouse = undefined;
 		this.transcript.attach(undefined);
+		this.#screen.set(undefined);
 		await host?.stop();
 	}
 

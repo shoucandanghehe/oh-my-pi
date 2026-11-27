@@ -12,7 +12,7 @@ import {
 	STATUS_LINE_SEPARATOR_VALUES,
 } from "../config/status-line-schema";
 import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
-import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
+import { parseMaxFps } from "../config/frame-rate";
 import { parseSpinnerInterval } from "../config/spinner-interval";
 import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
 import { setTightLayout } from "../ui/styles/terminal-padding";
@@ -710,7 +710,7 @@ export const cfgTuiSpinnerInterval = register({
 export const cfgTuiMaxFps = register({
 	id: "tui.maxFps",
 	type: "number",
-	default: DEFAULT_MAX_FPS,
+	default: undefined,
 	env: "PI_MAX_FPS",
 	validate: raw => {
 		if (raw !== undefined && raw !== null) parseMaxFps(raw);
@@ -721,9 +721,9 @@ export const cfgTuiMaxFps = register({
 		group: "Display",
 		label: "Max Frames Per Second",
 		description:
-			"Ceiling on how often the TUI repaints, streaming text included. Keystroke echo keeps 30 fps, so the pane you type in stays responsive",
+			"Ceiling on how often the TUI repaints, streaming text included. Unset: uncapped in fullscreen, 30 fps inline",
 		options: [
-			{ value: "30", label: "30 fps", description: "Default" },
+			{ value: "30", label: "30 fps" },
 			{ value: "15", label: "15 fps" },
 			{ value: "4", label: "4 fps", description: "Quiet, for many panes" },
 			{ value: "1", label: "1 fps", description: "Minimum" },

@@ -45,6 +45,7 @@ import {
 	resolveExactModelIdentity,
 } from "../config/model-resolver";
 import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
+import { DEFAULT_MAX_FPS } from "../config/frame-rate";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -1953,8 +1954,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** `tui.maxFps`, `tui.hyperlinks`, `tui.textSizing` and `tui.screen` into the running renderer. */
 	#syncFrameSettings(): void {
-		this.#frame.frameInterval.set(1000 / cfgTuiMaxFps.get(this.settings));
-		this.#frame.screen.set(cfgTuiScreen.get(this.settings));
+		const screen = cfgTuiScreen.get(this.settings);
+		this.#frame.screen.set(screen);
+		const fps = cfgTuiMaxFps.get(this.settings) ?? (screen === "inline" ? DEFAULT_MAX_FPS : undefined);
+		this.#frame.frameInterval.set(fps === undefined ? 0 : 1000 / fps);
 		this.#frame.copyOnSelect.set(cfgTuiCopyOnSelect.get(this.settings));
 		this.#frame.wheelLines.set(cfgTuiWheelLines.get(this.settings));
 		this.#frame.scrollbar.set(cfgTuiScrollbar.get(this.settings));
@@ -8819,7 +8822,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	commandReportRows(): number | undefined {
 		const below = this.shell.rowsBelow("report");
-		return below === undefined ? undefined : this.shell.size().rows - below;
+		return below === undefined ? undefined : Math.max(1, this.shell.mainSize().rows - below);
 	}
 
 	cycleThinkingLevel(): void {

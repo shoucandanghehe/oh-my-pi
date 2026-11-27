@@ -330,6 +330,28 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		);
 	};
 
+	readonly titleDetail = (focused: boolean) => {
+		const topic = this.#displayed();
+		if (!topic) return [{ t: " · no threads", s: "muted" }];
+		const count = this.#threads().length;
+		const state =
+			topic.phase === "running"
+				? "streaming"
+				: topic.error
+					? "error"
+					: this.ansiRail?.preview()
+						? "preview"
+						: focused
+							? "focused"
+							: "ready";
+		return [
+			{
+				t: ` · ${count} ${count === 1 ? "thread" : "threads"} · ${topic.title} · ${state}`,
+				s: state === "error" ? "error" : "muted",
+			},
+		];
+	};
+
 	readonly #facts = computed(() => {
 		const thread = this.#displayed();
 		if (!thread) return;

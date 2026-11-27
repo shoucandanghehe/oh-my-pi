@@ -12,9 +12,11 @@ import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/detail
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+import { createSurface, jsx } from "@oh-my-pi/pi-tui";
 import { cfgTasksTodoClearDelay } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { getCurrentThemeName, initTheme, setTheme } from "../src/ui/theme/service";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { StatusHud, TodoHud } from "../src/ui/dock";
 import { createModeTerminal, type ModeTerminal, renderRows } from "./helpers/mode-terminal";
@@ -494,6 +496,60 @@ describe("InteractiveMode todo HUD anchor", () => {
 		resetSettingsForTest();
 	});
 
+	it("scrolls a tall Todo under the pointer while keeping the composer and sibling fixed", async () => {
+		term.frame.screen.set("fullscreen");
+		const workspace = mode.shell.host!.ansiWorkspace!;
+		try {
+			workspace.open(
+				"side",
+				() => ({ surface: createSurface(() => ({ main: jsx("text", { text: "sibling" }) })) }),
+				{ focus: false },
+			);
+			mode.setTodos(
+				Array.from({ length: 60 }, (_, i) => ({ content: `scroll task ${i}`, status: "pending" as const })),
+			);
+			mode.setTodoExpanded(true);
+			await term.waitFor(rows => rows.some(row => row.includes("scroll task 59")));
+			const before = term.screen();
+			const first = (lines: string[]) => Number(lines.join("\n").match(/scroll task (\d+)/)?.[1]);
+			const row = before.findIndex(line => line.includes("scroll task"));
+			term.feed(`\x1b[<64;8;${row + 1}M`);
+			await term.waitFor(lines => first(lines) < first(before));
+			expect(term.screen().at(-1)).toBe(before.at(-1));
+			expect(term.screen().findIndex(line => line.includes("sibling"))).toBe(
+				before.findIndex(line => line.includes("sibling")),
+			);
+		} finally {
+			workspace.close("side");
+			mode.setTodoExpanded(false);
+			term.frame.screen.set("inline");
+		}
+	});
+
+	it("opens a report as a page when it fits the terminal but not Main's remaining body", async () => {
+		term.frame.screen.set("fullscreen");
+		const workspace = mode.shell.host!.ansiWorkspace!;
+		try {
+			workspace.open(
+				"below",
+				() => ({ surface: createSurface(() => ({ main: jsx("text", { text: "lower pane" }) })) }),
+				{ edge: "bottom", focus: false },
+			);
+			await term.waitFor(lines => lines.some(line => line.includes("lower pane")));
+			mode.showCommandReport({
+				title: "Sized report",
+				body: () => jsx("rows", { lines: Array.from({ length: 12 }, (_, i) => `Report line ${i}`) }),
+			});
+			await term.waitFor(lines => lines.some(row => row.includes("Report line 11")));
+			expect(term.screen().join("\n")).toContain("Sized report");
+			expect(term.screen().join("\n")).not.toContain("lower pane");
+		} finally {
+			mode.dismissCommandReport();
+			workspace.close("below");
+			term.frame.screen.set("inline");
+		}
+	});
+
 	it("renders a Todos tree: stage progression header, active stage expanded, others collapsed", () => {
 		mode.setTodos([
 			{
@@ -523,11 +579,11 @@ describe("InteractiveMode todo HUD anchor", () => {
 		// is visible while the stage still has open work.
 		expect(lines.some(line => line.includes("I. Foundation") && line.includes("1/3"))).toBe(true);
 		const secondLine = lines.find(line => line.includes("second task"));
-		expect(secondLine).toContain(currentTheme().symbols.symbol("tree.branch"));
-		expect(secondLine).toContain(currentTheme().symbols.symbol("checkbox.unchecked"));
+		expect(secondLine).toContain(PLAIN_THEME.symbols.symbol("tree.branch"));
+		expect(secondLine).toContain(PLAIN_THEME.symbols.symbol("checkbox.unchecked"));
 		expect(lines.some(line => line.includes("third task"))).toBe(true);
 		const firstLine = lines.find(line => line.includes("first task"));
-		expect(firstLine).toContain(currentTheme().symbols.symbol("checkbox.checked"));
+		expect(firstLine).toContain(PLAIN_THEME.symbols.symbol("checkbox.checked"));
 		// Upcoming stage: header with its own progress, but collapsed (no task rows).
 		expect(lines.some(line => line.includes("II. Verification") && line.includes("0/1"))).toBe(true);
 		expect(lines.some(line => line.includes("run tests"))).toBe(false);

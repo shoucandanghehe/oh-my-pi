@@ -306,7 +306,7 @@ export class CommandController {
 			this.#showSheet(node, dispose, { page: false, head: options.head ?? options.title, focus: node });
 			return;
 		}
-		const { columns, rows } = untrack(size);
+		const { columns, rows } = untrack(this.ctx.shell.mainSize);
 		const inline = this.ctx.commandReportRows() ?? rows;
 		const height = renderBlock(node, columns, { env: staticEnvironment(currentTheme()) }).rows.length;
 		if (height > inline) {
@@ -904,7 +904,7 @@ export class CommandController {
 		}
 
 		const now = Date.now();
-		const columns = this.ctx.shell.size().columns;
+		const columns = this.ctx.shell.mainSize().columns;
 		let info = `${currentTheme().fg("dim", "Running:")} ${tree.running.length}\n`;
 		if (tree.running.length === 0 && tree.recent.length === 0) {
 			info += `\n${currentTheme().fg("dim", "No async jobs yet.")}`;

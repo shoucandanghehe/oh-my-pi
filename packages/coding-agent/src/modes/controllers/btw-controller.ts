@@ -1045,6 +1045,7 @@ export class BtwController {
 				this.#pane = pane;
 				return {
 					surface: pane.surface,
+					titleDetail: pane.titleDetail,
 					ansiRail: pane.ansiRail,
 					onKey: pane.onKey,
 					isPrompt: isUserPrompt,

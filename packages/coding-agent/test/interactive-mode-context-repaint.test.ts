@@ -4,6 +4,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { cfgTuiMaxFps, cfgTuiScreen } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -11,13 +12,14 @@ import { createRoot, effect } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { cfgComputerEnabled } from "../src/tools/settings";
 import { initTheme } from "../src/ui/theme/service";
-import { createModeTerminal } from "./helpers/mode-terminal";
+import { createModeTerminal, type ModeTerminal } from "./helpers/mode-terminal";
 
-describe("InteractiveMode context figure after an eval-prelude toggle", () => {
+describe("InteractiveMode repaint settings", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 	let mode: InteractiveMode;
+	let term: ModeTerminal;
 
 	beforeAll(() => {
 		initTheme();
@@ -37,25 +39,34 @@ describe("InteractiveMode context figure after an eval-prelude toggle", () => {
 			settings: Settings.isolated({}),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(
-			session,
-			"test",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			createModeTerminal().frame,
-		);
+		term = createModeTerminal();
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
 		await mode.init({ suppressWelcomeIntro: true });
 	});
 
 	afterEach(async () => {
 		mode?.stop();
+		await mode?.shell.stop();
+		term?.dispose();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
 		vi.restoreAllMocks();
 		resetSettingsForTest();
+	});
+
+	it("applies an explicit frame ceiling in fullscreen and removes it when the override clears", async () => {
+		expect(term.frame.frameInterval.peek()).toBeCloseTo(1000 / 30);
+		cfgTuiScreen.override(mode.settings, "fullscreen");
+		cfgTuiMaxFps.override(mode.settings, 5);
+		await Promise.resolve();
+		expect(term.frame.frameInterval.peek()).toBe(200);
+		cfgTuiMaxFps.clearOverride(mode.settings);
+		await Promise.resolve();
+		expect(term.frame.frameInterval.peek()).toBe(0);
+		cfgTuiMaxFps.override(mode.settings, 30);
+		await Promise.resolve();
+		expect(term.frame.frameInterval.peek()).toBeCloseTo(1000 / 30);
 	});
 
 	it("shows the prompt's new size once the session rebuilt it, without another event", async () => {

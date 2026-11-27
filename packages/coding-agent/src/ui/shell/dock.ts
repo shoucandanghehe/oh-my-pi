@@ -88,6 +88,22 @@ export const NATIVE_DOCK: readonly DockSlot[] = [
 /** Slots Tern shows at the transcript's end rather than in the dock. */
 export const NATIVE_TAIL: readonly DockSlot[] = ["pendingShell", "ask"];
 
+/** Live panels scroll with the fullscreen transcript; the report and composer stay pinned. */
+export const FULLSCREEN_TAIL: readonly DockSlot[] = [
+	"pendingShell",
+	"pendingMessages",
+	"todo",
+	"subagents",
+	"btw",
+	"omfg",
+	"cleanse",
+	"errorBanner",
+	"modelCycle",
+	"deferredCommand",
+	"status",
+];
+export const FULLSCREEN_DOCK = TERMINAL_DOCK.filter(name => !FULLSCREEN_TAIL.includes(name));
+
 /**
  * Slots drawn over the live transcript in a plain terminal: their rows take no
  * room from it, so the transcript rows that still fit above them stay on
@@ -116,8 +132,8 @@ export class Dock {
 	}
 
 	/** The terminal dock as a region template: {@link TERMINAL_DOCK}, the {@link COVERING} slots drawn over the transcript. */
-	terminalViews(): JSXNode {
-		return TERMINAL_DOCK.map(name =>
+	terminalViews(order = TERMINAL_DOCK): JSXNode {
+		return order.map(name =>
 			COVERING.includes(name)
 				? jsx("col", { role: "omp.dock.covering", children: this.slot(name).view }, name)
 				: this.slot(name).view,
