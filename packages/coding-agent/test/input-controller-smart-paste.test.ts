@@ -18,14 +18,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { $which } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { chipLabel } from "../src/ui/composer/attachments";
 import { Composer } from "../src/ui/composer/composer";
 import { createInputHarness } from "./helpers/input-harness";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const ONE_PX_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -66,26 +66,23 @@ function createContext(options?: { focused?: object }) {
 }
 
 /** A composer-focused context with the controller's input hooks installed, so bracketed pastes route as in the app. */
-function createWiredContext(clipboard?: ConstructorParameters<typeof InputController>[1]) {
-	const { ctx, composer, spies } = createContext();
+function createWiredContext(clipboard?: ConstructorParameters<typeof InputController>[1], artifactsDir?: string) {
 	const input = createInputHarness();
-	Object.assign(ctx, {
+	const ctx = createInteractiveModeContext({
 		...input.context,
-		shell: { focused: () => composer.field, host: undefined, overlays: { open: () => false } },
-		keybindings: KeybindingsManager.inMemory(),
-		session: { extensionRunner: undefined, prewarmModelConnection: vi.fn() },
-		dictationSpaceHold: () => undefined,
-		syncIdleMaintenanceView: vi.fn(),
-		updateEditorBorderColor: vi.fn(),
+		sessionManager: {
+			getArtifactsDir: () => artifactsDir ?? null,
+			putBlob: async () => ({ hash: "h", path: "/tmp/h.png", displayPath: "/tmp/h.png", ref: "blob:h" }),
+		},
 	});
 	const controller = new InputController(ctx, clipboard);
 	const handleImagePaste = vi.spyOn(controller, "handleImagePaste");
 	const handleImagePathPaste = vi.spyOn(controller, "handleImagePathPaste");
 	controller.setupKeyHandlers();
 	return {
-		composer,
+		composer: ctx.composer,
 		paste: (text: string) => input.paste(ctx, text),
-		spies: { ...spies, handleImagePaste, handleImagePathPaste },
+		spies: { showStatus: ctx.showStatus, handleImagePaste, handleImagePathPaste },
 	};
 }
 
@@ -645,10 +642,14 @@ describe("bracketed paste into the composer", () => {
 	});
 
 	it("attaches the clipboard image bytes for an empty bracketed paste of an image-only clipboard", async () => {
-		const { composer, paste, spies } = createWiredContext({
-			readImage: async () => ({ data: ONE_PX_PNG, mimeType: "image/png" }),
-			readText: async () => "", // pbpaste returns empty for image-only pasteboards
-		});
+		using artifacts = TempDir.createSync("@omp-smart-paste-");
+		const { composer, paste, spies } = createWiredContext(
+			{
+				readImage: async () => ({ data: ONE_PX_PNG, mimeType: "image/png" }),
+				readText: async () => "", // pbpaste returns empty for image-only pasteboards
+			},
+			artifacts.path(),
+		);
 
 		paste("");
 		await spies.handleImagePaste.mock.results[0]?.value;

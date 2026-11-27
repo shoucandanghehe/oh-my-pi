@@ -41,7 +41,7 @@ function delivery(text: string, read = 1): string {
 
 async function setup() {
 	let interrupts = 0;
-	const ctx = createInteractiveModeContext({ session: { prewarmModelConnection: () => {} } });
+	const ctx = createInteractiveModeContext();
 	ctx.hasActiveBtw = () => true;
 	ctx.handleBtwEscape = () => {
 		interrupts++;
@@ -92,7 +92,7 @@ describe("enhanced paste order through the terminal driver", () => {
 	});
 
 	it("holds a native Send until enhanced paste completes without putting the pasted text in the next draft", async () => {
-		const ctx = createInteractiveModeContext({ session: { prewarmModelConnection: () => {} } });
+		const ctx = createInteractiveModeContext();
 		ctx.interceptInput = handler => ctx.shell.interceptInput(handler);
 		ctx.addGlobalKeyHandler = handler => ctx.shell.addGlobalKeyHandler(handler);
 		await using ui = await nativeShell(ctx.shell);
