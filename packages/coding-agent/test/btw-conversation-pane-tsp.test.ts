@@ -54,6 +54,7 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 	const errors: unknown[] = [];
 	const pane = new BtwConversationPane({
 		cwd,
+		writeRaw: data => tern.writeRaw(data),
 		rows: () => tern.rows,
 		columns: () => tern.columns,
 		nativeSupports: kind => (kind === "scroll" ? connection.hasFeature(kind) : connection.supports(kind)),
@@ -101,6 +102,11 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 		clock.advance(0);
 		tern.pump();
 	}
+	const textMime = Buffer.from("text/plain").toString("base64");
+	const oscPaste = (status: string, attrs = "", payload = "") => {
+		tern.input({ type: "osc", raw: `\x1b]5522;type=read:status=${status}${attrs}${payload}\x07` });
+		refresh();
+	};
 	return {
 		submitted,
 		cancelled,
@@ -119,6 +125,15 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 			tern.input({ type: "paste", paste: { text } });
 			refresh();
 		},
+		announcePaste() {
+			oscPaste("OK");
+			oscPaste("DATA", `:mime=${textMime}`);
+			oscPaste("DONE");
+		},
+		finishPaste(id: number, text: string) {
+			oscPaste("DATA", `:id=paste-${id}:mime=${textMime}`, `;${Buffer.from(text).toString("base64")}`);
+			oscPaste("DONE", `:id=paste-${id}`);
+		},
 		act(act: string) {
 			const node = [...doc.nodes.values()].find(
 				({ p }) => p.actions && typeof p.actions === "object" && Reflect.get(p.actions, "click") === act,
@@ -135,6 +150,27 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 		},
 	};
 }
+
+test("enhanced paste returns to the originating BTW draft after switching topics", async () => {
+	const a = topic("a", process.cwd());
+	const b = topic("b", process.cwd());
+	const ui = await mount(process.cwd(), [a, b]);
+	try {
+		ui.paste("left right");
+		for (const _ of "right") ui.key("left");
+		ui.announcePaste();
+		ui.act("threads");
+		const picker = [...ui.doc.nodes.values()].find(node => node.k === "picker")!;
+		ui.tern.event({ ev: "activate", sf: ui.doc.root, id: picker.id, item: "b" });
+		ui.refresh();
+		ui.paste("B draft");
+		ui.finishPaste(1, "pasted ");
+		expect(ui.draft()).toBe("B draft");
+		expect(a.draft).toBe("left pasted right");
+	} finally {
+		ui.close();
+	}
+});
 
 test("Tern Ctrl+Enter edits the BTW draft; clear and scroll stay in that pane", async () => {
 	const current = topic("current", process.cwd());

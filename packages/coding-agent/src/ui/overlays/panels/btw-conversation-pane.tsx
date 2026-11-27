@@ -4,6 +4,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	batch,
 	computed,
+	createRoot,
 	createSurface,
 	effect,
 	For,
@@ -11,6 +12,7 @@ import {
 	type KeyEvent,
 	onCleanup,
 	signal,
+	type Signal,
 	type Surface,
 	untrack,
 } from "@oh-my-pi/pi-tui";
@@ -131,8 +133,16 @@ interface SummaryApproval {
 	finish(approved: boolean): void;
 }
 
+interface BtwDraftView {
+	readonly thread: BtwThread | undefined;
+	readonly composer: Composer;
+	readonly paste: PanePaste;
+	readonly dispose: () => void;
+}
+
 interface DraftPasteTarget {
 	readonly cwd: string;
+	readonly view: BtwDraftView;
 	isCurrent(): boolean;
 	attach(image: ImageContent, sourcePath?: string): Promise<void>;
 	pasteText(text: string): void;
@@ -162,8 +172,10 @@ const COMMANDS = [
 export class BtwConversationPane implements NativeWorkspaceSurface {
 	readonly surface: Surface;
 	readonly ansiRail: BtwTopicRail | undefined;
-	readonly #composer: Composer;
+	readonly #draftViews = new Map<BtwThread | undefined, BtwDraftView>();
+	readonly #activeDraft: Signal<BtwDraftView>;
 	readonly #overlays: Overlays;
+	readonly #autocomplete: CombinedAutocompleteProvider;
 	readonly #selected;
 	readonly #threads;
 	readonly #expanded = signal(false);
@@ -171,15 +183,25 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	readonly #menu = signal<{ key: string; active: string } | undefined>(undefined);
 	readonly #lifetime = new AbortController();
 	readonly #notice = signal<string | undefined>(undefined);
-	readonly #paste = new PanePaste();
+	#pasteGeneration = 0;
 	readonly #scroll: NativePaneScroll;
 	readonly #enhancedPaste: EnhancedPasteController | undefined;
 	#approvalTail = Promise.resolve();
 	#mode: "steer" | "followUp" = "steer";
-	#draftKey: string | undefined;
 	#draftGeneration = 0;
-	#loadingDraft = false;
 	#disposed = false;
+
+	get #draftView(): BtwDraftView {
+		return this.#activeDraft();
+	}
+
+	get #composer(): Composer {
+		return this.#draftView.composer;
+	}
+
+	get #draftKey(): string | undefined {
+		return this.#draftView.thread?.key;
+	}
 
 	constructor(private readonly options: BtwPaneOptions) {
 		this.#scroll = new NativePaneScroll(options.nativeSupports, options.keybindings, message =>
@@ -193,16 +215,11 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			options.revision();
 			return options.threads();
 		});
-		let composer!: Composer;
+		this.#autocomplete = new CombinedAutocompleteProvider(COMMANDS, options.cwd);
+		this.#activeDraft = signal(this.#createDraft(this.#thread()));
 		let rail: BtwTopicRail | undefined;
 		this.surface = createSurface(() => {
-			composer = new Composer({
-				placeholder: "Ask BTW…",
-				autocomplete: new CombinedAutocompleteProvider(COMMANDS, options.cwd),
-				deferSubmit: replay => this.#paste.hold(replay),
-			});
-			if (options.nativeSupports) composer.setSlots(this.#nativeStatus());
-			else {
+			if (!options.nativeSupports) {
 				rail = new BtwTopicRail({
 					rows: options.rows,
 					threads: this.#threads,
@@ -252,53 +269,33 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						},
 				dock: () => {
 					const approval = this.#approval();
-					return approval ? this.#confirmation(approval) : [this.#chrome, above, composer.node, below];
+					return approval ? this.#confirmation(approval) : [this.#chrome, above, this.#composer.node, below];
 				},
 				layer: () => this.#overlays.nodes(),
 			};
 		});
 		this.ansiRail = rail;
-		this.#composer = composer;
 		this.#overlays = new Overlays({
 			focused: this.surface.focused,
 			focus: node => this.surface.focus(node),
-			fallback: () => (this.#approval.peek() ? null : composer.field),
+			fallback: () => (this.#approval.peek() ? null : this.#composer.field),
 		});
-		// The surface's dynamic regions are lazy; all callbacks above run after the composer exists.
-		this.surface.focus(composer.field);
-		composer.onSubmit = text => this.#submit(text);
-		composer.addPasteHandler(paste => {
-			if (!paste.text) return this.#pasteClipboard("image");
-			const paths = extractImagePastePathsFromText(paste.text, { allowRelativeFile: true });
-			if (!paths) return false;
-			const target = this.#capturePasteTarget();
-			if (!target.isCurrent()) return false;
-			const finish = this.#paste.begin();
-			void pastePaneImagePaths(paths, target.cwd, target).catch(target.showError).finally(finish);
-			return true;
-		});
-		composer.addActionHandler(action => {
-			if (action !== "interrupt") return false;
-			this.#interruptOrClear();
-			return true;
-		});
-		if (isClipboardTerminalLocal()) composer.readClipboard = readTextFromClipboard;
-		composer.setImageLinkResolver(async images => {
-			const generation = this.#draftGeneration;
-			const manager = this.#thread()?.conversation.sessionManager;
-			if (!manager) return [];
-			const links = await materializeImageChipLinks(images, manager);
-			if (this.#disposed || generation !== this.#draftGeneration) return [];
-			return this.#thread()?.conversation.sessionManager === manager ? links : [];
-		});
+		this.surface.focus(this.#composer.field);
 		if (options.writeRaw) {
 			this.#enhancedPaste = new EnhancedPasteController({
 				write: options.writeRaw,
 				beginPaste: () => {
 					const target = this.#capturePasteTarget();
-					const release = target.isCurrent() ? this.#paste.begin() : undefined;
+					const release = target.isCurrent() ? target.view.paste.begin() : undefined;
 					return {
 						isCurrent: target.isCurrent,
+						pasteImage: image => target.attach(image).catch(target.showError),
+						pasteHtml: html => this.#pasteHtml(html, target),
+						pasteNative: async () => {
+							if (!isClipboardTerminalLocal() || !target.isCurrent()) return false;
+							await this.#readClipboard("smart", target).catch(target.showError);
+							return true;
+						},
 						finish: text => {
 							if (text === undefined || !target.isCurrent()) release?.();
 							else void this.#pasteText(text, target).catch(target.showError).finally(release);
@@ -311,18 +308,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 					return target.attach(image).catch(target.showError);
 				},
 				acceptsHtml: () => this.#acceptsPaste(),
-				pasteHtml: async html => {
-					const target = this.#capturePasteTarget();
-					try {
-						for (const part of htmlToPaste(html) ?? []) {
-							if (!target.isCurrent()) break;
-							if (typeof part === "string") target.pasteText(part);
-							else await target.attach(part);
-						}
-					} catch (error) {
-						target.showError(error);
-					}
-				},
+				pasteHtml: html => this.#pasteHtml(html, this.#capturePasteTarget()),
 				showStatus: options.showError,
 				pasteNative: () => this.#pasteClipboard("smart"),
 			});
@@ -330,18 +316,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				if (!this.#disposed) this.#enhancedPaste?.enable();
 			});
 		}
-		composer.setSpaceHold(
-			options.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
-			options.dictation?.(composer),
-		);
-		this.#loadDraft();
 		this.ansiRail?.selectionChanged(this.#draftKey);
-		// Track undo, recall, typing, pasted atoms and dictation alike; the keyed editor must
-		// never persist an old draft into the newly selected thread.
-		this.#composer.addEditListener(() => {
-			this.ansiRail?.preview.set(undefined);
-			this.saveDraft(false);
-		});
 	}
 
 	readonly #thread = (): BtwThread | undefined => {
@@ -462,52 +437,107 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		);
 	}
 
-	#draft(text = this.#composer.expandedText(), take = false): BtwPaneDraft {
-		const images = take ? this.#composer.pendingImages.splice(0) : this.#composer.pendingImages;
-		const links = take ? this.#composer.pendingImageLinks.splice(0) : this.#composer.pendingImageLinks;
+	#draft(composer: Composer, text = composer.expandedText(), take = false): BtwPaneDraft {
+		const images = take ? composer.pendingImages.splice(0) : composer.pendingImages;
+		const links = take ? composer.pendingImageLinks.splice(0) : composer.pendingImageLinks;
 		const compacted = compactImageMarkers(text, images.length);
 		const keep = compacted?.keep ?? images.map((_, index) => index);
 		return { text: compacted?.text ?? text, images: keep.map(i => images[i]!), imageLinks: keep.map(i => links[i]) };
 	}
 
-	#loadDraft(): void {
-		const thread = this.#thread();
-		this.#draftKey = thread?.key;
-		this.#loadingDraft = true;
-		try {
-			this.#composer.setDraft(thread?.draft ?? "", thread?.draftImages);
-			if (thread) this.#composer.pendingImageLinks.splice(0, Infinity, ...thread.draftImageLinks);
-			this.#composer.setPlaceholder(thread ? "Reply in BTW…" : "Ask a side question without interrupting Main…");
-			this.#composer.relinkImages();
-		} finally {
-			this.#loadingDraft = false;
-		}
+	#createDraft(thread: BtwThread | undefined): BtwDraftView {
+		const { options } = this;
+		const view = createRoot<BtwDraftView>(dispose => {
+			const paste = new PanePaste();
+			const composer = new Composer({
+				placeholder: thread ? "Reply in BTW…" : "Ask a side question without interrupting Main…",
+				autocomplete: this.#autocomplete,
+				deferSubmit: replay => this.#holdPaste(replay),
+			});
+			if (options.nativeSupports) composer.setSlots(this.#nativeStatus());
+			if (isClipboardTerminalLocal()) composer.readClipboard = readTextFromClipboard;
+			composer.setSpaceHold(
+				options.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
+				options.dictation?.(composer),
+			);
+			return {
+				thread,
+				composer,
+				paste,
+				dispose: () => {
+					paste.reset();
+					composer.setSpaceHold([], undefined);
+					dispose();
+				},
+			};
+		});
+		this.#draftViews.set(thread, view);
+		const { composer } = view;
+		composer.onSubmit = text => {
+			if (this.#draftView === view) this.#submit(text);
+		};
+		composer.addPasteHandler(paste => {
+			if (!paste.text) return this.#pasteClipboard("image");
+			const paths = extractImagePastePathsFromText(paste.text, { allowRelativeFile: true });
+			if (!paths) return false;
+			const target = this.#capturePasteTarget();
+			if (!target.isCurrent()) return false;
+			const finish = view.paste.begin();
+			void pastePaneImagePaths(paths, target.cwd, target).catch(target.showError).finally(finish);
+			return true;
+		});
+		composer.addActionHandler(action => {
+			if (action !== "interrupt" || this.#draftView !== view) return false;
+			this.#interruptOrClear();
+			return true;
+		});
+		composer.setImageLinkResolver(async images => {
+			const manager = thread?.conversation.sessionManager;
+			if (!manager) return [];
+			const links = await materializeImageChipLinks(images, manager);
+			return this.#draftViews.get(thread) === view && thread?.conversation.sessionManager === manager ? links : [];
+		});
+		this.#loadDraft(view);
+		composer.addEditListener(() => {
+			if (this.#draftView === view) this.ansiRail?.preview.set(undefined);
+			this.#saveDraft(view, false);
+		});
+		return view;
+	}
+
+	#loadDraft({ thread, composer }: BtwDraftView): void {
+		composer.setDraft(thread?.draft ?? "", thread?.draftImages);
+		if (thread) composer.pendingImageLinks.splice(0, Infinity, ...thread.draftImageLinks);
+		composer.relinkImages();
 	}
 
 	/** A model change may select a different thread or restore a rejected submission. */
 	syncDraft(): void {
 		if (this.#disposed) return;
 		const thread = this.#thread();
-		if (thread?.key !== this.#draftKey) {
-			const previous = this.#draftKey;
+		const previous = this.#draftView;
+		if (thread !== previous.thread) {
 			this.#notice.set(undefined);
 			this.#scroll.request.set(undefined);
-			const draft = this.#draft();
 			this.#menu.set(undefined);
 			this.#draftGeneration++;
-			this.#paste.reset();
-			this.#enhancedPaste?.cancel();
-			this.#loadDraft();
+			this.#activeDraft.set(this.#draftViews.get(thread) ?? this.#createDraft(thread));
+			if (this.surface.focused() === previous.composer.field) this.surface.focus(this.#composer.field);
 			this.ansiRail?.selectionChanged(thread?.key);
-			if (previous !== undefined) {
-				this.options.setDraft(previous, draft);
-				this.options.persistDraft(previous);
-			}
+			this.#saveDraft(previous);
+		}
+		for (const [topic, view] of this.#draftViews) {
+			if (!topic || this.#threads().includes(topic)) continue;
+			this.#draftViews.delete(topic);
+			view.dispose();
 		}
 	}
 
 	restoreDraft(key: string): void {
-		if (!this.#disposed && this.#draftKey === key) this.#loadDraft();
+		if (this.#disposed) return;
+		const thread = this.#threads().find(thread => thread.key === key);
+		const view = thread && this.#draftViews.get(thread);
+		if (view) this.#loadDraft(view);
 	}
 
 	showTree(
@@ -558,28 +588,31 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		);
 		return true;
 	}
-	saveDraft(persist = true): void {
-		const key = this.#draftKey;
-		if (key === undefined || this.#loadingDraft) return;
-		this.options.setDraft(key, this.#draft());
+	saveDraft(): void {
+		this.#saveDraft(this.#draftView);
+	}
+
+	#saveDraft({ thread, composer }: BtwDraftView, persist = true): void {
+		if (!thread || !this.#threads().includes(thread)) return;
+		const { key } = thread;
+		this.options.setDraft(key, this.#draft(composer));
 		if (persist) this.options.persistDraft(key);
 	}
 
 	#submit(text: string): void {
 		this.ansiRail?.preview.set(undefined);
-		const input = this.#draft(text, true);
-		const key = this.#draftKey;
-		const sent = this.options.submit(key, input, this.#mode);
-		if (!sent && this.#draftKey === key) {
-			this.#composer.setDraft(input.text, input.images);
-			this.#composer.pendingImageLinks.splice(0, Infinity, ...input.imageLinks);
-			this.#composer.relinkImages();
-			this.saveDraft(false);
-		} else if (sent) {
-			this.#composer.addToHistory(text);
-			// A send can synchronously select a different thread. Never clear its draft.
-			if (this.#draftKey === key) this.saveDraft();
+		const view = this.#draftView;
+		const { composer, thread } = view;
+		const input = this.#draft(composer, text, true);
+		const sent = this.options.submit(thread?.key, input, this.#mode);
+		if (!sent) {
+			composer.setDraft(input.text, input.images);
+			composer.pendingImageLinks.splice(0, Infinity, ...input.imageLinks);
+			composer.relinkImages();
+		} else {
+			composer.addToHistory(text);
 		}
+		this.#saveDraft(view, sent);
 	}
 
 	#select(key: string): void {
@@ -603,14 +636,20 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	}
 
 	#capturePasteTarget(): DraftPasteTarget {
-		const generation = this.#draftGeneration;
-		const manager = this.#thread()?.conversation.sessionManager;
+		const view = this.#draftView;
+		const { composer, thread } = view;
+		const generation = this.#pasteGeneration;
+		const manager = thread?.conversation.sessionManager;
+		const acceptsPaste = this.#acceptsPaste();
 		const isCurrent = () =>
-			generation === this.#draftGeneration &&
-			this.#acceptsPaste() &&
-			this.#thread()?.conversation.sessionManager === manager;
+			acceptsPaste &&
+			!this.#disposed &&
+			generation === this.#pasteGeneration &&
+			this.#draftViews.get(thread) === view &&
+			(!thread || (this.#threads().includes(thread) && thread.conversation.sessionManager === manager));
 		return {
 			cwd: manager?.getCwd() ?? this.options.cwd,
+			view,
 			isCurrent,
 			attach: async (image, sourcePath) => {
 				if (!isCurrent()) return;
@@ -619,16 +658,18 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				const link = sourcePath ?? (manager && (await materializeImageChipLinks([normalized], manager))[0]);
 				if (!isCurrent()) return;
 				const kind = imageAttachmentSource(normalized)?.kind ?? "image";
-				const number = this.#composer.pendingImages.length + 1;
-				this.#composer.insertAtom(this.#composer.chipLabel(kind, number), formatVisionMarker(kind, number), {
+				const number = composer.pendingImages.length + 1;
+				composer.insertAtom(composer.chipLabel(kind, number), formatVisionMarker(kind, number), {
 					kind,
 					image: normalized,
 					link,
 				});
-				this.saveDraft();
+				this.#saveDraft(view);
 			},
 			pasteText: text => {
-				if (isCurrent()) this.#composer.insertText(text);
+				if (!isCurrent()) return;
+				composer.insertText(text);
+				this.#saveDraft(view);
 			},
 			showError: error => {
 				if (isCurrent()) this.options.showError(error);
@@ -642,23 +683,48 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		else target.pasteText(text);
 	}
 
-	#pasteClipboard(mode: "image" | "smart" | "raw"): boolean {
-		if (!isClipboardTerminalLocal()) return false;
-		const target = this.#capturePasteTarget();
-		if (!target.isCurrent()) return false;
-		const finish = this.#paste.begin();
-		const read = async () => {
-			if (mode === "raw") {
-				target.pasteText(await readTextFromClipboard());
-				return;
+	async #pasteHtml(html: string, target: DraftPasteTarget): Promise<void> {
+		try {
+			for (const part of htmlToPaste(html) ?? []) {
+				if (!target.isCurrent()) break;
+				if (typeof part === "string") target.pasteText(part);
+				else await target.attach(part);
 			}
-			const { image, text, fileUrls } = await readClipboardContent();
-			if (fileUrls.length && (await pastePaneImagePaths(fileUrls, target.cwd, target, "finder"))) return;
-			if (image) await target.attach({ type: "image", data: image.data.toBase64(), mimeType: image.mimeType });
-			else if (mode === "smart" && text) await this.#pasteText(text, target);
-		};
-		void read().catch(target.showError).finally(finish);
+		} catch (error) {
+			target.showError(error);
+		}
+	}
+
+	#cancelPaste(): void {
+		this.#pasteGeneration++;
+		for (const view of this.#draftViews.values()) view.paste.reset();
+		this.#enhancedPaste?.cancel();
+	}
+
+	#holdPaste(replay: () => void): boolean {
+		const view = this.#draftView;
+		return view.paste.hold(() => {
+			if (!this.#disposed && this.#draftView === view) replay();
+		});
+	}
+
+	#pasteClipboard(mode: "image" | "smart" | "raw"): boolean {
+		const target = this.#capturePasteTarget();
+		if (!isClipboardTerminalLocal() || !target.isCurrent()) return false;
+		const finish = target.view.paste.begin();
+		void this.#readClipboard(mode, target).catch(target.showError).finally(finish);
 		return true;
+	}
+
+	async #readClipboard(mode: "image" | "smart" | "raw", target: DraftPasteTarget): Promise<void> {
+		if (mode === "raw") {
+			target.pasteText(await readTextFromClipboard());
+			return;
+		}
+		const { image, text, fileUrls } = await readClipboardContent();
+		if (fileUrls.length && (await pastePaneImagePaths(fileUrls, target.cwd, target, "finder"))) return;
+		if (image) await target.attach({ type: "image", data: image.data.toBase64(), mimeType: image.mimeType });
+		else if (mode === "smart" && text) await this.#pasteText(text, target);
 	}
 
 	#copy(text: string): void {
@@ -736,8 +802,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			this.surface.focus(null);
 			this.#approval.set({ title, summary, finish });
 			this.#draftGeneration++;
-			this.#paste.reset();
-			this.#enhancedPaste?.cancel();
+			this.#cancelPaste();
 			return await answer.promise;
 		} finally {
 			finished.resolve();
@@ -875,7 +940,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 
 	readonly intercept: NonNullable<NativeWorkspaceSurface["intercept"]> = (event, replay) => {
 		if (event.type === "osc") return this.#enhancedPaste?.handleInput(event.raw) ?? false;
-		if ((event.type === "key" || event.type === "paste") && this.#acceptsPaste() && this.#paste.hold(replay))
+		if ((event.type === "key" || event.type === "paste") && this.#acceptsPaste() && this.#holdPaste(replay))
 			return true;
 		if (event.type === "key") return this.onKey(event.key);
 		return event.type === "paste" && (this.#approval.peek() !== undefined || this.#menu.peek() !== undefined);
@@ -1092,12 +1157,12 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		if (this.#disposed) return;
 		this.saveDraft();
 		this.#disposed = true;
-		this.#paste.reset();
+		for (const view of this.#draftViews.values()) view.dispose();
+		this.#draftViews.clear();
 		this.#enhancedPaste?.disable();
 		this.#lifetime.abort();
 		this.ansiRail?.dispose();
 		this.#overlays.closeAll();
-		this.#composer.setSpaceHold([], undefined);
 	};
 }
 
