@@ -6,7 +6,7 @@ import { untrack } from "../reactive";
 import type { MainScrollScope, Surface } from "../surface";
 import { stripEscapes, tokens } from "../text/ansi";
 import { textSizedRows } from "../text/osc";
-import { padTo, pieces, sliceColumns, visibleWidth } from "../text/width";
+import { padTo, pieces, sliceColumns, type TextRow, visibleWidth } from "../text/width";
 import type { Theme } from "../theme/contract";
 import type { Block, Cell, Hit } from "./paint";
 import { TranscriptRows } from "./transcript-rows";
@@ -34,6 +34,10 @@ interface Document {
 const OVERSCAN = 4;
 const REFINE_BLOCKS = 32;
 const REFINE_MS = 4;
+const AUTO_SCROLL_MS = 80;
+const MULTI_CLICK_MS = 500;
+const WORD_CELL = /[\p{L}\p{N}\p{M}'’‐‑_./\\:?&=%#@~+-]/u;
+const CJK_CELL = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 
 /** A row and column inside a node, independent of other nodes' heights. Negative rows are its separator. */
 interface Point extends Cell {
@@ -49,9 +53,17 @@ interface Bookmark {
 	readonly textOffset: number | undefined;
 }
 
-interface Selection {
-	readonly anchor: Point;
-	readonly focus: Point;
+interface Selection<T extends Cell = Point> {
+	readonly anchor: T;
+	readonly focus: T;
+	/** A multi-click can select even a single cell without a drag. */
+	readonly explicit?: boolean;
+}
+
+interface Dock {
+	readonly top: number;
+	readonly rows: readonly string[];
+	readonly textRows: readonly (TextRow | undefined)[];
 }
 
 interface View {
@@ -174,7 +186,12 @@ function ordered(selection: Selection | undefined, document: Document): readonly
 	const last = document.byNode.get(focus.node);
 	if (first === undefined || last === undefined) return undefined;
 	if (first !== last) return first < last ? [anchor, focus] : [focus, anchor];
-	if (anchor.row === focus.row && anchor.col === focus.col) return undefined;
+	return orderCells(selection);
+}
+
+function orderCells<T extends Cell>(selection: Selection<T>): readonly [T, T] | undefined {
+	const { anchor, focus } = selection;
+	if (!selection.explicit && anchor.row === focus.row && anchor.col === focus.col) return undefined;
 	return anchor.row < focus.row || (anchor.row === focus.row && anchor.col < focus.col)
 		? [anchor, focus]
 		: [focus, anchor];
@@ -186,9 +203,11 @@ function position(document: Document, point: Point): Cell {
 }
 
 /** Selected cells, including the last clicked cell and without slicing through wide glyphs. */
-function columns(line: string, row: number, start: Cell, end: Cell): [number, number] {
-	const from = row === start.row ? start.col : 0;
-	const to = row === end.row ? end.col + 1 : visibleWidth(line);
+function columns(line: string, row: number, start: Cell, end: Cell, textRow?: TextRow): [number, number] {
+	const first = textRow?.start ?? 0;
+	const last = textRow?.end ?? visibleWidth(line);
+	const from = row === start.row ? Math.max(first, start.col) : first;
+	const to = row === end.row ? Math.min(last, end.col + 1) : last;
 	let left = from;
 	let right = to;
 	let col = 0;
@@ -202,6 +221,73 @@ function columns(line: string, row: number, start: Cell, end: Cell): [number, nu
 	return [left, right];
 }
 
+function highlight(line: string, row: number, start: Cell, end: Cell, textRow?: TextRow): string {
+	if (row < start.row || row > end.row || hasGraphics(line)) return line;
+	const [left, right] = columns(line, row, start, end, textRow);
+	const selected = sliceColumns(line, left, right);
+	if (!selected) return line;
+	// Drop selected text's styles so an embedded reset cannot cancel the highlight.
+	const body = selected.includes(SIZED)
+		? tokens(selected)
+				.filter(token => !token.escape || token.text.startsWith(SIZED))
+				.map(token => token.text)
+				.join("")
+		: stripEscapes(selected);
+	return `${sliceColumns(line, 0, left)}\x1b[7m${body}\x1b[0m${sliceColumns(line, right, visibleWidth(line))}`;
+}
+
+function appendSelection(
+	chunks: string[],
+	line: string,
+	row: number,
+	start: Cell,
+	end: Cell,
+	textRow: TextRow | undefined,
+): void {
+	if (chunks.length > 0) chunks.push(textRow?.join ?? "\n");
+	if (hasGraphics(line)) {
+		chunks.push("");
+		return;
+	}
+	const [left, right] = columns(line, row, start, end, textRow);
+	const text = plainText(sliceColumns(line, left, right));
+	chunks.push(textRow === undefined && right >= visibleWidth(line) ? text.trimEnd() : text);
+}
+
+function clickRange(
+	line: string,
+	col: number,
+	count: number,
+	textRow?: TextRow,
+): readonly [number, number] | undefined {
+	const start = textRow?.start ?? 0;
+	const end = textRow?.end ?? visibleWidth(line);
+	if (end <= start || hasGraphics(line)) return undefined;
+	if (count >= 3) return [start, end - 1];
+	if (count !== 2 || col < start || col >= end) return undefined;
+	const spans: { start: number; end: number; kind: string }[] = [];
+	let at = 0;
+	for (const piece of pieces(line)) {
+		if (piece.width === 0) continue;
+		const next = at + piece.width;
+		if (at >= start && next <= end) {
+			const kind = /^\s+$/u.test(piece.text)
+				? "blank"
+				: CJK_CELL.test(piece.text)
+					? "cjk"
+					: WORD_CELL.test(piece.text)
+						? "word"
+						: "other";
+			const last = spans.at(-1);
+			if (last?.kind === kind) last.end = next;
+			else spans.push({ start: at, end: next, kind });
+		}
+		at = next;
+	}
+	const word = spans.find(span => col >= span.start && col < span.end);
+	return word && word.kind !== "blank" ? [word.start, word.end - 1] : undefined;
+}
+
 /** The ANSI `main` region's scroll and selection, independent of dock and layer layout. */
 export class AppViewport {
 	#layout: Document | undefined;
@@ -211,6 +297,11 @@ export class AppViewport {
 	#scrollScope: MainScrollScope | undefined;
 	readonly #bookmarks = new Map<string, Bookmark>();
 	#selection: Selection | undefined;
+	#dock: Dock | undefined;
+	#dockSelection: Selection<Cell> | undefined;
+	#lastClick: { readonly point: Cell | Point; readonly time: number; readonly count: number } | undefined;
+	#edge: { readonly row: number; readonly col: number; readonly delta: number } | undefined;
+	#autoScroll: Timer | undefined;
 	#dragging = false;
 	#scrollbarGrab: number | undefined;
 
@@ -295,10 +386,19 @@ export class AppViewport {
 	endDrag(): void {
 		this.#dragging = false;
 		this.#scrollbarGrab = undefined;
+		this.#stopAutoScroll();
+	}
+
+	#stopAutoScroll(): void {
+		clearInterval(this.#autoScroll);
+		this.#autoScroll = undefined;
+		this.#edge = undefined;
 	}
 
 	clearSelection(): void {
 		this.#selection = undefined;
+		this.#dockSelection = undefined;
+		this.#lastClick = undefined;
 		this.endDrag();
 	}
 
@@ -449,7 +549,7 @@ export class AppViewport {
 		if (this.#selection) {
 			const anchor = rebase(this.#selection.anchor, before, document, true);
 			const focus = rebase(this.#selection.focus, before, document, true);
-			this.#selection = anchor && focus ? { anchor, focus } : undefined;
+			this.#selection = anchor && focus ? { ...this.#selection, anchor, focus } : undefined;
 			if (!this.#selection) this.endDrag();
 		}
 		const { top, from, to, maxTop } = geometry();
@@ -483,14 +583,8 @@ export class AppViewport {
 						.map(token => (token.text.startsWith(SIZED) ? sizedText(token.text) : token.text))
 						.join("");
 				}
-				if (startPoint && endPoint && row >= startPoint.row && row <= endPoint.row && !hasGraphics(line)) {
-					const [left, right] = columns(line, row, startPoint, endPoint);
-					const selected = sliceColumns(line, left, right);
-					if (selected) {
-						// Drop selected text's styles so an embedded reset cannot cancel the highlight.
-						line = `${sliceColumns(line, 0, left)}\x1b[7m${stripEscapes(selected)}\x1b[0m${sliceColumns(line, right, contentWidth)}`;
-					}
-				}
+				if (startPoint && endPoint)
+					line = highlight(line, row, startPoint, endPoint, block.textRows?.[row - start]);
 				rows[row - from] = line;
 			}
 			const placed = start - from;
@@ -516,6 +610,23 @@ export class AppViewport {
 			}
 		}
 		return cursor;
+	}
+
+	/** Save unhighlighted dock rows for copy, then paint their selection above the viewport's chrome. */
+	paintDock(rows: string[], top: number, textRows: readonly (TextRow | undefined)[]): void {
+		const dock = rows.slice(top);
+		this.#dock = { top, rows: dock, textRows };
+		const selection = this.#dockSelection && orderCells(this.#dockSelection);
+		if (!selection) return;
+		const [start, end] = selection;
+		if (end.row >= dock.length) {
+			this.#dockSelection = undefined;
+			this.endDrag();
+			return;
+		}
+		for (let row = start.row; row <= end.row; row++) {
+			rows[row + top] = highlight(dock[row]!, row, start, end, textRows[row]);
+		}
 	}
 
 	#scroll(delta: number): number | undefined {
@@ -556,11 +667,24 @@ export class AppViewport {
 	}
 
 	#copy(): boolean {
+		const dock = this.#dock;
+		const selection = this.#dockSelection && orderCells(this.#dockSelection);
+		if (dock && selection) {
+			const [start, end] = selection;
+			const chunks: string[] = [];
+			for (let row = start.row; row <= end.row && row < dock.rows.length; row++) {
+				appendSelection(chunks, dock.rows[row]!, row, start, end, dock.textRows[row]);
+			}
+			const text = chunks.join("");
+			if (!text) return false;
+			this.options.copy(text);
+			return true;
+		}
 		const document = this.#view?.document;
 		if (!document) return false;
-		const selection = ordered(this.#selection, document);
-		if (!selection) return false;
-		const [start, end] = selection;
+		const points = ordered(this.#selection, document);
+		if (!points) return false;
+		const [start, end] = points;
 		const first = document.byNode.get(start.node)!;
 		const last = document.byNode.get(end.node)!;
 		const chunks: string[] = [];
@@ -568,7 +692,8 @@ export class AppViewport {
 		for (let index = first; index <= last; index++) {
 			const { node, block } = document.blocks[index]!;
 			// Copy can span skipped history. Materialize its text without reserving offscreen images.
-			const rows = block?.rows ?? this.options.paint(node, document.width, true).rows;
+			const painted = block ?? this.options.paint(node, document.width, true);
+			const { rows, textRows } = painted;
 			if (rows.length === 0) continue;
 			const lead =
 				index === first
@@ -579,26 +704,25 @@ export class AppViewport {
 			const a = index === first ? start : { row: -lead, col: 0 };
 			const b = index === last ? end : { row: rows.length - 1, col: document.width };
 			for (let row = Math.max(-lead, a.row); row <= Math.min(rows.length - 1, b.row); row++) {
-				const line = rows[row] ?? "";
-				const [left, right] = columns(line, row, a, b);
-				const text = plainText(sliceColumns(line, left, right));
-				chunks.push(right >= visibleWidth(line) ? text.trimEnd() : text);
+				appendSelection(chunks, rows[row] ?? "", row, a, b, textRows?.[row]);
 			}
 			above = node;
 		}
-		const text = chunks.join("\n");
+		const text = chunks.join("");
 		if (!text) return false;
 		this.options.copy(text);
 		return true;
+	}
+
+	/** Selected text takes priority over a focused editor's Ctrl+C binding. */
+	copyKey(key: KeyEvent): boolean {
+		return key.kind !== "release" && (key.id === "ctrl+c" || key.id === "ctrl+shift+c") && this.#copy();
 	}
 
 	key(key: KeyEvent): boolean {
 		if (key.kind === "release") return false;
 		const page = Math.max(1, (this.#view?.to ?? 1) - (this.#view?.from ?? 0) - 1);
 		switch (key.id) {
-			case "ctrl+c":
-			case "ctrl+shift+c":
-				return this.#copy();
 			case "pageUp":
 			case "alt+pageUp":
 				this.#scroll(-page);
@@ -618,7 +742,7 @@ export class AppViewport {
 		}
 	}
 
-	/** A started transcript drag owns its continuation even over a widget. */
+	/** A started selection owns its continuation even over a widget. */
 	drag(mouse: MouseEvent, row: number): boolean {
 		if (this.#scrollbarGrab !== undefined && this.#view) {
 			if (mouse.action === "release") this.endDrag();
@@ -626,24 +750,74 @@ export class AppViewport {
 			else return false;
 			return true;
 		}
-		if (!this.#dragging || !this.#selection || !this.#view) return false;
+		if (!this.#dragging) return false;
 		if (mouse.action === "release") {
 			this.endDrag();
 			return true;
 		}
-		const view = this.#view;
-		const visible = view.to - view.from;
-		if (visible <= 0) return false;
 		const wheel = wheelDelta(mouse);
 		if (mouse.action !== "drag" && wheel === 0) return false;
-		const delta = wheel || (row >= visible ? 1 : row === 0 ? -1 : 0);
+		if (this.#dockSelection && this.#dock) {
+			if (mouse.action !== "drag") return false;
+			const dock = this.#dock;
+			const at = Math.max(0, Math.min(dock.rows.length - 1, row - dock.top));
+			this.#dockSelection = { ...this.#dockSelection, focus: { row: at, col: mouse.col } };
+			this.#lastClick = undefined;
+			return true;
+		}
+		const view = this.#view;
+		if (!view || !this.#selection) return false;
+		const visible = view.to - view.from;
+		if (visible <= 0) return false;
+		this.#lastClick = undefined;
+		const edge = mouse.action === "drag" && (row <= 0 ? -1 : row >= visible - 1 ? 1 : 0);
+		if (edge) {
+			this.#edge = { row, col: mouse.col, delta: edge };
+			this.#autoScroll ??= setInterval(() => {
+				const edge = this.#edge;
+				if (!edge) return;
+				if (this.#extendDrag(edge.row, edge.col, edge.delta)) this.options.requestRender();
+			}, AUTO_SCROLL_MS);
+		} else if (!wheel) this.#stopAutoScroll();
+		this.#extendDrag(row, mouse.col, wheel || edge || 0);
+		return true;
+	}
+
+	#extendDrag(row: number, col: number, delta: number): boolean {
+		const view = this.#view;
+		if (!view || !this.#selection || view.to <= view.from) return false;
+		const visible = view.to - view.from;
 		const top = delta ? (this.#scroll(delta) ?? view.top) : view.top;
 		const source = Math.min(
 			view.document.rows.end - 1,
 			top + view.from - view.top + Math.max(0, Math.min(visible - 1, row)),
 		);
-		this.#selection = { anchor: this.#selection.anchor, focus: pointAt(view.document, source, mouse.col) };
-		return true;
+		const focus = pointAt(view.document, source, col);
+		const previous = this.#selection.focus;
+		this.#selection = { ...this.#selection, focus };
+		return (
+			top !== view.top || focus.node !== previous.node || focus.row !== previous.row || focus.col !== previous.col
+		);
+	}
+
+	#start<T extends Cell>(point: T, line: string, textRow?: TextRow): Selection<T> {
+		const last = this.#lastClick;
+		const now = performance.now();
+		const node = "node" in point ? point.node : undefined;
+		const lastNode = last && "node" in last.point ? last.point.node : undefined;
+		const repeated =
+			last &&
+			now - last.time <= MULTI_CLICK_MS &&
+			node === lastNode &&
+			last.point.row === point.row &&
+			Math.abs(last.point.col - point.col) <= 1;
+		const count = repeated ? Math.min(3, last.count + 1) : 1;
+		this.#lastClick = { point, time: now, count };
+		const range = clickRange(line, point.col, count, textRow);
+		this.#dragging = range === undefined;
+		return range
+			? { anchor: { ...point, col: range[0] }, focus: { ...point, col: range[1] }, explicit: true }
+			: { anchor: point, focus: point };
 	}
 
 	/** Handle mouse actions no widget in `main` or `dock` claimed. */
@@ -651,13 +825,21 @@ export class AppViewport {
 		const view = this.#view;
 		if (!view || mouse.action !== "press") return;
 		const delta = wheelDelta(mouse);
-		if (delta) this.#scroll(delta);
-		else if (mouse.button === "left") {
-			if (row >= 0 && view.from + row < view.to) {
+		if (delta) {
+			this.#lastClick = undefined;
+			this.#scroll(delta);
+		} else if (mouse.button === "left") {
+			this.#selection = undefined;
+			this.#dockSelection = undefined;
+			const dock = this.#dock;
+			if (dock && row >= dock.top && row < dock.top + dock.rows.length) {
+				const at = row - dock.top;
+				this.#dockSelection = this.#start({ row: at, col: mouse.col }, dock.rows[at]!, dock.textRows[at]);
+			} else if (row >= 0 && view.from + row < view.to) {
 				const point = pointAt(view.document, view.from + row, mouse.col);
-				this.#selection = { anchor: point, focus: point };
-				this.#dragging = true;
-			}
+				const block = view.document.blocks[view.document.byNode.get(point.node)!]?.block;
+				this.#selection = this.#start(point, block?.rows[point.row] ?? "", block?.textRows?.[point.row]);
+			} else this.clearSelection();
 		} else if (mouse.button === "right") {
 			this.endDrag();
 			if (this.#copy()) this.clearSelection();

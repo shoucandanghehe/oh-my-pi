@@ -8,7 +8,7 @@
 import type { TspCodeProps, TspTone } from "@oh-my-pi/pi-wire";
 import { highlightCode, supportsLanguage } from "../../text/highlight";
 import { languageFromPath } from "../../text/lang";
-import { replaceTabs, truncate, visibleWidth, wrap } from "../../text/width";
+import { replaceTabs, type TextRow, truncate, visibleWidth, wrapRows } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK } from "../paint";
 
 definePainter("code", (node, cx): Block => {
@@ -32,6 +32,7 @@ definePainter("code", (node, cx): Block => {
 	const marks = new Map((props.marks ?? []).map(mark => [mark.line, mark.tone ?? "accent"]));
 	const gutterWidth = numbers ? String(Math.max(...numbers)).length + 1 : 0;
 	const rows: string[] = [];
+	const textRows: (TextRow | undefined)[] = [];
 	for (let i = 0; i < styled.length; i++) {
 		let gutter = "";
 		let rest = "";
@@ -46,11 +47,12 @@ definePainter("code", (node, cx): Block => {
 		const room = Math.max(1, width - visibleWidth(gutter));
 		const line = styled[i] ?? "";
 		if (props.wrap) {
-			const parts = wrap(line, room);
-			(parts.length > 0 ? parts : [""]).forEach((part, j) => {
-				rows.push(`${j === 0 ? gutter : rest}${part}`);
+			const start = visibleWidth(gutter);
+			wrapRows(line, room).forEach(({ text, textRow }, j) => {
+				textRows[rows.length] = { ...textRow, start, end: start + textRow.end };
+				rows.push(`${j === 0 ? gutter : rest}${text}`);
 			});
 		} else rows.push(`${gutter}${truncate(line, room, theme.symbols.ellipsis)}`);
 	}
-	return { rows };
+	return { rows, textRows };
 });

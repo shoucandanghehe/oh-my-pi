@@ -57,6 +57,7 @@
 - Saved device calls retain their text and attachments when terminal transcripts reopen.
 - Native Windows consoles batch input to keep large pastes responsive ([#19783](https://github.com/can1357/oh-my-pi/issues/19783)).
 - Kitty input preserves IME text commits, and the ANSI viewport preserves pane-local selections and clipboard targets.
+- In the ANSI viewport, Ctrl+C copies the selection before editing the draft, soft wraps copy as plain text, and multi-click and edge drag selections work across the transcript and fixed controls.
 - File and image links from OMP running in WSL open in Windows Tern.
 
 ## [19.2.1] - 2026-11-25

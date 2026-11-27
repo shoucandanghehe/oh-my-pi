@@ -7,7 +7,7 @@
 import type { TspSpace, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { CanvasProps, UiNode } from "../../node";
 import type { Theme } from "../../theme/contract";
-import { padTo, replaceTabs, truncate, visibleWidth, wrap } from "../../text/width";
+import { padTo, replaceTabs, type TextRow, truncate, visibleWidth, wrapRows } from "../../text/width";
 import { type Block, type Cell, definePainter, EMPTY_BLOCK, type Hit, type PaintContext } from "../paint";
 import { defineWidget } from "../widgets";
 
@@ -50,6 +50,7 @@ export function offsetBlock(block: Block, rows: number, cols: number): { cursor?
  */
 export function stack(blocks: readonly Block[], gap: number): Block {
 	const rows: string[] = [];
+	let textRows: (TextRow | undefined)[] | undefined;
 	let cursor: Cell | undefined;
 	let hits: Hit[] | undefined;
 	let stable = 0;
@@ -63,6 +64,12 @@ export function stack(blocks: readonly Block[], gap: number): Block {
 		const shifted = offsetBlock(block, top, 0);
 		cursor ??= shifted.cursor;
 		if (shifted.hits) (hits ??= []).push(...shifted.hits);
+		if (block.textRows) {
+			const joined = (textRows ??= []);
+			block.textRows.forEach((row, i) => {
+				if (row) joined[top + i] = row;
+			});
+		}
 		rows.push(...block.rows);
 		if (open) {
 			const head = Math.min(block.stable ?? 0, block.rows.length);
@@ -73,6 +80,7 @@ export function stack(blocks: readonly Block[], gap: number): Block {
 	if (rows.length === 0) return EMPTY_BLOCK;
 	return {
 		rows,
+		...(textRows ? { textRows } : {}),
 		...(stable > 0 ? { stable } : {}),
 		...(covering > 0 ? { covering } : {}),
 		...(cursor ? { cursor } : {}),
@@ -199,17 +207,20 @@ function paintText(node: UiNode, cx: PaintContext): Block {
 	const content = props.spans ?? props.text;
 	const styled = replaceTabs(styledText(cx.theme, content));
 	if (styled === "") return EMPTY_BLOCK;
-	let rows =
-		props.wrap === "none" || props.truncate !== undefined
-			? styled.split("\n").map(line => truncate(line, cx.width, cx.theme.symbols.ellipsis))
-			: wrap(styled, cx.width);
+	const wrapped = props.wrap === "none" || props.truncate !== undefined ? undefined : wrapRows(styled, cx.width);
+	let rows = wrapped
+		? wrapped.map(row => row.text)
+		: styled.split("\n").map(line => truncate(line, cx.width, cx.theme.symbols.ellipsis));
 	if (props.lines !== undefined && rows.length > props.lines) {
 		rows = rows.slice(0, props.lines);
 		const last = rows.length - 1;
 		if (last >= 0)
 			rows[last] = truncate(`${rows[last]}${cx.theme.symbols.ellipsis}`, cx.width, cx.theme.symbols.ellipsis);
 	}
-	return { rows };
+	const textRows = wrapped
+		?.slice(0, rows.length)
+		.map(({ text, textRow }, i) => (rows[i] === text ? textRow : { ...textRow, end: visibleWidth(rows[i]!) }));
+	return { rows, ...(textRows && { textRows }) };
 }
 
 function paintCanvas(node: UiNode, cx: PaintContext): Block {

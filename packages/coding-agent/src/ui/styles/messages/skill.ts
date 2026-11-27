@@ -12,7 +12,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { wrap } from "@oh-my-pi/pi-tui/text/width";
+import { type TextRow, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { TermChip } from "../../transcript/messages/chips";
 import { fillRow, termOf } from "./fill";
 import { fileLink } from "../tools/file-common";
@@ -46,22 +46,34 @@ function paintSkill(node: UiNode, cx: PaintContext): Block {
 	);
 	const header = term.lines ? `${pill}  ${theme.fg("muted", term.lines)}` : pill;
 	const content: string[] = [...wrap(header, inner)];
-	if (term.leading && term.draft)
-		content.push("", ...bubbleMarkdown(theme, term.draft, inner, { chips: term.chips, hyperlinks: cx.hyperlinks }));
-	if (term.expanded && term.prompt) {
-		content.push("", theme.fg("muted", "prompt"), "", ...bubbleMarkdown(theme, term.prompt, inner, {}));
-	}
+	const textRows: (TextRow | undefined)[] = [];
 	const rail = theme.bg(BG, theme.fg("customMessageLabel", theme.symbols.symbol("skill.rail")));
+	const inset = visibleWidth(rail) + 1;
+	const append = ({ rows, textRows: source }: Block): void => {
+		const top = content.length + 1;
+		source?.forEach((row, i) => {
+			if (row) textRows[top + i] = { ...row, start: row.start + inset, end: row.end + inset };
+		});
+		content.push(...rows);
+	};
+	if (term.leading && term.draft) {
+		content.push("");
+		append(bubbleMarkdown(theme, term.draft, inner, { chips: term.chips, hyperlinks: cx.hyperlinks }));
+	}
+	if (term.expanded && term.prompt) {
+		content.push("", theme.fg("muted", "prompt"), "");
+		append(bubbleMarkdown(theme, term.prompt, inner, {}));
+	}
 	const callout = ["", ...content, ""].map(row => rail + fillRow(theme, BG, row === "" ? "" : ` ${row}`, boxWidth));
-	if (term.leading) return { rows: callout };
+	if (term.leading) return { rows: callout, textRows };
 	const bubble = term.draft
-		? bubbleMarkdown(theme, term.draft, width, {
-				chips: term.chips,
-				padding: 1,
-				hyperlinks: cx.hyperlinks,
-			}).map(row => fillRow(theme, BG, row, width))
-		: [];
-	return { rows: term.expanded ? [...bubble, ...callout] : bubble };
+		? bubbleMarkdown(theme, term.draft, width, { chips: term.chips, padding: 1, hyperlinks: cx.hyperlinks })
+		: undefined;
+	const rows = bubble?.rows.map(row => fillRow(theme, BG, row, width)) ?? [];
+	if (!term.expanded) return { rows, textRows: bubble?.textRows };
+	const descriptions = bubble?.textRows?.slice() ?? [];
+	descriptions.length = rows.length;
+	return { rows: [...rows, ...callout], textRows: [...descriptions, ...textRows] };
 }
 
 defineRolePainter("card", "omp.skill", paintSkill);

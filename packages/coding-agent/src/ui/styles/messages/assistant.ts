@@ -25,12 +25,13 @@ import { type Block, defineRolePainter, type Hit, type PaintContext } from "@oh-
 import { paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
 import { routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
 import {
+	type MarkdownFrame,
 	type MarkdownLook,
 	markdownLook,
 	renderMarkdownFrame,
 	takeExtensionLinks,
 } from "@oh-my-pi/pi-tui/text/markdown/index";
-import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
+import { replaceTabs, type TextRow, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { terminalPaddingX } from "../terminal-padding";
@@ -91,9 +92,7 @@ export function errorRows(theme: Theme, message: string, width: number, maxRows:
 	];
 }
 
-interface ReplyFrame {
-	readonly rows: readonly string[];
-	readonly stable: number;
+interface ReplyFrame extends MarkdownFrame {
 	readonly hits?: readonly Hit[];
 }
 
@@ -162,7 +161,7 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 				hits.push({ row, col: link.start, width: link.end - link.start, height: 1, node: child, item: link.href });
 			return taken.row;
 		});
-		frame = { rows, stable: frame.stable, ...(hits.length > 0 ? { hits } : {}) };
+		frame = { ...frame, rows, ...(hits.length > 0 ? { hits } : {}) };
 	}
 	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
 	return frame;
@@ -211,6 +210,7 @@ function imageRows(cx: PaintContext, image: UiNode): readonly string[] {
 function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	const theme = cx.theme;
 	const rows: string[] = [];
+	const textRows: (TextRow | undefined)[] = [];
 	const hits: Hit[] = [];
 	let stable = 0;
 	let rendered = false;
@@ -226,9 +226,16 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 		if (rows.length > 0) rows.push("");
 		rows.push(pulseRow(cx, dots));
 	};
-	const streamed = (frame: { rows: readonly string[]; stable: number }, streaming: boolean): void => {
+	const append = (block: Block): void => {
+		const top = rows.length;
+		block.textRows?.forEach((row, i) => {
+			if (row) textRows[top + i] = row;
+		});
+		rows.push(...block.rows);
+	};
+	const streamed = (frame: MarkdownFrame, streaming: boolean): void => {
 		if (streaming) stable = rows.length + frame.stable;
-		rows.push(...frame.rows);
+		append(frame);
 	};
 	for (const child of node.children()) {
 		const role = propsOf<{ role: string }>(child).role ?? "";
@@ -237,7 +244,7 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 			const figure = cx.paint(child, cx.width);
 			if (figure.rows.length > 0) {
 				if (rendered) rows.push("");
-				rows.push(...figure.rows);
+				append(figure);
 				rendered = true;
 				afterFigure = true;
 			}
@@ -261,15 +268,15 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 			} else if (body) {
 				const block = cx.paint(body, cx.width);
 				for (const hit of block.hits ?? []) hits.push({ ...hit, row: rows.length + hit.row });
-				rows.push(...block.rows);
+				append(block);
 				rendered ||= block.rows.length > 0;
 			}
 			if (term.spaceAfter) rows.push("");
 		} else if (role === "omp.thinking.extension") {
 			// Extension thinking renderers draw under their thinking block.
-			const extension = cx.paint(child, cx.width).rows;
-			rows.push(...extension);
-			rendered ||= extension.length > 0;
+			const extension = cx.paint(child, cx.width);
+			append(extension);
+			rendered ||= extension.rows.length > 0;
 		} else if (child.kind === "image" && key.startsWith("i")) {
 			if (rendered) rows.push("");
 			rows.push(...imageRows(cx, child));
@@ -303,7 +310,7 @@ function paintAssistant(node: UiNode, cx: PaintContext): Block {
 	}
 	pulse();
 	stable = Math.min(stable, deferredAt);
-	return { rows, ...(stable > 0 ? { stable } : {}), ...(hits.length > 0 ? { hits } : {}) };
+	return { rows, textRows, ...(stable > 0 ? { stable } : {}), ...(hits.length > 0 ? { hits } : {}) };
 }
 
 defineRolePainter("col", "omp.assistant", paintAssistant);

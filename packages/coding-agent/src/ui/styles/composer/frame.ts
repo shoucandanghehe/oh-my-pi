@@ -12,7 +12,7 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, type Cell, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+import { type TextRow, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { fgSgr } from "@oh-my-pi/pi-tui/theme/color";
 import { type ComposerChromeContext, type ComposerStatus, caretOverflow, composerShape } from "./shapes";
 
@@ -98,6 +98,7 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 	};
 	const gutter = shape.gutter ? shape.gutter.slice(0, gutterWidth) : "";
 	const rows: string[] = [];
+	const textRows: (TextRow | undefined)[] = [];
 	const top = shape.top?.(chrome);
 	if (top !== undefined) rows.push(top);
 	let cursor: Cell | undefined;
@@ -117,9 +118,15 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 			overflow: Math.max(0, width - contentWidth),
 		});
 		const textFirst = Array.isArray(rendered);
+		const fieldRow = rows.length + (textFirst ? 0 : rendered.textRow);
+		const textRow = block.textRows?.[i];
+		if (textRow) {
+			const col = side + gutterWidth;
+			textRows[fieldRow] = { ...textRow, start: textRow.start + col, end: textRow.end + col };
+		}
 		if (block.cursor?.row === i) {
 			cursor = {
-				row: rows.length + (textFirst ? 0 : rendered.textRow),
+				row: fieldRow,
 				col: side + gutterWidth + block.cursor.col,
 			};
 		}
@@ -139,6 +146,7 @@ function paintComposer(node: UiNode, cx: PaintContext): Block {
 	rows.push(...covering);
 	return {
 		rows: term.faint ? rows.map(faint) : rows,
+		textRows,
 		...(covering.length > 0 ? { covering: covering.length } : {}),
 		...(cursor ? { cursor } : {}),
 	};

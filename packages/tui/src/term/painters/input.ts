@@ -16,8 +16,12 @@ definePainter("input", (node, cx) => {
 	const caret = caretCell(text, layoutText(text, Number.MAX_SAFE_INTEGER), caretOf(props)).col;
 	// Keep one cell right of the caret for an end-of-text bar.
 	const start = Math.max(0, caret + 1 - cx.width);
+	const textRow = block.textRows?.[0];
 	return {
 		rows: [sliceColumns(row, start, start + cx.width)],
+		...(textRow && {
+			textRows: [{ start: Math.max(0, textRow.start - start), end: Math.min(cx.width, textRow.end - start) }],
+		}),
 		...(block.cursor ? { cursor: { row: 0, col: block.cursor.col - start } } : {}),
 	};
 });

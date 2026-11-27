@@ -19,7 +19,7 @@ import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { paintImage, paintPicture } from "@oh-my-pi/pi-tui/term/painters/image";
 import { stack, styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
-import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
+import { type MarkdownFrame, renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -45,12 +45,12 @@ function figureRoom(cx: PaintContext, rows?: number): PaintContext {
 }
 
 /** Markdown with the standard horizontal padding. */
-function paddedMarkdown(cx: PaintContext, text: string): readonly string[] {
+function paddedMarkdown(cx: PaintContext, text: string): MarkdownFrame {
 	return renderMarkdownFrame(text, cx.width, {
 		theme: cx.theme,
 		paddingX: terminalPaddingX(),
 		hyperlinks: cx.hyperlinks,
-	}).rows;
+	});
 }
 
 function drawable(node: UiNode, cx: PaintContext): boolean {
@@ -62,7 +62,7 @@ defineRolePainter("image", "omp.figure", (node, cx) => paintImage(node, figureRo
 defineRolePainter("image", "omp.figure.svg", (node, cx): Block => {
 	if (drawable(node, cx)) return paintImage(node, figureRoom(cx));
 	const code = termOf<FigureTerm>(node).code;
-	return code ? { rows: paddedMarkdown(cx, code) } : EMPTY_BLOCK;
+	return code ? paddedMarkdown(cx, code) : EMPTY_BLOCK;
 });
 
 defineRolePainter("image", "omp.figure.chart", (node, cx): Block => {
@@ -73,7 +73,7 @@ defineRolePainter("image", "omp.figure.chart", (node, cx): Block => {
 
 defineRolePainter("md", "omp.figure.code", (node, cx) => {
 	const text = propsOf<{ text: string }>(node).text ?? "";
-	return text.trim() ? { rows: paddedMarkdown(cx, text) } : EMPTY_BLOCK;
+	return text.trim() ? paddedMarkdown(cx, text) : EMPTY_BLOCK;
 });
 
 defineRolePainter("text", "omp.figure.pending", (node, cx) => {
@@ -122,7 +122,11 @@ defineRolePainter("col", "omp.figures", (node, cx) => {
 	const blocks = node.children().map((child): Block => {
 		if (paddingX === 0 || child.kind !== "md" || propsOf<{ role: string }>(child).role !== undefined)
 			return cx.paint(child, cx.width);
-		return { rows: cx.paint(child, Math.max(1, cx.width - 2 * paddingX)).rows.map(row => pad + row) };
+		const { rows, textRows } = cx.paint(child, Math.max(1, cx.width - 2 * paddingX));
+		return {
+			rows: rows.map(row => pad + row),
+			textRows: textRows?.map(row => row && { ...row, start: row.start + paddingX, end: row.end + paddingX }),
+		};
 	});
 	return stack(blocks, 1);
 });

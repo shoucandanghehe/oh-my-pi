@@ -65,5 +65,5 @@ definePainter("md", (node, cx) => {
 		});
 	}
 	const stable = stream && frame.stable > 0 ? frame.stable : undefined;
-	return { rows, ...(stable !== undefined && { stable }), ...(hits && { hits }) };
+	return { rows, textRows: frame.textRows, ...(stable !== undefined && { stable }), ...(hits && { hits }) };
 });

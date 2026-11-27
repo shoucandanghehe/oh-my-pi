@@ -20,7 +20,13 @@ function paintCollabPrompt(node: UiNode, cx: PaintContext): Block {
 	const sender = termOf<CollabPromptTerm>(node).sender ?? "guest";
 	const head = ` ${theme.fg("accent", `\x1b[1m«${sender}»\x1b[22m ›`)}`;
 	const prompt = node.children().find(child => child.kind === "md");
-	return { rows: [truncate(head, cx.width), ...(prompt ? bubbleRows(cx, prompt, cx.width) : [])] };
+	const row = truncate(head, cx.width);
+	if (!prompt) return { rows: [row] };
+	const bubble = bubbleRows(cx, prompt, cx.width);
+	return {
+		rows: [row, ...bubble.rows],
+		textRows: bubble.textRows && [undefined, ...bubble.textRows],
+	};
 }
 
 const QR_OPEN = "\x1b[47m\x1b[30m";

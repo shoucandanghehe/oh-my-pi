@@ -64,16 +64,21 @@ function paintFrameCard(node: UiNode, cx: PaintContext): Block {
 		folded = lines.length > fold;
 		if (folded) text = lines.slice(0, fold).join("\n");
 	}
-	const { rows } = renderMarkdownFrame(replaceTabs(text), contentWidth, {
+	const { rows, textRows } = renderMarkdownFrame(replaceTabs(text), contentWidth, {
 		theme,
 		textStyle: "customMessageText",
 		hyperlinks: cx.hyperlinks,
 	});
+	const start = content.length + 1; // includes the top border
 	content.push(...rows);
 	if (folded) content.push("…");
 	content.push("");
 	return {
 		rows: outlinedRows(theme, content, cx.width, term.border ?? "borderMuted", "customMessageBg"),
+		textRows: textRows && [
+			...Array.from({ length: start }, () => undefined),
+			...textRows.map(row => row && { ...row, start: row.start + 2, end: row.end + 2 }),
+		],
 	};
 }
 
@@ -83,12 +88,17 @@ function paintFrameCustom(node: UiNode, cx: PaintContext): Block {
 		node.children().map(child => {
 			// A rows object owns its columns, as the old frame drew its component.
 			if (child.kind === "canvas") return cx.paint(child, cx.width);
-			const { rows } = cx.paint(child, inner);
-			return { rows: rows.map(row => (row === "" ? row : ` ${row}`)) };
+			const { rows, textRows } = cx.paint(child, inner);
+			return {
+				rows: rows.map(row => (row === "" ? row : ` ${row}`)),
+				textRows: textRows?.map((row, i) =>
+					row && rows[i] !== "" ? { ...row, start: row.start + 1, end: row.end + 1 } : row,
+				),
+			};
 		}),
 		0,
 	);
-	return { rows: block.rows };
+	return { rows: block.rows, textRows: block.textRows };
 }
 
 for (const role of ["omp.custom", "omp.custom.delegation", "omp.hook"]) {

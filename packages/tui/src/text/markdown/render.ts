@@ -17,7 +17,7 @@ import { latexToUnicode } from "../latex";
 import { latexToBlock } from "../latex-block";
 import { textSized } from "../osc";
 import { tokens as ansiTokens } from "../ansi";
-import { pieces, spaces, truncate, visibleWidth, wrap } from "../width";
+import { pieces, spaces, type TextRow, truncate, visibleWidth, wrapRows, type WrappedRow } from "../width";
 import { FORMATTING_TAGS, type InlineContext, type InlineEnvironment, PLAIN_CONTEXT, renderInline } from "./inline";
 import {
 	lexInline,
@@ -88,17 +88,24 @@ export interface MarkdownOptions {
 	readonly codeIndent?: number;
 }
 
-/** A code row drawn at column 0 of the full width, outside every container. */
-interface LiteralRow {
-	readonly literal: string;
-}
+/** A styled row, or a row carrying its logical text and placement. */
+type Row = string | (WrappedRow & { readonly literal?: boolean });
 
-/** A content row: styled text placed by its containers, or a literal code row. */
-type Row = string | LiteralRow;
+/** Add visual chrome, excluding repeated prefixes at soft continuations from copied text. */
+function decorateRow(row: Row, prefix: string, style?: (text: string) => string): Row {
+	if (typeof row === "string") return prefix + (style ? style(row) : row);
+	if (row.literal) return row;
+	const shift = visibleWidth(prefix);
+	const { textRow } = row;
+	return {
+		text: prefix + (style ? style(row.text) : row.text),
+		textRow: { ...textRow, start: textRow.join === undefined ? 0 : textRow.start + shift, end: textRow.end + shift },
+	};
+}
 
 /** `rows` with `first` before the first text row and `rest` before the others; literal rows pass through. */
 function prefixRows(rows: readonly Row[], first: string, rest: string): Row[] {
-	return rows.map((row, i) => (typeof row === "string" ? (i === 0 ? first : rest) + row : row));
+	return rows.map((row, i) => decorateRow(row, i === 0 ? first : rest));
 }
 
 /** Widest a horizontal rule draws. */
@@ -171,14 +178,14 @@ function renderBlocks(r: Renderer, tokens: readonly Token[], width: number, ctx:
 function renderBlock(r: Renderer, token: Token, width: number, ctx: InlineContext): Row[] {
 	switch (token.type) {
 		case "paragraph":
-			return wrap(renderInline(r.inline, (token as Tokens.Paragraph).tokens, ctx), width);
+			return wrapRows(renderInline(r.inline, (token as Tokens.Paragraph).tokens, ctx), width);
 		case "text": {
 			const text = token as Tokens.Text;
 			const inline = text.tokens ? renderInline(r.inline, text.tokens, ctx) : ctx.text(text.text);
-			return wrap(inline, width);
+			return wrapRows(inline, width);
 		}
 		case "heading":
-			return wrap(renderHeading(r, token as Tokens.Heading, ctx), width);
+			return wrapRows(renderHeading(r, token as Tokens.Heading, ctx), width);
 		case "code":
 			return renderCode(r, token as Tokens.Code, width);
 		case "blockquote":
@@ -204,7 +211,7 @@ function renderBlock(r: Renderer, token: Token, width: number, ctx: InlineContex
 		case "math":
 			return renderDisplayMath(r, (token as unknown as MathToken).text, width, ctx);
 		default:
-			return token.raw.trim() ? wrap(ctx.text(token.raw.replace(/\n+$/, "")), width) : [];
+			return token.raw.trim() ? wrapRows(ctx.text(token.raw.replace(/\n+$/, "")), width) : [];
 	}
 }
 
@@ -224,7 +231,7 @@ function renderHtmlBlock(r: Renderer, raw: string, width: number, ctx: InlineCon
 		return head.length > 0 && rest.length > 0 ? [...head, "", ...rest] : [...head, ...rest];
 	}
 	for (const match of raw.matchAll(HTML_TAG)) {
-		if (!FORMATTING_TAGS[match[1]!.toLowerCase()]) return wrap(ctx.text(raw), width);
+		if (!FORMATTING_TAGS[match[1]!.toLowerCase()]) return wrapRows(ctx.text(raw), width);
 	}
 	const trimmed = raw.trim();
 	if (/^<hr\s*\/?>$/i.test(trimmed)) return [renderRule(r, undefined, width)];
@@ -236,9 +243,11 @@ function renderHtmlBlock(r: Renderer, raw: string, width: number, ctx: InlineCon
 			text: text => text,
 			restore: stylePrefix(styles.quote),
 		});
-		return wrap(inner, Math.max(1, width - visibleWidth(border))).map(row => border + styles.quote(row));
+		return wrapRows(inner, Math.max(1, width - visibleWidth(border))).map(row =>
+			decorateRow(row, border, styles.quote),
+		);
 	}
-	return wrap(renderInline(r.inline, lexInline(trimmed), ctx), width);
+	return wrapRows(renderInline(r.inline, lexInline(trimmed), ctx), width);
 }
 
 function renderHeading(r: Renderer, token: Tokens.Heading, ctx: InlineContext): string {
@@ -299,7 +308,7 @@ function sizedHeading(r: Renderer, token: Tokens.Heading, width: number): string
 }
 
 /** Padded rows of top-level `token`: a sized H1 over its reserved rows, or the block as `renderBlock` draws it. */
-function renderTopBlock(r: Renderer, token: Token, contentWidth: number, width: number, paddingX: number): string[] {
+function renderTopBlock(r: Renderer, token: Token, contentWidth: number, width: number, paddingX: number): Row[] {
 	const sized = token.type === "heading" ? sizedHeading(r, token as Tokens.Heading, contentWidth) : undefined;
 	if (sized === undefined) return padRows(renderBlock(r, token, contentWidth, r.prose), width, paddingX);
 	const rows = [sized];
@@ -347,17 +356,19 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 	// A literal body takes its fence rows to column 0 with it, so the block stays aligned.
 	const border = (text: string): Row[] =>
 		indent > 0
-			? wrap(styles.codeBorder(text), width)
-			: wrap(styles.codeBorder(text), r.fullWidth).map(literal => ({ literal }));
+			? wrapRows(styles.codeBorder(text), width)
+			: wrapRows(styles.codeBorder(text), r.fullWidth).map(row => ({ ...row, literal: true }));
 	const out: Row[] = border(`\`\`\`${lang ?? ""}`);
 	const fence = r.fence?.token === token ? r.fence : undefined;
 	for (let i = 0; i < lines.length; i++) {
 		// Every line another line follows is final; the last one can still grow or become the closing fence.
 		if (fence && i === lines.length - 1) fence.head = out.length;
 		const line = options.hyperlinks ? linkUrls(lines[i]!) : lines[i]!;
-		if (indent > 0) out.push(...wrap(spaces(indent) + line, width));
-		else if (line === "") out.push({ literal: "" });
-		else for (const literal of wrap(line, r.fullWidth)) out.push({ literal });
+		if (indent > 0) {
+			out.push(...wrapRows(spaces(indent) + line, width));
+		} else {
+			for (const row of wrapRows(line, r.fullWidth)) out.push({ ...row, literal: true });
+		}
 	}
 	out.push(...border("```"));
 	return out;
@@ -455,13 +466,13 @@ function renderQuote(r: Renderer, token: Tokens.Blockquote, width: number): Row[
 	const borderWidth = visibleWidth(border);
 	const ctx: InlineContext = { text: text => text, restore: stylePrefix(styles.quote) };
 	const inner = renderBlocks(r, token.tokens, Math.max(1, width - borderWidth), ctx, false);
-	return inner.map(row => (typeof row === "string" ? border + styles.quote(row) : row));
+	return inner.map(row => decorateRow(row, border, styles.quote));
 }
 
-function renderDisplayMath(r: Renderer, latex: string, width: number, ctx: InlineContext): string[] {
+function renderDisplayMath(r: Renderer, latex: string, width: number, ctx: InlineContext): Row[] {
 	const rows = latexToBlock(latex);
-	if (rows.length === 0) return wrap(ctx.text(latexToUnicode(latex)), width);
-	return rows.flatMap(row => wrap(row, width));
+	if (rows.length === 0) return wrapRows(ctx.text(latexToUnicode(latex)), width);
+	return rows.flatMap(row => wrapRows(row, width));
 }
 
 function listMarker(token: Tokens.List, index: number): string {
@@ -567,12 +578,13 @@ function createRenderer(tokens: readonly Token[], fullWidth: number, options: Ma
  * (the table still being written aside), so each frame of a growing answer
  * only renders the blocks that changed. Bounded by count and total size.
  */
-const blockRows = new LRUCache<string, readonly string[]>({
+const blockRows = new LRUCache<string, readonly Row[]>({
 	max: 2048,
 	maxSize: 8 * 1024 * 1024,
 	sizeCalculation: (rows, key) => {
 		let size = key.length;
-		for (const row of rows) size += row.length;
+		for (const row of rows)
+			size += typeof row === "string" ? row.length : row.text.length + (row.textRow.join?.length ?? 0);
 		return Math.max(1, size);
 	},
 });
@@ -592,15 +604,15 @@ function renderPart(
 	key: string | undefined | readonly (string | undefined)[],
 	open: boolean,
 	stable?: { rows: number },
-): string[] {
+): Row[] {
 	const r = createRenderer(tokens, width, options);
 	const paddingX = options.paddingX ?? 0;
 	const contentWidth = Math.max(1, inner);
 	// The table still being written is part of the last block: its rows are not the source's alone.
 	let uncachedAt = r.growing || open ? tokens.length - 1 : -1;
 	while (uncachedAt >= 0 && isBlank(tokens[uncachedAt]!)) uncachedAt--;
-	const out: string[] = [];
-	let blank: string | undefined;
+	const out: Row[] = [];
+	let blank: Row | undefined;
 	let previous: Token | undefined;
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i]!;
@@ -609,7 +621,7 @@ function renderPart(
 			continue;
 		}
 		// A reference definition draws nothing but still ends the block before it with a blank row.
-		let rows: readonly string[];
+		let rows: readonly Row[];
 		if (token.type === "def") rows = [];
 		else if ((typeof key === "object" ? key[i] : key) === undefined || i === uncachedAt) {
 			rows = renderTopBlock(r, token, contentWidth, width, paddingX);
@@ -648,21 +660,46 @@ function normalizeSource(source: string, stream: boolean): string {
 	return stream ? speculativeStreamingSource(unified) : unified;
 }
 
-/** Content rows padded to the full width: `paddingX` blank cells on the left (none for literal rows), spaces to the right edge. */
-function padRows(rows: readonly Row[], width: number, paddingX: number): string[] {
+/** Content rows padded to the full width. Keep the selectable span inside the padding. */
+function padRows(rows: readonly Row[], width: number, paddingX: number): Row[] {
 	const left = spaces(paddingX);
 	return rows.map(row => {
-		const line = typeof row === "string" ? left + row : row.literal;
-		const free = width - visibleWidth(line);
-		return free >= 0 ? line + spaces(free) : truncate(line, width, "");
+		const prefix = typeof row !== "string" && row.literal ? "" : left;
+		const line = prefix + (typeof row === "string" ? row : row.text);
+		const length = visibleWidth(line);
+		const text = length <= width ? line + spaces(width - length) : truncate(line, width, "");
+		if (typeof row === "string") return text;
+		const { textRow } = row;
+		return {
+			text,
+			textRow: {
+				...textRow,
+				start: textRow.start + prefix.length,
+				end: Math.min(width, textRow.end + prefix.length),
+			},
+		};
 	});
 }
 
 /** Rows of a document still arriving, and how many of them later text can no longer change. */
 export interface MarkdownFrame {
 	readonly rows: readonly string[];
+	readonly textRows?: readonly (TextRow | undefined)[];
 	/** Leading rows that stay as they are however the source grows (append-only output may retire them). */
 	readonly stable: number;
+}
+
+function markdownFrame(content: readonly Row[], stable: number): MarkdownFrame {
+	const rows: string[] = [];
+	let textRows: (TextRow | undefined)[] | undefined;
+	for (const row of content) {
+		if (typeof row === "string") rows.push(row);
+		else {
+			(textRows ??= [])[rows.length] = row.textRow;
+			rows.push(row.text);
+		}
+	}
+	return { rows, stable, ...(textRows && { textRows }) };
 }
 
 /** Blocks that end on their own line: what follows them directly cannot pull them into another block. */
@@ -734,7 +771,7 @@ function isClosedFence(token: Token): boolean {
 }
 
 /** Rows of the settled heads of streaming documents, by prefix (see `renderMarkdownFrame`). */
-const settledHeads = new LRUCache<string, readonly string[]>({ max: 64 });
+const settledHeads = new LRUCache<string, readonly Row[]>({ max: 64 });
 
 const kThemeId = Symbol("pi-tui.markdown.theme-id");
 let nextThemeId = 0;
@@ -873,7 +910,7 @@ function renderPriorDefinitions(
 	options: MarkdownOptions,
 	open: boolean,
 	stable?: { rows: number },
-): string[] {
+): Row[] {
 	const lexed = lexWithPriorDefinitions(blocks, from);
 	const keys = new Map<string, string | undefined>();
 	const blockKeys = lexed.keys.map(links => {
@@ -924,7 +961,7 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 			undefined,
 			false,
 		);
-		return { rows: paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows, stable: 0 };
+		return markdownFrame(paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows, 0);
 	}
 	const lexed = lexStream(source, normalized);
 	const tokens = lexed.tokens;
@@ -939,15 +976,15 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 		const rows = defined
 			? renderPriorDefinitions(tokens, 0, inner, width, options, true, fence)
 			: renderPart(tokens, inner, width, options, key, true, fence);
-		return {
-			rows: paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows,
-			stable: fence.rows > 0 ? paddingY + fence.rows : 0,
-		};
+		return markdownFrame(
+			paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows,
+			fence.rows > 0 ? paddingY + fence.rows : 0,
+		);
 	}
 	// Rows of a settled head are a function of its source alone (each block resolves reference links
 	// against the definitions before it), so they never change as the document grows: the terminal may
 	// already hold them in history. Drawn once per prefix, options and width.
-	let headRows: readonly string[] | undefined;
+	let headRows: readonly Row[] | undefined;
 	const headKey = blockKey(width, options, "");
 	let settledKey: string | undefined;
 	if (headKey !== undefined) {
@@ -971,18 +1008,18 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 		? renderPriorDefinitions(tokens, settled, inner, width, options, true, fence)
 		: renderPart(tokens.slice(settled), inner, width, options, key, true, fence);
 	const separator = headRows.length > 0 && tailRows.length > 0;
-	const rows: string[] = [];
+	const rows: Row[] = [];
 	for (let i = 0; i < paddingY; i++) rows.push(spaces(width));
 	for (const row of headRows) rows.push(row);
 	const stable = rows.length + (separator ? 1 : 0) + fence.rows;
 	if (separator) rows.push(spaces(width));
 	for (const row of tailRows) rows.push(row);
 	for (let i = 0; i < paddingY; i++) rows.push(spaces(width));
-	return { rows, stable };
+	return markdownFrame(rows, stable);
 }
 
 /** `rows` between `count` blank rows above and below. */
-function padVertically(rows: readonly string[], width: number, count: number, out: string[]): string[] {
+function padVertically(rows: readonly Row[], width: number, count: number, out: Row[]): Row[] {
 	for (let i = 0; i < count; i++) out.push(spaces(width));
 	for (const row of rows) out.push(row);
 	for (let i = 0; i < count; i++) out.push(spaces(width));

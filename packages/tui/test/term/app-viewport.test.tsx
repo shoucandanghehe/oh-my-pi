@@ -345,6 +345,185 @@ it("copies wide styled transcript text without the dock and requests paste only 
 	);
 });
 
+/** Feed the SGR reports the ANSI driver actually gets, using screen cells. */
+function selectCells(memory: MemoryTerminal, start: [number, number], end: [number, number]): void {
+	const [x, y] = start;
+	const [u, v] = end;
+	memory.feed(`\x1b[<0;${x};${y}M\x1b[<32;${u};${v}M\x1b[<0;${u};${v}m`);
+}
+
+it("copies a transcript selection before a focused editor's clear/stop binding", async () => {
+	const copied: string[] = [];
+	const draft = signal("keep my draft");
+	let clears = 0;
+	const surface = createSurface(() => ({
+		main: <text>copy this transcript</text>,
+		dock: (
+			<editor
+				text={draft}
+				onKey={key => {
+					if (key.id !== "ctrl+c") return false;
+					clears++;
+					draft.set("");
+					return true;
+				}}
+			/>
+		),
+	}));
+	surface.focus(surface.dock()[0]!);
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			await afterFrame(host, () => selectCells(memory, [1, 1], [9, 1]));
+			memory.feed("\x03");
+			expect(copied).toEqual(["copy this"]);
+			expect(clears).toBe(0);
+			expect(screen().at(-1)).toContain("keep my draft");
+			await afterFrame(host, () => memory.feed("\x1b[<0;1;1M\x1b[<0;1;1m"));
+			await afterFrame(host, () => memory.feed("\x03"));
+			expect(clears).toBe(1);
+			expect(screen().at(-1)).not.toContain("keep my draft");
+		},
+		{ columns: 32, onAppViewportSelectionCopy: text => copied.push(text) },
+	);
+});
+
+it("copies exact text through word wraps and mid-word wraps, preserving hard line breaks", async () => {
+	const copied: string[] = [];
+	const text = "alpha   bravo\nabcdefghijklmnop\nlast";
+	const surface = createSurface(() => ({
+		main: (
+			<col>
+				<text text={text} />
+			</col>
+		),
+	}));
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			expect(screen()[0]).toBe("alpha");
+			expect(screen()[1]).toBe("bravo");
+			await afterFrame(host, () => selectCells(memory, [1, 1], [4, 5]));
+			memory.feed("\x03");
+			expect(copied).toEqual([text]);
+		},
+		{ onAppViewportSelectionCopy: text => copied.push(text) },
+	);
+});
+
+it("does not copy a repeated Markdown quote border at a soft wrap", async () => {
+	const copied: string[] = [];
+	const surface = createSurface(() => ({ main: <md text="> alpha **bravo**" /> }));
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			expect(screen()[0]).toContain("alpha");
+			expect(screen()[1]).toContain("bravo");
+			await afterFrame(host, () => selectCells(memory, [3, 1], [7, 2]));
+			memory.feed("\x03");
+			expect(copied).toEqual(["alpha bravo"]);
+		},
+		{ onAppViewportSelectionCopy: text => copied.push(text) },
+	);
+});
+
+it("double-clicks words, paths and URLs, then triple-clicks the full displayed row", async () => {
+	const copied: string[] = [];
+	const lines = ["alpha beta gamma", "open /tmp/foo-bar_baz.ts:42 now", "visit https://example.com/a-b?x=1#top now"];
+	const surface = createSurface(() => ({ main: <rows lines={lines} /> }));
+	await withHost(
+		surface,
+		async ({ memory }) => {
+			const click = (col: number, row: number, count: number) =>
+				memory.feed(`\x1b[<0;${col};${row}M\x1b[<0;${col};${row}m`.repeat(count));
+			click(8, 1, 2);
+			memory.feed("\x03");
+			click(8, 1, 1);
+			memory.feed("\x03");
+			click(12, 2, 2);
+			memory.feed("\x03");
+			click(17, 3, 2);
+			memory.feed("\x03");
+			expect(copied).toEqual(["beta", lines[0]!, "/tmp/foo-bar_baz.ts:42", "https://example.com/a-b?x=1#top"]);
+		},
+		{ columns: 50, onAppViewportSelectionCopy: text => copied.push(text) },
+	);
+});
+
+it("copies a styled status segment and keeps a held editor selection in place while main streams", async () => {
+	const copied: string[] = [];
+	const stream = signal(["row0", "row1", "row2", "row3"]);
+	const surface = createSurface(() => ({
+		main: <rows lines={stream} />,
+		dock: [<rows lines={["\x1b[34m model \x1b[0m\x1b[32m path \x1b[0m"]} />, <editor text="hello world input" />],
+	}));
+	surface.focus(surface.dock()[1]!);
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			await afterFrame(host, () => selectCells(memory, [2, 4], [8, 4]));
+			memory.feed("\x03");
+			expect(copied).toEqual(["model  "]);
+			await afterFrame(host, () => memory.feed("\x1b[<0;1;5M\x1b[<32;6;5M"));
+			await afterFrame(host, () => stream.set([...stream(), "row4", "row5"]));
+			expect(screen()[0]).toMatch(/^row3/);
+			await afterFrame(host, () => memory.feed("\x1b[<32;11;5M\x1b[<0;11;5m"));
+			memory.feed("\x03");
+			expect(copied).toEqual(["model  ", "hello world"]);
+		},
+		{ columns: 25, onAppViewportSelectionCopy: text => copied.push(text) },
+	);
+});
+
+it("does not start a dock selection from a mouse press claimed by a widget", async () => {
+	const copied: string[] = [];
+	const selected: string[] = [];
+	defineRolePainter("canvas", "test.app-viewport-dock-hit", node => ({
+		rows: ["action text"],
+		hits: [{ node, item: "action", row: 0, col: 0, width: 6, height: 1 }],
+	}));
+	const surface = createSurface(() => ({
+		dock: <canvas role="test.app-viewport-dock-hit" paint={() => []} onSelect={item => selected.push(item)} />,
+	}));
+	await withHost(
+		surface,
+		async ({ host, memory }) => {
+			await afterFrame(host, () => selectCells(memory, [1, 5], [11, 5]));
+			memory.feed("\x03");
+			expect(selected).toEqual(["action"]);
+			expect(copied).toEqual([]);
+		},
+		{ onAppViewportSelectionCopy: text => copied.push(text) },
+	);
+});
+
+it("continues to scroll and extend a transcript selection without further mouse motion", async () => {
+	const copied: string[] = [];
+	const lines = Array.from({ length: 20 }, (_, i) => `row-${i}`);
+	const surface = createSurface(() => ({ main: <rows lines={lines} />, dock: <text>dock</text> }));
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			expect(screen()[0]).toMatch(/^row-16\b/);
+			const { promise, resolve } = Promise.withResolvers<void>();
+			const off = host.onFrame(() => {
+				if (!screen()[0]?.match(/^row-13\b/)) return;
+				memory.feed("\x1b[<0;1;1m\x03");
+				resolve();
+			});
+			try {
+				// One drag report, but the selection extends three rows beyond the initial viewport.
+				memory.feed("\x1b[<0;6;3M\x1b[<32;1;1M");
+				await promise;
+			} finally {
+				off();
+			}
+			expect(copied).toEqual([lines.slice(13, 19).join("\n")]);
+		},
+		{ columns: 25, onAppViewportSelectionCopy: text => copied.push(text) },
+	);
+});
+
 it("blocks clicks through a floating sheet without disabling uncovered main hits", async () => {
 	const clicked: string[] = [];
 	defineRolePainter("canvas", "test.app-viewport-hits", (node, cx) => {

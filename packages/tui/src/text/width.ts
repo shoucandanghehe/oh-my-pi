@@ -326,6 +326,52 @@ export function wrap(text: string, width: number): string[] {
 	return wrapTextWithAnsi(text, width, TAB_WIDTH);
 }
 
+/** Selectable columns `[start, end)`; `join` is the exact source text hidden before a soft continuation. */
+export interface TextRow {
+	readonly start: number;
+	readonly end: number;
+	readonly join?: string;
+}
+
+export interface WrappedRow {
+	readonly text: string;
+	readonly textRow: TextRow;
+}
+
+/**
+ * Describe the existing ANSI layout against its input. The wrapper only removes ASCII spaces
+ * at a soft break. Match the visible rows against the original runs in order, so a break inside
+ * a word contributes nothing, a discarded run contributes all its spaces, and `\n` stays hard.
+ */
+export function wrapRows(text: string, width: number): WrappedRow[] {
+	const rows = wrap(text, width);
+	if (rows.length <= 1) return rows.map(text => ({ text, textRow: { start: 0, end: visibleWidth(text) } }));
+	const lines = stripEscapes(text).split("\n");
+	let logical = 0;
+	let offset = 0;
+	let continued = false;
+	return rows.map(text => {
+		const drawn = stripEscapes(text);
+		let source = lines[logical];
+		if (continued && source !== undefined && /^ *$/u.test(source.slice(offset)) && logical < lines.length - 1) {
+			source = lines[++logical];
+			offset = 0;
+			continued = false;
+		}
+		let join: string | undefined;
+		if (source !== undefined) {
+			let at = offset;
+			while (!source.startsWith(drawn, at) && source[at] === " ") at++;
+			if (source.startsWith(drawn, at)) {
+				if (continued) join = source.slice(offset, at);
+				offset = at + drawn.length;
+				continued = true;
+			}
+		}
+		return { text, textRow: { start: 0, end: visibleWidth(text), ...(join !== undefined && { join }) } };
+	});
+}
+
 /**
  * Hard-wrap styled text at exactly `width` columns, keeping every space and
  * never splitting a grapheme (one wider than `width` gets a row of its own).

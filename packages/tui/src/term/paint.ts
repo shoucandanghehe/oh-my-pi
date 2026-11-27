@@ -16,6 +16,7 @@ import type { CellSize } from "../driver/images/fit";
 import type { ImageRequest, ImageRows, ImageSource } from "../driver/images/store";
 import type { UiKind, UiNode } from "../node";
 import { type Accessor, computed, createRoot, signal } from "../reactive";
+import type { TextRow } from "../text/width";
 import type { Theme } from "../theme/contract";
 
 /** A cell position inside a block. */
@@ -43,6 +44,8 @@ export interface Block {
 	readonly rows: readonly string[];
 	/** A one-shot mark on a top-level main block, written only when its row enters history. */
 	readonly historyMark?: HistoryRowMark & { readonly key: object };
+	/** Logical row boundaries, when layout knows more than the rendered cells. */
+	readonly textRows?: readonly (TextRow | undefined)[];
 	/** Hardware cursor (the focused editor's caret), in this block's coordinates. */
 	readonly cursor?: Cell;
 	/** Mouse targets, in this block's coordinates. */
@@ -79,6 +82,13 @@ function sameBlock(a: Block, b: Block): boolean {
 		return false;
 	if (a.rows !== b.rows) {
 		for (let i = 0; i < a.rows.length; i++) if (a.rows[i] !== b.rows[i]) return false;
+	}
+	if (a.textRows !== b.textRows) {
+		for (let i = 0; i < a.rows.length; i++) {
+			const x = a.textRows?.[i];
+			const y = b.textRows?.[i];
+			if (x?.start !== y?.start || x?.end !== y?.end || x?.join !== y?.join) return false;
+		}
 	}
 	if (a.hits !== b.hits) {
 		if (!a.hits || !b.hits || a.hits.length !== b.hits.length) return false;

@@ -20,7 +20,7 @@ import type { UiNode } from "../../node";
 import { fgSgr } from "../../theme/color";
 import type { Theme } from "../../theme/contract";
 import { hyperlink } from "../../text/osc";
-import { TAB_WIDTH, truncate, visibleWidth, widthEpoch } from "../../text/width";
+import { TAB_WIDTH, type TextRow, truncate, visibleWidth, widthEpoch } from "../../text/width";
 import { widgetState } from "../widgets";
 import { type Block, type Cell, definePainter, type PaintContext } from "../paint";
 
@@ -586,6 +586,7 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 		text === "" ? (term?.placeholder !== undefined ? term.placeholder : (props.placeholder ?? null)) : null;
 
 	const out: string[] = [];
+	const textRows: TextRow[] = [];
 	let cursor: Cell | undefined;
 	for (let r = top; r < bottom; r++) {
 		const row = rows[r]!;
@@ -625,6 +626,12 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 			labels = [];
 			({ out: body, width } = paintRun(text, row.start, row.textEnd, look, base));
 		}
+		const previous = rows[r - 1];
+		textRows.push({
+			start: promptWidth,
+			end: promptWidth + width,
+			...(previous && !previous.last && { join: text.slice(previous.textEnd, row.start) }),
+		});
 		let tail = "";
 		// The newline ending a selected line shows as one inverse blank.
 		if (row.last && selected(row.end) && row.end < text.length) {
@@ -681,7 +688,7 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 			cursor = { row: r - top, col };
 		}
 	}
-	return { rows: out, ...(cursor ? { cursor } : {}) };
+	return { rows: out, textRows, ...(cursor ? { cursor } : {}) };
 }
 
 definePainter("editor", (node, cx) => paintField(node, cx));

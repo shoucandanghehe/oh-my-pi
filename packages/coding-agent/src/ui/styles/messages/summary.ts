@@ -27,21 +27,31 @@ function dividerRow(cx: PaintContext, term: Partial<SummaryTerm>): string {
 }
 
 /** `markdown` in a `customMessageBg` box with one row and one cell of padding. */
-export function detailBox(cx: PaintContext, markdown: string): string[] {
+function detailBox(cx: PaintContext, markdown: string): Block {
 	const theme = cx.theme;
-	const { rows } = renderMarkdownFrame(markdown, Math.max(1, cx.width - 2), {
+	const { rows, textRows } = renderMarkdownFrame(markdown, Math.max(1, cx.width - 2), {
 		theme,
 		textStyle: "customMessageText",
 		hyperlinks: cx.hyperlinks,
 	});
-	return ["", ...rows.map(row => ` ${row}`), ""].map(row => fillRow(theme, "customMessageBg", row, cx.width));
+	return {
+		rows: ["", ...rows.map(row => ` ${row}`), ""].map(row => fillRow(theme, "customMessageBg", row, cx.width)),
+		textRows: textRows && [
+			undefined,
+			...textRows.map(row => row && { ...row, start: row.start + 1, end: row.end + 1 }),
+		],
+	};
 }
 
 function paintSummary(node: UiNode, cx: PaintContext): Block {
 	const term = termOf<SummaryTerm>(node);
 	const rows = ["", dividerRow(cx, term), ""];
-	if (propsOf<{ collapsed: boolean }>(node).collapsed === false) rows.push(...detailBox(cx, term.detail ?? ""));
-	return { rows };
+	if (propsOf<{ collapsed: boolean }>(node).collapsed !== false) return { rows };
+	const detail = detailBox(cx, term.detail ?? "");
+	return {
+		rows: [...rows, ...detail.rows],
+		textRows: detail.textRows && [undefined, undefined, undefined, ...detail.textRows],
+	};
 }
 
 for (const role of ["omp.compaction", "omp.handoff", "omp.branch"]) defineRolePainter("section", role, paintSummary);

@@ -55,7 +55,7 @@ import {
 } from "../reactive";
 import { isSettled, type Surface } from "../surface";
 import type { Theme } from "../theme/contract";
-import { padTo, sliceCells, sliceColumns, truncate, visibleWidth } from "../text/width";
+import { padTo, sliceCells, sliceColumns, type TextRow, truncate, visibleWidth } from "../text/width";
 import type { AnsiWorkspaceRail, WorkspacePaneMinimum, WorkspaceSurface } from "../workspace";
 import { AppViewport, type ViewportHit } from "./app-viewport";
 import {
@@ -121,9 +121,9 @@ export interface TermBackendOptions extends WorkspaceSurface {
 	/** Keep `main` scrollable on the alternate screen instead of retiring it into terminal history. */
 	readonly appViewport?: boolean;
 	readonly ansiWorkspaceMainMinimum?: WorkspacePaneMinimum;
-	/** Copy selected transcript text (OSC 52 when omitted). */
+	/** Copy selected viewport text (OSC 52 when omitted). */
 	readonly onAppViewportSelectionCopy?: (text: string) => void;
-	/** A right click without transcript text selected. */
+	/** A right click without viewport text selected. */
 	readonly onAppViewportPasteRequest?: () => void;
 	/**
 	 * Blank rows between two consecutive non-empty `main` blocks (the
@@ -1147,6 +1147,14 @@ export class TermBackend {
 			const rows = Array.from({ length: visible }, () => "");
 			cursor = appViewport.paint(contentWidth, capacity, visible, rows, hits);
 			appendDock(rows, dockTop);
+			const dockTextRows: (TextRow | undefined)[] = [];
+			for (const { block, top } of dock) {
+				const offset = dockTop + top - visible;
+				block.textRows?.forEach((row, i) => {
+					if (row && offset + i >= 0) dockTextRows[offset + i] = row;
+				});
+			}
+			appViewport.paintDock(rows, visible, dockTextRows);
 			if (rail && railLayout && railLayout.width > 0) {
 				const railWidth = railLayout.width;
 				const block = this.#paint(rail.node, railWidth, height);
@@ -1700,6 +1708,7 @@ export class TermBackend {
 				if (this.#pointerRail !== nextRail) this.#pointerRail?.leave();
 				this.#pointerRail = nextRail;
 				if (!target) {
+					if (event.mouse.action === "release") pane?.viewport.endDrag();
 					this.#hover.set(null);
 					return;
 				}
@@ -1710,6 +1719,7 @@ export class TermBackend {
 			if (originId === undefined && event.type === "key" && workspace?.key(event.key)) return;
 			const mount = pane?.mount ?? this.#options;
 			const { surface } = mount;
+			if (event.type === "key" && surface.layer().length === 0 && pane?.viewport.copyKey(event.key)) return;
 			if (intercept && mount.intercept?.(event, () => this.#onInput(event, true, id))) return;
 			switch (event.type) {
 				case "key": {
@@ -1766,8 +1776,8 @@ export class TermBackend {
 			this.#hover.set(null);
 			return;
 		}
-		if (mouse.action === "press" && mouse.button === "left") appViewport?.clearSelection();
 		if (appViewport && input.rail?.width && pane?.mount.ansiRail?.pointer(mouse, input.rail.width)) {
+			if (mouse.action === "press" && mouse.button === "left") appViewport.clearSelection();
 			this.#hover.set(null);
 			return;
 		}
@@ -1789,17 +1799,23 @@ export class TermBackend {
 			const path = pathTo(this.#regions(surface), hit.node);
 			if (path.length === 0) continue;
 			const widget = widgetFor(hit.node);
+			const leftPress = mouse.action === "press" && mouse.button === "left";
 			if (widget?.mouse?.(hit.node, mouse, { row, col }, this.#widgetContext(path, surface, id), hit)) {
-				if (mouse.action === "press" && mouse.button === "left") pointer?.reset();
+				if (leftPress) {
+					pointer?.reset();
+					appViewport?.clearSelection();
+				}
 				return;
 			}
-			if (mouse.action === "press" && mouse.button === "left" && hit.act) {
+			if (leftPress && hit.act) {
 				pointer?.reset();
+				appViewport?.clearSelection();
 				bubbleEvent(path, { type: "action", key: keypathOf(path), act: hit.act, mods: mouse.mods });
 				return;
 			}
-			if (mouse.action === "press" && mouse.button === "left" && hit.item !== undefined) {
+			if (leftPress && hit.item !== undefined) {
 				pointer?.reset();
+				appViewport?.clearSelection();
 				bubbleEvent(path, { type: "select", key: keypathOf(path), item: hit.item });
 				return;
 			}
