@@ -49,7 +49,7 @@ function pauseWorkStatus(root: AgentSession): PauseWorkStatus {
 /** How often the pause screen re-reads outstanding work. */
 const PAUSE_WORK_POLL_MS = 1_000;
 
-/** A cancelled paused exit returns to the sheet without releasing the model barrier. */
+/** An unsuccessful paused exit returns to the sheet without releasing the model barrier. */
 async function runPauseScreen(ctx: InteractiveModeContext): Promise<void> {
 	if (!agentPauseGate.pause()) return;
 	let exited = false;

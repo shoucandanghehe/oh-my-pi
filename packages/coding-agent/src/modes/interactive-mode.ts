@@ -7201,15 +7201,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	shutdownWhilePaused(): Promise<boolean> {
-		return this.#shutdown(true, true);
+		return this.#shutdown(false, true);
 	}
 
 	async #shutdown(cancellable: boolean, paused: boolean): Promise<boolean> {
 		if (this.#isShuttingDown) {
-			// Another close request ends the pending attempt's prompts; that
-			// attempt keeps ownership of teardown and can no longer be cancelled.
+			// Repeated requests abort outstanding prompts. A durable paused exit
+			// can take over before teardown begins; it must not dispose as a normal quit.
 			this.#closeAttempt?.abort();
-			return true;
+			if (!paused || !this.#closeAttempt) return true;
 		}
 		// The previous graceful teardown failed AT the memoized session.dispose()
 		// (the session is already disposing), so it re-rejects identically forever
@@ -7224,7 +7224,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const signal = this.#beginClose(paused ? "Saving paused session…" : "Closing session…");
 		// Reversible decisions first: nothing has been stopped yet, so a refusal
 		// leaves the session exactly as it was.
-		if (cancellable && !(await this.session.confirmClose(signal))) {
+		const confirmed = !cancellable || (await this.session.confirmClose(signal));
+		if (this.#closeAttempt?.signal !== signal) return false;
+		if (!confirmed) {
 			this.#abandonClose();
 			this.showStatus("Session close cancelled");
 			// The refusal covers only this quit, not a pending `ctx.shutdown()`.
@@ -7233,8 +7235,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		// A signal teardown or stop() took over while extensions were asked.
 		if (this.session.isDisposed || this.#dialogLifetime.signal.aborted) return false;
-		this.#pausedExitRequested = paused;
 		const worktreePlan = paused ? [] : await this.#planOwnedWorktreeExit(signal);
+		if (this.#closeAttempt?.signal !== signal) return false;
+		this.#pausedExitRequested = paused;
 		try {
 			await this.#teardown({ clearResume: true });
 		} catch (error) {
@@ -7411,6 +7414,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
 	async #teardown(options?: { clearResume?: boolean }): Promise<void> {
+		this.#closeAttempt = undefined;
 		// An in-flight loop condition (or a deferred auto-submit timer) must not
 		// outlive session disposal: an unaborted `sleep 30`-style condition can
 		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the

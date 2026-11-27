@@ -185,25 +185,36 @@ describe("InteractiveMode pre-quit extension gate", () => {
 		expect(postmortem.quit).toHaveBeenCalledTimes(1);
 	});
 
-	it("honors a refused paused exit, then uses durable teardown on the next request", async () => {
-		beforeShutdown = () => (attempts === 1 ? { cancel: true } : undefined);
-		const pausedExit = vi.spyOn(session, "disposeForPausedExit");
-		agentPauseGate.pause();
-		try {
-			expect(await mode.shutdownWhilePaused()).toBe(false);
-			expect(agentPauseGate.paused).toBe(true);
-			expect(session.isDisposed).toBe(false);
-			expect(pausedExit).not.toHaveBeenCalled();
-			expect(postmortem.quit).not.toHaveBeenCalled();
-
-			expect(await mode.shutdownWhilePaused()).toBe(true);
-			expect(pausedExit).toHaveBeenCalledTimes(1);
-			expect(session.isDisposed).toBe(true);
-			expect(postmortem.quit).toHaveBeenCalledTimes(1);
-		} finally {
-			agentPauseGate.resume();
-		}
-	});
+	it.each([false, true])(
+		"uses durable teardown without another close confirmation (pending operator quit: %s)",
+		async pendingQuit => {
+			const entered = Promise.withResolvers<AbortSignal>();
+			const late = Promise.withResolvers<SessionBeforeShutdownResult>();
+			beforeShutdown = event => {
+				if (!pendingQuit) return { cancel: true };
+				entered.resolve(event.signal);
+				return late.promise;
+			};
+			const pausedExit = vi.spyOn(session, "disposeForPausedExit");
+			agentPauseGate.pause();
+			try {
+				const quitting = pendingQuit ? mode.shutdown() : undefined;
+				const signal = pendingQuit ? await entered.promise : undefined;
+				expect(await mode.shutdownWhilePaused()).toBe(true);
+				await quitting;
+				expect(signal?.aborted).toBe(pendingQuit ? true : undefined);
+				expect(attempts).toBe(pendingQuit ? 1 : 0);
+				expect(laterHandlers).toBe(0);
+				expect(pausedExit).toHaveBeenCalledTimes(1);
+				expect(session.isDisposed).toBe(true);
+				expect(shutdownEvents).toBe(1);
+				expect(postmortem.quit).toHaveBeenCalledTimes(1);
+			} finally {
+				late.resolve({ cancel: true });
+				agentPauseGate.resume();
+			}
+		},
+	);
 
 	it.each([
 		["a further Ctrl+D", (m: InteractiveMode): void => m.handleCtrlD()],

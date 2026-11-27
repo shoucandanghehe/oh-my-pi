@@ -711,7 +711,7 @@ export interface InteractiveModeContext {
 	/** Close and quit. Operator quits are cancellable by extensions; pass `cancellable: false` for forced closes. */
 	shutdown(options?: { cancellable?: boolean }): Promise<void>;
 
-	/** Close from the process-wide durable pause barrier; false when the close is refused. */
+	/** Close from the durable pause barrier without asking again; false if the close did not complete. */
 	shutdownWhilePaused(): Promise<boolean>;
 	getPausedExitParticipants?(): readonly PausedExitParticipant[];
 	/** Restart with the original launch flags, resuming this session. Refuse if the working directory was removed. */
