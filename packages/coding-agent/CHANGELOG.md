@@ -133,6 +133,7 @@
 - `providers.openaiWebsockets: only` keeps Codex turns and streamed compaction on WebSockets.
 - Attach audio and video from the command line or interactive `@file` mentions, and configure OpenAI-compatible image models in `models.yml`.
 - Extensions can append or replace assistant thinking and opt custom task messages into automatic session titles ([#19302](https://github.com/can1357/oh-my-pi/issues/19302)).
+- Extensions can ask a question on the host alone with `ctx.ui.localAskDialog` and restrict answers to the listed choices with `allowCustomInput: false`.
 - `roast` records optional agent feedback locally in `roast.db`.
 
 ### Changed

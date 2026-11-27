@@ -15,6 +15,8 @@ export interface ExtensionAskDialogQuestion {
 	header?: string;
 	options: ExtensionAskDialogOption[];
 	multi?: boolean;
+	/** Offer a free-text “Other” answer besides the listed options. Defaults to true. */
+	allowCustomInput?: boolean;
 	recommended?: number;
 }
 
@@ -107,6 +109,7 @@ export function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]
 			...(typeof q.header === "string" ? { header: sanitizeCarriageReturns(q.header) } : {}),
 			options,
 			...(typeof q.multi === "boolean" ? { multi: q.multi } : {}),
+			...(typeof q.allowCustomInput === "boolean" ? { allowCustomInput: q.allowCustomInput } : {}),
 			...(Number.isInteger(q.recommended) ? { recommended: q.recommended } : {}),
 		});
 	}

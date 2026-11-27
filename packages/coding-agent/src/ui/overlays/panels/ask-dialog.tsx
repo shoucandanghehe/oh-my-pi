@@ -263,7 +263,9 @@ export class AskDialogModel {
 			label: labels[index] ?? sanitizeCarriageReturns(option.label),
 			optionIndex: index,
 		}));
-		rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
+		if (question.allowCustomInput !== false) {
+			rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
+		}
 		return rows;
 	}
 

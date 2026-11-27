@@ -410,8 +410,17 @@ export interface ExtensionUIContext {
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
+	/** Absent when the host cannot guarantee that fixed-choice questions hide custom answers. */
+	readonly askDialogCapabilities?: { readonly allowCustomInput: true };
+
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(
+		questions: ExtensionAskDialogQuestion[],
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionAskDialogResult | undefined>;
+
+	/** Like `askDialog`, but only the interactive host can answer; never mirrored to collaboration guests. */
+	localAskDialog?(
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;

@@ -204,6 +204,24 @@ describe("ExtensionUiController ask dialog", () => {
 		{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] },
 	];
 
+	it("takes fixed-choice answers on the host without sending the dialog to a guest", async () => {
+		const harness = makeHarness();
+		const requestGuestUi = vi.fn();
+		Object.assign(harness.ctx, { collabHost: { requestGuestUi } });
+		const ui = await harness.init();
+		expect(ui.askDialogCapabilities?.allowCustomInput).toBe(true);
+		const pending = ui.localAskDialog!([{ ...questions[0]!, allowCustomInput: false }]);
+		expect(harness.screen()).toContain("Continue?");
+		expect(harness.screen()).not.toContain("Other");
+		// Moving beyond the last choice must not reach a hidden free-text editor.
+		harness.term.press("down");
+		harness.term.press("down");
+		harness.term.press("enter");
+		expect(harness.askSlot()).toBe(false);
+		expect(await pending).toMatchObject({ kind: "submit", results: [{ selectedOptions: ["No"] }] });
+		expect(requestGuestUi).not.toHaveBeenCalled();
+	});
+
 	it("shows an ask above a populated prompt, which keeps the keys until they move to the ask", async () => {
 		const harness = makeHarness();
 		harness.composer.setText("finish this word");

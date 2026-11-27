@@ -1057,6 +1057,7 @@ describe("guest ask multi-select Next", () => {
 					id: "q1",
 					question: "Pick several?",
 					options: [{ label: "Option A" }, { label: "Option B" }],
+					allowCustomInput: false,
 					multi: true,
 				},
 			];
@@ -1064,6 +1065,7 @@ describe("guest ask multi-select Next", () => {
 
 			const first = await nextUiRequest(guest);
 			expect(selectLabels(first)).toContain("Next →");
+			expect(selectLabels(first)).not.toContain("Other (type your own)");
 			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Next →" });
 
 			const settled = await result;
@@ -1096,6 +1098,7 @@ describe("guest ask multi-select Next", () => {
 				{
 					id: "q1",
 					question: "Pick\r\rone?",
+					allowCustomInput: false,
 					options: [{ label: "Retry\rnow", description: "Try\r\ragain." }, { label: "Abort" }],
 				},
 			];
@@ -1104,6 +1107,7 @@ describe("guest ask multi-select Next", () => {
 			const first = await nextUiRequest(guest);
 			expect(JSON.stringify(first.request)).not.toContain("\r");
 			expect(selectLabels(first).slice(0, 2)).toEqual(["Retry now", "Abort"]);
+			expect(selectLabels(first)).not.toContain("Other (type your own)");
 
 			// Guest answers with the sanitized display label.
 			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Retry now" });

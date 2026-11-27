@@ -254,7 +254,10 @@ export class ExtensionUiController {
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
+			askDialogCapabilities: Object.freeze({ allowCustomInput: true }),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
+			localAskDialog: (questions, dialogOptions) =>
+				this.#showLocalAskDialog(normalizeDialogQuestions(questions), dialogOptions),
 			formDialog: (html, dialogOptions) => this.showFormDialog(html, dialogOptions),
 			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
@@ -1326,18 +1329,21 @@ export class ExtensionUiController {
 		// ignored at result build, as before.
 		const resolveGuestLabel = (value: string): string => originalByDisplay.get(value) ?? value;
 		const displayQuestion = sanitizeCarriageReturns(question.question);
-		const baseOptions: CollabUiSelectItem[] = question.options.map((option, index) =>
+		const options: CollabUiSelectItem[] = question.options.map((option, index) =>
 			option.description?.trim()
 				? { label: displayLabels[index]!, description: sanitizeCarriageReturns(option.description.trim()) }
 				: displayLabels[index]!,
 		);
+		const allowCustomInput = question.allowCustomInput !== false;
+		if (allowCustomInput) options.push(ASK_OTHER_OPTION);
+		// Next is always offered: an empty multi-select answer is the guest's to give, as in the local dialog.
+		if (question.multi) options.push(ASK_NEXT_OPTION);
+		options.push(ASK_CHAT_OPTION);
 		if (question.multi) {
 			while (true) {
 				const checkedIndices = question.options
 					.map((option, index) => (selected.has(option.label) ? index : -1))
 					.filter(index => index >= 0);
-				// Next is always offered: an empty answer is the guest's to give, as in the local dialog.
-				const options = [...baseOptions, ASK_OTHER_OPTION, ASK_NEXT_OPTION, ASK_CHAT_OPTION];
 				const choice = await this.#requestGuestUiString(
 					host,
 					{
@@ -1355,7 +1361,7 @@ export class ExtensionUiController {
 				if (choice.kind === "cancelled") return undefined;
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
 				if (choice.value === ASK_NEXT_OPTION) break;
-				if (choice.value === ASK_OTHER_OPTION) {
+				if (allowCustomInput && choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
 						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },
@@ -1384,7 +1390,7 @@ export class ExtensionUiController {
 					{
 						kind: "select",
 						title: displayQuestion,
-						options: [...baseOptions, ASK_OTHER_OPTION, ASK_CHAT_OPTION],
+						options,
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
@@ -1395,7 +1401,7 @@ export class ExtensionUiController {
 				if (choice.kind === "unavailable") return "unavailable";
 				if (choice.kind === "cancelled") return undefined;
 				if (choice.value === ASK_CHAT_OPTION) return "chat";
-				if (choice.value === ASK_OTHER_OPTION) {
+				if (allowCustomInput && choice.value === ASK_OTHER_OPTION) {
 					const input = await this.#requestGuestUiString(
 						host,
 						{ kind: "editor", title: boundPromptTitle("Custom answer: ", displayQuestion) },

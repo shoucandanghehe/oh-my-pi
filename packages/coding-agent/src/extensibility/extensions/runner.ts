@@ -256,6 +256,7 @@ function createHandlerUIContext(
 	timeoutBudget?: HandlerTimeoutBudget,
 ): ExtensionUIContext {
 	const askDialog = ui.askDialog;
+	const localAskDialog = ui.localAskDialog;
 	const formDialog = ui.formDialog;
 	const approve = ui.approve;
 	const runDialog = async <T>(dialog: () => Promise<T>): Promise<T> => {
@@ -276,6 +277,10 @@ function createHandlerUIContext(
 		askDialog: askDialog
 			? (questions, dialogOptions) =>
 					runDialog(() => askDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
+			: undefined,
+		localAskDialog: localAskDialog
+			? (questions, dialogOptions) =>
+					runDialog(() => localAskDialog.call(ui, questions, attachHandlerSignal(dialogOptions, handlerSignal)))
 			: undefined,
 		formDialog: formDialog
 			? (html, dialogOptions) =>
@@ -312,7 +317,7 @@ function createHandlerUIContext(
 			runDialog(() => ui.editor(title, prefill, attachHandlerSignal(dialogOptions, handlerSignal), editorOptions)),
 	} satisfies Pick<
 		ExtensionUIContext,
-		"select" | "confirm" | "input" | "askDialog" | "formDialog" | "approve" | "custom" | "editor"
+		"select" | "confirm" | "input" | "askDialog" | "localAskDialog" | "formDialog" | "approve" | "custom" | "editor"
 	>;
 	const delegatedMethods = new Map<PropertyKey, unknown>();
 

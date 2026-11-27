@@ -633,7 +633,7 @@ Cancelable pre-events:
 - `session_before_tree` → `{ cancel?: boolean; summary?: { summary: string; details?: unknown } }`
 - `session_before_shutdown` → `{ cancel?: boolean }`
 
-Pre-events are gates: handlers may ask the operator before deciding, so time spent awaiting a host dialog (`ctx.ui.select`, `confirm`, `input`, `askDialog`, `formDialog`, `approve`, `editor`, a presented `custom` component) does not count against the 30-second handler budget. The `signal` on `session_before_compact` and `session_before_tree` is cooperative: pass it to your own work, but the operation still waits for your handler. The `signal` on `session_before_shutdown` releases the close: on abort the host stops waiting, closes your pending dialogs, and ignores a late result.
+Pre-events are gates: handlers may ask the operator before deciding, so time spent awaiting a host dialog (`ctx.ui.select`, `confirm`, `input`, `askDialog`, `localAskDialog`, `formDialog`, `approve`, `editor`, a presented `custom` component) does not count against the 30-second handler budget. The `signal` on `session_before_compact` and `session_before_tree` is cooperative: pass it to your own work, but the operation still waits for your handler. The `signal` on `session_before_shutdown` releases the close: on abort the host stops waiting, closes your pending dialogs, and ignores a late result.
 
 `session_before_branch` and `session_branch` carry `reason`, which decides what `session_before_branch.entryId` means. For `"branch"` (`branch(entryId)`, `/branch`) it is the user message being rewound: it and everything after it are dropped. For `"fork"` (`AgentSession.fork(entryId)`, RPC `fork` with an `entryId`) and `"btw"` (`/btw` promotion) it is the last entry kept in the new session.
 
@@ -1070,7 +1070,7 @@ before and performs no extra syscalls.
 
 Supported:
 
-- dialogs: `select`, `confirm`, `input` (honors `ExtensionUIDialogOptions.secret` by masking typed characters as bullets), `editor`, optional `askDialog`
+- dialogs: `select`, `confirm`, `input` (honors `ExtensionUIDialogOptions.secret` by masking typed characters as bullets), `editor`, optional `askDialog` and `localAskDialog`
 - input editing: `setEditorText`, `getEditorText`, `pasteToEditor`, `editor`; `supportsEditor` indicates whether paste updates a local or remote composer (absent means unsupported)
 - autocomplete stacking: `addAutocompleteProvider(factory)` wraps the built-in editor provider (factories apply in registration order and re-apply on every slash-command refresh)
 - terminal title and working message (`setTitle`, `setWorkingMessage`)
@@ -1080,6 +1080,10 @@ Supported:
 - `rerenderMessage(timestamp)`: draws the assistant reply with that `message.timestamp` again, re-running the [assistant text renderers](#assistant-text-renderer); a no-op while `extensionRenderers.assistantText` is off
 - `refreshTranscript(ids)`: asks the [transcript presenters](#transcript-presenter) again for the blocks with those ids and redraws the ones whose display changed
 - `getLinkClicksAvailable()`: whether picking a [claimed link](#extension-link-schemes), by its hint tag or a click, raises `link_activate` right now
+
+`askDialog` lets either the host or a collaboration guest answer. `localAskDialog` takes the same questions and options, but never sends a guest UI request. It is unavailable in RPC, ACP and headless modes. If a decision must be host-local, do not fall back to `askDialog`.
+
+Set `ExtensionAskDialogQuestion.allowCustomInput` to `false` to hide the free-text “Other” answer for that question. It defaults to `true`. Check `ctx.ui.askDialogCapabilities?.allowCustomInput === true` when fixed choices are required: the interactive TUI honors the flag on both the host and collaboration guest.
 
 Current no-op methods in this controller:
 
@@ -1261,7 +1265,7 @@ backends turn argv into shell text, under the required POSIX grammar assertion.
 Unsupported/no-op in RPC implementation:
 
 - `onTerminalInput`
-- `custom`; optional `askDialog` is absent
+- `custom` and `localAskDialog`; `askDialog` is absent unless the client enables it with `set_ask_dialog`
 - `getEditorText` returns `""`; `composer` is absent
 - `setFooter`, `setHeader`, `addAutocompleteProvider`
 - `setWorkingMessage`

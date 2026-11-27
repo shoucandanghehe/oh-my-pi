@@ -2425,6 +2425,7 @@ export default function (pi) {
 							ctx.ui.notify("Waiting for confirmation");
 							await new Promise(resolve => setTimeout(resolve, 8));
 							await ctx.ui.confirm("High-risk command", "Allow this command?");
+							await ctx.ui.localAskDialog([{ id: "host", question: "Allow?", options: [{ label: "Yes" }] }]);
 							await ctx.ui.custom(() => ({}));
 							ctx.ui.notify("Custom settled");
 							await Promise.withResolvers().promise;
@@ -2457,6 +2458,12 @@ export default function (pi) {
 				dialogSignal?.addEventListener("abort", () => dialog.resolve(false), { once: true });
 				return await dialog.promise;
 			};
+			const localStarted = Promise.withResolvers<AbortSignal | undefined>();
+			const localAnswer = Promise.withResolvers<undefined>();
+			const localAskDialog: NonNullable<ExtensionUIContext["localAskDialog"]> = (_questions, options) => {
+				localStarted.resolve(options?.signal);
+				return localAnswer.promise;
+			};
 			const customDialog = Promise.withResolvers<void>();
 			let customSignal: AbortSignal | undefined;
 			const custom: ExtensionUIContext["custom"] = async <T>(...args: Parameters<ExtensionUIContext["custom"]>) => {
@@ -2468,6 +2475,7 @@ export default function (pi) {
 			};
 			const uiPrototype = Object.create(runner.getUIContext(), {
 				confirm: { value: confirm },
+				localAskDialog: { value: localAskDialog },
 				custom: { value: custom },
 				notify: { value: notify },
 			});
@@ -2504,18 +2512,23 @@ export default function (pi) {
 				expect(dialogSignal?.aborted).toBe(false);
 
 				dialog.resolve(true);
+				const localSignal = await localStarted.promise;
+				now += 100;
+				vi.advanceTimersByTime(100);
+				expect(localSignal?.aborted).toBe(false);
+				localAnswer.resolve(undefined);
 				await customStarted.promise;
 				expect(customSignal).toBeDefined();
 				expect(customSignal?.aborted).toBe(false);
 
-				now = 208;
+				now += 100;
 				vi.advanceTimersByTime(100);
 				expect(customSignal?.aborted).toBe(false);
 
 				customDialog.resolve();
 				await customCompleted.promise;
 
-				now = 225;
+				now += 17;
 				vi.advanceTimersByTime(17);
 				await Promise.resolve();
 				await Promise.resolve();
