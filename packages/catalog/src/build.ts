@@ -21,7 +21,15 @@ import {
 	NO_RECURRING_TARIFF,
 	parseDatedCostCards,
 } from "./pricing";
-import { type Api, type EffectiveTokenCost, type InputModality, MODEL_KINDS, type Model, type ModelCost, type ModelSpec } from "./types";
+import {
+	type Api,
+	type EffectiveTokenCost,
+	type InputModality,
+	MODEL_KINDS,
+	type Model,
+	type ModelCost,
+	type ModelSpec,
+} from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {

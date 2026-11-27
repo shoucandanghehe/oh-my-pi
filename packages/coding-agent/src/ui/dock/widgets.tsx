@@ -16,7 +16,16 @@
  * a band-shaped composer closes while the status row above it draws (the
  * working row brings its own blank row). Natively the dock spaces itself.
  */
-import { type Accessor, computed, For, type JSXNode, onCleanup, signal, structural, structuralEffect } from "@oh-my-pi/pi-tui";
+import {
+	type Accessor,
+	computed,
+	For,
+	type JSXNode,
+	onCleanup,
+	signal,
+	structural,
+	structuralEffect,
+} from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { logger } from "@oh-my-pi/pi-utils";
 import {

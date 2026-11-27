@@ -7,11 +7,7 @@ import type { Settings } from "../../config/settings";
 import type { ExtensionRunner } from "../../extensibility/extensions/runner";
 import type { TranscriptBlock, TranscriptPresentation } from "../../extensibility/extensions/render-types";
 import { messageFace } from "../../modes/interactive/messages";
-import {
-	cfgDisplayAdvisorCollapsedLines,
-	cfgDisplayToolActivity,
-	cfgTerminalShowImages,
-} from "../../modes/settings";
+import { cfgDisplayAdvisorCollapsedLines, cfgDisplayToolActivity, cfgTerminalShowImages } from "../../modes/settings";
 import {
 	messageBlock,
 	onTranscriptPresentersChanged,

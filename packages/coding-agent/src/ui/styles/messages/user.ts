@@ -134,7 +134,7 @@ function paintUser(node: UiNode, cx: PaintContext): Block {
 	if (rows.length === 0) return EMPTY_BLOCK;
 	if (cx.height === 1) {
 		const row = firstContentRow(rows);
-		return { rows: [rows[row]!], textRows: [textRows[row]] };
+		return { rows: [rows[row]!], textRows: [textRows?.[row]] };
 	}
 	const term = termOf<UserTerm>(node);
 	if (term.steered || term.reaction !== undefined) {
