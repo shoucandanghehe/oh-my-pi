@@ -252,13 +252,13 @@ test.skipIf(process.platform !== "linux")("Windows Tern receives WSL links and p
 					"vscode://file/home/alice/note.md:42:7",
 				);
 				const embed = EmbedFigure({
-					embed: { kind: "iframe", src: "./a #1.html", label: "Page" },
+					embed: { kind: "iframe", src: "file:///home/alice/a%20%231.html?view=wide#page", label: "Page" },
 					showImages: true,
 					host: { cwd: () => "/home/alice" },
 				});
 				const page = typeof embed === "function" ? embed() : embed;
 				if (!isUiNode(page)) throw new Error("expected a page node");
-				const pageHref = "file://wsl.localhost/Ubuntu-24.04/home/alice/a%20%231.html";
+				const pageHref = "file://wsl.localhost/Ubuntu-24.04/home/alice/a%20%231.html?view=wide#page";
 				expect(describeTree(page, env)).toMatchObject({ k: "web", p: { url: pageHref } });
 				expect(paintNode(env, page, 80).rows.join("\n")).toContain(pageHref);
 			} finally {
