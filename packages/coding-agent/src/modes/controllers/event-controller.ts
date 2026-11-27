@@ -29,7 +29,7 @@ import {
 	readArgsHaveTarget,
 } from "../../session/transcript/read-tool-group";
 import { isReplyWrite, replyDisplayMessage, toolResultReplies } from "../../session/transcript/reply-write";
-import { canonicalizeMessage } from "../../session/transcript/thinking-display";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import {
 	asyncJobState,
 	isSettledJobFrame,
@@ -72,8 +72,8 @@ import { TurnUsageTally, turnElapsedMs } from "../view-model/overlays/usage-row"
 import { isWarpCliAgentProtocolActive } from "../warp-events";
 import { ComposerPredictionController } from "./composer-prediction-controller";
 import { recapBlock, todoReminderBlock, ttsrBlock, usageRowBlock } from "./event-blocks";
-import { StreamingRevealController } from "./streaming-reveal";
-import { toolArgsRevealTarget, ToolArgsRevealController } from "./tool-args-reveal";
+import { StreamingRevealController } from "@oh-my-pi/pi-tui/chat/streaming-reveal";
+import { toolArgsRevealTarget, ToolArgsRevealController } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
 

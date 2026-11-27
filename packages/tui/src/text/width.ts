@@ -156,7 +156,7 @@ function measureWidth(text: string): number {
 	return width;
 }
 
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+export const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** One grapheme, or one escape sequence, of styled text. */
 export interface Piece {
@@ -175,7 +175,7 @@ export function pieces(text: string): Piece[] {
 			out.push({ text: token.text, width: sized ? sizedWidth(token.text) : 0, escape: !sized });
 			continue;
 		}
-		for (const { segment } of segmenter.segment(token.text)) {
+		for (const { segment } of graphemeSegmenter.segment(token.text)) {
 			out.push({ text: segment, width: visibleWidth(segment), escape: false });
 		}
 	}

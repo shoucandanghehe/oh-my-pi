@@ -1,8 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	decodeStreamedToolArgs,
-	streamingStringKeysForTool,
-} from "@oh-my-pi/pi-coding-agent/modes/controllers/tool-args-reveal";
+import { decodeStreamedToolArgs, streamingStringKeysForTool } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 
 describe("streamed write args decode", () => {
 	it("shows content grown past the last throttled parse when rebuilt mid-stream", () => {

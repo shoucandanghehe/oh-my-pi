@@ -1,10 +1,9 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
-import { batch } from "@oh-my-pi/pi-tui";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { formatThinkingForDisplay, hasDisplayableThinking } from "../../session/transcript/thinking-display";
-import { getSegmenter } from "../../utils/text-width";
-import type { AssistantView } from "../types";
+import { batch, type Signal } from "../reactive";
+import { graphemeSegmenter } from "../text/width";
+import { formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
 
 export const STREAMING_REVEAL_FRAME_MS = 1000 / 30;
 export const MIN_STEP = 3;
@@ -13,7 +12,10 @@ export const CATCHUP_FRAMES = 8;
 type AssistantContentBlock = AssistantMessage["content"][number];
 type DisplayThinkingContentBlock = Extract<AssistantContentBlock, { type: "thinking" }> & { rawThinking?: string };
 /** Where the reveal draws: the streaming reply's signals (each frame is a transient update). */
-export type StreamingRevealTarget = Pick<AssistantView, "message" | "transient">;
+export interface StreamingRevealTarget {
+	readonly message: Signal<AssistantMessage | undefined>;
+	readonly transient: Signal<boolean>;
+}
 type GraphemeSlicer = (index: number, text: string, units: number) => string;
 
 type StreamingRevealControllerOptions = {
@@ -37,7 +39,7 @@ function countGraphemes(text: string): number {
 	const cached = graphemeCountCache.get(text);
 	if (cached !== undefined) return cached;
 	let count = 0;
-	for (const _segment of getSegmenter().segment(text)) {
+	for (const _segment of graphemeSegmenter.segment(text)) {
 		count += 1;
 	}
 	graphemeCountCache.set(text, count);
@@ -49,7 +51,7 @@ function countGraphemes(text: string): number {
 function countGraphemesFrom(text: string, start: number): { count: number; tailStart: number } {
 	let count = 0;
 	let tailStart = start;
-	for (const seg of getSegmenter().segment(start === 0 ? text : text.slice(start))) {
+	for (const seg of graphemeSegmenter.segment(start === 0 ? text : text.slice(start))) {
 		count += 1;
 		tailStart = start + seg.index;
 	}
@@ -63,7 +65,7 @@ function segmentFrom(text: string, start: number, clusters: number): { end: numb
 	let count = 0;
 	let lastStart = start;
 	let end = start;
-	for (const seg of getSegmenter().segment(start === 0 ? text : text.slice(start))) {
+	for (const seg of graphemeSegmenter.segment(start === 0 ? text : text.slice(start))) {
 		count += 1;
 		lastStart = start + seg.index;
 		end = start + seg.index + seg.segment.length;
@@ -126,7 +128,7 @@ export class BlockUnitCounter {
 function sliceGraphemes(text: string, units: number): string {
 	if (units <= 0 || text.length === 0) return "";
 	let count = 0;
-	for (const { index, segment } of getSegmenter().segment(text)) {
+	for (const { index, segment } of graphemeSegmenter.segment(text)) {
 		count += 1;
 		if (count >= units) {
 			const end = index + segment.length;

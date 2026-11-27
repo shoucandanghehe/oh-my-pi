@@ -8,12 +8,7 @@ import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { Settings } from "../src/config/settings";
-import {
-	BlockUnitCounter,
-	buildDisplayMessage,
-	nextStep,
-	visibleUnits,
-} from "../src/modes/controllers/streaming-reveal";
+import { BlockUnitCounter, buildDisplayMessage, nextStep, visibleUnits } from "@oh-my-pi/pi-tui/chat/streaming-reveal";
 import type { ToolSession } from "../src/tools";
 import { ReadTool } from "../src/tools/read";
 import { Composer } from "../src/ui/composer/composer";

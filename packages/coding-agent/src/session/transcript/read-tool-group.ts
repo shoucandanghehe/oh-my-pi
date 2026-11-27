@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { splitUrlScheme } from "../../internal-urls/url-scheme";
-import { canonicalizeMessage } from "./thinking-display";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 
 /**
  * Extract the read call's target path. `path` is the canonical arg; `file_path`

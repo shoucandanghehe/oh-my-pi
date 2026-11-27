@@ -4,6 +4,9 @@
  */
 import { mathSpanAt } from "@oh-my-pi/pi-utils/math-delimiters";
 
+/** Match a Markdown fenced-code opener and capture its indentation and marker. */
+export const FENCE_RE = /^( {0,3})([`~]{3,})/;
+
 const FENCE_LINE = /^((?:[ \t]*>)*)([ \t]*)(`{3,}|~{3,})(.*)$/;
 const LIST_ITEM = /^(?:[ \t]*>)*([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)\S/;
 

@@ -249,6 +249,7 @@
       "name": "@oh-my-pi/pi-tui",
       "version": "19.2.1",
       "dependencies": {
+        "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",

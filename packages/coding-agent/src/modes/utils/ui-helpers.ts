@@ -44,7 +44,7 @@ import { ToolActivity } from "../../ui/transcript/messages/panel";
 import { normalizeBlobExtension } from "../../utils/image-format";
 import { imageAttachmentSource } from "../../utils/image-source";
 import { previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
-import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../controllers/tool-args-reveal";
+import { decodeStreamedToolArgs, streamingStringKeysForTool } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 import { recapBlock, usageRowBlock } from "../controllers/event-blocks";
 import { extractVisibleAssistantText } from "../rpc/rpc-live";
 import {

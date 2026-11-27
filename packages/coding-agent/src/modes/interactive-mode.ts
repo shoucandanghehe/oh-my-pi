@@ -177,7 +177,7 @@ import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 
 import { resumeCommand } from "../utils/resume-command";
-import { messageHasDisplayableThinking } from "../session/transcript/thinking-display";
+import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import type { TokenRateMeter } from "../utils/token-rate";
 import {
 	type BlockedKind,
@@ -821,7 +821,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 	/** Record received reasoning content so Ctrl+T can reveal it even when model metadata says thinking is off. */
 	noteDisplayableThinkingContent(message: AgentMessage): boolean {
-		if (this.hasDisplayableThinkingContent || !messageHasDisplayableThinking(message, this.proseOnlyThinking)) {
+		if (
+			message.role !== "assistant" ||
+			this.hasDisplayableThinkingContent ||
+			!messageHasDisplayableThinking(message, this.proseOnlyThinking)
+		) {
 			return false;
 		}
 		this.#sessionsWithDisplayableThinkingContent.add(this.viewSession);

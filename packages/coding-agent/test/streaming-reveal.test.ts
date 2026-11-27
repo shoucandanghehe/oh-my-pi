@@ -10,7 +10,7 @@ import {
 	STREAMING_REVEAL_FRAME_MS,
 	StreamingRevealController,
 	visibleUnits,
-} from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
+} from "@oh-my-pi/pi-tui/chat/streaming-reveal";
 import { getSegmenter } from "@oh-my-pi/pi-coding-agent/utils/text-width";
 
 function makeUsage(): AssistantMessage["usage"] {

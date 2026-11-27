@@ -66,9 +66,6 @@ export const PREVIEW_LIMITS = {
 	DIFF_COLLAPSED_LINES: 40,
 } as const;
 
-/** Match a Markdown fenced-code opener and capture its indentation and marker. */
-export const FENCE_RE = /^( {0,3})([`~]{3,})/;
-
 /** Default display width reserved for a resolved model badge. */
 export const FEED_MODEL_BADGE_WIDTH = 30;
 

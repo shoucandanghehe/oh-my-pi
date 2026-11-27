@@ -1,4 +1,4 @@
-import { FENCE_RE } from "../../../utils/render-utils";
+import { FENCE_RE } from "@oh-my-pi/pi-tui/text/markdown/stream";
 
 /**
  * Markdown structure awareness for the magic-keyword affordances (see

@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { FENCE_RE } from "../../utils/render-utils";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { FENCE_RE } from "../text/markdown/stream";
 
 // Small per-mode MRU memo for formatThinkingForDisplay. During a streaming
 // tick the same growing thinking text is formatted up to three times (reveal
@@ -359,8 +359,7 @@ export function hasDisplayableThinking(
 }
 
 /** Whether an assistant message contains thinking content the TUI can reveal. */
-export function messageHasDisplayableThinking(message: AgentMessage, proseOnly: boolean): boolean {
-	if (message.role !== "assistant") return false;
+export function messageHasDisplayableThinking(message: AssistantMessage, proseOnly: boolean): boolean {
 	for (const content of message.content) {
 		if (content.type !== "thinking") continue;
 		if (hasDisplayableThinking(content.thinking, formatThinkingForDisplay(content.thinking, proseOnly))) {

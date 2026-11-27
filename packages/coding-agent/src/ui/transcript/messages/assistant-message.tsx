@@ -50,7 +50,7 @@ import {
 	canonicalizeMessage,
 	formatThinkingForDisplay,
 	hasDisplayableThinking,
-} from "../../../session/transcript/thinking-display";
+} from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { resolveAssistantErrorPresentation } from "../../../session/transcript/transcript-render-helpers";
 import type {
 	AssistantTextRenderer,

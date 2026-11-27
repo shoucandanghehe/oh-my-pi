@@ -5,7 +5,7 @@ import { runWithOwner, signal, untrack } from "@oh-my-pi/pi-tui";
 import type { Settings } from "../../config/settings";
 import { formatModelString } from "../../config/model-resolver";
 import { cfgMcpRenderMarkdownResults } from "../../mcp/settings";
-import { toolArgsRevealTarget, ToolArgsRevealController } from "../../modes/controllers/tool-args-reveal";
+import { toolArgsRevealTarget, ToolArgsRevealController } from "@oh-my-pi/pi-tui/chat/tool-args-reveal";
 import { cfgDisplayShellVisualization, cfgDisplaySmoothStreaming } from "../../modes/settings";
 import { type AgentViewSession, isLocalAgentSession } from "../../session/agent-session-handle";
 import type { AgentSessionEvent } from "../../session/agent-session-events";

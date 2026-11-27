@@ -2,7 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { replaceTabs, truncateToWidth } from "../../utils/text-width";
 import { TRUNCATE_LENGTHS } from "../../utils/render-utils";
-import { canonicalizeMessage } from "./thinking-display";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
 
