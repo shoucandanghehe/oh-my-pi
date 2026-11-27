@@ -7243,7 +7243,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#quitHostOwned(130);
 			return true;
 		}
-		const signal = this.#beginClose(paused ? "Saving paused session…" : "Closing session…");
+		const signal = this.#beginClose();
+		if (paused) this.showStatus("Saving paused session…");
 		// Reversible decisions first: nothing has been stopped yet, so a refusal
 		// leaves the session exactly as it was.
 		const confirmed = !cancellable || (await this.session.confirmClose(signal));
@@ -7416,15 +7417,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
 	}
 
-	/**
-	 * Claim the one-shot `shutdown()`/`restart()` close and acknowledge it before
-	 * any await: worktree exit planning, live commands, and BTW history writes can
-	 * all stall, and the user must see a reason for the pause.
-	 */
-	#beginClose(status = "Closing session…"): AbortSignal {
+	/** Claim the one-shot `shutdown()`/`restart()` close before any await. */
+	#beginClose(): AbortSignal {
 		this.#isShuttingDown = true;
 		this.#closeAttempt = new AbortController();
-		this.showStatus(status);
 		return this.#closeAttempt.signal;
 	}
 
@@ -7444,8 +7440,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#abortLoopCondition();
 		this.#cancelLoopAutoSubmit();
 
-		// Report progress only once the teardown itself lingers, so a fast close
-		// stays silent and time spent in exit prompts never counts.
+		// Escalate only once teardown itself lingers; time spent in exit prompts
+		// never counts, and a fast normal exit or restart stays silent.
 		const stillClosingTimer = setTimeout(() => {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);

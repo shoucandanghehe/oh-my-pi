@@ -196,11 +196,14 @@ describe("InteractiveMode pre-quit extension gate", () => {
 				return late.promise;
 			};
 			const pausedExit = vi.spyOn(session, "disposeForPausedExit");
+			const showStatus = vi.spyOn(mode, "showStatus");
 			agentPauseGate.pause();
 			try {
 				const quitting = pendingQuit ? mode.shutdown() : undefined;
 				const signal = pendingQuit ? await entered.promise : undefined;
-				expect(await mode.shutdownWhilePaused()).toBe(true);
+				const saving = mode.shutdownWhilePaused();
+				expect(showStatus.mock.calls).toEqual([["Saving paused session…"]]);
+				expect(await saving).toBe(true);
 				await quitting;
 				expect(signal?.aborted).toBe(pendingQuit ? true : undefined);
 				expect(attempts).toBe(pendingQuit ? 1 : 0);
