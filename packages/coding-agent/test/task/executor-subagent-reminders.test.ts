@@ -597,7 +597,9 @@ describe("runSubprocess yield reminders", () => {
 		expect(sessionOptions?.toolNames).toEqual(["read"]);
 		const systemPromptBuilder = sessionOptions?.systemPrompt;
 		if (typeof systemPromptBuilder !== "function") throw new Error("Expected system prompt builder");
-		expect(systemPromptBuilder(["system"])?.at(-1)).toContain("your final message is your result");
+		expect(systemPromptBuilder(["system"])?.at(-1)).toContain(
+			"Your final message is your result; it reaches Main verbatim and ends the run.",
+		);
 		expect(prompts).toHaveLength(1);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toBe(report);
