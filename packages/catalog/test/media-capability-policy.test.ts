@@ -20,7 +20,7 @@ const APIS = [
 	"apple-foundation-models",
 	"bedrock-converse-stream",
 	"google-generative-ai",
-	"google-gemini-cli",
+	"google-interactions",
 	"antigravity-acp",
 	"google-vertex",
 	"ollama-chat",
@@ -69,7 +69,7 @@ const EXPECTED: Record<KnownApi, Expected> = {
 		["text", "image", "audio", "video"],
 		["text", "image"],
 	],
-	"google-gemini-cli": [
+	"google-interactions": [
 		["text", "image"],
 		["text", "image"],
 	],

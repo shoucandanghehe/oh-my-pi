@@ -23,6 +23,7 @@ import type {
 	AssistantMessage,
 	Context,
 	ImageContent,
+	MediaContent,
 	Model,
 	StreamFunction,
 	StreamOptions,
@@ -157,7 +158,7 @@ interface InteractionEvent {
 // ---------------------------------------------------------------------------
 
 function userContent(
-	content: string | readonly (TextContent | ImageContent)[],
+	content: string | readonly (TextContent | MediaContent)[],
 	supportsImages: boolean,
 ): InteractionContent[] {
 	if (typeof content === "string") {
@@ -167,6 +168,9 @@ function userContent(
 	const parts: InteractionContent[] = [];
 	let omittedImages = false;
 	for (const item of content) {
+		if (item.type === "audio" || item.type === "video") {
+			throw new AIError.ValidationError(`Google Interactions cannot encode ${item.type} input`);
+		}
 		if (item.type === "text") {
 			const text = item.text.toWellFormed();
 			if (text.trim()) parts.push({ type: "text", text });
@@ -181,9 +185,12 @@ function userContent(
 }
 
 function toolResultValue(
-	content: readonly (TextContent | ImageContent)[],
+	content: readonly (TextContent | MediaContent)[],
 	supportsImages: boolean,
 ): string | InteractionContent[] {
+	const unsupported = content.find(item => item.type === "audio" || item.type === "video");
+	if (unsupported)
+		throw new AIError.ValidationError(`Google Interactions cannot encode ${unsupported.type} tool results`);
 	const text = content
 		.filter((item): item is TextContent => item.type === "text")
 		.map(item => item.text)
@@ -220,7 +227,7 @@ export function convertInteractionSteps(model: Model<"google-interactions">, con
 				type: "function_result",
 				call_id: msg.toolCallId,
 				name: msg.toolName,
-				result: toolResultValue(msg.content, supportsImages),
+				result: toolResultValue(msg.content, (model.toolResultInput ?? model.input).includes("image")),
 				is_error: msg.isError,
 			});
 			continue;

@@ -86,7 +86,7 @@ export const BUILTIN_MEDIA_POLICIES: Readonly<Record<KnownApi, MediaTransportPol
 	"apple-foundation-models": unsupported(),
 	"bedrock-converse-stream": unsupported(),
 	"google-generative-ai": { user: GOOGLE_MEDIA, toolResult: NONE },
-	"google-gemini-cli": unsupported(),
+	"google-interactions": unsupported(),
 	"antigravity-acp": unsupported(),
 	"google-vertex": { user: GOOGLE_MEDIA, toolResult: NONE },
 	"ollama-chat": unsupported(),

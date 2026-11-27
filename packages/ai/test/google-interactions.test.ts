@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { streamGoogleInteractions } from "@oh-my-pi/pi-ai/providers/google-interactions";
+import { convertInteractionSteps, streamGoogleInteractions } from "@oh-my-pi/pi-ai/providers/google-interactions";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, AssistantMessageEvent, Context, FetchImpl, Model, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -138,6 +138,16 @@ async function drain(stream: AsyncIterable<AssistantMessageEvent>): Promise<Assi
 }
 
 describe("Gemini Interactions request", () => {
+	it("rejects audio input rather than relabeling it as an image", () => {
+		expect(() =>
+			convertInteractionSteps(hydrogen, {
+				messages: [
+					{ role: "user", content: [{ type: "audio", mimeType: "audio/wav", data: "YQ==" }], timestamp: 0 },
+				],
+			}),
+		).toThrow("cannot encode audio input");
+	});
+
 	it("replays mixed history as ordered steps: own signed thoughts, foreign calls unsigned-safe, images", async () => {
 		const ownTurn: AssistantMessage = {
 			role: "assistant",
@@ -159,6 +169,21 @@ describe("Gemini Interactions request", () => {
 			stopReason: "toolUse",
 			timestamp: 2,
 		};
+		expect(() =>
+			convertInteractionSteps(hydrogen, {
+				messages: [
+					ownTurn,
+					{
+						role: "toolResult",
+						toolCallId: "call_1",
+						toolName: "read_file",
+						content: [{ type: "video", mimeType: "video/mp4", data: "Yg==" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+			}),
+		).toThrow("cannot encode video tool results");
 		const foreignTurn: AssistantMessage = {
 			...ownTurn,
 			api: "anthropic-messages",
