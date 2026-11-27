@@ -767,6 +767,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		composer = new Composer({
 			sendable: false,
 			placeholder: `Message ${agentId}`,
+			hideFocusedPlaceholder: true,
 			deferSubmit: replay => pasteBarrier.hold(replay),
 		});
 		composer.setNativePlaceholder(`Message ${agentId}`);

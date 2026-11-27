@@ -295,6 +295,8 @@ export interface ComposerOptions {
 	readonly history?: readonly string[];
 	/** The placeholder the terminal shows on an empty draft (none by default). */
 	readonly placeholder?: TspText;
+	/** Keep the terminal placeholder for unfocused panes only; notices still appear while focused. */
+	readonly hideFocusedPlaceholder?: boolean;
 	/** Shape id (`box` default; unknown ids draw as `box`). */
 	readonly shape?: string;
 	readonly paddingX?: number;
@@ -2073,6 +2075,9 @@ export class Composer {
 				placeholder:
 					this.#notice() ??
 					(this.#shownPrediction() || (terminal && this.#faint()) ? null : (this.#placeholder() ?? null)),
+				...(this.#options.hideFocusedPlaceholder && this.#notice() === undefined
+					? { hideFocusedPlaceholder: true }
+					: {}),
 				...(sel ? { selection: { from: sel.from, to: sel.to } } : {}),
 				caretOverflow: caretOverflow(shape(), paddingX),
 				...(this.#caretGlyph() ? { caretGlyph: this.#caretGlyph() } : {}),

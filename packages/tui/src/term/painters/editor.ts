@@ -325,6 +325,8 @@ export type EditorTerm = {
 	readonly caretEnd?: "bar" | "block" | "none";
 	/** The placeholder the terminal shows instead of `placeholder`; null shows none. */
 	readonly placeholder?: TspText | null;
+	/** Hide the terminal placeholder while this field has focus. */
+	readonly hideFocusedPlaceholder?: boolean;
 	/** The selection drawn instead of `anchor`…`cursor`, as `[from, to)` (Vim's inclusive visual modes). */
 	readonly selection?: { readonly from: number; readonly to: number } | null;
 	/** Cells right of the wrap width an end-of-row caret may take (padding the chrome lends it). */
@@ -582,8 +584,8 @@ export function paintField(node: UiNode, cx: PaintContext, options?: { wrap?: bo
 	}
 	const bottom = Math.min(rows.length, top + (Number.isFinite(limit) ? limit : rows.length));
 
-	const placeholder =
-		text === "" ? (term?.placeholder !== undefined ? term.placeholder : (props.placeholder ?? null)) : null;
+	const hint = term?.placeholder !== undefined ? term.placeholder : (props.placeholder ?? null);
+	const placeholder = text === "" && !(focused && term?.hideFocusedPlaceholder) ? hint : null;
 
 	const out: string[] = [];
 	const textRows: TextRow[] = [];
