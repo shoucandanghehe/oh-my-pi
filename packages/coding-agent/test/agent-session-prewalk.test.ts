@@ -2062,9 +2062,10 @@ describe("AgentSession prewalk", () => {
 	});
 	// With `todo.eager=always`, an armed prewalk's plan flow owns todo creation, so
 	// the forced eager-todo prelude ("call todo first this turn") must yield to the
-	// prewalk plan nudge ("write a complete plan first, then todo") instead of
-	// sending both contradictory hidden messages.
+	// prewalk plan nudge instead of sending both contradictory hidden messages.
 	describe("eager-todo prelude", () => {
+		const prewalkPlanMarker = "Consolidate the investigation into an execution plan";
+
 		function messageText(message: AgentMessage): string {
 			if (!("content" in message)) return "";
 			const content = message.content;
@@ -2137,19 +2138,19 @@ describe("AgentSession prewalk", () => {
 
 		it("suppresses the forced eager-todo prelude while prewalk is armed", async () => {
 			const text = await collectInjectedText({ prewalk: "handoff" });
-			expect(text.includes("write complete plan")).toBe(true);
+			expect(text).toContain(prewalkPlanMarker);
 			expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(false);
 		});
 
 		it("still injects the forced eager-todo prelude when prewalk is not armed", async () => {
 			const text = await collectInjectedText({ prewalk: "off" });
-			expect(text.includes("write complete plan")).toBe(false);
+			expect(text).not.toContain(prewalkPlanMarker);
 			expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
 		});
 
 		it("keeps the forced eager-todo prelude when the armed prewalk is a no-op", async () => {
 			const text = await collectInjectedText({ prewalk: "noop" });
-			expect(text.includes("write complete plan")).toBe(false);
+			expect(text).not.toContain(prewalkPlanMarker);
 			expect(text.includes("You MUST call") && text.includes("first in this turn")).toBe(true);
 		});
 	});
