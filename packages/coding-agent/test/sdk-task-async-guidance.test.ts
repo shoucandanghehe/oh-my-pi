@@ -166,7 +166,8 @@ describe("SDK async task guidance", () => {
 		const description = requests[1].taskDescription;
 		expect(description).toContain("Inspect the named target");
 		expect(description).toContain(deliveryGuidance);
-		expect(description).not.toContain("proc://");
+		expect(description).toContain("`read proc://<id>` inspects status/output without consuming delivery");
+		expect(description).toContain("`write proc://<id>/kill` cancels/stops");
 		expect(description).not.toContain("`solutionSpace`");
 	});
 
