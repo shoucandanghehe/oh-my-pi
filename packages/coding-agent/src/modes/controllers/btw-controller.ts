@@ -54,6 +54,7 @@ import type { DroppedPrompt, PausedExitParticipant } from "../../session/agent-s
 import { cfgBtwInject } from "../settings";
 import type { NativeWorkspaceSurface } from "../native-workspace/workspace";
 import { conversationPosition } from "../utils/conversation-position";
+import { materializeImageChipLinks } from "../utils/ui-helpers";
 import { shiftImageMarkers } from "../view-model/prompt/composer-attachments";
 import { mergeQueueEntries, parseQueueShorthand, splitQueuedMessages } from "../view-model/prompt/queue-input";
 import type { InteractiveModeContext } from "../types";
@@ -1137,48 +1138,6 @@ export class BtwController {
 		key ??= this.#createThread(workspace, question);
 		const thread = key && manager.thread(key);
 		if (!thread) return false;
-		const shorthand = parseQueueShorthand(question);
-		const queueBody = command?.name === "queue" ? command.args : shorthand;
-		const parts = queueBody === undefined ? [question] : splitQueuedMessages(queueBody);
-		if (!parts.length && input.images.length) parts.push("");
-		if (!parts.length) {
-			this.ctx.showError("Usage: /queue <message>");
-			return false;
-		}
-		const messages: CompactionQueuedMessage[] = parts.map((part, index) => ({
-			text: part,
-			mode: queueBody === undefined ? mode : "followUp",
-			images: index === 0 ? input.images : undefined,
-			imageLinks: index === 0 ? input.imageLinks : undefined,
-		}));
-		for (const message of messages) {
-			const parsed = parseSlashCommand(message.text);
-			if (!parsed) continue;
-			if (parsed.name === "compact") {
-				const compact = parseCompactArgs(parsed.args);
-				const error =
-					"error" in compact
-						? compact.error
-						: message.images?.length
-							? "/compact does not accept attachments"
-							: undefined;
-				if (error) {
-					this.ctx.showError(error);
-					return false;
-				}
-			} else if (parsed.name === "tree" && queueBody === undefined && message.mode === "steer") {
-				if (parsed.args || message.images?.length) {
-					this.ctx.showError("Usage: /tree");
-					return false;
-				}
-			} else if (
-				queueBody !== undefined &&
-				(lookupBuiltinSlashCommand(parsed.name) || this.ctx.isKnownSlashCommand(message.text))
-			) {
-				this.ctx.showError(`This command cannot be queued in BTW: /${parsed.name}`);
-				return false;
-			}
-		}
 		const state = threadSubmissions.get(thread) ?? { tail: Promise.resolve(), generation: 0 };
 		threadSubmissions.set(thread, state);
 		const generation = state.generation;
@@ -1191,6 +1150,15 @@ export class BtwController {
 			if (!stillCurrent()) throw new Error("BTW input interrupted before submission");
 			const session = await manager.session(thread.key);
 			if (!stillCurrent()) throw new Error("BTW input interrupted before submission");
+			const result = await session.emitInteractiveInput(question, input.images);
+			if (!stillCurrent()) throw new Error("BTW input interrupted before submission");
+			if (result?.handled) return;
+			const prepared = result?.text?.trim() ?? question;
+			const images = result?.images ?? input.images;
+			if (!prepared && !images.length) return;
+			const imageLinks =
+				result?.images === undefined ? input.imageLinks : await materializeImageChipLinks(images, session.sessionManager);
+			const messages = this.#parseThreadInput(prepared, images, imageLinks, mode);
 			for (const [index, message] of messages.entries()) {
 				try {
 					if (!stillCurrent()) throw new Error("BTW input interrupted before submission");
@@ -1209,6 +1177,52 @@ export class BtwController {
 			if (this.#owns(workspace)) this.ctx.showError(sanitizeErrorLine(error));
 		});
 		return true;
+	}
+
+	#parseThreadInput(
+		question: string,
+		images: ImageContent[],
+		imageLinks: (string | undefined)[],
+		mode: "steer" | "followUp",
+	): CompactionQueuedMessage[] {
+		const command = parseSlashCommand(question);
+		const shorthand = parseQueueShorthand(question);
+		const queueBody = command?.name === "queue" ? command.args : shorthand;
+		const parts = queueBody === undefined ? [question] : splitQueuedMessages(queueBody);
+		if (!parts.length && images.length) parts.push("");
+		if (!parts.length) throw new Error("Usage: /queue <message>");
+		const messages: CompactionQueuedMessage[] = parts.map((part, index) => ({
+			text: part,
+			mode: queueBody === undefined ? mode : "followUp",
+			images: index === 0 ? images : undefined,
+			imageLinks: index === 0 ? imageLinks : undefined,
+		}));
+		for (const message of messages) {
+			const parsed = parseSlashCommand(message.text);
+			if (!parsed) continue;
+			if (parsed.name === "compact") {
+				const compact = parseCompactArgs(parsed.args);
+				const error =
+					"error" in compact
+						? compact.error
+						: message.images?.length
+							? "/compact does not accept attachments"
+							: undefined;
+				if (error) throw new Error(error);
+			} else if (parsed.name === "tree" && queueBody === undefined && message.mode === "steer") {
+				if (parsed.args || message.images?.length) throw new Error("Usage: /tree");
+			} else if (
+				lookupBuiltinSlashCommand(parsed.name) ||
+				this.ctx.isKnownSlashCommand(message.text)
+			) {
+				throw new Error(
+					queueBody === undefined
+						? `This command is not available in BTW: /${parsed.name}`
+						: `This command cannot be queued in BTW: /${parsed.name}`,
+				);
+			}
+		}
+		return messages;
 	}
 
 	#restoreThreadDraft(

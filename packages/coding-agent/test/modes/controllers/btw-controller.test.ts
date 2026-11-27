@@ -1430,6 +1430,19 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		sideStreamFn: mock.stream,
 		toolRegistry: new Map([[lookup.name, lookup]]),
 		builtInToolNames: new Set([lookup.name]),
+		preparedExtensions: [
+			{
+				path: "side-input",
+				resolvedPath: "side-input",
+				error: null,
+				factory: api => {
+					api.on("input", event => {
+						if (event.text === "consume side input") return { handled: true };
+						if (event.text === "/queue rewrite side input") return { text: "/queue follow-up in the first topic" };
+					});
+				},
+			},
+		],
 	});
 	vi.spyOn(main, "generateTitle").mockResolvedValue(null);
 	const compact = vi.spyOn(AgentSession.prototype, "compact").mockImplementation(async function (this: AgentSession) {
@@ -1512,8 +1525,10 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(mock.calls).toHaveLength(1);
 		expect(inlineText(ctx.shell)).toBe("");
 
-		send("follow-up in the first topic");
+		send("consume side input");
+		send("/queue rewrite side input");
 		await drawn("reply for follow-up in the first topic", true);
+		expect(mock.calls).toHaveLength(2);
 		send("/handoff");
 		await drawn("Send to Main");
 		expect(press("enter", { afterPaste: true })).toBe(true);
