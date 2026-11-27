@@ -198,14 +198,15 @@ async function checkoutMergeRequest(
 	options: { mrRef: string | undefined; repo: string | undefined; force: boolean },
 ): Promise<MrCheckoutOutcome> {
 	const { mrRef, repo, force } = options;
+	const cwd = session.cwd;
 	if (mrRef?.startsWith("-")) {
 		throw new ToolError(`Invalid MR identifier '${mrRef}'. Pass an MR IID, URL, or branch name.`);
 	}
 	const urlParsed = parseGitlabMrUrl(mrRef);
-	const ref = await resolveGitlabProject(session.cwd, repo, urlParsed.project, signal);
-	const iid = await resolveGitlabMrIid(session.cwd, ref, mrRef, signal);
+	const ref = await resolveGitlabProject(cwd, repo, urlParsed.project, signal);
+	const iid = await resolveGitlabMrIid(cwd, ref, mrRef, signal);
 	const mr = await glabApiJson<GlMrApi>(
-		session.cwd,
+		cwd,
 		ref.host,
 		`projects/${encodeProjectPath(ref.path)}/merge_requests/${iid}`,
 		undefined,
@@ -218,7 +219,7 @@ async function checkoutMergeRequest(
 	const isCrossRepository =
 		mr.source_project_id != null && mr.target_project_id != null && mr.source_project_id !== mr.target_project_id;
 
-	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
+	const repoRoot = await requireGitRepoRoot(cwd, signal);
 	const primaryRepoRoot = await requirePrimaryGitRepoRoot(repoRoot, signal);
 
 	let sourceProject: GlProjectApi | undefined;
@@ -241,7 +242,7 @@ async function checkoutMergeRequest(
 		const hasLocalOnlyOrigin = Boolean(originUrl && !parseGitUrl(originUrl));
 		if (!matched && !hasLocalOnlyOrigin) {
 			sourceProject = await glabApiJson<GlProjectApi>(
-				session.cwd,
+				cwd,
 				ref.host,
 				`projects/${encodeProjectPath(ref.path)}`,
 				undefined,
@@ -252,7 +253,7 @@ async function checkoutMergeRequest(
 
 	const projectKey = ref.full.toLowerCase();
 	const localBranch = mrLocalBranchName(projectKey, mrIid);
-	const worktreePath = getWorktreeDir(`${localBranch}-${hashPath(primaryRepoRoot)}`);
+	const worktreePath = getWorktreeDir(cwd, `${localBranch}-${hashPath(primaryRepoRoot)}`);
 	const mrWebUrl = mr.web_url ?? `https://${ref.host}/${ref.path}/-/merge_requests/${mrIid}`;
 
 	return withRepoLock(
@@ -356,6 +357,7 @@ async function checkoutMergeRequest(
 					localBranch,
 					{
 						detach: false,
+						excludePaths: [path.dirname(worktreePath)],
 						clone: cfgWorktreeClone.get(session.settings),
 						backend: parseIsolationBackend(cfgIsolationBackend.get(session.settings)),
 					},
