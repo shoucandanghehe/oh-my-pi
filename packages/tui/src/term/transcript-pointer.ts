@@ -5,17 +5,33 @@ import { coveredCells } from "../driver/output/ansi";
 import type { UiNode } from "../node";
 import type { Theme } from "../theme/contract";
 import type { SelectionMotion } from "./backend";
-import { plainTranscriptText, styleTranscriptCells, transcriptLine } from "./transcript-cells";
+import type { Block } from "./paint";
+import {
+	plainTranscriptText,
+	reflowCell,
+	selectedText,
+	styleTranscriptCells,
+	transcriptLine,
+} from "./transcript-cells";
 import type { TranscriptDocument } from "./transcript-document";
 import { TranscriptWheel } from "./transcript-wheel";
 
-interface PointerWindow {
-	readonly doc: TranscriptDocument;
+type SelectionDocument = Pick<TranscriptDocument, "entry" | "at" | "line" | "rows">;
+
+interface SelectionView {
+	nodes(): readonly UiNode[];
+	block(node: UiNode): Block;
+	readonly doc: SelectionDocument;
 	readonly top: number;
 	readonly width: number;
-	readonly rows: number;
+	readonly screenTop: number;
 	/** Actual visible document rows, excluding padding, indicator and dock. */
 	readonly content: number;
+}
+
+interface PointerWindow extends SelectionView {
+	readonly rows: number;
+	dock(): SelectionView;
 	readonly scrollbar: boolean;
 }
 
@@ -25,6 +41,7 @@ interface PointerHost {
 	scroll(delta: number): void;
 	scrollTo(offset: number): void;
 	now(): number;
+	requestRender(): void;
 	wheelLines(): number;
 	copyOnSelect(): boolean;
 	copy?: (text: string) => void;
@@ -34,6 +51,7 @@ interface PointerHost {
 interface Span {
 	node: UiNode;
 	row: number;
+	block: Block;
 	text: string;
 	start: number;
 	end: number;
@@ -68,9 +86,9 @@ function wordAt(text: string, offset: number): [number, number] {
 	return [start, end];
 }
 
-function spanAt(view: PointerWindow, pointer: Pointer, unit: Unit): Span | undefined {
+function spanAt(view: SelectionView, pointer: Pointer, unit: Unit): Span | undefined {
 	if (view.content === 0) return undefined;
-	const row = view.top + Math.max(0, Math.min(view.content - 1, pointer.row));
+	const row = view.top + Math.max(0, Math.min(view.content - 1, pointer.row - view.screenTop));
 	const entry = view.doc.at(row);
 	if (!entry) return undefined;
 	const { text, cells } = transcriptLine(view.doc.line(row));
@@ -92,34 +110,42 @@ function spanAt(view: PointerWindow, pointer: Pointer, unit: Unit): Span | undef
 			end = right.col + right.width;
 		}
 	}
-	return { node: entry.node, row: row - entry.top - entry.lead, text, start, end };
+	return { node: entry.node, row: row - entry.top - entry.lead, block: view.block(entry.node), text, start, end };
 }
 
 function sameSpan(a: Span, b: Span): boolean {
 	return a.node === b.node && a.row === b.row && a.start === b.start && a.end === b.end && a.text === b.text;
 }
 
+function spanOrder(left: Span, leftIndex: number, right: Span, rightIndex: number): number {
+	return leftIndex - rightIndex || left.row - right.row || left.start - right.start;
+}
+
 /** Document row of an endpoint. Never copy unrelated text after a block is removed or reflowed. */
-function resolve(doc: TranscriptDocument, span: Span): number | undefined {
+function resolve(doc: SelectionDocument, span: Span, view: SelectionView) {
 	const entry = doc.entry(span.node);
 	if (!entry || span.row < -entry.lead) return undefined;
-	const row = entry.top + entry.lead + span.row;
-	if (doc.at(row) !== entry || !plainTranscriptText(doc.line(row)).startsWith(span.text)) return undefined;
-	return row;
+	const raw = span.row < 0 ? "" : view.block(span.node).rows[span.row];
+	if (raw === undefined) return;
+	const text = plainTranscriptText(raw);
+	if (text.startsWith(span.text)) return entry;
+	// A stream may replace the padding after a selected prefix with more text.
+	const tail = transcriptLine(span.block.rows[span.row] ?? "").cells.findLast(cell => cell.col < span.end);
+	if (tail && text.startsWith(span.text.trimEnd()) && text.startsWith(span.text.slice(0, tail.end))) return entry;
 }
 
 interface Bounds {
 	first: number;
-	start: number;
+	left: Span;
 	last: number;
-	end: number;
+	right: Span;
 }
 
 function thumb(view: PointerWindow): { start: number; size: number; travel: number; max: number } {
 	const max = view.doc.rows - view.rows;
-	// Leave at least one travel cell when a track of two or more rows overflows.
-	const size = Math.max(1, Math.min(view.rows - 1, Math.round((view.rows * view.rows) / view.doc.rows)));
-	const travel = view.rows - size;
+	// Four vertical dot pairs per cell. Keep at least one full cell to grab.
+	const size = 4 * Math.max(1, Math.min(view.rows - 1, Math.round((view.rows * view.rows) / view.doc.rows)));
+	const travel = 4 * view.rows - size;
 	return { start: Math.round((view.top / max) * travel), size, travel, max };
 }
 
@@ -128,6 +154,8 @@ const inverse = (text: string): string => `\x1b[7m${text}\x1b[27m`;
 export class TranscriptPointer {
 	readonly #wheel = new TranscriptWheel();
 	#view?: PointerWindow;
+	#inDock = false;
+	#tailHover = false;
 	#origin?: Span;
 	#focus?: Span;
 	#unit: Unit = "cell";
@@ -142,24 +170,67 @@ export class TranscriptPointer {
 
 	constructor(readonly host: PointerHost) {}
 
+	get holdingTranscript(): boolean {
+		return !!this.#press && !this.#inDock;
+	}
+
+	#selectionView(view = this.#view!): SelectionView {
+		return this.#inDock ? view.dock() : view;
+	}
+
+	leave(): void {
+		if (!this.#tailHover) return;
+		this.#tailHover = false;
+		this.host.requestRender();
+	}
+
 	update(view: PointerWindow, rows: string[], theme: Theme): void {
 		const previous = this.#view;
-		if (previous && previous.width !== view.width) this.reset();
+		if (previous && previous.width !== view.width && this.#origin && this.#focus) {
+			const next = this.#selectionView(view);
+			const origin = this.#origin;
+			const focus = this.#focus;
+			const a = next.doc.entry(origin.node);
+			const b = next.doc.entry(focus.node);
+			const reverse = a && b && spanOrder(origin, a.index, focus, b.index) > 0;
+			const move = (span: Span, end: boolean): Span | undefined => {
+				if (!next.doc.entry(span.node)) return;
+				const block = next.block(span.node);
+				const point = reflowCell(span.block, block, { row: span.row, col: end ? span.end : span.start }, end);
+				if (point)
+					return {
+						node: span.node,
+						block,
+						row: point.row,
+						text: plainTranscriptText(block.rows[point.row] ?? ""),
+						start: point.col,
+						end: point.col,
+					};
+			};
+			this.#origin = move(origin, !!reverse);
+			this.#focus = move(focus, !reverse);
+			if (!this.#origin || !this.#focus) this.reset();
+			this.#lastClick = undefined;
+		}
 		this.#view = view;
 		if (!view.scrollbar) this.#grab = undefined;
+		if (!view.scrollbar || view.top >= view.doc.rows - view.rows) this.#tailHover = false;
 		if (this.#edge && previous?.top !== view.top) this.#extend(this.#edge);
-		const bounds = this.#bounds();
+		const selection = this.#selectionView(view);
+		const bounds = this.#bounds(selection, selection.doc);
 		if (bounds) {
 			for (
-				let row = Math.max(bounds.first, view.top);
-				row <= Math.min(bounds.last, view.top + view.content - 1);
+				let row = Math.max(bounds.first, selection.top);
+				row <= Math.min(bounds.last, selection.top + selection.content - 1);
 				row++
 			) {
-				const y = row - view.top;
+				const y = row - selection.top + selection.screenTop;
+				const entry = selection.doc.at(row)!;
+				const fact = selection.block(entry.node).textRows?.[row - entry.top - entry.lead];
 				rows[y] = styleTranscriptCells(
 					rows[y]!,
-					row === bounds.first ? bounds.start : 0,
-					row === bounds.last ? bounds.end : view.width,
+					Math.max(row === bounds.first ? bounds.left.start : 0, fact?.start ?? 0),
+					Math.min(row === bounds.last ? bounds.right.end : selection.width, fact?.end ?? Infinity),
 					inverse,
 				);
 			}
@@ -167,11 +238,22 @@ export class TranscriptPointer {
 		if (!view.scrollbar) return;
 		const { start, size } = thumb(view);
 		const track = theme.fg("dim", "│");
-		const handle = theme.fg(this.#grab === undefined ? "muted" : "accent", this.#grab === undefined ? "┃" : "█");
+		const dots = [0x09, 0x12, 0x24, 0xc0];
 		for (let y = 0; y < view.rows; y++) {
 			// Padding a continuation row would overwrite cells occupied by the scaled heading above.
 			if (coveredCells(rows, y) > 0) continue;
-			rows[y] = withImageGutter(rows[y]!, view.width, y >= start && y < start + size ? handle : track);
+			let mask = 0;
+			for (let dot = 0; dot < 4; dot++) {
+				const at = y * 4 + dot;
+				if (at >= start && at < start + size) mask |= dots[dot]!;
+			}
+			const control =
+				y === view.rows - 1 && view.top < view.doc.rows - view.rows
+					? theme.fg("accent", this.#tailHover ? inverse("▽") : "▽")
+					: mask
+						? theme.fg(this.#grab === undefined ? "muted" : "accent", String.fromCodePoint(0x2800 + mask))
+						: track;
+			rows[y] = withImageGutter(rows[y]!, view.width, control);
 		}
 	}
 
@@ -179,54 +261,72 @@ export class TranscriptPointer {
 		this.#stopEdge();
 		this.#wheel.reset();
 		this.#origin = this.#focus = this.#press = this.#grab = this.#lastClick = undefined;
+		this.#inDock = false;
+		this.#tailHover = false;
 		this.#active = false;
 		this.#preferredColumn = undefined;
 	}
 
 	/** Losing focus or mouse reporting cannot leave a drag waiting for a release that will never come. */
 	blur(): boolean {
-		const changed = (!!this.#press && this.#active) || this.#grab !== undefined;
+		const changed = (!!this.#press && this.#active) || this.#grab !== undefined || this.#tailHover;
+		this.#tailHover = false;
 		if (this.#press || this.#grab !== undefined) this.reset();
 		this.#lastClick = undefined;
 		this.#wheel.reset();
 		return changed;
 	}
 
-	#bounds(doc = this.#view?.doc): Bounds | undefined {
-		if (!doc || !this.#origin || !this.#focus) return undefined;
-		const a = resolve(doc, this.#origin);
-		const b = resolve(doc, this.#focus);
-		if (a === undefined || b === undefined) {
+	#bounds(view: SelectionView, doc: SelectionDocument): Bounds | undefined {
+		const origin = this.#origin;
+		const focus = this.#focus;
+		if (!origin || !focus) return;
+		const a = resolve(doc, origin, view);
+		const b = resolve(doc, focus, view);
+		if (!a || !b) {
 			this.reset();
 			return undefined;
 		}
 		if (!this.#active) return undefined;
-		const bounds =
-			a < b || (a === b && this.#origin.start <= this.#focus.start)
-				? { first: a, start: this.#origin.start, last: b, end: this.#focus.end }
-				: { first: b, start: this.#focus.start, last: a, end: this.#origin.end };
-		return bounds.first !== bounds.last || bounds.start < bounds.end ? bounds : undefined;
+		const left = spanOrder(origin, a.index, focus, b.index) <= 0;
+		const first = a.top + a.lead + origin.row;
+		const last = b.top + b.lead + focus.row;
+		return left
+			? { first, left: origin, last, right: focus }
+			: { first: last, left: focus, last: first, right: origin };
 	}
 
 	copy(): boolean {
 		if (!this.#active || !this.host.copy || !this.host.available()) return false;
-		const doc = this.host.document();
-		const bounds = this.#bounds(doc);
+		const view = this.#selectionView();
+		const doc = this.#inDock ? view.doc : this.host.document();
+		const bounds = this.#bounds(view, doc);
 		if (!bounds) return false;
-		const lines: string[] = [];
-		for (let row = bounds.first; row <= bounds.last; row++) {
-			const raw = doc.line(row);
-			if (row !== bounds.first && row !== bounds.last) {
-				lines.push(plainTranscriptText(raw).trimEnd());
-				continue;
+		const chunks: string[] = [];
+		const first = doc.entry(bounds.left.node)!;
+		const last = doc.entry(bounds.right.node)!;
+		const nodes = view.nodes();
+		for (let i = first.index; i <= last.index; i++) {
+			const node = nodes[i]!;
+			const block = view.block(node);
+			const entry = doc.entry(node);
+			if (!entry || !block.rows.length) continue;
+			const from = i === first.index ? bounds.left.row : -entry.lead;
+			const to = i === last.index ? bounds.right.row : block.rows.length - 1;
+			for (let r = from; r <= to; r++) {
+				const fact = block.textRows?.[r];
+				if (chunks.length) chunks.push(fact?.join ?? "\n");
+				chunks.push(
+					selectedText(
+						block.rows[r] ?? "",
+						fact,
+						i === first.index && r === from ? bounds.left.start : 0,
+						i === last.index && r === to ? bounds.right.end : Infinity,
+					),
+				);
 			}
-			const { text, cells } = transcriptLine(raw);
-			const left =
-				row === bounds.first ? (cells.find(cell => cell.col + cell.width > bounds.start)?.start ?? text.length) : 0;
-			const right = row === bounds.last ? (cells.findLast(cell => cell.col < bounds.end)?.end ?? 0) : text.length;
-			lines.push(text.slice(left, right).trimEnd());
 		}
-		const text = lines.join("\n");
+		const text = chunks.join("");
 		if (!text) return false;
 		this.host.copy(text);
 		return true;
@@ -235,20 +335,21 @@ export class TranscriptPointer {
 	/** Keyboard selection moves the active end, never the fixed anchor (even after crossing it). */
 	adjust(motion: SelectionMotion): boolean {
 		if (!this.#active || !this.host.available()) return false;
-		const doc = this.host.document();
-		if (!this.#bounds(doc)) return false;
+		const view = this.#selectionView();
+		const doc = this.#inDock ? view.doc : this.host.document();
+		const bounds = this.#bounds(view, doc);
+		if (!bounds) return false;
 		if (motion === "clear") {
 			this.reset();
 			return true;
 		}
 		this.#stopEdge();
 		this.#press = this.#lastClick = undefined;
-		const view = this.#view!;
 		const origin = this.#origin!;
 		const focus = this.#focus!;
-		const a = resolve(doc, origin)!;
-		let row = resolve(doc, focus)!;
-		const reversed = row < a || (row === a && focus.start < origin.start);
+		const reversed = bounds.left !== origin;
+		const a = reversed ? bounds.last : bounds.first;
+		let row = reversed ? bounds.first : bounds.last;
 		const anchor = reversed ? origin.end : origin.start;
 		let caret = reversed ? focus.start : focus.end;
 		let line = transcriptLine(doc.line(row));
@@ -284,17 +385,25 @@ export class TranscriptPointer {
 		}
 		this.#origin = { ...origin, start: anchor, end: anchor };
 		const entry = doc.at(row)!;
-		this.#focus = { node: entry.node, row: row - entry.top - entry.lead, text: line.text, start: caret, end: caret };
+		this.#focus = {
+			node: entry.node,
+			block: view.block(entry.node),
+			row: row - entry.top - entry.lead,
+			text: line.text,
+			start: caret,
+			end: caret,
+		};
 		this.#active = row !== a || anchor !== caret;
+		if (this.#inDock) return true;
 		if (row < view.top) this.host.scrollTo(row);
 		else if (row >= view.top + view.content)
-			this.host.scrollTo(Math.min(doc.rows - view.rows, Math.max(0, row - view.rows + 2)));
+			this.host.scrollTo(Math.min(doc.rows - this.#view!.rows, Math.max(0, row - this.#view!.rows + 2)));
 		return true;
 	}
 
 	#extend(pointer: Pointer): void {
 		if (!this.#view || !this.#press) return;
-		const target = spanAt(this.#view, pointer, this.#unit);
+		const target = spanAt(this.#selectionView(), pointer, this.#unit);
 		if (!target) return;
 		this.#focus = target;
 		this.#active = this.#unit !== "cell" || !sameSpan(this.#origin!, target) || pointer.col !== this.#press.col;
@@ -328,13 +437,27 @@ export class TranscriptPointer {
 
 	#scrollThumb(row: number): void {
 		const { travel, max } = thumb(this.#view!);
-		if (travel > 0) this.host.scrollTo(Math.round((Math.min(travel, Math.max(0, row - this.#grab!)) * max) / travel));
+		if (travel > 0)
+			this.host.scrollTo(Math.round((Math.min(travel, Math.max(0, 4 * row - this.#grab!)) * max) / travel));
 	}
 
 	/** Continue the existing press before hit-testing the current pointer location. */
-	capture(mouse: MouseEvent, row: number): boolean {
+	capture(mouse: MouseEvent & { readonly rowFraction?: number }, row: number): boolean {
+		const view = this.#view;
+		const hover =
+			!!view?.scrollbar && view.top < view.doc.rows - view.rows && row === view.rows - 1 && mouse.col === view.width;
+		if (this.#tailHover !== hover) {
+			this.#tailHover = hover;
+			this.host.requestRender();
+		}
+		const y = row + (mouse.rowFraction ?? 0);
 		if (!this.#view || (!this.#press && this.#grab === undefined)) return false;
 		if (mouse.action === "press" && !mouse.button.startsWith("wheel-")) {
+			if (mouse.button === "right" && this.#active) {
+				this.#stopEdge();
+				this.#press = undefined;
+				return false; // Let the pane copy the held range before clearing it.
+			}
 			this.reset(); // A new press without a release supersedes the previous gesture.
 			return false;
 		}
@@ -344,9 +467,9 @@ export class TranscriptPointer {
 			return false;
 		}
 		if (this.#grab !== undefined) {
-			if (row !== this.#thumbRow) {
-				this.#thumbRow = row;
-				this.#scrollThumb(row);
+			if (y !== this.#thumbRow) {
+				this.#thumbRow = y;
+				this.#scrollThumb(y);
 			}
 			if (mouse.action === "release") this.#grab = undefined;
 			return true;
@@ -359,13 +482,13 @@ export class TranscriptPointer {
 			if (this.host.copyOnSelect()) this.copy();
 		} else {
 			this.#lastClick = undefined;
-			this.#autoScroll(pointer);
+			if (!this.#inDock) this.#autoScroll(pointer);
 		}
 		return true;
 	}
 
 	/** A report not consumed by a widget or layer. Only unmodified left presses start a drag. */
-	input(mouse: MouseEvent, row: number): void {
+	input(mouse: MouseEvent & { readonly rowFraction?: number }, row: number): void {
 		const view = this.#view;
 		if (!view || mouse.action !== "press") return;
 		if (mouse.button === "wheel-up" || mouse.button === "wheel-down") {
@@ -377,11 +500,16 @@ export class TranscriptPointer {
 		if (mouse.button !== "left" || mouse.mods.length) return;
 		if (view.scrollbar && mouse.col === view.width && row >= 0 && row < view.rows) {
 			this.reset();
+			if (row === view.rows - 1 && view.top < view.doc.rows - view.rows) {
+				this.host.scrollTo(view.doc.rows - view.rows);
+				return;
+			}
 			const { start, size } = thumb(view);
-			const grabbed = row >= start && row < start + size;
-			this.#grab = grabbed ? row - start : Math.floor(size / 2);
-			this.#thumbRow = row;
-			if (!grabbed) this.#scrollThumb(row);
+			const y = row + (mouse.rowFraction ?? 0);
+			const grabbed = row * 4 < start + size && (row + 1) * 4 > start;
+			this.#grab = grabbed ? y * 4 - start : Math.floor(size / 8) * 4;
+			this.#thumbRow = y;
+			if (!grabbed) this.#scrollThumb(y);
 			return;
 		}
 		// The indicator is an explicit jump to the live tail, not selectable transcript text.
@@ -390,13 +518,20 @@ export class TranscriptPointer {
 			this.host.scrollTo(view.doc.rows - view.rows);
 			return;
 		}
-		if (row < 0 || row >= view.content || mouse.col < 0 || mouse.col >= view.width) {
+		this.#inDock = row >= view.rows;
+		const source = this.#selectionView();
+		if (
+			row < source.screenTop ||
+			row >= source.screenTop + source.content ||
+			mouse.col < 0 ||
+			mouse.col >= source.width
+		) {
 			this.reset();
 			return;
 		}
 		this.#preferredColumn = undefined;
 		const pointer = { row, col: mouse.col };
-		const word = spanAt(view, pointer, "word");
+		const word = spanAt(source, pointer, "word");
 		if (!word) return;
 		const previous = this.#lastClick;
 		const time = this.host.now();
@@ -404,7 +539,7 @@ export class TranscriptPointer {
 			previous && time - previous.time <= 500 && sameSpan(previous.word, word) ? (previous.count % 3) + 1 : 1;
 		this.#lastClick = { word, time, count };
 		this.#unit = count === 2 ? "word" : count === 3 ? "row" : "cell";
-		this.#origin = this.#focus = this.#unit === "word" ? word : spanAt(view, pointer, this.#unit);
+		this.#origin = this.#focus = this.#unit === "word" ? word : spanAt(source, pointer, this.#unit);
 		this.#press = pointer;
 		this.#active = count > 1;
 	}

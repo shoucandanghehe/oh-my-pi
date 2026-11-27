@@ -131,7 +131,7 @@ it("uses fullscreen, keeps its reading point and flushes the transcript only on 
 	await withHost(
 		surface,
 		async ({ host, memory, term, screen }) => {
-			const transcript = () => screen().map(row => row.replace(/[│┃█]$/u, "").trimEnd());
+			const transcript = () => screen().map(row => row.replace(/[│▽\u2800-\u28ff]$/u, "").trimEnd());
 			expect(host.ansiWorkspace).toBeDefined();
 			expect(surface.main().some(node => host.retired(node))).toBe(false);
 			expect(transcript()).toEqual(["live4", "live5", "live6", "live7", "dock"]);
@@ -257,23 +257,23 @@ it("drags the transcript thumb across content and returns to a live tail from th
 	}));
 	await withHost(surface, async ({ host, memory, screen }) => {
 		expect(screen()[0]).toMatch(/^item12\b/);
-		expect(screen()[3]).toMatch(/┃$/u);
+		expect(screen()[3]).toMatch(/⣿$/u);
 		await afterFrame(host, () => memory.feed("\x1b[<0;12;4M"));
 		expect(screen()[0]).toMatch(/^item12\b/);
 		await afterFrame(host, () => memory.feed("\x1b[<32;2;2M\x1b[<0;2;2m"));
 		expect(screen()[0]).toMatch(/^item4\b/);
-		expect(screen()[3]).toMatch(/│$/u);
+		expect(screen()[3]).toMatch(/▽$/u);
 		await afterFrame(host, () => lines.set([...lines(), "item16"]));
 		expect(screen()[0]).toMatch(/^item4\b/);
 		await afterFrame(host, () => memory.feed("\x1b[<0;12;4M\x1b[<0;12;4m"));
-		expect(screen()[3]).toMatch(/^item16\s+┃$/u);
+		expect(screen()[3]).toMatch(/^item16\s+⣿$/u);
 		await afterFrame(host, () => lines.set([...lines(), "item17"]));
-		expect(screen()[3]).toMatch(/^item17\s+┃$/u);
+		expect(screen()[3]).toMatch(/^item17\s+⣿$/u);
 		expect(screen()[4]).toBe("dock");
 	});
 });
 
-it("clears a transcript selection on rewrap without losing the selected text from view", async () => {
+it("keeps the same selected text when it rewraps onto a different row", async () => {
 	const copied: string[] = [];
 	const surface = createSurface(() => ({
 		main: <text>alpha bravo ch x</text>,
@@ -290,8 +290,8 @@ it("clears a transcript selection on rewrap without losing the selected text fro
 				memory.resize(7, ROWS);
 			});
 			expect(screen()[1]).toBe("bravo");
-			expect(host.copySelection()).toBe(false);
-			expect(copied).toEqual(["bravo"]);
+			expect(host.copySelection()).toBe(true);
+			expect(copied).toEqual(["bravo", "bravo"]);
 		},
 		{ copySelection: text => copied.push(text) },
 	);
@@ -308,6 +308,10 @@ it("copies wide styled transcript text without the dock and requests paste only 
 	await withHost(
 		surface,
 		async ({ host, memory }) => {
+			await afterFrame(host, () => selectCells(memory, [1, 1], [4, 1]));
+			memory.feed("\x1b[<2;1;1M\x1b[<2;1;1M");
+			expect(selected.splice(0)).toEqual(["a界b"]);
+			expect(pastes).toBe(1);
 			await afterFrame(host, () => {
 				expect(
 					host.ansiWorkspace!.open("side", () => ({
@@ -326,7 +330,7 @@ it("copies wide styled transcript text without the dock and requests paste only 
 			expect(selected).toEqual(["界b\nsec"]);
 			memory.feed("\x1b[<2;1;2M\x1b[<2;1;2M");
 			expect(selected).toEqual(["界b\nsec", "界b\nsec"]);
-			expect(pastes).toBe(1);
+			expect(pastes).toBe(2);
 			expect(unhandled).toEqual([]);
 			memory.feed("\x03");
 			expect(unhandled).toEqual(["ctrl+c"]);
@@ -387,7 +391,7 @@ it("copies a transcript selection without clearing the focused editor's draft", 
 	);
 });
 
-it("copies the displayed transcript lines with hard and soft wraps", async () => {
+it("copies hard newlines and restores the exact spacing at soft breaks", async () => {
 	const copied: string[] = [];
 	const text = "alpha   bravo\nabcdefghijklmnop\nlast";
 	const surface = createSurface(() => ({
@@ -404,13 +408,13 @@ it("copies the displayed transcript lines with hard and soft wraps", async () =>
 			expect(screen()[1]).toBe("bravo");
 			await afterFrame(host, () => selectCells(memory, [1, 1], [4, 5]));
 			expect(host.copySelection()).toBe(true);
-			expect(copied).toEqual(["alpha\nbravo\nabcdefghijk\nlmnop\nlast"]);
+			expect(copied).toEqual([text]);
 		},
 		{ copySelection: text => copied.push(text) },
 	);
 });
 
-it("copies the displayed Markdown quote continuation", async () => {
+it("omits both the first quote gutter and its soft Markdown continuation gutter", async () => {
 	const copied: string[] = [];
 	const surface = createSurface(() => ({ main: <md text="> alpha **bravo**" /> }));
 	await withHost(
@@ -418,11 +422,39 @@ it("copies the displayed Markdown quote continuation", async () => {
 		async ({ host, memory, screen }) => {
 			expect(screen()[0]).toContain("alpha");
 			expect(screen()[1]).toContain("bravo");
-			await afterFrame(host, () => selectCells(memory, [3, 1], [7, 2]));
+			await afterFrame(host, () => selectCells(memory, [1, 1], [7, 2]));
 			expect(host.copySelection()).toBe(true);
-			expect(copied).toEqual(["alpha\n▏ bravo"]);
+			expect(copied).toEqual(["alpha bravo"]);
 		},
 		{ copySelection: text => copied.push(text) },
+	);
+});
+
+it("copies source indentation but neither the fence's display indent nor the line-number gutter", async () => {
+	const surface = createSurface(() => ({
+		main: [<md text={"```\n  indented\n```"} />, <code numbers text="  numbered" />],
+	}));
+	let pastes = 0;
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			const source = screen().findIndex(row => row.includes("indented")) + 1;
+			const code = screen().findIndex(row => row.includes("numbered")) + 1;
+			expect(screen()[source - 1]).toMatch(/^ {4}indented/);
+			expect(screen()[code - 1]).toContain("1   numbered");
+			for (const [y, text] of [
+				[source, "  indented"],
+				[code, "  numbered"],
+			] as const) {
+				await afterFrame(host, () => selectCells(memory, [1, y], [24, y]));
+				memory.feed(`\x1b[<2;1;${y}M`);
+				expect(memory.output.join("")).toContain(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
+			}
+			expect(pastes).toBe(0);
+			memory.feed("\x1b[<2;1;1M");
+			expect(pastes).toBe(1);
+		},
+		{ columns: 30, rows: 12, onPasteRequest: () => pastes++ },
 	);
 });
 
@@ -449,7 +481,7 @@ it("uses fullscreen word boundaries for paths and URLs and triple-clicks the dis
 	);
 });
 
-it("leaves the fixed status and editor out of transcript selections while main streams", async () => {
+it("selects status and editor text in the fixed dock while the transcript streams", async () => {
 	const copied: string[] = [];
 	const stream = signal(["row0", "row1", "row2", "row3"]);
 	const surface = createSurface(() => ({
@@ -461,13 +493,14 @@ it("leaves the fixed status and editor out of transcript selections while main s
 		surface,
 		async ({ host, memory, screen }) => {
 			await afterFrame(host, () => selectCells(memory, [2, 4], [8, 4]));
-			expect(host.copySelection()).toBe(false);
+			expect(host.copySelection()).toBe(true);
 			await afterFrame(host, () => memory.feed("\x1b[<0;1;5M\x1b[<32;6;5M"));
 			await afterFrame(host, () => stream.set([...stream(), "row4", "row5"]));
 			expect(screen()[0]).toMatch(/^row3/);
 			await afterFrame(host, () => memory.feed("\x1b[<32;11;5M\x1b[<0;11;5m"));
-			expect(host.copySelection()).toBe(false);
-			expect(copied).toEqual([]);
+			expect(screen()[4]).toContain("hello world input");
+			expect(host.copySelection()).toBe(true);
+			expect(copied).toEqual(["model  ", "hello world"]);
 		},
 		{ columns: 25, copySelection: text => copied.push(text) },
 	);

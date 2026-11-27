@@ -446,9 +446,7 @@ export class TermBackend {
 					surface,
 					isPrompt,
 					env: this.#env,
-					get copySelection() {
-						return options.copySelection ?? (split.peek() ? copyOsc52 : undefined);
-					},
+					copySelection: options.copySelection ?? copyOsc52,
 					acceptsPointer: () => {
 						const input = split.peek() ? this.#workspace.pane(id)?.input : this.#inlineInput;
 						return this.#running && this.#pointerFocused && surface.layer() === input?.layer;
@@ -1394,9 +1392,9 @@ export class TermBackend {
 			}
 		}
 		if (!pointer || cover) return;
-		if (pane && !input.layer.length && mouse.action === "press" && mouse.button === "right") {
+		if (!input.layer.length && mouse.action === "press" && mouse.button === "right") {
 			if (pointer.copySelection()) pointer.resetPointer();
-			else pane.mount.onPasteRequest?.();
+			else (pane ?? this.#workspace.main).mount.onPasteRequest?.();
 			return;
 		}
 		pointer.pointerInput(contentMouse, viewportRow);

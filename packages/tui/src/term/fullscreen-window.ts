@@ -108,18 +108,30 @@ export class FullscreenWindow {
 
 	resetPointer(): void {
 		this.#pointer?.reset();
+		this.host.requestRender();
 	}
 
 	blurPointer(): boolean {
-		return this.#pointer?.blur() ?? false;
+		const changed = this.#pointer?.blur() ?? false;
+		if (changed) this.host.requestRender();
+		return changed;
+	}
+
+	leavePointer(): void {
+		this.#pointer?.leave();
 	}
 
 	capturePointer(mouse: MouseEvent, row: number): boolean {
-		return this.#pointer?.capture(mouse, row) ?? false;
+		const captured = this.#pointer?.capture(mouse, row) ?? false;
+		if (captured) this.host.requestRender();
+		return captured;
 	}
 
 	pointerInput(mouse: MouseEvent, row: number): void {
 		this.#pointer?.input(mouse, row);
+		if (mouse.action === "press" && mouse.button === "left" && this.#pointer?.holdingTranscript)
+			this.#anchor ??= this.#window?.top;
+		if (mouse.action === "press") this.host.requestRender();
 	}
 
 	#paint(node: UiNode, width: number): Block {
@@ -296,6 +308,7 @@ export class FullscreenWindow {
 		const options = this.host;
 		return (this.#pointer ??= new TranscriptPointer({
 			available: () => this.host.acceptsPointer() && this.wheel && !this.#search,
+			requestRender: options.requestRender,
 			document: () => this.#index!.read(),
 			scroll: delta => this.scroll(delta),
 			scrollTo: offset => this.#seek(offset),
@@ -348,7 +361,7 @@ export class FullscreenWindow {
 			this.resetPointer();
 		}
 		const search = this.#search;
-		const dock: { block: Block; top: number }[] = [];
+		const dock: { node: UiNode; block: Block; top: number }[] = [];
 		let dockRows = search ? 1 : 0;
 		for (const node of search ? [] : this.#surface.dock()) {
 			const block = this.#paint(node, screenWidth);
@@ -363,7 +376,7 @@ export class FullscreenWindow {
 				)
 					skip++;
 			}
-			dock.push({ block, top: dockRows - skip });
+			dock.push({ node, block, top: dockRows - skip });
 			dockRows += block.rows.length - skip;
 		}
 		const room = Math.max(0, height - dockRows);
@@ -402,7 +415,8 @@ export class FullscreenWindow {
 		const index = first?.index ?? main.length;
 		const skip = first ? offset - first.top : 0;
 		const below = offset < maxTop ? maxTop - offset + 1 : 0; // The indicator replaces the last content row.
-		this.#anchor = below && first ? { node: first.node, row: skip } : undefined;
+		// Even at the tail, a held selection pins the last painted rows before more output arrives.
+		this.#anchor = (below || this.#pointer?.holdingTranscript) && first ? { node: first.node, row: skip } : undefined;
 		this.#remember(doc, width);
 
 		// The window: entry rows from the top down, the indicator taking its last row while anchored.
@@ -450,23 +464,11 @@ export class FullscreenWindow {
 			nodes,
 		};
 
-		this.#sessionPointer().update(
-			{
-				doc,
-				top: offset,
-				rows: room,
-				content: Math.min(content, doc.rows - offset),
-				width,
-				scrollbar: lane && room > 0 && doc.rows > room,
-			},
-			window,
-			this.host.theme(),
-		);
 		const rows = window;
 		if (search) {
 			const bar = search.bar(screenWidth, room);
 			rows.push(bar.text);
-			return { rows, cursor: { row: room, col: bar.col } };
+			cursor = { row: room, col: bar.col };
 		}
 		const dockTop = rows.length;
 		for (const placed of dock) {
@@ -484,6 +486,51 @@ export class FullscreenWindow {
 			if (cursor) cursor = cursor.row >= over ? { row: cursor.row - over, col: cursor.col } : null;
 			for (const entry of hits) entry.top -= over;
 		}
+		this.#sessionPointer().update(
+			{
+				doc,
+				nodes: this.#surface.main,
+				block: node => this.#paint(node, width),
+				screenTop: 0,
+				dock: () => {
+					// The fixed dock already has exact block placements, including partially clipped nodes.
+					const entries = dock.map(({ node, block, top }, index) => ({
+						node,
+						block,
+						top,
+						index,
+						lead: 0,
+						size: block.rows.length,
+					}));
+					const at = (row: number) => entries.find(entry => row >= entry.top && row < entry.top + entry.size);
+					const entry = (node: UiNode) => entries.find(entry => entry.node === node);
+					return {
+						doc: {
+							rows: dockRows,
+							at,
+							entry,
+							line: row => {
+								const hit = at(row);
+								return hit?.block.rows[row - hit.top] ?? "";
+							},
+						},
+						nodes: () => entries.map(e => e.node),
+						block: node => entry(node)!.block,
+						top: Math.max(0, over),
+						screenTop: room,
+						content: Math.min(height, dockRows),
+						width: screenWidth,
+					};
+				},
+				top: offset,
+				rows: room,
+				content: Math.min(content, doc.rows - offset),
+				width,
+				scrollbar: lane && room > 0 && doc.rows > room,
+			},
+			window,
+			this.host.theme(),
+		);
 		return { rows, cursor };
 	}
 }

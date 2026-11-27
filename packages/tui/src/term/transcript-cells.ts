@@ -2,7 +2,8 @@
 import { holdsImage } from "../driver/images/anchor";
 import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
 import { sgrParams, SgrState, stripEscapes, tokens } from "../text/ansi";
-import { pieces, visibleWidth } from "../text/width";
+import { pieces, type TextRow, visibleWidth } from "../text/width";
+import type { Block, Cell } from "./paint";
 
 interface TranscriptCell {
 	readonly start: number;
@@ -64,6 +65,51 @@ export function transcriptLine(row: string): TranscriptLine {
 		append(run);
 	}
 	return { text, cells };
+}
+
+/** Select logical text, not paint padding. Only an unannotated row selected to its end loses trailing blanks. */
+export function selectedText(raw: string, fact: TextRow | undefined, start = 0, end = Infinity): string {
+	if (!fact && start === 0 && end === Infinity) return plainTranscriptText(raw).trimEnd();
+	const { text, cells } = transcriptLine(raw);
+	const from = Math.max(start, fact?.start ?? 0);
+	const to = Math.min(end, fact?.end ?? Infinity);
+	if (from >= to) return "";
+	const left = cells.find(cell => cell.col + cell.width > from)?.start ?? text.length;
+	const right = cells.findLast(cell => cell.col < to)?.end ?? 0;
+	const selected = text.slice(left, right);
+	return !fact && right === text.length ? selected.trimEnd() : selected;
+}
+
+/** Move a caret through a rewrap of the same logical block, preserving its side of an empty soft break. */
+export function reflowCell(before: Block, after: Block, point: Cell, end: boolean): Cell | undefined {
+	if (point.row < 0) return point; // Block separator.
+	const layout = (block: Block) => {
+		let text = "";
+		const starts = block.rows.map((raw, i) => {
+			const fact = block.textRows?.[i];
+			if (i > 0) text += fact?.join ?? "\n";
+			const start = text.length;
+			text += selectedText(raw, fact);
+			return start;
+		});
+		return { starts, text };
+	};
+	const old = layout(before);
+	const next = layout(after);
+	if (!next.text.startsWith(old.text) || !after.rows.length || old.starts[point.row] === undefined) return;
+	const offset =
+		old.starts[point.row]! + selectedText(before.rows[point.row]!, before.textRows?.[point.row], 0, point.col).length;
+	let row = next.starts.findLastIndex(
+		(start, i) => start < offset || (start === offset && (!end || after.textRows?.[i]?.join !== "")),
+	);
+	row = Math.max(0, row);
+	const fact = after.textRows?.[row];
+	const { cells } = transcriptLine(after.rows[row]!);
+	const first = cells.find(cell => cell.col + cell.width > (fact?.start ?? 0))?.start ?? 0;
+	const at = first + offset - next.starts[row]!;
+	const last = cells.at(-1);
+	const col = cells.find(cell => cell.end > at)?.col ?? (last ? last.col + last.width : 0);
+	return { row, col: Math.min(col, fact?.end ?? Infinity) };
 }
 
 /** Style every grapheme intersecting [start,end), retaining the original control sequences and SGR state. */

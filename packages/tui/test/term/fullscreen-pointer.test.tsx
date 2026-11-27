@@ -104,7 +104,7 @@ describe("fullscreen transcript pointer", () => {
 		expect(term.backend.copySelection()).toBe(false);
 	});
 
-	it("never copies or adjusts through a modal or after a lost release; width changes invalidate stale endpoints", () => {
+	it("never copies through a modal or after a lost release, but keeps a completed selection on resize", () => {
 		const layer = mount(["transcript"], { copyOnSelect: () => false });
 		mouse("press", 0, 0);
 		mouse("drag", 0, 4);
@@ -124,7 +124,8 @@ describe("fullscreen transcript pointer", () => {
 		mouse("press", 0, 0);
 		mouse("release", 0, 5);
 		term.resize(15, 6);
-		expect(term.backend.copySelection()).toBe(false);
+		expect(term.backend.copySelection()).toBe(true);
+		expect(copied).toEqual(["transc"]);
 	});
 
 	it("retains a completed selection across focus changes but never copies replacement content or captures inline input", () => {
@@ -174,16 +175,49 @@ describe("fullscreen transcript pointer", () => {
 
 	it("maps a track click and a captured drag outside the gutter to absolute positions and resumes following at the bottom", () => {
 		mount(many);
-		expect(term.screen()[4]).toEndWith("┃");
+		expect(term.screen()[4]).toEndWith("⣿");
 		mouse("press", 0, 19);
 		expect(term.screen()[0]).toStartWith("line 0 ");
-		expect(term.screen()[0]).toEndWith("█");
+		expect(term.screen()[0]).toEndWith("⣿");
 		mouse("drag", 3, 2);
 		expect(term.screen()[0]).toStartWith("line 11 ");
 		mouse("release", 5, 2);
 		expect(term.backend.following).toBe(true);
-		expect(term.screen()[4]).toEndWith("┃");
+		expect(term.screen()[4]).toEndWith("⣿");
 		expect(copied).toEqual([]);
+	});
+
+	it("moves the thumb by dot rows and highlights only the clickable return-to-tail cell", () => {
+		mount(many);
+		term.backend.scroll("start");
+		term.backend.scroll("line-down");
+		term.render();
+		expect(term.screen()[0]).toEndWith("⣶");
+		expect(term.screen()[1]).toEndWith("⠉");
+		mouse("move", 4, 19, "none");
+		expect(term.rows()[4]).toContain("\x1b[7m▽\x1b[27m");
+		mouse("move", 4, 18, "none");
+		expect(term.rows()[4]).not.toContain("\x1b[7m▽");
+		click(4, 19);
+		expect(term.screen()[4]).toStartWith("line 19 ");
+		expect(term.backend.following).toBe(true);
+	});
+
+	it("holds the reading position from press to release when output streams at the tail", () => {
+		const lines = signal([...many.slice(0, -1), "line 19".padEnd(19)]);
+		const clipboard: string[] = [];
+		term = createTestTerminal(() => ({ main: <rows lines={lines} />, dock: <text>draft</text> }), {
+			rows: 6,
+			columns: 20,
+			screen: () => "fullscreen",
+			copySelection: text => clipboard.push(text),
+		});
+		mouse("press", 4, 0);
+		lines.set([...many.slice(0, -1), "line 19 continued", "line 20", "line 21"]);
+		term.render();
+		expect(term.screen()[4]).toStartWith("line 19 continued ");
+		mouse("release", 4, 6);
+		expect(clipboard).toEqual(["line 19"]);
 	});
 
 	it("routes the wheel over the dock, supports Alt ×5 and a fixed live override without spending a transcript row on a redundant indicator", () => {
