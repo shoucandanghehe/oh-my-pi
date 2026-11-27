@@ -1275,6 +1275,11 @@ export class InputController {
 				this.ctx.composer.pendingImageLinks.length > 0 ? [...this.ctx.composer.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
+			// A queued command belongs to the conversation at Enter, not the one shown after a hook.
+			const queueOrigin =
+				parseQueueShorthand(text) !== undefined || parseSlashCommand(text)?.name === "queue"
+					? conversationPosition(this.ctx.sessionManager)
+					: undefined;
 
 			// Input hooks pass in submission order with the follow-up key's (see `#submissionHookOrder`):
 			// `/queue` placement behind a queued `/compact` must follow the order the user sent them.
@@ -1314,6 +1319,7 @@ export class InputController {
 				await this.#queueForYield(queueBody, {
 					historyText: text,
 					detachedText: draftDetached ? text : undefined,
+					origin: queueOrigin,
 					images: inputImages,
 					imageLinks: inputImageLinks,
 				});
@@ -1340,7 +1346,12 @@ export class InputController {
 						: undefined;
 				let slashResult: string | boolean;
 				try {
-					slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+					slashResult = await executeBuiltinSlashCommand(text, {
+						ctx: this.ctx,
+						input,
+						draftDetached,
+						followUp: submittedMode === "queue" ? queueOrigin : undefined,
+					});
 				} catch (error) {
 					// Detached mode commands (plan/vibe/goal/guided-goal) rethrow so
 					// this caller — the one that took the draft's images out of the
@@ -2114,6 +2125,7 @@ export class InputController {
 	async handleQueueCommand(
 		text: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+		origin?: ConversationPosition,
 	): Promise<void> {
 		const source = detached ?? {
 			images: this.ctx.composer.pendingImages,
@@ -2121,7 +2133,7 @@ export class InputController {
 		};
 		const images = source.images?.length ? [...source.images] : undefined;
 		const imageLinks = images && source.imageLinks?.length ? [...source.imageLinks] : undefined;
-		await this.#queueForYield(text, { images, imageLinks, detachedText: detached?.text });
+		await this.#queueForYield(text, { images, imageLinks, detachedText: detached?.text, origin });
 	}
 
 	async #queueForYield(
@@ -2130,6 +2142,7 @@ export class InputController {
 			historyText?: string;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
+			origin?: ConversationPosition;
 			/** The submitted draft already left the editor; anything there now is newer. Restored on failure. */
 			detachedText?: string;
 		},
@@ -2163,7 +2176,7 @@ export class InputController {
 		this.releaseStaleYieldCompaction();
 		const session = this.ctx.session;
 		const queue = sessionCommandQueue(session);
-		const origin = conversationPosition(this.ctx.sessionManager);
+		const origin = options.origin ?? conversationPosition(this.ctx.sessionManager);
 		const hasCompact = messages.some(message => parseSlashCommand(message)?.name === "compact");
 
 		const startImmediately = !this.ctx.session.isStreaming && this.ctx.session.queuedMessageCount === 0;
@@ -2206,19 +2219,19 @@ export class InputController {
 				const message = messages[queuedCount] ?? "";
 				const queuedImages = queuedCount === 0 ? images : undefined;
 				const queuedImageLinks = queuedCount === 0 ? imageLinks : undefined;
-				if (session.isCompacting || queue.holdsInput) {
-					this.ctx.compactionQueuedMessages.push({
-						text: message,
-						mode: "followUp",
-						images: queuedImages,
-						imageLinks: queuedImageLinks,
-					});
-				} else if (parseSlashCommand(message)?.name === "compact") {
+				if (parseSlashCommand(message)?.name === "compact") {
 					await executeBuiltinSlashCommand(message, {
 						ctx: this.ctx,
 						input: { images: queuedImages, imageLinks: queuedImageLinks },
 						draftDetached: true,
 						followUp: origin,
+					});
+				} else if (session.isCompacting || queue.holdsInput) {
+					this.ctx.compactionQueuedMessages.push({
+						text: message,
+						mode: "followUp",
+						images: queuedImages,
+						imageLinks: queuedImageLinks,
 					});
 				} else {
 					await this.ctx.withLocalSubmission(message, () => session.followUp(message, queuedImages), {
@@ -2344,7 +2357,14 @@ export class InputController {
 		// A compaction queued for the next yield holds later follow-ups the same
 		// way, so they run after it.
 		this.releaseStaleYieldCompaction();
-		if (this.ctx.session.isCompacting || sessionCommandQueue(this.ctx.session).holdsInput) {
+		// Compact (including an explicit queue of it) must check its original conversation
+		// before entering even an already-held queue. The compact handler owns that decision.
+		const command = parseSlashCommand(text)?.name;
+		if (
+			command !== "compact" &&
+			command !== "queue" &&
+			(this.ctx.session.isCompacting || sessionCommandQueue(this.ctx.session).holdsInput)
+		) {
 			if (
 				text &&
 				!this.#matchesBuiltinSlashCommand(text) &&

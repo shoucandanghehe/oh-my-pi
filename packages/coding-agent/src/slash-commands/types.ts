@@ -162,8 +162,7 @@ export interface TuiSlashCommandRuntime {
 	input?: Pick<SubmittedUserInput, "images" | "imageLinks">;
 	/** The submitted draft is no longer the live editor draft. */
 	draftDetached?: boolean;
-	/** Submitted with the follow-up key from this conversation position: queue behind the active run
-	 *  rather than interrupt it. */
+	/** Conversation bound at submission by the follow-up key or an explicit queue command. */
 	followUp?: ConversationPosition;
 }
 

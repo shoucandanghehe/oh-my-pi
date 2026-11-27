@@ -9,6 +9,7 @@ import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, findCompactMode, type ParsedCompactArgs, parseCompactArgs } from "../session/compact-modes";
 import { isInterruptReason } from "../session/messages";
+import { sessionCommandQueue } from "../session/session-command-queue";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
 import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
@@ -76,13 +77,7 @@ async function handleCompact(command: ParsedSlashCommand, runtime: SlashCommandR
 }
 
 async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): Promise<void> {
-	const parsed = parseCompactionCommand(command);
-	if (!("error" in parsed) && parsed.mode === "handoff" && refuseImages(command, runtime)) return;
-	clearSubmittedText(runtime);
-	if ("error" in parsed) {
-		runtime.ctx.showWarning(parsed.error);
-		return;
-	}
+	// A queued command first verifies its owner, even when the new conversation is compacting.
 	const { ctx } = runtime;
 	const origin = runtime.followUp;
 	// A switch still applying (or rolling back) decides which conversation is live.
@@ -90,6 +85,24 @@ async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCo
 	if (origin && !continuesConversation(ctx.sessionManager, origin)) {
 		restoreDetachedDraft(ctx.composer, command.text, runtime.input?.images, runtime.input?.imageLinks);
 		ctx.showWarning(`Conversation changed before /${command.name} ran; returned it to the editor`);
+		return;
+	}
+	if (
+		origin &&
+		command.name === "compact" &&
+		(ctx.session.isCompacting || sessionCommandQueue(ctx.session).holdsInput)
+	) {
+		ctx.queueCompactionMessage(command.text, "followUp", runtime.input?.images, {
+			preserveDraft: true,
+			imageLinks: runtime.input?.imageLinks,
+		});
+		return;
+	}
+	const parsed = parseCompactionCommand(command);
+	if (!("error" in parsed) && parsed.mode === "handoff" && refuseImages(command, runtime)) return;
+	clearSubmittedText(runtime);
+	if ("error" in parsed) {
+		ctx.showWarning(parsed.error);
 		return;
 	}
 	const background = parsed.mode && findCompactMode(parsed.mode)?.background;

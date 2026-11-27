@@ -812,7 +812,7 @@ describe("InputController keybinding setup", () => {
 		const { handleCompactCommand } = withCompactionQueue(ctx);
 		Object.assign(ctx.session, { isRunActive: true });
 		const controller = new InputController(ctx);
-		ctx.handleQueueCommand = (text, detached) => controller.handleQueueCommand(text, detached);
+		ctx.handleQueueCommand = (...args) => controller.handleQueueCommand(...args);
 		controller.setupEditorSubmitHandler();
 
 		await editor.onSubmit?.("/queue /compact soft keep decisions");

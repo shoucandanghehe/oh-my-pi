@@ -13,6 +13,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { BlobPutOptions, BlobPutResult } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { sessionCommandQueue } from "@oh-my-pi/pi-coding-agent/session/session-command-queue";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -77,6 +78,12 @@ async function createHarness(factory: ExtensionFactory) {
 		settings: Settings.isolated({}),
 		keybindings: KeybindingsManager.inMemory(),
 		dictationSpaceHold: vi.fn(),
+		get yieldCompaction() {
+			return sessionCommandQueue(ctx.session).request;
+		},
+		set yieldCompaction(request: InteractiveModeContext["yieldCompaction"]) {
+			sessionCommandQueue(ctx.session).request = request;
+		},
 		compactionQueuedMessages: [],
 		skillCommands: new Map<string, Skill>(),
 		fileSlashCommands: new Set<string>(),
@@ -95,6 +102,9 @@ async function createHarness(factory: ExtensionFactory) {
 		syncIdleMaintenanceView: vi.fn(),
 		flushPendingExecRuns: vi.fn(),
 		showStatus: vi.fn(),
+		showWarning: vi.fn(),
+		runYieldCompaction: vi.fn(),
+		handleCompactCommand: vi.fn(async () => "ok" as const),
 		showError: vi.fn(),
 		handleClearCommand: vi.fn(),
 		resetDisplayAfterAppearanceRefresh: vi.fn(),
@@ -105,6 +115,8 @@ async function createHarness(factory: ExtensionFactory) {
 		isGuidedGoalInterviewActive: () => false,
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
+	ctx.flushCompactionQueue = options => helpers.flushCompactionQueue(options);
+	ctx.isKnownSlashCommand = text => helpers.isKnownSlashCommand(text);
 	ctx.queueCompactionMessage = (text, mode, images, options) =>
 		helpers.queueCompactionMessage(text, mode, images, options);
 	const controller = new InputController(ctx);
@@ -304,6 +316,64 @@ describe("interactive native input ingress", () => {
 		]);
 		expect(h.editor.expandedText()).toBe("newer [Image #1]");
 		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpg"]);
+	});
+
+	it.each([
+		{ text: "/queue /compact", key: ENTER, hold: "none" },
+		{ text: "-> /compact", key: ENTER, hold: "compacting" },
+		{ text: "=> /compact", key: ENTER, hold: "barrier" },
+		{ text: "/queue /compact", key: FOLLOW_UP, hold: "none" },
+		{ text: "/queue /compact", key: FOLLOW_UP, hold: "compacting" },
+		{ text: "/compact", key: FOLLOW_UP, hold: "barrier" },
+	])("returns $text ($key) after a session switch ($hold)", async ({ text, key, hold }) => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.draftWithImage(`${text} soft keep [Image #1]`);
+		const submitting = h.pressSubmit(key);
+		await entered.promise;
+		await h.ctx.sessionManager.newSession();
+		h.session.isCompacting = hold === "compacting";
+		const queue = sessionCommandQueue(h.ctx.session);
+		const request =
+			hold === "barrier"
+				? { sessionId: h.ctx.sessionManager.getSessionId(), leafId: null, text: "/compact newer request" }
+				: undefined;
+		queue.request = request;
+		h.draftWithImage("newer [Image #1]", newerImage, "local://new.jpg");
+		release.resolve();
+		await submitting;
+
+		expect(h.editor.expandedText()).toBe("/compact soft keep [Image #2]\n\nnewer [Image #1]");
+		expect(h.editor.pendingImages).toEqual([newerImage, originalImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpg", "local://original.png"]);
+		expect(h.ctx.showWarning).toHaveBeenCalledTimes(1);
+		expect(queue.request).toBe(request);
+		expect(h.ctx.compactionQueuedMessages).toEqual([]);
+		expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+		expect(h.session.followUp).not.toHaveBeenCalled();
+		expect(h.prompt).not.toHaveBeenCalled();
+	});
+
+	it("holds a queued compact in the same session and leaves newer input untouched when it runs", async () => {
+		const h = await createHarness(() => {});
+		h.session.isCompacting = true;
+		h.editor.setText("/queue /compact soft keep decisions");
+		await h.pressSubmit(ENTER);
+		expect(h.ctx.compactionQueuedMessages.map(item => item.text)).toEqual(["/compact soft keep decisions"]);
+		expect(h.ctx.handleCompactCommand).not.toHaveBeenCalled();
+
+		h.session.isCompacting = false;
+		h.draftWithImage("newer [Image #1]", newerImage, "local://new.jpg");
+		await h.ctx.flushCompactionQueue();
+		expect(h.ctx.handleCompactCommand).toHaveBeenCalledWith("keep decisions", "soft");
+		expect(h.editor.expandedText()).toBe("newer [Image #1]");
 		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpg"]);
 	});
 
