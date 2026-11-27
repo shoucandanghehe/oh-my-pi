@@ -39,7 +39,7 @@ it("describes an @-mentioned image for a text-only model", async () => {
 	authStorage.keys.setRuntime("anthropic", "test-key");
 	const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!bundled) throw new Error("Expected claude-sonnet-4-5 model to exist");
-	const textOnly: Model = { ...bundled, input: ["text"] };
+	const textOnly: Model = { ...bundled, input: ["text"], vendorInput: ["text"] };
 	const mock = createMockModel({ responses: [{ content: ["ok"] }] });
 	const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
 	const modelRegistry = new ModelRegistry(authStorage);

@@ -430,7 +430,7 @@ describe("Bedrock native compaction transport", () => {
 		expect(requests[0]?.url).toBe(
 			"https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke-with-response-stream",
 		);
-		expect(hookModel).toBe(model);
+		expect(hookModel).toEqual({ ...model, requestModelId: "anthropic.claude-3-5-sonnet-20241022-v2:0" });
 		expect(hookPayload).toMatchObject({
 			anthropic_version: "bedrock-2023-05-31",
 			compaction: { type: "summarize", instructions: "Keep only verified findings." },

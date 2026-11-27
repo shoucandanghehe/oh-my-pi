@@ -880,13 +880,13 @@ describe("Agent", () => {
 				},
 			};
 
-			let callCount = 0;
+			const requests: Model[] = [];
 			const agent = new Agent({
 				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [switchTool], messages: [] },
 				streamFn: requestedModel => {
-					callCount += 1;
+					requests.push(requestedModel);
 					const stream = new AssistantMessageEventStream();
-					if (callCount === 1) {
+					if (requests.length === 1) {
 						const toolCalls = Array.from({ length: 8 }, (_, index) => ({
 							type: "toolCall" as const,
 							id: `call-switch-${index}`,
@@ -907,7 +907,6 @@ describe("Agent", () => {
 							stream.push({ type: "done", reason: "toolUse", message: firstTurn });
 						});
 					} else {
-						expect(requestedModel).toEqual(codexModel);
 						if (switchBackInFlight) {
 							agentRef.current.setModel(mock.model);
 						}
@@ -919,6 +918,13 @@ describe("Agent", () => {
 			agentRef.current = agent;
 
 			await agent.prompt("switch and fail");
+			expect(requests).toHaveLength(2);
+			expect(requests[1]).toMatchObject({
+				id: codexModel.id,
+				provider: codexModel.provider,
+				api: codexModel.api,
+				requestModelId: codexModel.id,
+			});
 
 			const terminal = agent.state.messages.at(-1);
 			expect(terminal?.role).toBe("assistant");
