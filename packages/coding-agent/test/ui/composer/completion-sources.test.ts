@@ -13,6 +13,7 @@ import { getDocFilenames } from "../../../src/internal-urls/docs-index";
 import { createModelBrowserSource } from "../../../src/modes/model-browser-source";
 import { Settings } from "../../../src/config/settings";
 import { buildArgumentCompletions } from "../../../src/slash-commands/builtin-completions";
+import { BUILTIN_SLASH_COMMANDS } from "../../../src/slash-commands/builtin-registry";
 import { Composer, inCompletionContext } from "../../../src/ui/composer";
 import { getTestModel } from "../../helpers/model-fixtures";
 import { key, sendKey, sendPaste, settle } from "./harness";
@@ -165,6 +166,24 @@ describe("composer completion sources", () => {
 		type(composer, "/sec");
 		await offered(composer, "skill:security-review");
 		expect(offers(composer.node, "switch")).toBe(false);
+	});
+
+	test("Tab completes a queued compact command and its mode instead of a matching prose skill", async () => {
+		const composer = new Composer({
+			autocomplete: new PromptActionAutocompleteProvider(
+				[...BUILTIN_SLASH_COMMANDS, { name: "skill:compare" }],
+				process.cwd(),
+				[],
+			),
+		});
+		type(composer, "/queue /comp");
+		await offered(composer, "/compact ");
+		type(composer, "\t");
+		expect(composer.text()).toBe("/queue /compact ");
+		type(composer, "sof");
+		await offered(composer, "/compact soft ");
+		type(composer, "\t");
+		expect(composer.text()).toBe("/queue /compact soft ");
 	});
 
 	test("dispatches emoji, hash actions, GitHub references and internal URLs from the live token", async () => {
