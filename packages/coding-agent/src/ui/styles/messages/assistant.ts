@@ -163,7 +163,10 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		});
 		frame = { ...frame, rows, ...(hits.length > 0 ? { hits } : {}) };
 	}
-	if (cacheable) child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
+	if (cacheable) {
+		if (!child[kCompleted]) child.onDispose(() => delete child[kCompleted]);
+		child[kCompleted] = { source, width, theme, paddingX, hyperlinks, textStyle, schemes, look, frame };
+	}
 	return frame;
 }
 
