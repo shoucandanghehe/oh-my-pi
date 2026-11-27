@@ -21,6 +21,7 @@ export interface LspParams {
 	query?: string;
 	new_name?: string;
 	apply?: boolean;
+	all_worktrees?: boolean;
 	timeout?: number;
 	payload?: string;
 }

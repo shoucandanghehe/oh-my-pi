@@ -31,7 +31,7 @@ export async function missingOccurrencesNote(
 	locations: readonly Location[],
 	cwd: string,
 	signal?: AbortSignal,
-	{ where = "are not in the result" }: { where?: string } = {},
+	{ where = "are not in the result", includeFile }: { where?: string; includeFile?: (file: string) => boolean } = {},
 ): Promise<string | undefined> {
 	const ext = path.extname(filePath);
 	if (!ext || !/^[\w$]+$/.test(name)) return undefined;
@@ -57,7 +57,9 @@ export async function missingOccurrencesNote(
 			covered.add(`${file}:${line + 1}`);
 		}
 	}
-	const missing = matches.filter(match => !covered.has(`${match.file}:${match.line}`));
+	const missing = matches.filter(
+		match => !covered.has(`${match.file}:${match.line}`) && (includeFile?.(match.file) ?? true),
+	);
 	if (missing.length === 0) return undefined;
 	const files = new Set(missing.map(match => match.file)).size;
 	const examples = missing

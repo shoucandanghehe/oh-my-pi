@@ -2,6 +2,7 @@ Symbol-aware code intelligence from language servers — navigation, refactors, 
 
 <operations>
 - Position-based: `file` + `line` + `symbol` (bare identifiers match whole tokens; other text matches substrings; first match by default, `#N` selects Nth). `line` is 1-indexed.
+- `references` — current worktree only. `all_worktrees: true` also queries other checked-out worktrees of the same Git repository; each uses its own language server index.
 - `rename` — applies by default; `apply: false` previews. Project-aware lookups ERROR without `symbol` — missing matches or out-of-range occurrences error.
 - `code_actions` — lists by default; apply ONE with `apply: true` + `query` (title substring or index).
 - `rename_file` — moves the path and applies server-returned import/reference edits; may move without reference updates if servers are unavailable or do not support the operation. Applies by default.

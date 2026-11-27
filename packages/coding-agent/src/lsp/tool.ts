@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
-import path from "node:path";
+import * as path from "node:path";
 import type {
 	AgentTool,
 	AgentToolContext,
@@ -8,6 +8,8 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import { structuredPatchHunks } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, isFsError, logger, prompt, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -86,6 +88,7 @@ import {
 	type LocationLink,
 	type LspClient,
 	lspSchema,
+	type Position,
 	type ServerConfig,
 	type SymbolInformation,
 	type TextEdit,
@@ -109,6 +112,7 @@ import {
 	mergeCodeActions,
 	parseSymbolSpec,
 	resolveDiagnosticTargets,
+	readTextFromDisk,
 	resolveSymbolColumn,
 	sortDiagnostics,
 	symbolKindToIcon,
@@ -245,6 +249,85 @@ async function selectClientForAction(
 		notes.push(`${name}: does not implement ${provider!.method}`);
 	}
 	return fallback ? { ...fallback, skipped: notes } : { unsupported: notes };
+}
+
+async function requestReferences(
+	client: LspClient,
+	config: ServerConfig,
+	uri: string,
+	position: Position,
+	signal: AbortSignal,
+	includeFile?: (file: string) => boolean,
+): Promise<Location[]> {
+	for (let attempt = 0; ; attempt++) {
+		const result = (await sendRequest(
+			client,
+			"textDocument/references",
+			{ textDocument: { uri }, position, context: { includeDeclaration: true } },
+			signal,
+		)) as Location[] | null;
+		const locations = (result ?? []).filter(location => includeFile?.(uriToFile(location.uri)) ?? true);
+		if (
+			!isProjectAwareLspServer(config) ||
+			attempt === REFERENCES_RETRY_COUNT ||
+			(locations.length > 0 && !isOnlyQueriedDeclaration(locations, uri, position))
+		) {
+			return locations;
+		}
+		await waitForProjectLoaded(client, signal);
+		throwIfAborted(signal);
+		await untilAborted(signal, () => Bun.sleep(REFERENCES_RETRY_DELAY_MS));
+	}
+}
+
+/** Project the cursor through unchanged source lines, never onto a same-named token by guessing. */
+function projectReferencePosition(source: string, sibling: string, position: Position): Position | undefined {
+	let line = position.line;
+	for (const hunk of structuredPatchHunks(source, sibling, 0)) {
+		const start = hunk.oldStart - 1;
+		if (position.line < start) break;
+		if (position.line < start + hunk.oldLines) return undefined;
+		line += hunk.newLines - hunk.oldLines;
+	}
+	return { line, character: position.character };
+}
+
+function filesInCheckout(root: string): (file: string) => boolean {
+	const directories = new Map<string, boolean>();
+	return file => {
+		if (!path.isAbsolute(file)) return false;
+		const dir = path.dirname(file);
+		let matches = directories.get(dir);
+		if (matches === undefined) {
+			matches = vcs.gitInfo(dir)?.repoRoot === root;
+			directories.set(dir, matches);
+		}
+		return matches;
+	};
+}
+
+async function referencesInWorktree(
+	root: string,
+	relativeFile: string,
+	source: string,
+	position: Position,
+	signal: AbortSignal,
+): Promise<{ locations: Location[]; indexing: boolean }> {
+	const file = await fs.promises.realpath(path.join(root, relativeFile));
+	const includeFile = filesInCheckout(root);
+	if (!includeFile(file)) throw new Error("the source file lies outside this checkout");
+	const mapped = projectReferencePosition(source, await readTextFromDisk(file), position);
+	if (!mapped) throw new Error("the queried source line changed in this checkout");
+	const candidates = getLspServersForFile(getConfig(root), file);
+	if (candidates.length === 0) throw new Error("no configured language server for this file");
+	const selected = await selectClientForAction(candidates, "references", root, signal);
+	if ("unsupported" in selected) throw new Error(selected.unsupported.join("; "));
+	const { client, config } = selected;
+	await reconcileFileFromDisk(client, file, signal);
+	if (isProjectAwareLspServer(config)) await waitForProjectLoaded(client, signal);
+	await reconcileOpenFilesFromDisk(client, signal, undefined, "close");
+	const locations = await requestReferences(client, config, fileToUri(file), mapped, signal, includeFile);
+	return { locations, indexing: client.activeProgressTokens.size > 0 };
 }
 
 /**
@@ -1387,14 +1470,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const candidates = resolvedFile ? getLspServersForFile(config, resolvedFile) : [];
+		let serverCwd = this.session.cwd;
+		const checkout = action === "references" && resolvedFile ? vcs.gitInfo(path.dirname(resolvedFile)) : null;
+		if (checkout && vcs.gitInfo(serverCwd)?.repoRoot !== checkout.repoRoot) serverCwd = checkout.repoRoot;
+		const fileConfig = serverCwd === this.session.cwd ? config : getConfig(serverCwd);
+		const candidates = resolvedFile ? getLspServersForFile(fileConfig, resolvedFile) : [];
 		if (candidates.length === 0) {
 			return {
 				content: [
 					{
 						type: "text",
 						text: resolvedFile
-							? describeMissingServers(config, resolvedFile)
+							? describeMissingServers(fileConfig, resolvedFile)
 							: "No language server found for this action",
 					},
 				],
@@ -1409,7 +1496,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (action === "reload") clearInitializationFailure(serverConfig, this.session.cwd);
 
 		try {
-			const selected = await selectClientForAction(candidates, action, this.session.cwd, signal);
+			const selected = await selectClientForAction(candidates, action, serverCwd, signal);
 			if ("unsupported" in selected) {
 				const ext = path.extname(resolvedFile!) || path.basename(resolvedFile!);
 				const notes = selected.unsupported.map(note => `  ${note}`).join("\n");
@@ -1576,39 +1663,63 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					break;
 				}
 				case "references": {
-					let result: Location[] | null = null;
-					for (let attempt = 0; attempt <= REFERENCES_RETRY_COUNT; attempt++) {
-						result = (await sendRequest(
-							client,
-							"textDocument/references",
-							{
-								textDocument: { uri },
-								position,
-								context: { includeDeclaration: true },
-							},
-							signal,
-						)) as Location[] | null;
-
-						const locations = result ?? [];
-						if (!isProjectAwareLspServer(serverConfig) || attempt === REFERENCES_RETRY_COUNT) {
-							break;
+					const root = checkout?.repoRoot;
+					const includeFile = root ? filesInCheckout(root) : undefined;
+					const result = await requestReferences(client, serverConfig, uri, position, signal, includeFile);
+					const worktreeNotes: string[] = [];
+					if (params.all_worktrees) {
+						const repo = root ? vcs.git(root) : null;
+						if (repo && checkout && targetFile) {
+							const lookupSignal = signal;
+							const relativeFile = path.relative(checkout.repoRoot, targetFile);
+							try {
+								const worktrees = (await repo.worktrees(signal))
+									.map(entry => vcs.gitInfo(entry.path))
+									.filter(entry => entry !== null)
+									.filter(
+										entry => entry.commonDir === checkout.commonDir && entry.repoRoot !== checkout.repoRoot,
+									);
+								if (worktrees.length > 0) {
+									const source = await readTextFromDisk(targetFile);
+									const siblingResults = await Promise.all(
+										worktrees.map(async worktree => {
+											const name = formatPathRelativeToCwd(worktree.repoRoot, this.session.cwd);
+											try {
+												const { locations, indexing } = await referencesInWorktree(
+													worktree.repoRoot,
+													relativeFile,
+													source,
+													position,
+													lookupSignal,
+												);
+												return { locations, note: indexing ? `${name}: server still indexing` : undefined };
+											} catch (error) {
+												throwIfAborted(lookupSignal);
+												return {
+													locations: [],
+													note: `${name}: not searched (${error instanceof Error ? error.message : String(error)})`,
+												};
+											}
+										}),
+									);
+									for (const { locations, note } of siblingResults) {
+										result.push(...locations);
+										if (note) worktreeNotes.push(note);
+									}
+								}
+							} catch (error) {
+								throwIfAborted(signal);
+								worktreeNotes.push(
+									`could not search other worktrees (${error instanceof Error ? error.message : String(error)})`,
+								);
+							}
+						} else {
+							worktreeNotes.push("the source is not in a Git checkout");
 						}
-						if (locations.length > 0 && !isOnlyQueriedDeclaration(locations, uri, position)) {
-							break;
-						}
-
-						await waitForProjectLoaded(client, signal);
-						throwIfAborted(signal);
-						await untilAborted(signal, () => Bun.sleep(REFERENCES_RETRY_DELAY_MS));
 					}
 
-					if (!result || result.length === 0) {
+					if (result.length === 0) {
 						output = "No references found";
-						const missing = symbolName
-							? await missingOccurrencesNote(symbolName, client.cwd, targetFile!, [], this.session.cwd, signal)
-							: undefined;
-						if (missing) output += `\n${missing}`;
-						else useless = true;
 					} else {
 						const contextualReferences = result.slice(0, REFERENCE_CONTEXT_LIMIT);
 						const plainReferences = result.slice(REFERENCE_CONTEXT_LIMIT);
@@ -1625,7 +1736,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							: contextualLines;
 						output = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
 						output += await offTargetNote(result, symbolName, serverName, this.session.cwd);
-						const missing = symbolName
+					}
+					const missing =
+						symbolName && !params.all_worktrees
 							? await missingOccurrencesNote(
 									symbolName,
 									client.cwd,
@@ -1633,10 +1746,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 									result,
 									this.session.cwd,
 									signal,
+									{ includeFile },
 								)
 							: undefined;
-						if (missing) output += `\n${missing}`;
-					}
+					if (missing) output += `\n${missing}`;
+					if (worktreeNotes.length > 0)
+						output += `\nWorktree search notes:\n${worktreeNotes.map(note => `  ${note}`).join("\n")}`;
+					useless = result.length === 0 && !missing && worktreeNotes.length === 0;
 					break;
 				}
 

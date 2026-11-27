@@ -15,6 +15,9 @@ export const lspSchema = type({
 	query: "string?",
 	new_name: "string?",
 	apply: "boolean?",
+	"all_worktrees?": type.boolean.describe(
+		"References only: also query checked-out worktrees of the same Git repository.",
+	),
 	"timeout?": type.number
 		.atLeast(TOOL_TIMEOUTS.lsp.min)
 		.atMost(TOOL_TIMEOUTS.lsp.max)

@@ -38,6 +38,7 @@
 | `query`    | string      | No       | Workspace symbol query, code-action selector/filter, or LSP method name for `action=request`.                                                                                                                                                                                                                                                                                     |
 | `new_name` | string      | No       | Required for `rename` and `rename_file`.                                                                                                                                                                                                                                                                                                                                          |
 | `apply`    | boolean     | No       | For `rename`/`rename_file`, apply unless explicitly `false`. For `code_actions`, list unless explicitly `true`.                                                                                                                                                                                                                                                                   |
+| `all_worktrees` | boolean | No | For `references`, also query other checked-out worktrees of the same Git repository. Defaults to `false`. |
 | `timeout`  | number      | No       | Seconds; the schema accepts `5..300`. Sets both the call deadline and the project-aware diagnostics wait, raising or lowering the defaults (call `max(20, lsp.requestTimeout)`, wait `lsp.requestTimeout`). `resolveLspTimeouts()` applies the positive `tools.maxTimeout` cap first, then the tool's `5..300` range (so the 5-second floor still wins over a lower global cap).  |
 | `payload`  | string      | No       | JSON string for `action=request`; overrides auto-built params.                                                                                                                                                                                                                                                                                                                    |
 
@@ -130,11 +131,12 @@ Uses the same location normalization and output shape as `definition`, but sends
 **Inputs**
 
 - Required: `file`.
-- Optional: `line`, `symbol`, `timeout`.
+- Optional: `line`, `symbol`, `timeout`, `all_worktrees`.
 
 **Execution**
 
 - Sends `textDocument/references` with `includeDeclaration: true`.
+- In Git, references are scoped to the worktree containing `file`. Set `all_worktrees: true` to also query each other checkout's own language server index. The cursor is mapped to the corresponding unchanged line; a checkout without that source position or a usable server is reported as not searched.
 - Requires `symbol` when `line` is given on project-aware servers (the first-non-whitespace-column fallback is disabled for this action).
 - For project-aware servers, retries up to `REFERENCES_RETRY_COUNT` times when results are empty or the only hit is the queried declaration; between retries it waits for project load and sleeps `REFERENCES_RETRY_DELAY_MS`.
 - First `REFERENCE_CONTEXT_LIMIT` references include surrounding context; the rest are location-only.

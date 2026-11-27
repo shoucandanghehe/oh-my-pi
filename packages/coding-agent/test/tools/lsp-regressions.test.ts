@@ -53,7 +53,7 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { getPluginsDir, sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
-import type { Subprocess } from "bun";
+import { $, type Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { ToolCall } from "../../src/ui/transcript/tool-block";
 import { toolCallText, toolText } from "../helpers/tool-text";
@@ -139,6 +139,7 @@ interface FakeLspServer {
 	readonly killed: boolean;
 	/** Number of subprocesses spawned through this fake. */
 	readonly spawnCount: number;
+	readonly spawn: typeof piUtils.ptree.spawn;
 	/** Resolve once a received message matches `predicate` (already-seen or future). */
 	waitFor(predicate: (message: RpcMessage) => boolean, timeoutMs?: number): Promise<RpcMessage>;
 }
@@ -151,13 +152,8 @@ interface FakeLspOptions {
 	stdoutClosesBeforeExit?: boolean;
 }
 
-// In-memory LSP transport fake. Replaces the real subprocess (`ptree.spawn`)
-// with an in-process JSON-RPC peer so the initialize / shutdown / exit and
-// workspace-folder handshakes resolve deterministically -- no subprocess spawn,
-// no real-clock latency. Installed by spying on the shared `ptree` namespace
-// object (NOT `mock.module`, which would leak across files); the suite's
-// `afterEach` `vi.restoreAllMocks()` removes it.
-function installFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): FakeLspServer {
+// In-memory JSON-RPC peer; each instance owns its own input and output streams.
+function createFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): FakeLspServer {
 	const encoder = new TextEncoder();
 	const received: RpcMessage[] = [];
 	const waiters: Array<{
@@ -215,6 +211,10 @@ function installFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): Fake
 		get spawnCount() {
 			return spawnCount;
 		},
+		spawn: (() => {
+			spawnCount++;
+			return proc as unknown as piUtils.ptree.ChildProcess<"pipe">;
+		}) as typeof piUtils.ptree.spawn,
 		waitFor(predicate, timeoutMs = 1_000) {
 			const existing = received.find(predicate);
 			if (existing) return Promise.resolve(existing);
@@ -286,10 +286,13 @@ function installFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): Fake
 		},
 	} as unknown as LspClient["proc"];
 
-	vi.spyOn(piUtils.ptree, "spawn").mockImplementation((() => {
-		spawnCount++;
-		return proc as unknown as piUtils.ptree.ChildProcess<"pipe">;
-	}) as typeof piUtils.ptree.spawn);
+	return server;
+}
+
+/** Install a single in-memory LSP transport for the usual one-server tests. */
+function installFakeLsp(handler: FakeLspHandler, options?: FakeLspOptions): FakeLspServer {
+	const server = createFakeLsp(handler, options);
+	vi.spyOn(piUtils.ptree, "spawn").mockImplementation(server.spawn);
 	return server;
 }
 
@@ -413,6 +416,80 @@ afterEach(() => {
 describe("lsp regressions", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("only queries sibling worktree indexes when opted in and projects the cursor through line shifts", async () => {
+		using temp = TempDir.createSync("@omp-lsp-references-worktrees-");
+		const cwd = path.join(temp.path(), "current");
+		const sibling = path.join(temp.path(), "sibling");
+		const source = "pub fn needle() {}\nfn main() { needle(); }\n";
+		const file = "lib.rs";
+		await Bun.write(path.join(cwd, file), source);
+		await $`git init -q ${cwd}`;
+		await $`git add ${file}`.cwd(cwd);
+		await $`git -c user.name=Test -c user.email=test@example.com -c commit.gpgsign=false commit -qm base`.cwd(cwd);
+		await $`git worktree add -qb consumer ${sibling}`.cwd(cwd);
+		await Bun.write(path.join(sibling, file), `// Inserted on the other branch\n${source}`);
+		const consumer = path.join(sibling, "consumer.rs");
+		await Bun.write(consumer, "fn main() { dependency::needle(); }\n");
+		const definition = {
+			uri: fileToUri(path.join(cwd, file)),
+			range: { start: { line: 0, character: 7 }, end: { line: 0, character: 13 } },
+		};
+		const localUsage = {
+			uri: definition.uri,
+			range: { start: { line: 1, character: 12 }, end: { line: 1, character: 18 } },
+		};
+		const usage = {
+			uri: fileToUri(consumer),
+			range: { start: { line: 0, character: 24 }, end: { line: 0, character: 30 } },
+		};
+		const primary = createFakeLsp((message, server) => {
+			if (message.method === "exit") return server.exit();
+			if (message.id === undefined) return;
+			const result =
+				message.method === "initialize"
+					? { capabilities: { referencesProvider: true } }
+					: message.method === "textDocument/references"
+						? [definition, localUsage, usage]
+						: null;
+			server.send({ jsonrpc: "2.0", id: message.id, result });
+		});
+		const linked = createFakeLsp((message, server) => {
+			if (message.method === "exit") return server.exit();
+			if (message.id === undefined) return;
+			const params = message.params as { textDocument?: { uri: string }; position?: { line: number } } | undefined;
+			const result =
+				message.method === "initialize"
+					? { capabilities: { referencesProvider: true } }
+					: message.method === "textDocument/references" &&
+						  params?.textDocument?.uri === fileToUri(path.join(sibling, file)) &&
+						  params.position?.line === 1
+						? [usage]
+						: null;
+			server.send({ jsonrpc: "2.0", id: message.id, result });
+		});
+		vi.spyOn(piUtils.ptree, "spawn").mockImplementation(((argv, options) =>
+			(options?.cwd === sibling ? linked : primary).spawn(argv, options)) as typeof piUtils.ptree.spawn);
+		const config: ServerConfig = { command: "fake-rust", fileTypes: ["rs"], rootMarkers: [] };
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-rust": config }, idleTimeoutMs: undefined });
+		vi.spyOn(lspClient, "waitForProjectLoaded").mockResolvedValue(undefined);
+		try {
+			const tool = new LspTool(makeLspSession(cwd));
+			const args = { action: "references", file, symbol: "needle", line: 1 } as const;
+			const local = textResult(await tool.execute("local", args));
+			expect(local).toContain("Found 2 reference(s)");
+			expect(local).not.toContain("consumer.rs");
+			expect(linked.spawnCount).toBe(0);
+			const all = textResult(await tool.execute("worktrees", { ...args, all_worktrees: true }));
+			expect(all).toContain("Found 3 reference(s)");
+			expect(all).toContain("sibling/consumer.rs:1:25");
+			expect(linked.spawnCount).toBe(1);
+		} finally {
+			configCache.delete(cwd);
+			configCache.delete(sibling);
+			await lspClient.shutdownAll();
+		}
 	});
 
 	it("detects bracket-style glob patterns", () => {
