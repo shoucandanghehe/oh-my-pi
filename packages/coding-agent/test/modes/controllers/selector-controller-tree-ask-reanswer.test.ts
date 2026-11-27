@@ -90,6 +90,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		sessionManager: {
 			getTree: () => tree,
 			getLeafId: () => leafEntry.id,
+			getBranch: () => [leafEntry],
 			getEntry: (id: string) => (id === leafEntry.id ? leafEntry : undefined),
 			getSessionName: () => undefined,
 		},
