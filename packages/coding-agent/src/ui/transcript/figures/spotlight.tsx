@@ -126,6 +126,8 @@ export function SpotlightNotice(props: {
 			tone={spotlight.original && !heldBack ? "accent" : "muted"}
 			spans={noticeSpans(spotlight, saving)}
 			hovercard={spotlight.original ? heatCard(spotlight.original, heldBack) : undefined}
+			title={spotlight.original ? undefined : "Spotlight: passthrough"}
+			aria={spotlight.original ? undefined : "Spotlight: passthrough"}
 			hidden={() => (read(props.hidden) ? true : undefined)}
 			actions={spotlight.original && props.onOpen ? { click: SPOTLIGHT_ACT } : undefined}
 			onAction={act => {

@@ -47,6 +47,12 @@ describe("Spotlight notice", () => {
 		const unhosted = single(<SpotlightNotice toolCallId="c1" spotlight={SHAPED} />);
 		expect(unhosted.props().actions).toBeUndefined();
 	});
+
+	it("names a passthrough result in its tooltip and accessibility label", () => {
+		const { original: _, ...passthrough } = SHAPED;
+		const node = single(<SpotlightNotice toolCallId="c1" spotlight={passthrough} />);
+		expect(node.props()).toMatchObject({ title: "Spotlight: passthrough", aria: "Spotlight: passthrough" });
+	});
 });
 
 describe("transcript Spotlight notices", () => {
