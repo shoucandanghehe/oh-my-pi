@@ -10,10 +10,14 @@
  * item, `close`/`cancel` cancels. Events addressed to any other keypath are
  * not the sheet's.
  */
-import { type Accessor, type JSXNode, read, type Reactive, signal } from "@oh-my-pi/pi-tui";
+import { type Accessor, computed, type JSXNode, read, type Reactive, signal } from "@oh-my-pi/pi-tui";
 import type { PickerTerm } from "@oh-my-pi/pi-tui/term/painters/picker";
 import type { TspPickerAction, TspPickerColumn, TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
+import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
+import { fuzzyFilter } from "../../../utils/fuzzy";
 import { cancelKbd, confirmKbd } from "../../keys/hints";
+import { editLine, type LineState } from "../settings/line-edit";
+import { menuMove } from "./menu";
 
 /** Key of the picker child; its events arrive at this keypath. */
 export const PICKER_KEY = "picker";
@@ -52,10 +56,7 @@ export interface SelectSheetProps {
 	readonly columns?: readonly TspPickerColumn[];
 	/** The primary action's label (default `Select`). */
 	readonly confirmLabel?: string;
-	/** The search text (omp's filter); absent: no search field. */
-	readonly query?: Reactive<string>;
-	/** The search caret (UTF-16 offset). */
-	readonly cursor?: Reactive<number>;
+	readonly searchable?: boolean;
 	/** The terminal look. */
 	readonly term?: Reactive<PickerTerm>;
 	/** The user picked `id`. */
@@ -74,17 +75,54 @@ export interface SelectSheetState {
 /** A select sheet (see the module docs). */
 export function SelectSheet(props: SelectSheetProps): JSXNode {
 	const items = (): readonly TspPickerItem[] => read(props.items);
-	const first = items()[0]?.id ?? null;
+	const search = signal<LineState>({ text: "", cursor: 0 });
+	const visible = computed(() => {
+		const query = search().text.trim();
+		return query ? fuzzyFilter([...items()], query, item => item.label) : items();
+	});
+	const first = visible()[0]?.id ?? null;
 	const selected = signal<string | null>(
 		props.initial !== undefined && items().some(item => item.id === props.initial) ? props.initial : first,
 	);
-	const has = (id: string): boolean => items().some(item => item.id === id);
+	const has = (id: string): boolean => visible().some(item => item.id === id);
+	const pick = (): void => {
+		const id = selected();
+		if (id !== null && has(id)) props.onPick(id);
+	};
 	const actions = [
 		pickerAction("confirm", props.confirmLabel ?? "Select", confirmKbd(), { primary: true }),
 		closeAction(),
 	];
 	return (
-		<col>
+		<col
+			onKey={key => {
+				if (!props.searchable || key.kind === "release") return false;
+				if (matchesSelectCancel(key)) {
+					props.onCancel();
+					return true;
+				}
+				const command = selectKeyId(key);
+				switch (command) {
+					case "up":
+					case "down": {
+						const rows = visible();
+						const index = rows.findIndex(item => item.id === selected());
+						const next = menuMove(rows.length, index, command === "up" ? -1 : 1, i => rows[i]?.disabled === true);
+						selected.set(rows[next]?.id ?? null);
+						return true;
+					}
+					case "enter":
+						if (key.kind === "press" && !key.afterPaste) pick();
+						return true;
+				}
+				const line = search();
+				const next = editLine(line, key);
+				if (!next) return false;
+				search.set(next);
+				if (next.text !== line.text) selected.set(visible()[0]?.id ?? null);
+				return true;
+			}}
+		>
 			<picker
 				key={PICKER_KEY}
 				title={props.title}
@@ -94,9 +132,10 @@ export function SelectSheet(props: SelectSheetProps): JSXNode {
 				size="md"
 				layout="rows"
 				preview="none"
-				query={() => (props.query === undefined ? null : read(props.query))}
-				cursor={() => (props.query === undefined ? undefined : (read(props.cursor) ?? 0))}
+				query={() => (props.searchable ? search().text : null)}
+				cursor={() => (props.searchable ? search().cursor : undefined)}
 				items={items}
+				order={() => (search().text.trim() ? visible().map(item => item.id) : undefined)}
 				selected={selected}
 				current={props.current}
 				columns={props.columns}
@@ -115,10 +154,7 @@ export function SelectSheet(props: SelectSheetProps): JSXNode {
 				}}
 				onAction={act => {
 					if (act === "close" || act === "cancel") props.onCancel();
-					else if (act === "confirm") {
-						const id = selected();
-						if (id !== null) props.onPick(id);
-					}
+					else if (act === "confirm") pick();
 				}}
 			/>
 		</col>

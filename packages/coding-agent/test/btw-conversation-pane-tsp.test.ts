@@ -172,6 +172,26 @@ test("enhanced paste returns to the originating BTW draft after switching topics
 	}
 });
 
+test("the native BTW thread picker searches titles and exposes state and drafts", async () => {
+	const a = topic("alpha", process.cwd());
+	const b = topic("beta", process.cwd());
+	b.phase = "error";
+	b.draft = "Saved question";
+	const ui = await mount(process.cwd(), [a, b]);
+	try {
+		ui.act("threads");
+		const picker = () => [...ui.doc.nodes.values()].find(node => node.k === "picker")!;
+		expect(picker().p.items).toContainEqual({ id: "beta", label: "beta", detail: "Error · Draft" });
+		for (const key of "beta") ui.key(key);
+		expect(picker().p.query).toBe("beta");
+		expect(picker().p.order).toEqual(["beta"]);
+		ui.key("enter");
+		expect(ui.draft()).toBe("Saved question");
+	} finally {
+		ui.close();
+	}
+});
+
 test("Tern Ctrl+Enter edits the BTW draft; clear and scroll stay in that pane", async () => {
 	const current = topic("current", process.cwd());
 	const ui = await mount(process.cwd(), [current]);

@@ -1087,7 +1087,13 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				? this.#threads().map(topic => ({
 						id: topic.key,
 						label: sanitizeDisplayLine(topic.title),
-						detail: topic.phase === "running" ? "Replying" : topic.unread ? `${topic.unread} unread` : undefined,
+						detail: [
+							topic.phase === "running" ? "Replying" : topic.phase === "error" ? "Error" : undefined,
+							topic.unread ? `${topic.unread} unread` : undefined,
+							topic.draft || topic.draftImages.length || topic.draftImageLinks.some(Boolean) ? "Draft" : undefined,
+						]
+							.filter(Boolean)
+							.join(" · ") || undefined,
 					}))
 				: this.#thread()?.key === thread?.key && thread
 					? this.#threadActions(thread)
@@ -1097,6 +1103,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				<overlay key={`btw-${kind}`} role={`omp.btw.${kind}`} size="sm" modal>
 					<SelectSheet
 						title={title}
+						noun={kind === "threads" ? "threads" : undefined}
+						searchable={kind === "threads"}
 						items={items}
 						initial={initial}
 						current={initial === undefined ? undefined : [initial]}
