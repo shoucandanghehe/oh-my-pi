@@ -119,6 +119,11 @@ export function For<T>(props: {
 	children: (item: T, index: Accessor<number>) => JSXNode;
 }): JSXNode {
 	let entries: Mapped<T>[] = [];
+	const mount = (item: T, at: number): Mapped<T> =>
+		createRoot(dispose => {
+			const index = signal(at);
+			return { item, node: stable(props.children(item, index)), index: index.set, dispose };
+		});
 	onCleanup(() => {
 		for (const entry of entries) entry.dispose();
 		entries = [];
@@ -126,6 +131,16 @@ export function For<T>(props: {
 	const mapped = structural(() => {
 		const items = read(props.each) ?? [];
 		return untrack(() => {
+			// A growing transcript leaves its entire keyed prefix at the same indices.
+			// Appending duplicates also preserves the FIFO reuse rules of the general path.
+			if (items.length > entries.length) {
+				let i = 0;
+				while (i < entries.length && Object.is(entries[i]!.item, items[i])) i++;
+				if (i === entries.length) {
+					for (; i < items.length; i++) entries.push(mount(items[i]!, i));
+					return entries.map(entry => entry.node);
+				}
+			}
 			const pool = new Map<T, Mapped<T>[]>();
 			for (const entry of entries) {
 				const list = pool.get(entry.item);
@@ -141,12 +156,7 @@ export function For<T>(props: {
 					next.push(reused);
 					continue;
 				}
-				next.push(
-					createRoot(dispose => {
-						const index = signal(i);
-						return { item, node: stable(props.children(item, index)), index: index.set, dispose };
-					}),
-				);
+				next.push(mount(item, i));
 			}
 			for (const list of pool.values()) for (const entry of list) entry.dispose();
 			entries = next;

@@ -282,6 +282,55 @@ describe("native reconciler", () => {
 		expect(h.tern.errors).toEqual([]);
 	});
 
+	it("keeps For item state on append, including repeated identities, and updates moved indices", () => {
+		const a = { label: "a" };
+		const b = { label: "b" };
+		const c = { label: "c" };
+		const x = { label: "x" };
+		const items = signal([a, b, a]);
+		const mapped: string[] = [];
+		const surface = createSurface(() => ({
+			main: (
+				<For each={items}>
+					{(item, index) => {
+						mapped.push(item.label);
+						return <text text={() => `${item.label}:${index()}`} />;
+					}}
+				</For>
+			),
+		}));
+		try {
+			const [first, second, repeated] = surface.main();
+			items.set([a, b, a, a]);
+			const appended = surface.main()[3]!;
+			expect(surface.main()[0]).toBe(first);
+			expect(surface.main()[1]).toBe(second);
+			expect(surface.main()[2]).toBe(repeated);
+			expect(appended).not.toBe(repeated);
+			expect(mapped).toEqual(["a", "b", "a", "a"]);
+
+			items.set([x, a, b, a, a]); // Prepend.
+			const prepended = surface.main()[0]!;
+			expect(surface.main()[1]).toBe(first);
+			items.set([x, a, c, b, a, a]); // Insert in the middle.
+			const inserted = surface.main()[2]!;
+			expect(surface.main()[3]).toBe(second);
+			items.set([x, a, c, a, a]); // Remove b.
+			expect(surface.main()).not.toContain(second);
+			items.set([a, c, x, a, a]); // Reorder; identical items are reused in occurrence order.
+			const expected = [first, inserted, prepended, repeated, appended];
+			for (const [i, node] of surface.main().entries()) expect(node).toBe(expected[i]);
+			const labels = surface.main().map(node => {
+				const props = node.props();
+				return "text" in props ? props.text : undefined;
+			});
+			expect(labels).toEqual(["a:0", "c:1", "x:2", "a:3", "a:4"]);
+			expect(mapped).toEqual(["a", "b", "a", "a", "x", "c"]);
+		} finally {
+			surface.dispose();
+		}
+	});
+
 	it("appends a growing text, splices a rewritten tail and replaces a text rewritten from its start", async () => {
 		const text = signal("Hello");
 		const h = await mount(() => ({ main: <md stream={true}>{text}</md> }));
