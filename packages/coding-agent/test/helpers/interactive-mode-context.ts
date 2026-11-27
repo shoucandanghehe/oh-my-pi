@@ -166,6 +166,7 @@ export function createSessionStub(
 		setMCPPromptCommands: vi.fn(),
 		setActiveToolsByName: vi.fn(async () => {}),
 		prewarmModelConnection: vi.fn(),
+		getQueuedMessageEditIds: () => ({ steering: [], followUp: [] }),
 		runIdleCompaction: vi.fn(async () => {}),
 		waitForIdle: async () => {},
 		isRunActive: false,

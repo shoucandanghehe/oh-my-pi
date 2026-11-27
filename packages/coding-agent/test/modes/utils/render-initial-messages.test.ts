@@ -112,6 +112,7 @@ function makeRenderCtx(
 	const ctx = createInteractiveModeContext({
 		settings: Settings.isolated({ "terminal.showImages": showImages, "composer.recallClearedDrafts": false }),
 		session: {
+			instanceKey: "render-session",
 			buildTranscriptSessionContext: transcriptSpy,
 			getQueuedMessages: () => ({ steering: [], followUp: [], liveSteered: 0 }),
 		},
@@ -251,6 +252,10 @@ describe("UiHelpers.renderInitialMessages — clearTerminalHistory", () => {
 describe("UiHelpers.renderInitialMessages — queued messages", () => {
 	it("keeps the queued-message bar after a mid-turn rebuild such as rewind (#13680)", async () => {
 		const harness = makeRenderCtx(makeEmptyContext());
+		spyOn(harness.ctx.viewSession, "getQueuedMessageEditIds").mockReturnValue({
+			steering: ["steer-id"],
+			followUp: ["first-id", "second-id"],
+		});
 		spyOn(harness.ctx.viewSession, "getQueuedMessages").mockReturnValue({
 			steering: ["steer now"],
 			followUp: ["queued one", "queued two"],
@@ -261,9 +266,18 @@ describe("UiHelpers.renderInitialMessages — queued messages", () => {
 		await harness.helpers.renderInitialMessages({ clearTerminalHistory: true });
 
 		expect(display).toHaveBeenCalled();
-		expect(harness.ctx.hud.queue.groups()).toEqual([
-			{ label: "Steering", messages: ["steer now"] },
-			{ label: "After yield", messages: ["queued one", "queued two"] },
+		const groups = harness.ctx.hud.queue.groups().map(({ label, messages, edits }) => ({
+			label,
+			messages,
+			editIds: edits?.map(edit => edit?.id),
+		}));
+		expect(groups).toEqual([
+			{ label: "Steering", messages: ["steer now"], editIds: ["render-session/steer-id"] },
+			{
+				label: "After yield",
+				messages: ["queued one", "queued two"],
+				editIds: ["render-session/first-id", "render-session/second-id"],
+			},
 		]);
 	});
 });
