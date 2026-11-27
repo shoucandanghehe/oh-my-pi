@@ -192,6 +192,24 @@ test("the native BTW thread picker searches titles and exposes state and drafts"
 	}
 });
 
+test("closing a BTW pane keeps saved attachments without text or a visible chip", async () => {
+	using temp = TempDir.createSync("@pi-btw-close-draft-");
+	const first = topic("image only", temp.path());
+	const image = { type: "image", mimeType: "image/png", data: PIXEL_PNG } as const;
+	first.draftImages = [image];
+	const second = topic("link only", temp.path());
+	second.draftImageLinks = ["saved-screenshot.png"];
+	const ui = await mount(temp.path(), [first, second]);
+	try {
+		ui.key("tab");
+		expect(JSON.stringify(ui.doc.shape("dock"))).toContain("BTW · link only");
+	} finally {
+		ui.close();
+	}
+	expect(first.draftImages).toEqual([image]);
+	expect(second.draftImageLinks).toEqual(["saved-screenshot.png"]);
+});
+
 test("Tern Ctrl+Enter edits the BTW draft; clear and scroll stay in that pane", async () => {
 	const current = topic("current", process.cwd());
 	const ui = await mount(process.cwd(), [current]);

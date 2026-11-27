@@ -165,16 +165,18 @@ test("the native BTW quick card routes its visible Copy and Close controls", asy
 	const state = new BtwPanelState();
 	const calls: string[] = [];
 	await using ui = await nativeShell(shell);
-	shell.dock.slot("btw").set(() => (
-		<BtwPanel
-			question="Where is this configured?"
-			state={state}
-			canFollowUp={() => false}
-			onCopy={() => calls.push("copy")}
-			onClose={() => calls.push("close")}
-			onCancel={() => calls.push("cancel")}
-		/>
-	));
+	shell.dock
+		.slot("btw")
+		.set(() => (
+			<BtwPanel
+				question="Where is this configured?"
+				state={state}
+				canFollowUp={() => false}
+				onCopy={() => calls.push("copy")}
+				onClose={() => calls.push("close")}
+				onCancel={() => calls.push("cancel")}
+			/>
+		));
 	const click = (action: string) => {
 		const buttons = ui.children(ui.node("row", "actions"));
 		const button = buttons.find(node => node.id.endsWith(`/${action}`))!;

@@ -199,10 +199,6 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		return this.#draftView.composer;
 	}
 
-	get #draftKey(): string | undefined {
-		return this.#draftView.thread?.key;
-	}
-
 	constructor(private readonly options: BtwPaneOptions) {
 		this.#scroll = new NativePaneScroll(options.nativeSupports, options.keybindings, message =>
 			this.#notice.set(message),
@@ -316,7 +312,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				if (!this.#disposed) this.#enhancedPaste?.enable();
 			});
 		}
-		this.ansiRail?.selectionChanged(this.#draftKey);
+		this.ansiRail?.selectionChanged(this.#draftView.thread?.key);
 	}
 
 	readonly #thread = (): BtwThread | undefined => {
@@ -596,7 +592,17 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	#saveDraft({ thread, composer }: BtwDraftView, persist = true): void {
 		if (!thread || !this.#threads().includes(thread)) return;
 		const { key } = thread;
-		this.options.setDraft(key, this.#draft(composer));
+		const text = composer.expandedText();
+		const { pendingImages, pendingImageLinks } = composer;
+		// A saved attachment can exist without a visible marker. Don't compact an unchanged draft just for saving it.
+		const unchanged =
+			text === thread.draft &&
+			pendingImages.length === thread.draftImages.length &&
+			pendingImages.every((image, i) => image === thread.draftImages[i]);
+		this.options.setDraft(
+			key,
+			unchanged ? { text, images: pendingImages, imageLinks: pendingImageLinks } : this.#draft(composer, text),
+		);
 		if (persist) this.options.persistDraft(key);
 	}
 
@@ -1087,13 +1093,16 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				? this.#threads().map(topic => ({
 						id: topic.key,
 						label: sanitizeDisplayLine(topic.title),
-						detail: [
-							topic.phase === "running" ? "Replying" : topic.phase === "error" ? "Error" : undefined,
-							topic.unread ? `${topic.unread} unread` : undefined,
-							topic.draft || topic.draftImages.length || topic.draftImageLinks.some(Boolean) ? "Draft" : undefined,
-						]
-							.filter(Boolean)
-							.join(" · ") || undefined,
+						detail:
+							[
+								topic.phase === "running" ? "Replying" : topic.phase === "error" ? "Error" : undefined,
+								topic.unread ? `${topic.unread} unread` : undefined,
+								topic.draft || topic.draftImages.length || topic.draftImageLinks.some(Boolean)
+									? "Draft"
+									: undefined,
+							]
+								.filter(Boolean)
+								.join(" · ") || undefined,
 					}))
 				: this.#thread()?.key === thread?.key && thread
 					? this.#threadActions(thread)
@@ -1173,6 +1182,14 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				</row>
 			</col>
 		);
+	}
+
+	pendingPasteThreads(): ReadonlySet<BtwThread> {
+		const threads = new Set<BtwThread>();
+		for (const [thread, view] of this.#draftViews) {
+			if (thread && view.paste.pending) threads.add(thread);
+		}
+		return threads;
 	}
 
 	readonly dispose = (): void => {

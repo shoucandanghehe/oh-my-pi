@@ -56,6 +56,7 @@ interface ThreadMetadata {
 	readThrough: number;
 	error: string | undefined;
 	request: (Extract<MetadataEvent, { op: "request" }> & { entryId: string }) | undefined;
+	started: boolean;
 	removed: boolean;
 }
 
@@ -85,6 +86,7 @@ function threadMetadata(manager: SessionManager): ThreadMetadata | undefined {
 				readThrough: 0,
 				error: undefined,
 				request: undefined,
+				started: false,
 				removed: false,
 			};
 			continue;
@@ -103,10 +105,12 @@ function threadMetadata(manager: SessionManager): ThreadMetadata | undefined {
 				metadata.readThrough = event.through;
 				break;
 			case "request":
+				metadata.started = true;
 				metadata.request = { ...event, entryId: entry.id };
 				metadata.error = undefined;
 				break;
 			case "terminal":
+				metadata.started = true;
 				metadata.request = undefined;
 				metadata.error = event.error;
 				break;
@@ -256,6 +260,7 @@ export class BtwSessionStore {
 				anchorLeafId: metadata.create.anchorLeafId,
 				model: metadata.create.model,
 				...checkpoint,
+				started: metadata.started || checkpoint.turns.length > 0,
 				draft: metadata.draft,
 				draftImages: metadata.draftImages,
 				draftImageLinks: metadata.draftImageLinks,

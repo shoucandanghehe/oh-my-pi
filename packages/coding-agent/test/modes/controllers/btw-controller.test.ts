@@ -1389,6 +1389,8 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 	const releaseReply = Promise.withResolvers<void>();
 	const releaseInterrupted = Promise.withResolvers<void>();
 	const releaseTool = Promise.withResolvers<void>();
+	const sideInputArrived = Promise.withResolvers<void>();
+	const releaseSideInput = Promise.withResolvers<void>();
 	const lookup: AgentTool = {
 		name: "web_search",
 		label: "Search",
@@ -1438,7 +1440,12 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 				factory: api => {
 					api.on("input", event => {
 						if (event.text === "consume side input") return { handled: true };
-						if (event.text === "/queue rewrite side input") return { text: "/queue follow-up in the first topic" };
+						if (event.text === "hold side input") {
+							sideInputArrived.resolve();
+							return releaseSideInput.promise.then(() => ({ handled: true as const }));
+						}
+						if (event.text === "/queue rewrite side input")
+							return { text: "/queue follow-up in the first topic" };
 					});
 				},
 			},
@@ -1789,7 +1796,26 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		send("/new");
 		controller.closeView();
 		expect(await controller.start("")).toBe(true);
+		await drawn("reply for second question");
+		const clickNew = () =>
+			click(
+				dockNode(node => node.props().title === "New")!,
+				"new",
+			);
+		expect(clickNew()).toBe(true);
+		const close = dockNode(node => node.props().title === "Close")!;
+		expect(click(close, "close")).toBe(true);
+		expect(mounted).toBeUndefined();
+		expect(await controller.start("")).toBe(true);
+		await drawn("reply for second question");
+		expect(clickNew()).toBe(true);
+		send("hold side input");
+		await sideInputArrived.promise;
+		controller.closeView();
+		expect(await controller.start("")).toBe(true);
 		expect(draw()).not.toContain("reply for second question");
+		releaseSideInput.resolve();
+		await yieldToIo();
 		const blankDraft = "unsent first question";
 		mounted?.surface.focused()?.handlers.onEdit?.({
 			from: 0,
@@ -1822,6 +1848,7 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		releaseTool.resolve();
 		releaseReply.resolve();
 		releaseCompaction.resolve();
+		releaseSideInput.resolve();
 		compact.mockRestore();
 		await controller.dispose();
 		await main.dispose();

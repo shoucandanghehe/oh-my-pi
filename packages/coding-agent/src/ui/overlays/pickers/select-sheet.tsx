@@ -11,7 +11,7 @@
  * not the sheet's.
  */
 import { type Accessor, computed, type JSXNode, read, type Reactive, signal } from "@oh-my-pi/pi-tui";
-import type { PickerTerm } from "@oh-my-pi/pi-tui/term/painters/picker";
+import { type PickerTerm, plainText } from "@oh-my-pi/pi-tui/term/painters/picker";
 import type { TspPickerAction, TspPickerColumn, TspPickerItem, TspPickerProps } from "@oh-my-pi/pi-wire";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
 import { fuzzyFilter } from "../../../utils/fuzzy";
@@ -57,6 +57,9 @@ export interface SelectSheetProps {
 	/** The primary action's label (default `Select`). */
 	readonly confirmLabel?: string;
 	readonly searchable?: boolean;
+	/** Search text supplied by the host when the sheet doesn't own filtering. */
+	readonly query?: Reactive<string>;
+	readonly cursor?: Reactive<number>;
 	/** The terminal look. */
 	readonly term?: Reactive<PickerTerm>;
 	/** The user picked `id`. */
@@ -78,7 +81,7 @@ export function SelectSheet(props: SelectSheetProps): JSXNode {
 	const search = signal<LineState>({ text: "", cursor: 0 });
 	const visible = computed(() => {
 		const query = search().text.trim();
-		return query ? fuzzyFilter([...items()], query, item => item.label) : items();
+		return query ? fuzzyFilter([...items()], query, item => plainText(item.label)) : items();
 	});
 	const first = visible()[0]?.id ?? null;
 	const selected = signal<string | null>(
@@ -132,8 +135,10 @@ export function SelectSheet(props: SelectSheetProps): JSXNode {
 				size="md"
 				layout="rows"
 				preview="none"
-				query={() => (props.searchable ? search().text : null)}
-				cursor={() => (props.searchable ? search().cursor : undefined)}
+				query={() => (props.searchable ? search().text : props.query === undefined ? null : read(props.query))}
+				cursor={() =>
+					props.searchable ? search().cursor : props.query === undefined ? undefined : (read(props.cursor) ?? 0)
+				}
 				items={items}
 				order={() => (search().text.trim() ? visible().map(item => item.id) : undefined)}
 				selected={selected}

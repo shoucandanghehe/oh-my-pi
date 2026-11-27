@@ -87,11 +87,13 @@ interface DurableWorkspace {
 	readonly sessionId: string;
 	readonly artifactsDir: string | null;
 	readonly manager: BtwManager;
+	paneClosed?: Promise<void>;
 }
 
 interface BtwSubmissionState {
 	tail: Promise<void>;
 	generation: number;
+	pending: number;
 }
 
 interface QuickAnswer {
@@ -631,8 +633,13 @@ export class BtwController {
 	}
 
 	async flush(timeoutMs = 10_000): Promise<void> {
+		const workspace = this.#durable;
+		const saveDurable = async () => {
+			await workspace?.paneClosed;
+			await workspace?.manager.flushEvents();
+		};
 		await withTimeout(
-			Promise.all([this.#drainWrites(), this.#durable?.manager.flushEvents()]).then(() => undefined),
+			Promise.all([this.#drainWrites(), saveDurable()]).then(() => undefined),
 			timeoutMs,
 			"BTW history is still being saved. The session operation was stopped; retry when storage responds.",
 		);
@@ -876,6 +883,7 @@ export class BtwController {
 		if (!workspace) return;
 		this.#dismissQuick(false);
 		this.closeView();
+		await workspace.paneClosed;
 		for (const thread of workspace.manager.children) {
 			const session = thread.conversation.session;
 			if (session) this.#restoreThreadQueue(workspace, thread.key, session);
@@ -979,6 +987,8 @@ export class BtwController {
 		if (!this.workspace || !this.#owns(workspace)) return false;
 		const { manager } = workspace;
 		try {
+			await workspace.paneClosed;
+			if (!this.#owns(workspace)) return false;
 			if (key && !manager.select(key)) return false;
 			const opened = await this.workspace.open((close, rows, columns, nativeSupports, writeRaw) => {
 				const pane = new BtwConversationPane({
@@ -1038,9 +1048,21 @@ export class BtwController {
 					intercept: pane.intercept,
 					onAppViewportPasteRequest: pane.onAppViewportPasteRequest,
 					dispose: () => {
-						if (this.#pane === pane) this.#pane = undefined;
+						if (this.#pane !== pane) return pane.dispose();
+						const pendingInput = new Set(pane.pendingPasteThreads());
+						for (const thread of manager.children) {
+							if ((threadSubmissions.get(thread)?.pending ?? 0) > 0) pendingInput.add(thread);
+						}
+						this.#pane = undefined;
 						pane.dispose();
-						void manager.flushEvents().catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+						workspace.paneClosed = (async () => {
+							if (this.#owns(workspace)) {
+								await manager.removeEmptyThreads(
+									thread => pendingInput.has(thread) || (threadSubmissions.get(thread)?.pending ?? 0) > 0,
+								);
+							}
+							await manager.flushEvents();
+						})().catch(error => this.ctx.showError(sanitizeErrorLine(error)));
 					},
 				};
 			});
@@ -1165,8 +1187,9 @@ export class BtwController {
 		key ??= this.#createThread(workspace, question);
 		const thread = key && manager.thread(key);
 		if (!thread) return false;
-		const state = threadSubmissions.get(thread) ?? { tail: Promise.resolve(), generation: 0 };
+		const state = threadSubmissions.get(thread) ?? { tail: Promise.resolve(), generation: 0, pending: 0 };
 		threadSubmissions.set(thread, state);
+		state.pending++;
 		const generation = state.generation;
 		const stillCurrent = () =>
 			this.#owns(workspace) &&
@@ -1184,7 +1207,9 @@ export class BtwController {
 			const images = result?.images ?? input.images;
 			if (!prepared && !images.length) return;
 			const imageLinks =
-				result?.images === undefined ? input.imageLinks : await materializeImageChipLinks(images, session.sessionManager);
+				result?.images === undefined
+					? input.imageLinks
+					: await materializeImageChipLinks(images, session.sessionManager);
 			const messages = this.#parseThreadInput(prepared, images, imageLinks, mode);
 			for (const [index, message] of messages.entries()) {
 				try {
@@ -1199,10 +1224,14 @@ export class BtwController {
 				}
 			}
 		});
-		state.tail = dispatch.catch(error => {
-			this.#restoreThreadDraft(workspace, thread.key, input);
-			if (this.#owns(workspace)) this.ctx.showError(sanitizeErrorLine(error));
-		});
+		state.tail = dispatch
+			.catch(error => {
+				this.#restoreThreadDraft(workspace, thread.key, input);
+				if (this.#owns(workspace)) this.ctx.showError(sanitizeErrorLine(error));
+			})
+			.finally(() => {
+				state.pending--;
+			});
 		return true;
 	}
 
@@ -1236,12 +1265,9 @@ export class BtwController {
 							? "/compact does not accept attachments"
 							: undefined;
 				if (error) throw new Error(error);
-			} else if (parsed.name === "tree" && queueBody === undefined && message.mode === "steer") {
-				if (parsed.args || message.images?.length) throw new Error("Usage: /tree");
-			} else if (
-				lookupBuiltinSlashCommand(parsed.name) ||
-				this.ctx.isKnownSlashCommand(message.text)
-			) {
+			} else if (parsed.name === "tree" && queueBody === undefined) {
+				if (message.mode === "steer" && (parsed.args || message.images?.length)) throw new Error("Usage: /tree");
+			} else if (lookupBuiltinSlashCommand(parsed.name) || this.ctx.isKnownSlashCommand(message.text)) {
 				throw new Error(
 					queueBody === undefined
 						? `This command is not available in BTW: /${parsed.name}`

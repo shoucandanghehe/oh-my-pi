@@ -151,7 +151,13 @@ function footerOf(props: BtwPanelProps): Footer {
 		if (props.canBranch?.() ?? true)
 			hints.push({ id: "promote", button: "Promote", keys: ["b"], label: "to branch", run: props.onBranch });
 		if (props.canFollowUp())
-			hints.push({ id: "follow-up", button: "Follow up", keys: ["f"], label: "to follow up", run: props.onFollowUp });
+			hints.push({
+				id: "follow-up",
+				button: "Follow up",
+				keys: ["f"],
+				label: "to follow up",
+				run: props.onFollowUp,
+			});
 		hints.push(close);
 		return copied ? { status: { s: "success", t: "✓ Copied to clipboard" }, hints } : { hints };
 	});
@@ -200,7 +206,10 @@ export function BtwPanel(props: BtwPanelProps): JSXNode {
 				const copied = title === undefined && state.copied() && state.status() === "complete";
 				return { title: title ?? `/btw ${props.question}`, copied };
 			}}
-			onAction={act => footer().hints.find(hint => hint.id === act)?.run?.()}
+			onAction={act => {
+				const action = footer().hints.find(hint => hint.id === act);
+				action?.run?.();
+			}}
 			onKey={key => {
 				if (key.kind === "release") return false;
 				const status = untrack(state.status);

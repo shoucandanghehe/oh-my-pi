@@ -67,10 +67,7 @@ test("Main displays BTW sources as separate cards without exposing the model mes
 		[{ t: "From BTW · Cache & latency", s: "customMessageLabel strong" }],
 		[{ t: "From BTW · Approval <review>", s: "customMessageLabel strong" }],
 	]);
-	expect(cards.map(node => ui.children(node)[0]?.p.text)).toEqual([
-		"Keep `a < b` intact.",
-		"**Wait** for approval.",
-	]);
+	expect(cards.map(node => ui.children(node)[0]?.p.text)).toEqual(["Keep `a < b` intact.", "**Wait** for approval."]);
 	const rendered = JSON.stringify(ui.tree(ui.surface().dock[0]!.id));
 	expect(rendered).not.toMatch(/<btw-summary|private-one|private-two/);
 	expect(message.content).toContain('thread-key="private-one"');

@@ -7,6 +7,7 @@ import { AGENTS_PAUSED_CUSTOM_TYPE, readAgentsPaused } from "./exit-diagnostics"
 import type { ContinuePausedAgentsResult } from "./agent-session-types";
 import { USER_INTERRUPT_LABEL } from "./messages";
 import type { BtwThreadEvent, BtwThreadModelRef, RestoredBtwThread } from "./btw-thread";
+import { sessionCommandQueue } from "./session-command-queue";
 import type {
 	EphemeralConversation,
 	EphemeralConversationCheckpoint,
@@ -56,6 +57,7 @@ interface BtwThreadOptions {
 	model: BtwThreadModelRef;
 	conversation: EphemeralConversation;
 	phase?: BtwThreadPhase;
+	started?: boolean;
 	error?: string;
 	draft?: string;
 	draftImages?: ImageContent[];
@@ -72,6 +74,7 @@ export class BtwThread {
 	readonly model: BtwThreadModelRef;
 	conversation: EphemeralConversation;
 	phase: BtwThreadPhase;
+	started: boolean;
 	error: string | undefined;
 	draft: string;
 	draftImages: ImageContent[];
@@ -89,6 +92,7 @@ export class BtwThread {
 		this.model = options.model;
 		this.conversation = options.conversation;
 		this.phase = options.phase ?? "ready";
+		this.started = options.started ?? options.conversation.turns.length > 0;
 		this.error = options.error;
 		this.draft = options.draft ?? "";
 		this.draftImages = options.draftImages ?? [];
@@ -120,6 +124,7 @@ export class BtwManager {
 	readonly #threads = new Map<string, BtwThread>();
 	readonly #childKeys: string[] = [];
 	readonly #preparedPromotions = new Set<string>();
+	readonly #removals = new Map<string, Promise<boolean>>();
 	readonly #dirtyDrafts = new Set<string>();
 	#activeKey: string | undefined;
 	readonly #subscriptions = new Map<string, () => void>();
@@ -167,6 +172,7 @@ export class BtwManager {
 					thread.request.userMessage ??= event.message;
 				}
 				if (event.type === "agent_start") {
+					thread.started = true;
 					thread.phase = "running";
 					thread.error = undefined;
 				} else if (event.type === "agent_end") {
@@ -298,9 +304,18 @@ export class BtwManager {
 		return this.#forget(key);
 	}
 
-	async remove(key: string, reason: "deleted" | "promoted"): Promise<boolean> {
+	remove(key: string, reason: "deleted" | "promoted"): Promise<boolean> {
+		const pending = this.#removals.get(key);
+		if (pending) return pending;
 		const thread = this.#threads.get(key);
-		if (!thread) return false;
+		if (!thread) return Promise.resolve(false);
+		const removal = this.#removeThread(thread, reason).finally(() => this.#removals.delete(key));
+		this.#removals.set(key, removal);
+		return removal;
+	}
+
+	async #removeThread(thread: BtwThread, reason: "deleted" | "promoted"): Promise<boolean> {
+		const { key } = thread;
 		const abortController = thread.abortController;
 		thread.request = undefined;
 		thread.abortController = undefined;
@@ -324,6 +339,36 @@ export class BtwManager {
 		}
 		this.#preparedPromotions.delete(key);
 		return this.#forget(key);
+	}
+
+	async removeEmptyThreads(hasPendingInput: (thread: BtwThread) => boolean): Promise<void> {
+		const canRemove = (thread: BtwThread): boolean => {
+			if (
+				thread.started ||
+				thread.phase !== "ready" ||
+				thread.request ||
+				thread.draft ||
+				thread.draftImages.length ||
+				thread.draftImageLinks.some(Boolean) ||
+				hasPendingInput(thread)
+			)
+				return false;
+			const session = thread.conversation.session;
+			if (session) {
+				const queue = sessionCommandQueue(session);
+				return !(
+					session.isCompacting ||
+					session.hasAdmittedSubmission ||
+					session.queuedMessageCount ||
+					queue.holdsInput ||
+					queue.messages.length
+				);
+			}
+			return true;
+		};
+		for (const thread of this.children.filter(canRemove)) {
+			if (canRemove(thread)) await this.remove(thread.key, "deleted");
+		}
 	}
 
 	/** Stop only this thread's current work, without creating or disposing its runtime. */
@@ -405,6 +450,7 @@ export class BtwManager {
 		const abortController = new AbortController();
 		thread.request = request;
 		thread.abortController = abortController;
+		thread.started = true;
 		thread.phase = "running";
 		thread.error = undefined;
 		this.#appendEvent({
@@ -630,6 +676,7 @@ export class BtwManager {
 			model: restored.model,
 			conversation: this.#createConversation(restored.model, checkpoint, this.#createSideOptions?.(restored.key)),
 			phase: restored.phase,
+			started: restored.started,
 			error: restored.error,
 			draft: restored.draft,
 			draftImages: restored.draftImages,

@@ -55,6 +55,8 @@ export interface RestoredBtwThread {
 	trailingMessages?: readonly AgentMessage[];
 	baseMessages: readonly AgentMessage[];
 	turns: readonly EphemeralConversationTurn[];
+	/** A request was started even if it left no completed turns. */
+	started?: boolean;
 	draft: string;
 	draftImages: ImageContent[];
 	draftImageLinks: (string | undefined)[];

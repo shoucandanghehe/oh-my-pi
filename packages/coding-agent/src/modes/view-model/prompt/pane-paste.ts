@@ -9,8 +9,12 @@ export class PanePaste {
 	readonly #pending = new Set<() => void>();
 	readonly #held: (() => void)[] = [];
 
+	get pending(): boolean {
+		return this.#pending.size > 0;
+	}
+
 	hold(replay: () => void): boolean {
-		if (this.#pending.size === 0) return false;
+		if (!this.pending) return false;
 		this.#held.push(replay);
 		return true;
 	}
