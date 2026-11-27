@@ -13445,9 +13445,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
-			if (this.model && previousModelRole) {
-				this.sessionManager.appendModelChange(formatModelStringWithRouting(this.model), previousModelRole);
-			}
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 
@@ -13459,6 +13456,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
 			await this.#reconcileModeAfterTransition();
+			// Reconciliation can restore a pre-plan model. Do not make the outgoing
+			// plan model look like a saved selection on the new transcript.
+			if (this.model && previousModelRole && this.sessionManager.getLastModelChangeRole() !== previousModelRole) {
+				this.sessionManager.appendModelChange(formatModelStringWithRouting(this.model), previousModelRole);
+			}
 			// Drop the process-lifetime context-file cache so the rebuild re-reads
 			// AGENTS.md and friends from disk: the user may have edited them since
 			// the previous session started, and refreshBaseSystemPrompt() re-runs
