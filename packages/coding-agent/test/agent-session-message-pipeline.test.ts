@@ -364,7 +364,10 @@ describe("AgentSession message pipeline", () => {
 		expect(calls).toBe(0);
 	});
 
-	it("rejects a side turn when its session changes during context preparation", async () => {
+	it.each([
+		["changes", "Active session changed during ephemeral turn"],
+		["is disposed", "Session disposed during ephemeral turn"],
+	] as const)("rejects a side turn when its session %s during context preparation", async (change, error) => {
 		const model = getBundledModel("openai", "gpt-4o-mini");
 		const agent = new Agent({ initialState: { model, systemPrompt: [], tools: [] } });
 		const entered = Promise.withResolvers<void>();
@@ -382,16 +385,17 @@ describe("AgentSession message pipeline", () => {
 			modelRegistry: createModelRegistryStub() as never,
 			sideStreamFn: () => {
 				calls++;
-				return new AssistantMessageEventStream();
+				throw new Error("Side request dispatched with a stale session");
 			},
 		});
 		sessions.push(session);
 
 		const turn = session.runEphemeralTurn({ promptText: "Question?" });
 		await entered.promise;
-		expect(await session.newSession()).toBe(true);
+		if (change === "is disposed") await session.dispose();
+		else expect(await session.newSession()).toBe(true);
 		resume.resolve();
-		await expect(turn).rejects.toThrow("Active session changed during ephemeral turn");
+		await expect(turn).rejects.toThrow(error);
 		expect(calls).toBe(0);
 	});
 

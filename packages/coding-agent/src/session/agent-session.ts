@@ -14974,6 +14974,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const sessionGeneration = this.#sessionGeneration;
 		const assertEphemeralTurnReady = () => {
 			args.signal?.throwIfAborted();
+			if (this.#isDisposed) throw new Error("Session disposed during ephemeral turn.");
 			// The side request must use the exact model snapshot captured above.
 			// `modelsAreEqual` intentionally compares only provider/id, while a
 			// replacement with that same identity can still change routing and wire
