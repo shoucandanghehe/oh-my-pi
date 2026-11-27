@@ -30,6 +30,26 @@ export class TranscriptRows {
 		return this.#weights[index] ?? this.estimate;
 	}
 
+	/** Append a Fenwick leaf; its covered range also includes the preceding partial tree. */
+	push(weight?: number): void {
+		this.#weights.push(weight);
+		const index = this.#weights.length;
+		const first = index - (index & -index);
+		let sum = weight ?? 0;
+		let unknown = weight === undefined ? 1 : 0;
+		for (let i = index - 1; i > first; i -= i & -i) {
+			sum += this.#sums[i]!;
+			unknown += this.#unknown[i]!;
+		}
+		this.#sums.push(sum);
+		this.#unknown.push(unknown);
+	}
+
+	truncate(length: number): void {
+		this.#weights.length = length;
+		this.#sums.length = this.#unknown.length = length + 1;
+	}
+
 	set(index: number, weight: number): void {
 		const previous = this.#weights[index];
 		if (previous === weight) return;

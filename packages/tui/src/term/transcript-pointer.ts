@@ -299,7 +299,8 @@ export class TranscriptPointer {
 	copy(): boolean {
 		if (!this.#active || !this.host.copy || !this.host.available()) return false;
 		const view = this.#selectionView();
-		const doc = this.#inDock ? view.doc : this.host.document();
+		const transcript = this.#inDock ? undefined : this.host.document();
+		const doc = transcript ?? view.doc;
 		const bounds = this.#bounds(view, doc);
 		if (!bounds) return false;
 		const chunks: string[] = [];
@@ -308,7 +309,8 @@ export class TranscriptPointer {
 		const nodes = view.nodes();
 		for (let i = first.index; i <= last.index; i++) {
 			const node = nodes[i]!;
-			const block = view.block(node);
+			// Skipped blocks still have estimated separators until their real heights are known.
+			const block = transcript?.pending ? transcript.measure(i) : view.block(node);
 			const entry = doc.entry(node);
 			if (!entry || !block.rows.length) continue;
 			const from = i === first.index ? bounds.left.row : -entry.lead;

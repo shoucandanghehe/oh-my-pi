@@ -65,6 +65,42 @@ it("uses every row above the composer for transcript text when the scrollbar sup
 	expect(term.screen()[4]).toBe("> draft");
 });
 
+it("opens and resizes long history without painting it first, and pages through cold heights", () => {
+	const count = 1000;
+	const seen = new Set<number>();
+	term = createTestTerminal(
+		() => ({
+			main: Array.from({ length: count }, (_, index) => (
+				<canvas
+					paint={width => {
+						seen.add(index);
+						return Array.from({ length: index === 986 ? 12 : 1 }, (_, row) => `${index}:${row} @${width}`);
+					}}
+				/>
+			)),
+			dock: <rows lines={["> draft"]} />,
+		}),
+		{ rows: 10, columns: 20, separator: () => 0, screen: () => "fullscreen", scrollbar: () => false },
+	);
+	expect(term.screen().slice(-2)).toEqual(["999:0 @20", "> draft"]);
+	// Bound synchronous work without pinning the cache, overscan or exact paint count.
+	expect(seen.size).toBeLessThan(count / 10);
+	expect(seen.has(986)).toBe(false);
+	term.backend.scroll("page-up"); // 8 actual rows before 991:0.
+	term.render();
+	expect(term.screen()[0]).toBe("986:8 @20");
+	seen.clear();
+	term.resize(24, 10);
+	expect(term.screen()[0]).toBe("986:8 @24");
+	expect(seen.size).toBeLessThan(count / 10);
+	term.backend.scroll("start");
+	term.render();
+	expect(term.screen()[0]).toBe("0:0 @24");
+	term.backend.scroll("end");
+	term.render();
+	expect(term.screen().slice(-2)).toEqual(["999:0 @24", "> draft"]);
+});
+
 describe("fullscreen screen mode", () => {
 	it("pins the dock to the bottom row under a short transcript and writes no history", () => {
 		const { term } = mount([block("a", 2)]);

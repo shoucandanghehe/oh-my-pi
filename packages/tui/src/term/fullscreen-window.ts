@@ -9,7 +9,7 @@ import type { WorkspaceMainView } from "../workspace";
 import type { SelectionMotion, TermBackendOptions, TranscriptScroll } from "./backend";
 import { type Block, type Cell, type PaintEnvironment, paintNode } from "./paint";
 import { plainTranscriptText } from "./transcript-cells";
-import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
+import { TranscriptDocument } from "./transcript-document";
 import { TranscriptPointer } from "./transcript-pointer";
 import { TranscriptSearch } from "./transcript-search";
 import type { WidgetContext } from "./widgets";
@@ -43,6 +43,8 @@ interface Bookmark {
 }
 
 const contentLength = (line: string): number => plainTranscriptText(line).replace(/\s+/gu, "").length;
+
+const OVERSCAN = 4;
 
 interface FullscreenWindowHost extends Pick<
 	TermBackendOptions,
@@ -80,7 +82,8 @@ export class FullscreenWindow {
 	#anchor: ScrollAnchor | undefined;
 	#search: TranscriptSearch | undefined;
 	#window: SessionWindow | undefined;
-	#index: TranscriptIndex | undefined;
+	#index: TranscriptDocument | undefined;
+	readonly #widths = new Map<number, TranscriptDocument>();
 	#pointer: TranscriptPointer | undefined;
 	#scope: MainScrollScope | undefined;
 	#bookmark: Bookmark | undefined;
@@ -148,17 +151,18 @@ export class FullscreenWindow {
 		if (!view) return false;
 		const page = Math.max(1, view.rows - 1);
 		if (by === "previous-prompt" || by === "next-prompt") {
-			const main = untrack(() => this.#surface.main());
+			const doc = this.#index!;
+			const main = untrack(this.#surface.main);
 			const top = this.#anchor ?? view.top;
 			if (!top || !this.host.isPrompt) return false;
 			const step = by === "next-prompt" ? 1 : -1;
-			let index = main.indexOf(top.node);
+			let index = doc.indexOf(top.node);
 			if (step > 0 || top.row === 0) index += step;
 			for (; index >= 0 && index < main.length; index += step) {
 				const node = main[index]!;
 				if (!this.host.isPrompt(node)) continue;
 				this.#anchor = { node, row: 0 };
-				this.#remember(this.#index!.read(), view.width);
+				this.#remember(doc, view.width);
 				this.host.requestRender();
 				break;
 			}
@@ -178,11 +182,14 @@ export class FullscreenWindow {
 							: by === "line-down"
 								? 1
 								: 0;
-		const doc = this.#index!.read();
+		const doc = this.#index!;
 		const maxTop = Math.max(0, doc.rows - view.rows);
-		const origin = this.#anchor && doc.entry(this.#anchor.node);
-		const from = origin ? origin.top + Math.min(this.#anchor!.row, origin.size - 1) : maxTop;
-		this.#seek(by === "start" ? 0 : by === "end" ? maxTop : from + delta, doc);
+		const origin = this.#anchor ? doc.entry(this.#anchor.node) : doc.at(maxTop);
+		const row = origin ? Math.min(origin.size - 1, this.#anchor?.row ?? maxTop - origin.top) : 0;
+		this.#seek(
+			by === "start" ? 0 : by === "end" ? maxTop : origin ? doc.offset(origin, row, delta) : maxTop + delta,
+			doc,
+		);
 		return true;
 	}
 
@@ -275,7 +282,7 @@ export class FullscreenWindow {
 		this.#window = undefined;
 		this.#pointer?.reset();
 		this.#pointer = undefined;
-		this.#index?.dispose();
+		this.#widths.clear();
 		this.#index = undefined;
 	}
 
@@ -295,7 +302,7 @@ export class FullscreenWindow {
 		this.#bookmark = { index: entry.index, kind: anchor.node.kind, row, width, textOffset };
 	}
 
-	#seek(offset: number, doc = this.#index?.read()): void {
+	#seek(offset: number, doc = this.#index): void {
 		if (!doc || !this.#window) return;
 		const target = Math.max(0, Math.trunc(offset));
 		const entry = target < doc.rows - this.#window.rows ? doc.at(target) : undefined;
@@ -309,7 +316,7 @@ export class FullscreenWindow {
 		return (this.#pointer ??= new TranscriptPointer({
 			available: () => this.host.acceptsPointer() && this.wheel && !this.#search,
 			requestRender: options.requestRender,
-			document: () => this.#index!.read(),
+			document: () => this.#index!,
 			scroll: delta => this.scroll(delta),
 			scrollTo: offset => this.#seek(offset),
 			now: options.clock ?? (() => performance.now()),
@@ -322,16 +329,75 @@ export class FullscreenWindow {
 	}
 
 	#document(width: number): TranscriptDocument {
-		if (this.#index?.width !== width) {
-			this.#index?.dispose();
-			this.#index = transcriptIndex(
-				width,
+		let doc = this.#widths.get(width);
+		if (!doc) {
+			doc = new TranscriptDocument(
 				this.#surface.main,
-				node => this.#paint(node, width).rows,
+				node => paintNode(this.host.env, node, width, undefined, true),
 				this.host.separator ?? (() => 1),
+				this.#index?.estimate,
+				node => this.#paint(node, width),
 			);
 		}
-		return this.#index.read();
+		// Keep the current and previous width: terminal resize often toggles between the two.
+		this.#widths.delete(width);
+		this.#widths.set(width, doc);
+		if (this.#widths.size > 2) this.#widths.delete(this.#widths.keys().next().value!);
+		doc.sync();
+		return (this.#index = doc);
+	}
+
+	#position(doc: TranscriptDocument, room: number): number {
+		const max = Math.max(0, doc.rows - room);
+		const anchor = this.#anchor;
+		if (!anchor || !room) return max;
+		const index = doc.indexOf(anchor.node);
+		if (index < 0) return max;
+		return Math.min(max, doc.start(index) + Math.max(0, Math.min(anchor.row, doc.size(index) - 1)));
+	}
+
+	#visible(doc: TranscriptDocument, nodes: readonly UiNode[], room: number): Map<number, Block> {
+		const blocks = new Map<number, Block>();
+		if (!room) return blocks;
+		const anchor = this.#anchor && doc.indexOf(this.#anchor.node);
+		if (anchor !== undefined && anchor >= 0) doc.measure(anchor);
+		const limit = Math.max(128, room + OVERSCAN * 2);
+		const fill = (): void => {
+			const following = this.#position(doc, room) === Math.max(0, doc.rows - room);
+			for (
+				let i = doc.indexAt(following ? doc.rows - 1 : this.#position(doc, room));
+				i >= 0 && i < nodes.length && blocks.size < limit;
+				i = doc.indexAt(following ? doc.start(i) - 1 : doc.start(i + 1))
+			) {
+				const top = this.#position(doc, room);
+				if (following ? doc.start(i + 1) <= top : doc.start(i) >= top + room) break;
+				if (blocks.has(i)) continue;
+				blocks.set(i, doc.measure(i, true));
+			}
+		};
+		fill();
+		const top = this.#position(doc, room);
+		const first = doc.indexAt(top);
+		const last = doc.indexAt(Math.min(doc.rows, top + room) - 1);
+		// Nearby blocks give short scrolls exact heights, without animating or acquiring their images.
+		const nearby = new Set<number>();
+		for (let i = 1; i <= OVERSCAN; i++) {
+			nearby.add(first - i);
+			nearby.add(last + i);
+			nearby.add(nodes.length - i); // Empty and streaming tail nodes can gain rows without a list change.
+		}
+		for (const i of nearby) if (i >= 0 && i < nodes.length && !blocks.has(i)) doc.measure(i);
+		let sum = 0;
+		let count = 0;
+		for (const [i, block] of blocks) {
+			if (!block.rows.length) continue;
+			sum += doc.size(i);
+			count++;
+		}
+		doc.seed(sum, count);
+		fill();
+		if (blocks.size >= limit) this.host.requestRender();
+		return blocks;
 	}
 
 	/**
@@ -383,10 +449,12 @@ export class FullscreenWindow {
 		const main = this.#surface.main();
 		const lane = screenWidth > 1 && (this.host.scrollbar?.() ?? true);
 		const width = lane ? screenWidth - 1 : screenWidth;
+		const previous = this.#index;
+		const continuing = previous?.pending;
 		const doc = this.#document(width);
-		const size = (i: number): number => doc.entry(main[i]!)?.size ?? 0;
 		if (bookmark) {
 			const node = main[bookmark.index];
+			if (node?.kind === bookmark.kind) doc.measure(bookmark.index);
 			const entry = node?.kind === bookmark.kind ? doc.entry(node) : undefined;
 			if (entry && node) {
 				let row = bookmark.row;
@@ -404,13 +472,21 @@ export class FullscreenWindow {
 		}
 
 		if (search) {
-			this.#anchor = search.reveal(main, i => this.#paint(main[i]!, width).rows, size, this.#anchor, room);
+			this.#anchor = search.reveal(
+				main,
+				i => doc.measure(i).rows,
+				i => doc.size(i),
+				this.#anchor,
+				room,
+			);
 		}
+		if (room && continuing && previous === doc) doc.refine();
+		const blocks = this.#visible(doc, main, room);
+		doc.painted(blocks);
+		if (room && doc.pending) this.host.requestRender();
 
 		const maxTop = Math.max(0, doc.rows - room);
-		const anchored = this.#anchor && doc.entry(this.#anchor.node);
-		const offset =
-			room && anchored ? Math.min(maxTop, anchored.top + Math.min(this.#anchor!.row, anchored.size - 1)) : maxTop;
+		const offset = this.#position(doc, room);
 		const first = doc.at(offset);
 		const index = first?.index ?? main.length;
 		const skip = first ? offset - first.top : 0;
@@ -424,11 +500,11 @@ export class FullscreenWindow {
 		const content = indicator ? room - 1 : room;
 		const window: string[] = [];
 		const nodes: UiNode[] = [];
-		for (let i = index; i < main.length && window.length < content; i++) {
-			const rows = size(i);
-			if (rows === 0) continue;
+		for (let i = index; i < main.length && window.length < content; i = doc.indexAt(doc.start(i + 1))) {
+			const rows = doc.size(i);
 			const node = main[i]!;
-			const block = this.#paint(node, width);
+			const block = blocks.get(i);
+			if (!block) break; // A long run of changing empty blocks can exhaust this frame's layout budget.
 			const lead = rows - block.rows.length;
 			// Window row of the block's first row (negative: cut above the window).
 			const top = window.length + lead - (i === index ? skip : 0);
@@ -490,7 +566,7 @@ export class FullscreenWindow {
 			{
 				doc,
 				nodes: this.#surface.main,
-				block: node => this.#paint(node, width),
+				block: doc.block,
 				screenTop: 0,
 				dock: () => {
 					// The fixed dock already has exact block placements, including partially clipped nodes.

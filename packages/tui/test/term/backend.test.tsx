@@ -130,6 +130,45 @@ describe("TermBackend animation", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("animates a fullscreen block only while it is on screen", () => {
+		vi.useFakeTimers();
+		const start = Date.now();
+		let paints = 0;
+		defineRolePainter("rows", "test.fullscreen-offscreen-clock", (_node, cx) => {
+			paints++;
+			return { rows: [`clock ${cx.now() - start}`] };
+		});
+		const surface = createSurface(() => ({
+			main: [<rows role="test.fullscreen-offscreen-clock" lines={[]} />, <rows lines={lines("tail ", 20)} />],
+		}));
+		const driver = new FakeDriver();
+		const backend = new TermBackend({
+			surface,
+			driver,
+			theme: () => PLAIN_THEME,
+			screen: () => "fullscreen",
+			separator: () => 0,
+			tickInterval: 80,
+		});
+		try {
+			backend.start();
+			backend.scroll("start");
+			backend.renderNow();
+			vi.advanceTimersByTime(80);
+			expect(driver.frames.at(-1)?.fullscreen?.[0]).toContain("clock 80");
+			backend.scroll("end");
+			backend.renderNow();
+			expect(driver.frames.at(-1)?.fullscreen?.at(-1)).toContain("tail 19");
+			const hiddenPaints = paints;
+			vi.advanceTimersByTime(800);
+			expect(paints).toBe(hiddenPaints);
+		} finally {
+			backend.stop();
+			surface.dispose();
+			vi.useRealTimers();
+		}
+	});
 });
 
 describe("TermBackend main surface", () => {
