@@ -34,10 +34,10 @@ import type {
 	TerminalCapabilities,
 	TerminalDriver,
 } from "../driver/contract";
-import { dropCutImages, holdsImage } from "../driver/images/anchor";
+import { dropCutImages } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
 import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
-import { clipViewportImages, maskOverlayImages } from "../driver/images/viewport";
+import { maskOverlayImages } from "../driver/images/viewport";
 import { normalizeRow } from "../driver/output/ansi";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { ScrollRequest, UiNode } from "../node";
@@ -58,19 +58,9 @@ import type { Theme } from "../theme/contract";
 import { padTo, sliceCells, sliceColumns, type TextRow, truncate, visibleWidth } from "../text/width";
 import type { AnsiWorkspaceRail, WorkspacePaneMinimum, WorkspaceSurface } from "../workspace";
 import { AppViewport, type ViewportHit } from "./app-viewport";
-import {
-	type Block,
-	type Cell,
-	type Hit,
-	type PaintEnvironment,
-	type PaintImages,
-	paintNode,
-	type PointerHover,
-} from "./paint";
+import { FullscreenWindow, isFullscreen } from "./fullscreen-window";
+import { type Block, type Cell, type PaintEnvironment, type PaintImages, paintNode, type PointerHover } from "./paint";
 import { petrifyRows } from "./petrification";
-import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
-import { TranscriptPointer } from "./transcript-pointer";
-import { TranscriptSearch } from "./transcript-search";
 import { type InputFrame, TerminalWorkspace, type WorkspacePane, type WorkspaceRect } from "./workspace";
 import { type WidgetContext, widgetContext, widgetFor } from "./widgets";
 import "./painters";
@@ -96,23 +86,6 @@ export type TranscriptScroll =
 	| "previous-prompt"
 	| "next-prompt"
 	| number;
-
-/** The top of the fullscreen transcript window: a `main` node and a row of its entry (separator rows first). */
-interface ScrollAnchor {
-	readonly node: UiNode;
-	readonly row: number;
-}
-
-/** The fullscreen transcript window as the last frame drew it. */
-interface SessionWindow {
-	/** Its first row (the tail-following window's too, so scrolling starts from what is on screen). */
-	readonly top: ScrollAnchor | undefined;
-	/** Transcript rows on screen (the indicator row included). */
-	readonly rows: number;
-	readonly width: number;
-	/** The wheel scrolls it: no modal sheet owns the pointer. */
-	readonly wheel: boolean;
-}
 
 /** Options of a {@link TermBackend}. */
 export interface TermBackendOptions extends WorkspaceSurface {
@@ -235,15 +208,6 @@ export function driverImages(
 		cell: () => capabilities().cell ?? DEFAULT_CELL,
 		...(images.measure ? { measure: images.measure.bind(images) } : {}),
 	};
-}
-
-const FULLSCREEN_KINDS: ReadonlySet<string> = new Set(["picker", "prefs"]);
-
-function isFullscreen(node: UiNode): boolean {
-	const props = node.props();
-	if (node.kind === "picker") return !("modal" in props && props.modal === false);
-	if (FULLSCREEN_KINDS.has(node.kind)) return true;
-	return node.kind === "overlay" && "size" in props && props.size === "full";
 }
 
 /**
@@ -430,13 +394,7 @@ export class TermBackend {
 	#inlineInput: InputFrame | undefined;
 	/** The driver lost history: the next frame replays the committed ledger. */
 	#replay = false;
-	/** Fullscreen transcript window top; undefined while it follows the tail. */
-	#anchor: ScrollAnchor | undefined;
-	#search: TranscriptSearch | undefined;
-	/** The fullscreen transcript window the last frame drew; undefined when none is on screen. */
-	#window: SessionWindow | undefined;
-	#index: TranscriptIndex | undefined;
-	#pointer: TranscriptPointer | undefined;
+	readonly #fullscreen: FullscreenWindow;
 	#pointerFocused = true;
 	/** Nonmodal sheets and toasts cover transcript cells even where they have no widget hit. */
 	readonly #pointerCovers: { top: number; bottom: number; left: number; right: number; firstHit: number }[] = [];
@@ -528,6 +486,17 @@ export class TermBackend {
 				: {}),
 			...(paintImages ? { images: paintImages } : {}),
 		};
+		this.#fullscreen = new FullscreenWindow({
+			...this.#options,
+			env: this.#env,
+			acceptsPointer: () =>
+				this.#running && this.#pointerFocused && this.#surface.layer() === this.#inlineInput?.layer,
+			requestRender: () => this.requestRender(),
+			settleFrame: () => {
+				if (this.#frameRequested) this.renderNow();
+			},
+			widgetContext: field => this.#widgetContext([field], this.#surface, "main"),
+		});
 	}
 
 	/** Start rendering and routing input on a started driver (the host owns the driver's lifecycle). */
@@ -563,8 +532,8 @@ export class TermBackend {
 	stop(): void {
 		if (!this.#running) return;
 		this.#running = false;
-		this.#leavePointerWindow();
-		this.#closeSearch();
+		this.#fullscreen.hide();
+		this.#fullscreen.closeSearch();
 		clearTimeout(this.#frame);
 		clearTimeout(this.#tick);
 		this.#frame = undefined;
@@ -609,114 +578,12 @@ export class TermBackend {
 	 * on screen (inline mode, a fullscreen layer up): the caller's key goes elsewhere.
 	 */
 	scroll(by: TranscriptScroll): boolean {
-		const view = this.#window;
-		if (!this.#running || !view) return false;
-		const page = Math.max(1, view.rows - 1);
-		if (by === "previous-prompt" || by === "next-prompt") {
-			const main = untrack(() => this.#surface.main());
-			const top = this.#anchor ?? view.top;
-			if (!top || !this.#options.isPrompt) return false;
-			const step = by === "next-prompt" ? 1 : -1;
-			let index = main.indexOf(top.node);
-			if (step > 0 || top.row === 0) index += step;
-			for (; index >= 0 && index < main.length; index += step) {
-				const node = main[index]!;
-				if (!this.#options.isPrompt(node)) continue;
-				this.#anchor = { node, row: 0 };
-				this.requestRender();
-				break;
-			}
-			return true;
-		}
-		if (by === "half-up" || by === "half-down")
-			by = (by === "half-up" ? -1 : 1) * Math.max(1, Math.floor(view.rows / 2));
-		const delta =
-			typeof by === "number"
-				? by
-				: by === "page-up"
-					? -page
-					: by === "page-down"
-						? page
-						: by === "line-up"
-							? -1
-							: by === "line-down"
-								? 1
-								: 0;
-		const doc = this.#index!.read();
-		const maxTop = Math.max(0, doc.rows - view.rows);
-		const origin = this.#anchor && doc.entry(this.#anchor.node);
-		const from = origin ? origin.top + Math.min(this.#anchor!.row, origin.size - 1) : maxTop;
-		this.#seek(by === "start" ? 0 : by === "end" ? maxTop : from + delta, doc);
-		return true;
+		return this.#running && this.#fullscreen.scroll(by);
 	}
 
 	/** Open a terminal-local transcript search without moving focus or editing the composer's draft. */
 	openSearch(): boolean {
-		if (!this.#running || !this.#window || !this.#searchable()) return false;
-		if (!this.#search) {
-			this.#pointer?.reset();
-			this.#search = new TranscriptSearch(this.#anchor, this.#surface.focused(), this.#env, field =>
-				this.#widgetContext([field], this.#surface, "main"),
-			);
-			this.requestRender();
-		}
-		return true;
-	}
-
-	#searchable(): boolean {
-		if (this.#options.screen?.() !== "fullscreen") return false;
-		if (this.#search && this.#search.owner !== this.#surface.focused()) return false;
-		return !this.#surface
-			.layer()
-			.some(
-				node =>
-					isFullscreen(node) || (node.kind === "overlay" && (node.props() as { modal?: boolean }).modal === true),
-			);
-	}
-
-	#closeSearch(accept = false): void {
-		const search = this.#search;
-		if (!search) return;
-		this.#anchor = (accept ? search.selectedAnchor : undefined) ?? search.savedAnchor;
-		search.dispose();
-		this.#search = undefined;
-	}
-
-	#searchInput(event: InputEvent): boolean {
-		const search = this.#search;
-		if (!search) return false;
-		if (!this.#searchable()) {
-			this.#closeSearch();
-			this.requestRender();
-			return false;
-		}
-		if (
-			event.type === "mouse" &&
-			event.mouse.action === "press" &&
-			event.mouse.row < (this.#window?.rows ?? 0) &&
-			(event.mouse.button === "wheel-up" || event.mouse.button === "wheel-down")
-		) {
-			search.browse();
-			this.#pointer?.input(event.mouse, event.mouse.row);
-			return true;
-		}
-		if (
-			event.type === "key" &&
-			event.key.kind !== "release" &&
-			(event.key.id === "pageUp" || event.key.id === "pageDown")
-		) {
-			search.browse();
-			return this.scroll(event.key.id === "pageUp" ? "page-up" : "page-down");
-		}
-		const action = search.input(event);
-		if (!action) return false;
-		if (action !== "handled") {
-			// The terminal may deliver the query, navigation and accept before a coalesced frame.
-			if (action === "accept" && this.#frameRequested) this.renderNow();
-			this.#closeSearch(action === "accept");
-		}
-		this.requestRender();
-		return true;
+		return this.#running && this.#fullscreen.openSearch();
 	}
 
 	/** Schedule a frame (coalesced, at most one per frame interval). */
@@ -1040,7 +907,7 @@ export class TermBackend {
 			pane.input = input;
 			if (layer.length > 0) appViewport?.endDrag();
 		} else {
-			if (this.#inlineInput?.layer !== layer) this.#pointer?.blur();
+			if (this.#inlineInput?.layer !== layer) this.#fullscreen.blurPointer();
 			this.#pointerCovers.length = 0;
 			this.#inlineInput = input;
 		}
@@ -1063,7 +930,7 @@ export class TermBackend {
 						? Math.max(0, rows.length - block.rows.length)
 						: Math.max(0, Math.floor((rows.length - block.rows.length) / 2));
 			const left = Math.max(0, Math.floor((width - overlayCols) / 2));
-			if (this.#window)
+			if (this.#fullscreen.painted)
 				this.#pointerCovers.push({
 					top,
 					bottom: top + block.rows.length,
@@ -1091,9 +958,9 @@ export class TermBackend {
 		};
 		const fullscreenAt = layer.findLastIndex(isFullscreen);
 		const screen = this.#options.screen?.() ?? "inline";
-		if (this.#search && (flush || !this.#searchable())) this.#closeSearch();
+		if (flush || !this.#fullscreen.searchable) this.#fullscreen.closeSearch();
 		if (fullscreenAt !== -1) {
-			this.#leavePointerWindow();
+			this.#fullscreen.hide();
 			const block = this.#paint(layer[fullscreenAt]!, width, height);
 			const rows = block.rows.slice(0, height);
 			while (rows.length < height) rows.push("");
@@ -1109,16 +976,15 @@ export class TermBackend {
 			const modal = layer.some(
 				node => node.kind === "overlay" && (node.props() as { modal?: boolean }).modal === true,
 			);
-			if (modal) this.#pointer?.blur();
-			const session = this.#composeSession(width, height, hits, !modal);
+			if (modal) this.#fullscreen.blurPointer();
+			const session = this.#fullscreen.paint(width, height, hits, !modal);
 			cursor = session.cursor;
 			for (const node of layer) place(session.rows, node);
 			// The normal screen stays as it was under the alternate one.
 			this.#nextPin = this.#pin;
 			return { viewport: [], cursor, fullscreen: session.rows };
 		}
-		if (this.#window) this.#leavePointerWindow();
-		if (!flush) this.#anchor = undefined;
+		this.#fullscreen.hide(!flush);
 
 		const dock: Placed[] = [];
 		let dockRows = 0;
@@ -1475,193 +1341,12 @@ export class TermBackend {
 
 	/** Copy selected fullscreen transcript text. False leaves the key available to the focused widget. */
 	copySelection(): boolean {
-		return this.#pointer?.copy() ?? false;
+		return this.#fullscreen.copySelection();
 	}
 
 	/** Adjust an existing selection without stealing navigation from the composer when none is active. */
 	extendSelection(direction: SelectionMotion): boolean {
-		if (!this.#pointer?.adjust(direction)) return false;
-		this.requestRender();
-		return true;
-	}
-
-	#leavePointerWindow(): void {
-		this.#window = undefined;
-		this.#pointer?.reset();
-		this.#pointer = undefined;
-		this.#index?.dispose();
-		this.#index = undefined;
-	}
-	#seek(offset: number, doc = this.#index?.read()): void {
-		if (!doc || !this.#window) return;
-		const target = Math.max(0, Math.trunc(offset));
-		const entry = target < doc.rows - this.#window.rows ? doc.at(target) : undefined;
-		this.#anchor = entry ? { node: entry.node, row: target - entry.top } : undefined;
-		this.requestRender();
-	}
-
-	#sessionPointer(): TranscriptPointer {
-		const options = this.#options;
-		return (this.#pointer ??= new TranscriptPointer({
-			available: () =>
-				this.#running &&
-				this.#pointerFocused &&
-				!!this.#window?.wheel &&
-				!this.#search &&
-				this.#surface.layer() === this.#inlineInput?.layer &&
-				this.#searchable(),
-			document: () => this.#index!.read(),
-			scroll: delta => this.scroll(delta),
-			scrollTo: offset => this.#seek(offset),
-			now: options.clock ?? (() => performance.now()),
-			wheelLines: options.wheelLines ?? (() => 0),
-			copyOnSelect: options.copyOnSelect ?? (() => true),
-			copy: options.copySelection,
-		}));
-	}
-
-	#document(width: number): TranscriptDocument {
-		if (this.#index?.width !== width) {
-			this.#index?.dispose();
-			this.#index = transcriptIndex(
-				width,
-				this.#surface.main,
-				node => this.#paint(node, width).rows,
-				this.#options.separator ?? (() => 1),
-			);
-		}
-		return this.#index.read();
-	}
-
-	/**
-	 * The fullscreen session frame (before layers): the transcript window over the dock pinned to the
-	 * bottom row. The window follows the tail, or starts at {@link #anchor} (clamped to the
-	 * transcript; one that reaches the tail follows it again) with a row counting what is below it.
-	 */
-	#composeSession(
-		screenWidth: number,
-		height: number,
-		hits: { hit: Hit; top: number; left: number }[],
-		wheel: boolean,
-	): { rows: string[]; cursor: Cell | null } {
-		let cursor: Cell | null = null;
-		const search = this.#search;
-		const dock: Placed[] = [];
-		let dockRows = search ? 1 : 0;
-		for (const node of search ? [] : this.#surface.dock()) {
-			const block = this.#paint(node, screenWidth);
-			// Inline dock painters include breathing room between the ledger and controls.
-			// On the fixed screen give leading, purely decorative blank rows back to the transcript.
-			let skip = 0;
-			if (!dockRows && block.rows[0] === "" && !block.covering && !block.rows.some(holdsImage)) {
-				while (
-					block.rows[skip] === "" &&
-					block.cursor?.row !== skip &&
-					!block.hits?.some(hit => hit.row <= skip && skip < hit.row + hit.height)
-				)
-					skip++;
-			}
-			dock.push({ block, top: dockRows - skip, left: 0 });
-			dockRows += block.rows.length - skip;
-		}
-		const room = Math.max(0, height - dockRows);
-		const main = this.#surface.main();
-		const lane = screenWidth > 1 && (this.#options.scrollbar?.() ?? true);
-		const width = lane ? screenWidth - 1 : screenWidth;
-		const doc = this.#document(width);
-		const size = (i: number): number => doc.entry(main[i]!)?.size ?? 0;
-
-		if (search) {
-			this.#anchor = search.reveal(main, i => this.#paint(main[i]!, width).rows, size, this.#anchor, room);
-		}
-
-		const maxTop = Math.max(0, doc.rows - room);
-		const anchored = this.#anchor && doc.entry(this.#anchor.node);
-		const offset =
-			room && anchored ? Math.min(maxTop, anchored.top + Math.min(this.#anchor!.row, anchored.size - 1)) : maxTop;
-		const first = doc.at(offset);
-		const index = first?.index ?? main.length;
-		const skip = first ? offset - first.top : 0;
-		const below = offset < maxTop ? maxTop - offset + 1 : 0; // The indicator replaces the last content row.
-		this.#anchor = below && first ? { node: first.node, row: skip } : undefined;
-
-		// The window: entry rows from the top down, the indicator taking its last row while anchored.
-		const indicator = below > 0 && !lane && room > 1;
-		const content = indicator ? room - 1 : room;
-		const window: string[] = [];
-		for (let i = index; i < main.length && window.length < content; i++) {
-			const rows = size(i);
-			if (rows === 0) continue;
-			const node = main[i]!;
-			const block = this.#paint(node, width);
-			const lead = rows - block.rows.length;
-			// Window row of the block's first row (negative: cut above the window).
-			const top = window.length + lead - (i === index ? skip : 0);
-			for (let r = i === index ? skip : 0; r < rows && window.length < content; r++) {
-				const raw = r < lead ? "" : block.rows[r - lead]!;
-				window.push(search ? search.highlight(node, r, raw) : raw);
-			}
-			if (this.#options.images) {
-				const from = Math.max(0, -top);
-				const to = Math.min(block.rows.length, content - top);
-				clipViewportImages(window, top + from, block.rows, from, to, this.#options.images.cell().h);
-			}
-			if (block.cursor && this.#surface.focused()) {
-				const row = top + block.cursor.row;
-				if (row >= 0 && row < window.length) cursor = { row, col: block.cursor.col };
-			}
-			for (const hit of block.hits ?? []) {
-				if (top + hit.row >= 0 && top + hit.row + hit.height <= window.length) hits.push({ hit, top, left: 0 });
-			}
-		}
-		dropCutImages(window, 0);
-		if (indicator) {
-			const theme = this.#options.theme();
-			window.push(truncate(theme.fg("dim", `↓ ${below} ${below === 1 ? "line" : "lines"} below`), width, ""));
-		}
-		while (window.length < room) window.push("");
-		this.#window = {
-			top: index < main.length ? { node: main[index]!, row: skip } : undefined,
-			rows: room,
-			width,
-			wheel,
-		};
-
-		this.#sessionPointer().update(
-			{
-				doc,
-				top: offset,
-				rows: room,
-				content: Math.min(content, doc.rows - offset),
-				width,
-				scrollbar: lane && room > 0 && doc.rows > room,
-			},
-			window,
-			this.#options.theme(),
-		);
-		const rows = window;
-		if (search) {
-			const bar = search.bar(this.#driver.columns, room);
-			rows.push(bar.text);
-			return { rows, cursor: { row: room, col: bar.col } };
-		}
-		const dockTop = rows.length;
-		for (const placed of dock) {
-			for (let row = Math.max(0, -placed.top); row < placed.block.rows.length; row++)
-				rows.push(placed.block.rows[row]!);
-			if (placed.block.cursor)
-				cursor = { row: dockTop + placed.top + placed.block.cursor.row, col: placed.block.cursor.col };
-			for (const hit of placed.block.hits ?? []) hits.push({ hit, top: dockTop + placed.top, left: 0 });
-		}
-		// A dock taller than the screen keeps its bottom rows (the editor).
-		const over = rows.length - height;
-		if (over > 0) {
-			rows.splice(0, over);
-			dropCutImages(rows, 0);
-			if (cursor) cursor = cursor.row >= over ? { row: cursor.row - over, col: cursor.col } : null;
-			for (const entry of hits) entry.top -= over;
-		}
-		return { rows, cursor };
+		return this.#fullscreen.extendSelection(direction);
 	}
 
 	#regions(surface: Surface): UiNode[] {
@@ -1685,14 +1370,14 @@ export class TermBackend {
 		if (event.type === "focus") {
 			// A focus-in can arrive over a page or during a live screen-mode switch.
 			this.#pointerFocused = event.focused;
-			if (!event.focused && this.#window) this.clearHover();
+			if (!event.focused && this.#fullscreen.painted) this.clearHover();
 		} else if (
 			event.type === "mouse" &&
-			this.#window &&
+			this.#fullscreen.painted &&
 			(!this.#pointerFocused || this.#options.screen?.() !== "fullscreen")
 		)
 			return;
-		if (!this.#searchInput(event)) this.#onInput(event, intercept);
+		if (!this.#fullscreen.searchInput(event)) this.#onInput(event, intercept);
 	}
 
 	#onInput(event: InputEvent, intercept: boolean, originId?: string): void {
@@ -1767,9 +1452,8 @@ export class TermBackend {
 			this.clearHover();
 			return;
 		}
-		const pointer =
-			!pane && this.#window?.wheel && (!input.layer.length || this.#searchable()) ? this.#pointer : undefined;
-		if (pointer?.capture(mouse, viewportRow)) return;
+		const pointer = !pane && this.#fullscreen.wheel ? this.#fullscreen : undefined;
+		if (pointer?.capturePointer(mouse, viewportRow)) return;
 		const appViewport = input.layer.length === 0 ? pane?.viewport : undefined;
 		const contentMouse = input.rail ? { ...mouse, col: Math.max(0, mouse.col - input.rail.inset) } : mouse;
 		if (appViewport?.drag(contentMouse, viewportRow)) return;
@@ -1803,25 +1487,25 @@ export class TermBackend {
 			const leftPress = mouse.action === "press" && mouse.button === "left";
 			if (widget?.mouse?.(hit.node, mouse, { row, col }, this.#widgetContext(path, surface, id), hit)) {
 				if (leftPress) {
-					pointer?.reset();
+					pointer?.resetPointer();
 					appViewport?.clearSelection();
 				}
 				return;
 			}
 			if (leftPress && hit.act) {
-				pointer?.reset();
+				pointer?.resetPointer();
 				appViewport?.clearSelection();
 				bubbleEvent(path, { type: "action", key: keypathOf(path), act: hit.act, mods: mouse.mods });
 				return;
 			}
 			if (leftPress && hit.item !== undefined) {
-				pointer?.reset();
+				pointer?.resetPointer();
 				appViewport?.clearSelection();
 				bubbleEvent(path, { type: "select", key: keypathOf(path), item: hit.item });
 				return;
 			}
 		}
-		if (pointer && !cover) pointer.input(mouse, viewportRow);
+		if (pointer && !cover) pointer.pointerInput(mouse, viewportRow);
 		appViewport?.mouse(contentMouse, viewportRow);
 	}
 
@@ -1849,7 +1533,7 @@ export class TermBackend {
 
 	/** Forget the hit under the pointer (pointer tracking went off: no report would ever clear it). */
 	clearHover(): void {
-		if (this.#pointer?.blur()) this.requestRender();
+		if (this.#fullscreen.blurPointer()) this.requestRender();
 		this.workspace?.endPointer();
 		this.#pointerRail?.leave();
 		this.#pointerRail = undefined;
@@ -1868,7 +1552,7 @@ export class TermBackend {
 
 	/** Whether a fullscreen transcript window is on screen and follows the tail (false while scrolled back). */
 	get following(): boolean {
-		return this.#window !== undefined && this.#anchor === undefined;
+		return this.#fullscreen.following;
 	}
 
 	/** Set reduced motion (clocked kinds draw their still frame). */
