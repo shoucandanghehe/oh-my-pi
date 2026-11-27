@@ -9208,8 +9208,8 @@ describe("AgentSession retry fallback", () => {
 		const delivery = "DELIVERY-1 from an extension";
 
 		type FailingWrite =
-			// The transcript rewrite that annotates the attempts the saga retried.
-			| "rewrite"
+			// The branch-local revision that annotates the attempts the saga retried.
+			| "retry-revision"
 			// The append of an empty error turn.
 			| "error-turn"
 			// The same append, failing only once the saga announced its first
@@ -9247,10 +9247,10 @@ describe("AgentSession retry fallback", () => {
 			const { retryEndEvents } = trackRetryEvents(session);
 
 			let failedWrites = 0;
-			if (scenario.failingWrite === "rewrite") {
-				vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+			if (scenario.failingWrite === "retry-revision") {
+				vi.spyOn(sessionManager, "appendContextRevision").mockImplementation(async () => {
 					failedWrites++;
-					throw new Error("EACCES: permission denied, open 'session.jsonl.tmp'");
+					throw new Error("EACCES: permission denied, writing session context revision");
 				});
 			} else {
 				let armed = scenario.failingWrite === "error-turn";
@@ -9289,7 +9289,7 @@ describe("AgentSession retry fallback", () => {
 			await expectSagaClosesDespiteFailedWrite({
 				responses: [{ throw: transientError }, { throw: transientError }],
 				settings: { "retry.maxRetries": 1, "retry.modelFallback": false },
-				failingWrite: "rewrite",
+				failingWrite: "retry-revision",
 				end: { success: false, attempt: 1, finalError: transientError },
 			});
 		});
@@ -9298,7 +9298,7 @@ describe("AgentSession retry fallback", () => {
 			await expectSagaClosesDespiteFailedWrite({
 				responses: [{ throw: transientError }, { content: ["Recovered after one retry."] }],
 				settings: { "retry.maxRetries": 1, "retry.modelFallback": false },
-				failingWrite: "rewrite",
+				failingWrite: "retry-revision",
 				end: { success: true, attempt: 1 },
 			});
 		});

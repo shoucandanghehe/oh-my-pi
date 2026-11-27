@@ -655,14 +655,20 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	});
 
-	it("rolls back the in-memory rewrite when durable history write fails", async () => {
+	it("keeps the original context when the durable revision fails", async () => {
 		const harness = await createSessionHarness();
-		const rewriteEntries = vi
-			.spyOn(harness.sessionManager, "rewriteEntries")
-			.mockRejectedValueOnce(new Error("injected rewrite failure"));
+		const appendRevision = vi
+			.spyOn(harness.sessionManager, "appendContextRevision")
+			.mockRejectedValueOnce(new Error("injected context revision failure"));
 		try {
 			await runPrompt(harness);
 			expect(harness.requests).toHaveLength(1);
+			expect(appendRevision).toHaveBeenCalledTimes(1);
+			expect(
+				harness.session.agent.state.messages.some(message =>
+					messageContainsText(message, "historical tool result"),
+				),
+			).toBe(true);
 			expect(
 				harness.sessionManager
 					.getBranch()
@@ -674,7 +680,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			).toBe(true);
 			assertTerminalErrorState(harness);
 		} finally {
-			rewriteEntries.mockRestore();
+			appendRevision.mockRestore();
 			await harness.cleanup();
 		}
 	});
@@ -705,25 +711,27 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		}
 	});
 
-	it("keeps the committed rewrite authoritative after abort during the durable write", async () => {
-		const rewriteStarted = Promise.withResolvers<void>();
-		const releaseRewrite = Promise.withResolvers<void>();
+	it("keeps the committed revision authoritative after abort during the durable write", async () => {
+		const revisionStarted = Promise.withResolvers<void>();
+		const releaseRevision = Promise.withResolvers<void>();
 		const harness = await createSessionHarness();
-		const originalRewrite = harness.sessionManager.rewriteEntries.bind(harness.sessionManager);
+		const originalAppend = harness.sessionManager.appendContextRevision.bind(harness.sessionManager);
 		let blocked = true;
-		const rewriteEntries = vi.spyOn(harness.sessionManager, "rewriteEntries").mockImplementation(async () => {
-			if (blocked) {
-				blocked = false;
-				rewriteStarted.resolve();
-				await releaseRewrite.promise;
-			}
-			await originalRewrite();
-		});
+		const appendRevision = vi
+			.spyOn(harness.sessionManager, "appendContextRevision")
+			.mockImplementation(async (...args) => {
+				if (blocked) {
+					blocked = false;
+					revisionStarted.resolve();
+					await releaseRevision.promise;
+				}
+				await originalAppend(...args);
+			});
 		try {
 			const firstPrompt = harness.session.prompt("continue");
-			await rewriteStarted.promise;
-			const abort = harness.session.abort({ reason: "negative-test-abort-during-rewrite" });
-			releaseRewrite.resolve();
+			await revisionStarted.promise;
+			const abort = harness.session.abort({ reason: "negative-test-abort-during-revision" });
+			releaseRevision.resolve();
 			await abort;
 			await firstPrompt;
 			await harness.session.waitForIdle();
@@ -760,7 +768,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 				content: [{ type: "text", text: "Recovered" }],
 			});
 		} finally {
-			rewriteEntries.mockRestore();
+			appendRevision.mockRestore();
 			await harness.cleanup();
 		}
 	});
