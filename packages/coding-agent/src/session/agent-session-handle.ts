@@ -268,6 +268,9 @@ export interface AgentViewState {
 /** Live `tool_execution_update` event replayed when the TUI attaches mid-tool. */
 export type ToolExecutionUpdateEvent = Extract<AgentSessionEvent, { type: "tool_execution_update" }>;
 
+/** Renderer-owned `tool_stream_update` replayed when the TUI attaches mid-tool. */
+export type ToolStreamUpdateEvent = Extract<AgentSessionEvent, { type: "tool_stream_update" }>;
+
 /**
  * Whether `session` is homed on this thread. Thread bridges decode a handle
  * homed here to the local {@link AgentSession} object itself, so code running on
@@ -355,6 +358,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	continuePausedAgents(): Promise<ContinuePausedAgentsResult>;
 	/** Tool execution updates of tools still running, for mid-tool attach. */
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[];
+	/** Latest renderer previews for active tools, for mid-tool attach. */
+	activeToolStreamUpdates(): readonly ToolStreamUpdateEvent[];
 	/** Await persistence of messages already emitted. */
 	settleInFlightMessagePersistence(): Promise<void>;
 	/** Session context for transcript rendering. */

@@ -52,6 +52,7 @@ import type {
 	AgentViewToolRenderMetadata,
 	AgentViewToolSchema,
 	ToolExecutionUpdateEvent,
+	ToolStreamUpdateEvent,
 } from "../session/agent-session-handle";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import type {
@@ -227,6 +228,7 @@ export interface SessionViewState {
 	 * starts a watch; main keeps it current from the forwarded event stream.
 	 */
 	activeToolExecutionUpdates: ToolExecutionUpdateEvent[];
+	activeToolStreamUpdates: ToolStreamUpdateEvent[];
 }
 
 /** One field of {@link SessionViewState}. */

@@ -65,6 +65,7 @@ import {
 	type AgentViewState,
 	isLocalAgentSession,
 	type ToolExecutionUpdateEvent,
+	type ToolStreamUpdateEvent,
 } from "../session/agent-session-handle";
 import type {
 	AgentSessionDisposeOptions,
@@ -233,6 +234,7 @@ function emptyViewState(): SessionViewState {
 		ephemeralMaxTokensPreservesRequest: false,
 		settings: { base: null, layers: [] },
 		activeToolExecutionUpdates: [],
+		activeToolStreamUpdates: [],
 	};
 }
 
@@ -292,6 +294,7 @@ export class RemoteAgentSession implements AgentViewSession {
 	#builtInTools = new Set<string>();
 	#runToolCallIds = new Set<string>();
 	readonly #activeUpdates = new Map<string, ToolExecutionUpdateEvent>();
+	readonly #activeStreamUpdates = new Map<string, ToolStreamUpdateEvent>();
 	readonly #entryObservers = new Set<(entry: SessionEntry) => void>();
 	#entries: SessionEntry[] = [];
 	readonly #entryIndex = new SessionEntryIndex();
@@ -610,6 +613,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	activeToolExecutionUpdates(): readonly ToolExecutionUpdateEvent[] {
 		return [...this.#activeUpdates.values()];
+	}
+
+	activeToolStreamUpdates(): readonly ToolStreamUpdateEvent[] {
+		return [...this.#activeStreamUpdates.values()];
 	}
 
 	compact(instructions?: string, options?: CompactOptions): Promise<CompactionResult> {
@@ -1027,6 +1034,8 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#pruneSettled(state.restorableQueue);
 		this.#activeUpdates.clear();
 		for (const update of state.activeToolExecutionUpdates) this.#activeUpdates.set(update.toolCallId, update);
+		this.#activeStreamUpdates.clear();
+		for (const update of state.activeToolStreamUpdates) this.#activeStreamUpdates.set(update.toolCallId, update);
 		if (entries) this.applyEntries(entries);
 		this.#entryIndex.setLeaf(state.leafId);
 		this.#syncViewDerived(state);
@@ -1128,6 +1137,7 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#closed = reason;
 		this.#settledQueued.clear();
 		this.#withdrawnQueued.clear();
+		this.#activeStreamUpdates.clear();
 		this.#listeners.clear();
 		this.#runStateListeners.clear();
 		this.#entryObservers.clear();
@@ -1154,6 +1164,7 @@ export class RemoteAgentSession implements AgentViewSession {
 			}
 			case "message_end":
 				this.#state = { ...this.#state, streamMessage: null };
+				if (event.message.role === "toolResult") this.#activeStreamUpdates.delete(event.message.toolCallId);
 				if (event.message.role === "assistant") {
 					const message = event.message;
 					this.tokenRate.end(
@@ -1165,8 +1176,12 @@ export class RemoteAgentSession implements AgentViewSession {
 			case "tool_execution_update":
 				this.#activeUpdates.set(event.toolCallId, event);
 				return;
+			case "tool_stream_update":
+				this.#activeStreamUpdates.set(event.toolCallId, event);
+				return;
 			case "tool_execution_end":
 				this.#activeUpdates.delete(event.toolCallId);
+				this.#activeStreamUpdates.delete(event.toolCallId);
 				return;
 		}
 	}

@@ -411,6 +411,32 @@ describe("focused view of a worker-homed agent session", () => {
 		}
 	});
 
+	it("replays an unwatched worker's latest tool preview on attach, then clears it when the tool ends", async () => {
+		const probe = await startWorker();
+		await probe.open("W1", await mainRegistry(), {});
+		const remote = mirrorOf("W1");
+		const preview = { type: "tool_stream_update" as const, toolCallId: "edit-1", toolName: "edit" };
+		await probe.emitToolEvent("W1", { ...preview, update: { marker: "older" } });
+		await probe.emitToolEvent("W1", { ...preview, update: { marker: "latest" } });
+		expect(remote.activeToolStreamUpdates()).toEqual([]);
+
+		cleanups.push(remote.subscribe(() => {}));
+		await waitFor(() => remote.activeToolStreamUpdates().length === 1);
+		expect(remote.activeToolStreamUpdates()).toEqual([{ ...preview, update: { marker: "latest" } }]);
+
+		await probe.emitToolEvent("W1", { ...preview, update: { marker: "live" } });
+		await waitFor(() =>
+			remote.activeToolStreamUpdates().some(({ update }) => isRecord(update) && update.marker === "live"),
+		);
+		await probe.emitToolEvent("W1", {
+			type: "tool_execution_end",
+			toolCallId: preview.toolCallId,
+			toolName: preview.toolName,
+			result: { content: [{ type: "text", text: "done" }], details: {} },
+		});
+		await waitFor(() => remote.activeToolStreamUpdates().length === 0);
+	});
+
 	it("refocuses with the entries the worker appended while unwatched, without re-sending the earlier ones", async () => {
 		const probe = await startWorker();
 		await probe.open("W1", await mainRegistry(), {});

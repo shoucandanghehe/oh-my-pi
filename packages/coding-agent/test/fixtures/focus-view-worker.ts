@@ -7,7 +7,7 @@
  * reply in two deltas, holding between them until the test opens the gate.
  */
 import { MessagePort, parentPort } from "node:worker_threads";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentEvent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
 	Api,
 	AssistantMessage,
@@ -60,6 +60,11 @@ export interface FocusProbe {
 	/** Release the reply held between its two deltas. */
 	release(): Promise<void>;
 	report(id: string): Promise<FocusSessionReport>;
+	/** Emit a renderer preview or end it on the owning worker. */
+	emitToolEvent(
+		id: string,
+		event: Extract<AgentEvent, { type: "tool_stream_update" | "tool_execution_end" }>,
+	): Promise<void>;
 	/** Drop every queued follow-up for good, as queue editing does. */
 	dropFollowUps(id: string): Promise<void>;
 }
@@ -250,6 +255,9 @@ const probe: FocusProbe = {
 			todoPhases: session.getTodoPhases(),
 			prewarmCount: prewarmCounts.get(id) ?? 0,
 		};
+	},
+	emitToolEvent: async (id, event) => {
+		local(id).agent.emitExternalEvent(event);
 	},
 	dropFollowUps: async id => {
 		const session = local(id);

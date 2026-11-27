@@ -1227,6 +1227,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
+	#activeToolStreamUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_stream_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	/** Epoch ms the current run went `running`; undefined while idle. */
 	#runStartedAt: number | undefined;
@@ -4535,8 +4536,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// terminal frame. Keep the latest update for future focus rebuilds;
 			// logical session transitions clear the cache.
 			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
+		} else if (event.type === "tool_stream_update") {
+			this.#activeToolStreamUpdates.set(event.toolCallId, event);
 		} else if (event.type === "tool_execution_end") {
 			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			this.#activeToolStreamUpdates.delete(event.toolCallId);
+		} else if (event.type === "message_end" && event.message.role === "toolResult") {
+			this.#activeToolStreamUpdates.delete(event.message.toolCallId);
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -6706,6 +6712,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	activeToolExecutionUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_execution_update" }>[] {
 		return [...this.#activeToolExecutionUpdates.values()];
+	}
+
+	activeToolStreamUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_stream_update" }>[] {
+		return [...this.#activeToolStreamUpdates.values()];
 	}
 
 	/**
@@ -9025,6 +9035,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
+		this.#activeToolStreamUpdates.clear();
 	}
 
 	/**

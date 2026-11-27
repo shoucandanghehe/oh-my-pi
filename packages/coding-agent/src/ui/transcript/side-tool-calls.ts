@@ -80,6 +80,8 @@ export class SideToolCalls {
 			if (this.#session !== session) return;
 			if (event.type === "tool_execution_start") this.#starts.set(event.toolCallId, event);
 			else if (event.type === "tool_execution_end") this.#starts.delete(event.toolCallId);
+			else if (event.type === "tool_stream_update")
+				this.#calls.get(event.toolCallId)?.call.updateStreamPreview(event.update);
 			else if (event.type === "message_start" && event.message.role === "assistant")
 				this.#finishedAssistant = undefined;
 			else if (event.type === "message_end" && event.message.role === "assistant")
@@ -207,6 +209,8 @@ export class SideToolCalls {
 				);
 			}
 		}
+		for (const { toolCallId, update } of session.activeToolStreamUpdates())
+			this.#calls.get(toolCallId)?.call.updateStreamPreview(update);
 	}
 
 	#create(part: ToolCallPart, message: AssistantMessage): SideCall {

@@ -229,6 +229,7 @@ function workspaceAgent(
 		waitForRunEnd: async () => {},
 		buildTranscriptSessionContext: () => ({ messages }),
 		activeToolExecutionUpdates: () => [],
+		activeToolStreamUpdates: () => [],
 		async prompt(text: string, options?: PromptOptions) {
 			prompts.push({ text, options });
 			options?.onPromptAdmitted?.();

@@ -8,7 +8,11 @@ import { Settings } from "../src/config/settings";
 import type { TranscriptPresenter } from "../src/extensibility/extensions/render-types";
 import { agentTranscriptSource } from "../src/modes/agent-hub-runtime";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../src/session/agent-session-events";
-import type { AgentViewSession, ToolExecutionUpdateEvent } from "../src/session/agent-session-handle";
+import type {
+	AgentViewSession,
+	ToolExecutionUpdateEvent,
+	ToolStreamUpdateEvent,
+} from "../src/session/agent-session-handle";
 import { captureStreamedToolArgs, restoreStreamedToolArgs } from "../src/thread/session-mirror";
 import { AgentWorkspaceTranscript } from "../src/ui/overlays/panels/agent-transcript-viewer";
 import { AgentTranscriptViewerModel } from "../src/ui/overlays/panels/agent-transcript-viewer-model";
@@ -26,6 +30,7 @@ function sideSession(label: string) {
 	const saved: AgentMessage[] = [];
 	const state = { streamMessage: null as AgentMessage | null, pendingToolCalls: new Set<string>() };
 	const active: ToolExecutionUpdateEvent[] = [];
+	const previews: ToolStreamUpdateEvent[] = [];
 	const pending: ToolResultMessage[] = [];
 	const session = {
 		agent: { state, getPendingToolResults: () => pending },
@@ -46,6 +51,7 @@ function sideSession(label: string) {
 		},
 		getToolByName: () => undefined,
 		activeToolExecutionUpdates: () => active,
+		activeToolStreamUpdates: () => previews,
 		buildTranscriptSessionContext: () => ({ messages: [...saved] }),
 		subscribe: (listener: AgentSessionEventListener) => {
 			listeners.add(listener);
@@ -59,10 +65,76 @@ function sideSession(label: string) {
 		state,
 		saved,
 		active,
+		previews,
 		pending,
 		emit: (event: AgentSessionEvent) => listeners.forEach(listener => listener(event)),
 	};
 }
+
+it("restores the latest edit preview on side-pane attach and routes live previews to the same card", () => {
+	const side = sideSession("side");
+	side.session.extensionRunner!.getTranscriptPresenters = () => [];
+	const edit: ToolCall = {
+		type: "toolCall",
+		id: "edit",
+		name: "edit",
+		arguments: { path: "mod.ts", old_string: "old", new_string: "new" },
+	};
+	const reply = createAssistantMessage("Editing");
+	side.saved.push(
+		{ ...reply, content: [...reply.content, edit], stopReason: "toolUse" },
+		{
+			role: "toolResult",
+			toolCallId: edit.id,
+			toolName: edit.name,
+			timestamp: 3,
+			isError: false,
+			content: [{ type: "text", text: "Edit succeeded without diff details" }],
+		},
+	);
+	const preview = (marker: string): ToolStreamUpdateEvent => ({
+		type: "tool_stream_update",
+		toolCallId: edit.id,
+		toolName: edit.name,
+		update: {
+			streaming: true,
+			files: [{ path: "mod.ts", diff: `@@ -1 +1 @@\n-old\n+${marker}`, firstChangedLine: 1 }],
+		},
+	});
+	side.previews.push(preview("ATTACH-PREVIEW"));
+	const model = new AgentTranscriptViewerModel({
+		agentId: "worker",
+		transcript: agentTranscriptSource,
+		registry: { get: () => ({ kind: "sub", status: "running" }) },
+		liveSession: () => side.session,
+		terminalRows: () => 42,
+		expandKeys: ["ctrl+o"],
+		hubKeys: [],
+		onClose: () => {},
+		onHubClose: () => {},
+	});
+	const surface = mountLayer(
+		() => (
+			<col>
+				<AgentWorkspaceTranscript model={model} />
+			</col>
+		),
+		{ columns: 100, rows: 42 },
+	);
+	try {
+		const card = model.tools.get(edit.id);
+		expect(card?.status()).toBe("done");
+		expect(surface.text()).toContain("ATTACH-PREVIEW");
+		side.previews.length = 0;
+		side.emit(preview("LIVE-PREVIEW"));
+		expect(surface.text()).toContain("LIVE-PREVIEW");
+		expect(surface.text()).not.toContain("ATTACH-PREVIEW");
+		expect(model.tools.get(edit.id)).toBe(card);
+	} finally {
+		surface.dispose();
+		model.dispose();
+	}
+});
 
 it("keeps one live subagent tool card through persistence and binds presenters to the displayed session", async () => {
 	const first = sideSession("First pane");
