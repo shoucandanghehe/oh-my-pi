@@ -13,7 +13,7 @@
  * nodes carry the data, the look decides the rows.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
-import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
+import { type Block, type PaintContext, roleOf } from "@oh-my-pi/pi-tui/term/paint";
 import type { TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
 import type { HubRecentLine } from "../pickers/agent-hub";
 
@@ -106,6 +106,18 @@ export function toolLook(key: string): ToolLook | undefined {
 /** The props of a `tool` node. */
 export function toolProps(node: UiNode): ToolProps {
 	return node.props() as ToolProps;
+}
+
+/** Terminal role of the audio/video markers the transcript appends after a presenter's body. */
+export const RESULT_MEDIA_ROLE = "omp.tool.result-media";
+
+/** For looks that draw their own rows instead of painting the tool's body. */
+export function resultMediaRows(node: UiNode, cx: PaintContext, width: number): string[] {
+	return node
+		.children()
+		.flatMap(child =>
+			child.kind === "text" && roleOf(child) === RESULT_MEDIA_ROLE ? cx.paint(child, width).rows : [],
+		);
 }
 
 /** Whether the tool shows its expanded body: an explicit fold wins over the transcript's expand state. */

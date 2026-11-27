@@ -9,6 +9,7 @@ import type { ToolViewState } from "../../../src/ui/tools/contract";
 import { defaultPresenter } from "../../../src/ui/tools/default";
 import { type LegacyToolRenderer, legacyParts, legacyPresenter } from "../../../src/ui/tools/legacy";
 import { ToolBlock, ToolCall } from "../../../src/ui/transcript/tool-block";
+import { toolCallText } from "../../helpers/tool-text";
 
 const STATE: ToolViewState = { expanded: false, isPartial: false, argsComplete: true, executionStarted: true };
 const RESULT = { content: [{ type: "text", text: "done" }] };
@@ -60,6 +61,39 @@ describe("extension tool render hooks", () => {
 			renderResult: () => ({ render: () => ["result rows"] }),
 		});
 		expect(screen.map(row => row.trim())).toEqual(["call needle", "result rows"]);
+	});
+
+	it.each(["decode_media", "bash"])("shows media once alongside a row-rendered %s result", name => {
+		const renderer = { renderResult: () => ({ render: () => ["Custom decoded output"] }) };
+		const call = new ToolCall({
+			id: "media",
+			name,
+			...(name === "bash"
+				? { args: { command: "decode_media" }, resolveToolCommand: () => ({ legacy: renderer }) }
+				: { presenter: legacyPresenter(renderer, defaultPresenter) }),
+		});
+		call.setArgsComplete();
+		call.setExecutionStarted();
+		call.updateResult(
+			{
+				content: [
+					{ type: "text", text: "Raw decoder output" },
+					{ type: "audio", mimeType: "audio/wav\x1b]52;c;PAYLOAD\x07", data: "YXVkaW8=" },
+					{ type: "video", mimeType: "video/mp4", data: "dmlkZW8=" },
+				],
+				...(name === "bash"
+					? { details: { toolCommands: [{ tool: "decode_media", mode: "execute", exitCode: 0, args: {} }] } }
+					: {}),
+			},
+			false,
+		);
+		const text = toolCallText(call);
+		expect(text).not.toContain("Raw decoder output");
+		expect(text.match(/Custom decoded output/g)).toHaveLength(1);
+		expect(text.match(/\[(?:audio|video) attachment[^\]]*\]/g) ?? []).toEqual([
+			"[audio attachment: audio/wav]",
+			"[video attachment: video/mp4]",
+		]);
 	});
 
 	it("hands renderers the extension theme", () => {

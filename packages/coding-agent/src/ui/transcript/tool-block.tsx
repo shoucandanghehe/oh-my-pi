@@ -47,7 +47,7 @@ import { type ShellInspectorSource, shellVizEventAction } from "../apps/shell-vi
 import { sanitizeDisplayLine, sanitizeDisplaySingleLine } from "../../extensibility/inventory/display-text";
 import { recentActivityLine } from "../overlays/pickers/agent-hub-model";
 import type { HubRecentLine } from "../styles/pickers/agent-hub";
-import type { ToolTerm } from "../styles/tools/look";
+import { RESULT_MEDIA_ROLE, type ToolTerm } from "../styles/tools/look";
 import type { ToolActivity, ToolPresenter, ToolResult, ToolView, ToolViewState } from "../tools/contract";
 import { defaultPresenter } from "../tools/default";
 import { mcpPresenter } from "../tools/mcp";
@@ -786,7 +786,13 @@ export function ToolBlock(props: { readonly call: ToolCall }): JSXNode {
 		const media = result?.content.flatMap((block, index) => {
 			if (block.type !== "audio" && block.type !== "video") return [];
 			const mime = block.mimeType ? sanitizeDisplayLine(block.mimeType) : "";
-			return <text key={`media${index}`} spans={[{ t: `[${block.type} attachment${mime ? `: ${mime}` : ""}]` }]} />;
+			return (
+				<text
+					key={`media${index}`}
+					term={{ role: RESULT_MEDIA_ROLE }}
+					spans={[{ t: `[${block.type} attachment${mime ? `: ${mime}` : ""}]` }]}
+				/>
+			);
 		});
 		if (typeof presentation === "object") return [compactBody(presentation), media];
 		const view = call.view();

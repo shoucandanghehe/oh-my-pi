@@ -29,7 +29,7 @@ import {
 	statusLine,
 	tailRows,
 } from "./frame";
-import { defineToolLook, isExpanded, toolProps } from "./look";
+import { defineToolLook, isExpanded, resultMediaRows, toolProps } from "./look";
 import { shellVizRows } from "./shell-viz";
 import { toolCommandRows } from "./tool-command";
 
@@ -138,6 +138,7 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	const outputLines = output.trim().length > 0 ? ansiLines(output).map(line => theme.fg("toolOutput", line)) : [];
 	const limit = Math.min(term.previewLines ?? PREVIEW_WINDOW_ROWS, PREVIEW_WINDOW_ROWS);
 	const shown = expanded ? outputLines : tailRows(theme, outputLines, limit, frameInner(width));
+	shown.push(...resultMediaRows(node, cx, frameInner(width)));
 	if (term.warning) shown.push(theme.fg("warning", bracketed(theme, term.warning)));
 	const stats = (term.stats ?? []).map(stat => statText(theme, stat));
 	if (term.liveClock) {

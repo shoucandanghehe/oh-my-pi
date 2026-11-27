@@ -313,6 +313,7 @@
 - Main queues the submitted text and attachments without clearing the next draft. `/queue /compact` completes its command and mode with Tab and returns to the editor if the conversation changes before dispatch.
 - In Tern, Edit restores the selected pending Main message. Editing a queued compaction returns it and the messages waiting on it to the draft.
 - Interrupting a BTW or subagent reply returns uncommitted steering and queued input to that pane's draft, just as in Main.
+- Restored audio and video attachment labels beside custom tool output in terminal transcripts, including tools mounted in Bash and reopened sessions.
 - BTW and subagent panes show streaming tool arguments and results in the same cards as Main.
 - Subagent panes show their own queued input and model status, complete commands and paths, and provide message-level copy and retry.
 - Relative transcript links in subagent panes open against the subagent's working directory, including after it parks.
