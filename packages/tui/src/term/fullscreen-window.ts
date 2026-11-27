@@ -316,7 +316,8 @@ export class FullscreenWindow {
 		return (this.#pointer ??= new TranscriptPointer({
 			available: () => this.host.acceptsPointer() && this.wheel && !this.#search,
 			requestRender: options.requestRender,
-			document: () => this.#index!,
+			// Selection endpoints refer to nodes, which may have retired since the last frame.
+			document: () => this.#document(this.#window!.width),
 			scroll: delta => this.scroll(delta),
 			scrollTo: offset => this.#seek(offset),
 			now: options.clock ?? (() => performance.now()),

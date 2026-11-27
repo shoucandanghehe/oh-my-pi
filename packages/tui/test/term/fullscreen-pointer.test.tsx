@@ -130,9 +130,10 @@ describe("fullscreen transcript pointer", () => {
 
 	it("retains a completed selection across focus changes but never copies replacement content or captures inline input", () => {
 		const lines = signal(["old text"]);
+		const mounted = signal(true);
 		const screen = signal<"fullscreen" | "inline">("fullscreen");
 		const clipboard: string[] = [];
-		term = createTestTerminal(() => ({ main: <rows lines={lines} /> }), {
+		term = createTestTerminal(() => ({ main: () => (mounted() ? <rows lines={lines} /> : undefined) }), {
 			columns: 20,
 			rows: 4,
 			screen,
@@ -147,12 +148,19 @@ describe("fullscreen transcript pointer", () => {
 		expect(term.backend.copySelection()).toBe(true);
 		lines.set(["new text"]); // The selection is still painted, but no longer denotes this text.
 		expect(term.backend.copySelection()).toBe(false);
+		term.render();
+		mouse("press", 0, 0);
+		mouse("release", 0, 2);
+		expect(term.backend.copySelection()).toBe(true);
+		mounted.set(false); // The old selection is still painted, but its block has been removed.
+		expect(term.backend.copySelection()).toBe(false);
+		mounted.set(true);
 		screen.set("inline");
 		term.render();
 		mouse("press", 0, 0);
 		mouse("release", 0, 2);
 		expect(term.backend.copySelection()).toBe(false);
-		expect(clipboard).toEqual(["old"]);
+		expect(clipboard).toEqual(["old", "new"]);
 	});
 
 	it("extends a held drag offscreen, including hidden document rows but excluding the dock, then stops", () => {
