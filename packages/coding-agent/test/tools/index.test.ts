@@ -116,7 +116,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read", "lsp", "write"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "write"]);
+		expect(names).toEqual(["read", "write", "roast"]);
 	});
 
 	it("keeps an explicit tool list top-level when it omits bash", async () => {
@@ -124,7 +124,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read", "lsp", "write"]);
 
 		expect(session.toolCommands).toBeUndefined();
-		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp", "write"]);
+		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp", "write", "roast"]);
 	});
 
 	it("lowercases requested tool subset", async () => {
@@ -132,7 +132,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["Read", "Write"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "write"]);
+		expect(names).toEqual(["read", "write", "roast"]);
 	});
 
 	it("includes hidden tools when explicitly requested", async () => {
@@ -140,7 +140,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["yield"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["yield"]);
+		expect(names).toEqual(["yield", "roast"]);
 	});
 
 	it("includes yield tool when required", async () => {
@@ -211,7 +211,7 @@ describe("createTools", () => {
 			}),
 			["ask", "read"],
 		);
-		expect(requested.map(t => t.name)).toEqual(["read"]);
+		expect(requested.map(t => t.name)).toEqual(["read", "roast"]);
 	});
 
 	it("filters disabled builtin tools by settings", async () => {
@@ -240,7 +240,7 @@ describe("createTools", () => {
 		expect(names).not.toContain("browser");
 
 		const requestedTools = await createTools(createTestSession({ settings: session.settings }), ["bash", "read"]);
-		expect(requestedTools.map(t => t.name)).toEqual(["read"]);
+		expect(requestedTools.map(t => t.name)).toEqual(["read", "roast"]);
 	});
 
 	it("auto-includes goal when goal mode is active", async () => {
@@ -253,14 +253,14 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "goal"]);
+		expect(names).toEqual(["read", "goal", "roast"]);
 	});
 
 	it("presents report_issue top-level when Auto-QA is on and bash is not requested", async () => {
 		const session = createTestSession({ settings: Settings.isolated({ "dev.autoqa": true }) });
 		const tools = await createTools(session, ["read"]);
 
-		expect(tools.map(tool => tool.name)).toEqual(["read", "report_issue"]);
+		expect(tools.map(tool => tool.name)).toEqual(["read", "roast", "report_issue"]);
 		expect(session.toolCommands).toBeUndefined();
 	});
 
