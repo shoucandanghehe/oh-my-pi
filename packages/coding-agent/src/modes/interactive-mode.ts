@@ -1515,8 +1515,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	#eventBus?: EventBus;
 	#subagentEventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
-	/** Mirror of `tui.mouse`: the terminal reports clicks (node hits, extension links). */
-	#mouseCapture = false;
 	/** The fullscreen extension link browser while it is shown. */
 	#linkBrowser: { replies: Signal<readonly LinkReply[]>; handle: OverlayHandle } | undefined;
 	#observerUiSyncTimer?: NodeJS.Timeout;
@@ -1620,10 +1618,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#eventBusUnsubscribers.push(onDownloadActivity(activity => this.hud.progress.downloads.update(activity)));
 		applyFileLinkSetting();
-		this.#mouseCapture = cfgTuiMouse.get(this.settings);
 		this.#eventBusUnsubscribers.push(
 			cfgTuiMouse.listen(this.settings, on => {
-				this.#mouseCapture = on;
 				// Any-motion tracking, as the old UI's: hovered rows band under the pointer.
 				this.shell.setInlineMouse(on ? "any" : "off");
 				this.#syncExtensionLinkClicks();
@@ -2020,7 +2016,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#appearanceRefreshDeadline = 0;
 			untrack(() => this.shell.host?.replayHistory());
 		});
-		this.shell.setInlineMouse(this.#mouseCapture ? "any" : "off");
+		this.shell.setInlineMouse(cfgTuiMouse.get(this.settings) ? "any" : "off");
 		this.#effect(() => {
 			const ansi = host.ansiWorkspace;
 			if (!ansi) return;
@@ -3954,7 +3950,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#extensionLinkClicksAvailable(): boolean {
 		const schemes = this.viewSession.extensionRunner?.getLinkSchemes() ?? [];
 		if (schemes.length === 0 || this.shell.native()) return false;
-		return this.#mouseCapture || this.keybindings.keysFor("app.links.hint").length > 0;
+		return cfgTuiMouse.get(this.settings) || this.keybindings.keysFor("app.links.hint").length > 0;
 	}
 
 	/** Re-evaluate link routing (mouse capture, native rendering, bindings changed). */
@@ -3990,6 +3986,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** A link label clicked in the transcript (a Markdown `select` with its href). */
 	#onTranscriptSelect(href: string): void {
+		if (!cfgTuiMouse.get(this.settings)) return;
 		const colon = href.indexOf(":");
 		if (colon <= 0 || !this.#linkSchemes.includes(href.slice(0, colon).toLowerCase())) return;
 		this.#activateLink(href, this.viewSession.extensionRunner);

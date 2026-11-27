@@ -14,7 +14,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
 import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { jsx, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
+import { createSurface, jsx, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "../src/ui/theme/service";
@@ -308,7 +308,8 @@ describe("inline click-to-focus geometry", () => {
 		expect(chat.split("early notice").length - 1).toBe(1);
 	});
 
-	it("hands a click on an extension-owned link to its extension with tui.mouse on, other links unchanged", async () => {
+	it("hands extension-owned link clicks to their extension only with tui.mouse on, other links unchanged", async () => {
+		Object.assign(term.memory.options.env!, { PI_TUI_RENDER_BACKEND: "app-viewport" });
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
 		cfgTuiMouse.set(mode.settings, true);
 		const { activated, firstActivation } = installDemoLinkExtension();
@@ -334,6 +335,27 @@ describe("inline click-to-focus geometry", () => {
 		click("the docs");
 		click("the details");
 		await firstActivation;
+		expect(activated).toEqual(["demo:open/7"]);
+
+		// The split workspace still receives mouse reports for its divider and text selection.
+		expect(
+			mode.shell.host!.ansiWorkspace!.open("other", () => ({ surface: createSurface(() => ({})) }), {
+				target: "main",
+				edge: "right",
+				focus: false,
+				label: "Other",
+			}),
+		).toBe(true);
+		cfgTuiMouse.set(mode.settings, false);
+		await term.settle();
+		// A bound hint key keeps the link pickable, but no longer by mouse.
+		expect(session.extensionRunner?.getUIContext()?.getLinkClicksAvailable()).toBe(true);
+		const current = term.screen();
+		const row = current.findIndex(line => line.includes("the details"));
+		const col = current[row]!.indexOf("the details");
+		term.mouse({ x: col, y: row, button: "left", action: "press" });
+		term.mouse({ x: col, y: row, button: "left", action: "release" });
+		await term.settle();
 		expect(activated).toEqual(["demo:open/7"]);
 	});
 
