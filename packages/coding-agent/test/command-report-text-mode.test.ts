@@ -105,9 +105,9 @@ describe("text-mode command reports on a real terminal core", () => {
 		// Typing the command opens the autocomplete menu, which pushes transcript rows into history
 		// for good; open and close it once so the baseline already has that shift.
 		term.type("/tools");
-		await term.waitFor(screen => screen.some(row => row.includes("Open debug tools selector")));
+		await term.waitFor(screen => screen.some(row => row.includes("Tools: none available")));
 		for (let i = 0; i < "/tools".length; i++) term.press("backspace");
-		await term.waitFor(screen => !screen.some(row => row.includes("Open debug tools selector")));
+		await term.waitFor(screen => !screen.some(row => row.includes("Tools: none available")));
 		await term.settle();
 		const lastRow = rowOf(term.screen(), last);
 		await runCommand("/tools", "Available Tools");
