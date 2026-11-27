@@ -37,6 +37,13 @@ export interface Lane {
 	readonly outline?: readonly [number, number];
 }
 
+/** A lane whose off-screen rows have estimated extents and are not painted. */
+export interface LaneViewport {
+	readonly length: number;
+	readonly outline: Lane["outline"];
+	slice(start: number, end: number): string[];
+}
+
 /** Rows a wheel notch scrolls. */
 const WHEEL_ROWS = 3;
 /** Rows kept on screen above the outline. */
@@ -87,37 +94,55 @@ export function wheelTranscriptView(node: UiNode, notches: -1 | 1): void {
  * just far enough to bring the outline in, with a scrollbar in the last
  * column.
  */
-function bodyWindow(node: UiNode, cx: PaintContext, body: Lane, width: number, height: number): string[] {
+function bodyWindow(
+	node: UiNode,
+	cx: PaintContext,
+	body: LaneViewport,
+	width: number,
+	height: number,
+	selection?: string,
+): string[] {
 	const theme = cx.theme;
-	const rows = body.rows;
 	const wheel = pickerState<number>(node, "transcript.wheel", () => 0)();
-	if (rows.length <= height) {
-		const out = rows.map(row => truncate(row, width, ""));
-		while (out.length < height) out.push("");
-		return out;
-	}
 	// Where the view was last drawn from, at whatever width (the painter's own output, so untracked).
-	const drawn = pickerState<{ start: number; wheel: number }>(node, "transcript.scroll", () => ({
+	const drawn = pickerState<{ start: number; wheel: number; selection?: string }>(node, "transcript.scroll", () => ({
 		start: 0,
 		wheel,
 	}));
 	const last = drawn.peek();
 	let start = last.start + wheel - last.wheel;
-	if (body.outline) {
-		const top = body.outline[0] - OUTLINE_CONTEXT;
-		const bottom = body.outline[1] + OUTLINE_CONTEXT;
-		if (top < start) start = top;
-		else if (bottom > start + height) start = bottom - height;
+	const follow = selection === undefined || selection !== last.selection;
+	let visible: string[] = [];
+	let edge: "top" | "bottom" | undefined;
+	for (let pass = 0; pass < 3; pass++) {
+		const length = body.length;
+		const outline = follow ? body.outline : undefined;
+		if (outline) {
+			const top = outline[0] - OUTLINE_CONTEXT;
+			const bottom = outline[1] + OUTLINE_CONTEXT;
+			edge ??= top < start ? "top" : bottom > start + height ? "bottom" : undefined;
+			if (edge === "top") start = top;
+			else if (edge === "bottom") start = bottom - height;
+		}
+		start = Math.max(0, Math.min(start, length - height));
+		visible = body.slice(start, start + height);
+		if (length === body.length && (!outline || outline[1] === body.outline?.[1])) break;
+		// A measured block can shrink near the end. Keep that end in view rather than exposing empty rows.
+		if (!follow && start + height <= body.length) break;
 	}
-	const max = rows.length - height;
-	start = Math.max(0, Math.min(start, max));
-	drawn.set({ start, wheel });
-	const thumb = Math.max(1, Math.min(height, Math.floor((height * height) / rows.length)));
+	drawn.set({ start, wheel, selection });
+	if (body.length <= height) {
+		const out = visible.map(row => truncate(row, width, ""));
+		while (out.length < height) out.push("");
+		return out;
+	}
+	const max = body.length - height;
+	const thumb = Math.max(1, Math.min(height, Math.floor((height * height) / body.length)));
 	const thumbTop = Math.round((start / max) * (height - thumb));
 	const inner = Math.max(0, width - 1);
 	const out: string[] = [];
 	for (let row = 0; row < height; row++) {
-		const line = rows[start + row]!;
+		const line = visible[row] ?? "";
 		const bar = row >= thumbTop && row < thumbTop + thumb ? theme.style("accent", "█") : theme.style("dim", "│");
 		// A row cut short (a wide fork) runs its fill on under the scrollbar.
 		const fill =
@@ -135,15 +160,29 @@ function bodyWindow(node: UiNode, cx: PaintContext, body: Lane, width: number, h
 export function transcriptScreen(
 	node: UiNode,
 	cx: PaintContext,
-	screen: { readonly head: string; readonly body: Lane; readonly footer: string; readonly rows?: number },
+	screen: {
+		readonly head: string;
+		readonly body: Lane | LaneViewport;
+		readonly footer: string;
+		readonly rows?: number;
+		readonly selection?: string;
+	},
 ): Block {
 	const theme = cx.theme;
 	const width = cx.width;
 	const rule = theme.style("border", "─".repeat(width));
 	const height = cx.height ?? screen.rows;
 	const rows = [rule, truncate(screen.head, width, theme.symbols.ellipsis), rule];
-	if (height === undefined) rows.push(...screen.body.rows.map(row => truncate(row, width, "")));
-	else rows.push(...bodyWindow(node, cx, screen.body, width, Math.max(1, height - 5)));
+	const body =
+		"rows" in screen.body
+			? {
+					length: screen.body.rows.length,
+					outline: screen.body.outline,
+					slice: screen.body.rows.slice.bind(screen.body.rows),
+				}
+			: screen.body;
+	if (height === undefined) rows.push(...body.slice(0, Infinity).map(row => truncate(row, width, "")));
+	else rows.push(...bodyWindow(node, cx, body, width, Math.max(1, height - 5), screen.selection));
 	rows.push(truncate(screen.footer, width, theme.symbols.ellipsis), rule);
 	return { rows };
 }

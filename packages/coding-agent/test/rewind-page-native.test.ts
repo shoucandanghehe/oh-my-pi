@@ -227,6 +227,11 @@ describe("native rewind page and session reset", () => {
 		expect(textOf(ui, page.main[0]!)).toBe('No turns match "second zzz"');
 		expect(textOf(ui, page.dock[0]!)).toContain("no matches");
 
+		ui.send({ ev: "edit", sf: ui.sf, id: field.id, from: 0, to: 10, text: "first prompt", cursor: 12, len: 10 });
+		page = ui.surface("screen")!;
+		expect(page.main.map(sig)).toEqual(["text:omp.rewind.here", "card:omp.user [pick]"]);
+		expect(textOf(ui, page.main[1]!)).toContain("first prompt");
+
 		ui.type(ESCAPE);
 		page = ui.surface("screen")!;
 		expect(find(ui, page.dock, "input")).toBeUndefined();

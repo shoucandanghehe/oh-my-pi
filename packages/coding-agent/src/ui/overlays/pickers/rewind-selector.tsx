@@ -41,6 +41,7 @@ import {
 	type UiNode,
 	untrack,
 } from "@oh-my-pi/pi-tui";
+import type { PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspMark, TspSpan } from "@oh-my-pi/pi-wire";
 import type { TranscriptReplica } from "../../../modes/interactive/transcript-replica";
@@ -53,8 +54,7 @@ import {
 	userTurnLabel,
 } from "../../../session/transcript/transcript-entry";
 import "../../styles/pickers/rewind";
-import type { RewindLookTerm } from "../../styles/pickers/rewind";
-import type { LaneItem } from "../../styles/pickers/transcript-view";
+import type { RewindLookTerm, RewindLookTurn } from "../../styles/pickers/rewind";
 import { editLine, type LineState } from "../settings/line-edit";
 import type { Keybinding } from "../../../config/keybindings/app-keybindings";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
@@ -201,13 +201,12 @@ interface TurnLane {
 	holds(index: number, entryId: string): boolean;
 }
 
-function termLane(targets: readonly RewindTarget[]): TurnLane {
-	const texts = targets.map(target => target.text.toLowerCase());
+function termLane(targets: readonly RewindTarget[], text: (target: RewindTarget) => string): TurnLane {
 	return {
 		turns: targets,
 		targets,
 		shows: () => true,
-		text: index => texts[index] ?? "",
+		text: index => (targets[index] ? text(targets[index]) : ""),
 		holds: (index, entryId) => targets[index]?.entryId === entryId || targets[index]?.turnId === entryId,
 	};
 }
@@ -300,15 +299,24 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	const keep = <T,>(build: () => T): T => runWithOwner(owner, () => untrack(build));
 	const replay = props.replica;
 	const replicas = new Set<TranscriptReplica>();
+	const views = new TurnViews();
+	const termPaint = signal<PaintContext | undefined>(undefined);
 	/** ^O: tool output and thinking expanded, in every replica (those replayed later too). */
-	let expanded = false;
+	const expanded = signal(false);
 	onCleanup(() => {
 		for (const replica of replicas) replica.dispose();
 	});
 	const laneOf = (entries: readonly TranscriptEntryLike[], clipped: boolean): TurnLane => {
-		if (!replay) return termLane(rewindTargets(entries));
+		if (!replay)
+			return termLane(rewindTargets(entries), target => {
+				const cx = termPaint();
+				if (!cx) return "";
+				const width = Math.max(1, cx.width - 5);
+				const rows = views.blocks(target.entryId, target.messages).flatMap(block => cx.paint(block, width).rows);
+				return Bun.stripANSI(rows.join("\n")).toLowerCase();
+			});
 		const replica = keep(() => replay(entries, clipped));
-		replica.expanded.set(expanded);
+		replica.expanded.set(expanded.peek());
 		replicas.add(replica);
 		return pageLane(replica);
 	};
@@ -326,7 +334,6 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	const filter = signal<LineState | undefined>(undefined);
 	/** The filter field is up: one field for the whole query, whatever is typed into it. */
 	const filtering = computed(() => filter() !== undefined);
-	const views = new TurnViews();
 
 	/** Replay the whole branch, keeping the outline on the same turn. */
 	const loadFull = (): void => {
@@ -467,6 +474,11 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 			variant.set(0);
 			siblingSelected.set(0);
 		});
+	const outlineFilterMatch = (): void => {
+		const shown = matches();
+		const at = selected();
+		if (!shown.includes(at)) selected.set(shown.findLast(index => index < at) ?? shown.at(-1) ?? at);
+	};
 	/** A typed query: an outline the query no longer matches rests on the newest match above it. */
 	const setFilter = (line: LineState): void => {
 		// A query searches the whole branch, not just the replayed tail.
@@ -474,16 +486,16 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 		batch(() => {
 			const changed = line.text !== filter()?.text;
 			filter.set(line);
-			if (!changed) return;
-			const shown = matches();
-			if (!shown.includes(selected()))
-				selected.set(shown.findLast(index => index < selected()) ?? shown.at(-1) ?? selected());
+			if (changed) outlineFilterMatch();
 		});
 	};
 	const toggleExpanded = (): void => {
-		views.toggleExpanded();
-		expanded = !expanded;
-		for (const replica of replicas) replica.expanded.set(expanded);
+		batch(() => {
+			views.toggleExpanded();
+			expanded.set(!expanded.peek());
+			for (const replica of replicas) replica.expanded.set(expanded.peek());
+			if (filter()?.text.trim()) outlineFilterMatch();
+		});
 	};
 	/** A click on a turn of the page: the outline moves there, as stepping would. */
 	const pick = (place: BlockPlace): void => {
@@ -591,16 +603,25 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 	const term = (): RewindLookTerm => {
 		const line = filter();
 		const targets = main().targets ?? [];
-		const turnAt = (index: number): LaneItem => ({
-			blocks: views.blocks(targets[index]!.entryId, targets[index]!.messages),
-			outlined: variant() === 0 && index === selected(),
-		});
+		const turnAt = (index: number): RewindLookTurn => {
+			const target = targets[index]!;
+			return {
+				id: target.entryId,
+				get blocks() {
+					return views.blocks(target.entryId, target.messages);
+				},
+				outlined: variant() === 0 && index === selected(),
+			};
+		};
 		const base = {
 			// The terminal counts the turns of the current path, also while a branch column is outlined.
 			counter: line ? counter() : { t: `${selected() + 1}/${targets.length}`, s: "dim" },
 			filter: line,
 			sideLabel: !line && columns().length > 0 ? "branches" : "user turns",
 			truncated: truncated(),
+			selection: `${outlined()?.entryId ?? ""}:${truncated()}:${expanded()}:${line?.text ?? ""}`,
+			expanded: expanded(),
+			setPaintContext: termPaint.set,
 			rows: props.terminalRows?.(),
 		};
 		if (line) {
@@ -626,7 +647,10 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 					label: column.label,
 					active: variant() === index + 1,
 					turns: (column.lane.targets ?? []).map((target, row) => ({
-						blocks: views.blocks(target.entryId, target.messages),
+						id: target.entryId,
+						get blocks() {
+							return views.blocks(target.entryId, target.messages);
+						},
 						outlined: variant() === index + 1 && row === siblingSelected(),
 					})),
 				})),
@@ -874,12 +898,9 @@ export function RewindSelector(props: RewindSelectorProps): JSXNode {
 						placeholder="words…"
 						sendable={false}
 						onEdit={edit => {
-							// The terminal's own edit of the field: the query changes, the outline stays.
 							const line = filter.peek();
 							const next = line && applyEdit(line, edit);
-							if (!next) return;
-							if (next.text.trim()) loadFull();
-							filter.set(next);
+							if (next) setFilter(next);
 						}}
 					/>
 				) : null
