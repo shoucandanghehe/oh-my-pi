@@ -2070,11 +2070,7 @@ function appendResponsesUserInput(
 	messages.push({
 		role: "user",
 		content:
-			developerStringContent && isDeveloper && typeof content === "string"
-				? escapeControlTokens
-					? escapeHarmonyControlTokens(content.toWellFormed())
-					: content.toWellFormed()
-				: converted,
+			developerStringContent && isDeveloper && typeof content === "string" ? content.toWellFormed() : converted,
 	});
 }
 

@@ -113,6 +113,27 @@ describe("Harmony control-token escaping at the request boundary", () => {
 		expect(wire).not.toContain(MARKER);
 	});
 
+	it("preserves raw developer strings but escapes developer text blocks", () => {
+		const model = createCodexModel("gpt-oss-120b");
+		const items = buildResponsesInput({
+			model,
+			context: {
+				messages: [
+					{ role: "developer", content: MARKER, timestamp: 0 },
+					{ role: "developer", content: [{ type: "text", text: MARKER }], timestamp: 1 },
+				],
+			},
+			strictResponsesPairing: false,
+			supportsImageDetailOriginal: false,
+			developerStringContent: true,
+		});
+
+		expect(items).toEqual([
+			{ role: "user", content: MARKER },
+			{ role: "user", content: [{ type: "input_text", text: ESCAPED }] },
+		]);
+	});
+
 	it("leaves non-harmony models (anthropic family) untouched", () => {
 		const model = buildModel({
 			id: "claude-sonnet-4",
