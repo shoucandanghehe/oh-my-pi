@@ -1,11 +1,12 @@
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ClipboardImage } from "@oh-my-pi/pi-natives/clipboard";
 import { createRoot, effect, type KeyEvent, type PasteEvent, type UiNode, untrack } from "@oh-my-pi/pi-tui";
 import type { InputEvent } from "@oh-my-pi/pi-tui/driver/index";
 import { emergencyTerminalRestore } from "@oh-my-pi/pi-tui/driver/session";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isEnoent, isWsl, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AutocompleteProvider, SlashCommand } from "../../autocomplete/autocomplete";
 import { expandEmoticons } from "../../autocomplete/emoji";
 import { createModelMentionSource } from "../../autocomplete/model-mention";
@@ -45,6 +46,7 @@ import { actionKey, formatDoubleTap } from "../../ui/keys/hints";
 import {
 	copyToClipboard,
 	isClipboardTerminalLocal,
+	readClipboardContent,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
@@ -271,12 +273,14 @@ export class InputController {
 			readImage: typeof readImageFromClipboard;
 			readText: typeof readTextFromClipboard;
 			readMacFileUrls?: typeof readMacFileUrlsFromClipboard;
+			readContent?: typeof readClipboardContent;
 			/** False when the readable clipboard is not the terminal's (SSH); omitted means local. */
 			isTerminalLocal?: typeof isClipboardTerminalLocal;
 		} = {
 			readImage: readImageFromClipboard,
 			readText: readTextFromClipboard,
 			readMacFileUrls: readMacFileUrlsFromClipboard,
+			readContent: isWsl() ? readClipboardContent : undefined,
 			isTerminalLocal: isClipboardTerminalLocal,
 		},
 	) {}
@@ -2811,10 +2815,10 @@ export class InputController {
 		return this.clipboard.isTerminalLocal?.() ?? true;
 	}
 
-	async #tryPasteClipboardImage(sink: ImagePasteSink): Promise<boolean> {
+	async #tryPasteClipboardImage(sink: ImagePasteSink, snapshot?: ClipboardImage | null): Promise<boolean> {
 		if (!this.#clipboardIsTerminalLocal()) return false;
 		try {
-			const image = await this.clipboard.readImage();
+			const image = snapshot === undefined ? await this.clipboard.readImage() : snapshot;
 			if (!image) return false;
 			await sink.attach(
 				{ type: "image", data: image.data.toBase64(), mimeType: image.mimeType },
@@ -2830,7 +2834,7 @@ export class InputController {
 		return this.#pasteImageIntoFocus(sink => this.#pasteImagePath(path, sink));
 	}
 
-	async #pasteImagePath(path: string, sink: ImagePasteSink): Promise<void> {
+	async #pasteImagePath(path: string, sink: ImagePasteSink, snapshot?: ClipboardImage | null): Promise<void> {
 		try {
 			if (isVideoPath(path)) {
 				if (sink.attachVideo) {
@@ -2846,7 +2850,7 @@ export class InputController {
 			if (!image) {
 				// Path resolved but is not a readable image (e.g. a zero-byte or
 				// locked transient screenshot file). Prefer the clipboard bytes.
-				if (await this.#tryPasteClipboardImage(sink)) return;
+				if (await this.#tryPasteClipboardImage(sink, snapshot)) return;
 				sink.pasteText(path);
 				this.ctx.showStatus("Pasted path is not a supported image");
 				return;
@@ -2866,7 +2870,7 @@ export class InputController {
 				// #2375: the bracketed paste forwarded by a local terminal carries a
 				// path on the *local* filesystem. The bytes may still be on the
 				// clipboard (Win+Shift+S), so try those before giving up.
-				if (await this.#tryPasteClipboardImage(sink)) return;
+				if (await this.#tryPasteClipboardImage(sink, snapshot)) return;
 				// Over SSH the clipboard lives on the remote host, so the path is
 				// genuinely unreachable; pasting it as text would look like the
 				// image was attached when nothing was sent. Surface an SSH-aware
@@ -2890,7 +2894,7 @@ export class InputController {
 				);
 				return;
 			}
-			if (await this.#tryPasteClipboardImage(sink)) return;
+			if (await this.#tryPasteClipboardImage(sink, snapshot)) return;
 			sink.pasteText(path);
 			this.ctx.showStatus("Failed to read pasted image path");
 		}
@@ -2918,50 +2922,24 @@ export class InputController {
 			if (promptTarget) promptPaste = this.#beginPromptImagePaste(promptTarget);
 			const textOnlyFocus = modalFocus !== null && promptPaste === undefined;
 			const sink = promptPaste?.sink ?? this.#editorImageSink;
-			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
-			// `public.file-url` representation and a generated 1024x1024
-			// file-icon bitmap on the pasteboard. `arboard::get_image()`
-			// succeeds with the icon, so probing the image representation first
-			// would attach the generic Finder icon instead of the copied
-			// screenshot — a vision model then sees a white `PNG` document
-			// icon. Probe the file URLs before the bitmap and let any that
-			// resolve to a supported image file win over the icon: the
-			// authoritative file bytes are what the user copied.
-			//
-			// #3506: this branch also recovers file-url-only pasteboards
-			// (Finder selections, certain screenshot tools) where
-			// `arboard::get_image()` returns `ContentNotAvailable` and
-			// `pbpaste` is empty. Every image-shaped path routes through
-			// {@link #pasteImagePath}, matching the bracketed-paste
-			// paste interceptor (`#onComposerPaste`); multi-image Finder
-			// selections must not silently drop after the first attach.
-			// `readMacFileUrls` returns an empty list off Darwin, so on every
-			// other platform this is a no-op and the bitmap read below still
-			// runs first.
-			const fileUrls = textOnlyFocus ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
+			const content = await this.clipboard.readContent?.();
+			// Finder selections can offer just file URLs (#3506), or both URLs and a generated
+			// document icon (#8769). Prefer the original files in selection order.
+			const fileUrls = textOnlyFocus ? [] : (content?.fileUrls ?? (await this.clipboard.readMacFileUrls?.()) ?? []);
 			let attachedFromFileUrls = false;
 			for (const url of fileUrls) {
 				const candidate = extractImagePathFromText(url);
 				if (!candidate) continue;
-				await this.#pasteImagePath(candidate, sink);
+				await this.#pasteImagePath(candidate, sink, content?.image);
 				attachedFromFileUrls = true;
 			}
 			if (attachedFromFileUrls) return true;
-			// No usable image-file URL (pure bitmap pasteboard: screenshots,
-			// browser copies, or a non-image Finder selection). Fall to the
-			// image representation. The text bridge starts alongside the image
-			// bridge: either can shell out (WSL's powershell.exe, wl-paste, xclip),
-			// so serial awaits stall an empty clipboard by their sum before
-			// "Clipboard is empty" can surface. Image precedence is preserved —
-			// a resolved text payload is discarded unused when an image is present.
-			const textPromise = this.clipboard.readText();
-			// Settle-mark the shared promise so a later image throw (which skips
-			// the text await below) can never surface as an unhandled rejection.
-			textPromise.then(
-				() => {},
-				() => {},
-			);
-			const image = await this.clipboard.readImage();
+			// With separate readers, start text and image concurrently but prefer the bitmap.
+			// A combined reader (one host invocation on WSL) already settled both.
+			const textPromise = content ? undefined : this.clipboard.readText();
+			// An image may win or throw before the text await below.
+			textPromise?.catch(() => {});
+			const image = content ? content.image : await this.clipboard.readImage();
 			if (image) {
 				if (textOnlyFocus) {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
@@ -2977,7 +2955,7 @@ export class InputController {
 			// Hosts that pre-empt the terminal's own paste (VS Code's
 			// integrated terminal, Win+V clipboard history) deliver only
 			// this keypress, so a miss here must not dead-end.
-			const text = await textPromise;
+			const text = content?.text ?? (await textPromise);
 			if (!text) {
 				this.ctx.showStatus("Clipboard is empty");
 				return false;
@@ -2990,7 +2968,7 @@ export class InputController {
 			// terminals do this for image clipboards).
 			const imagePath = textOnlyFocus ? null : extractImagePathFromText(text);
 			if (imagePath) {
-				await this.#pasteImagePath(imagePath, sink);
+				await this.#pasteImagePath(imagePath, sink, content?.image);
 				return true;
 			}
 			// Keep the initiating prompt as the only possible modal destination.

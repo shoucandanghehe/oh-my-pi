@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	isClipboardTerminalLocal,
 	copyToClipboard,
@@ -8,8 +10,10 @@ import {
 	readTextFromClipboard,
 } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as native from "@oh-my-pi/pi-natives/clipboard";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Subprocess } from "bun";
+import { Composer } from "../../src/ui/composer/composer";
 
 type SpawnOptions = Bun.SpawnOptions.SpawnOptions<
 	Bun.SpawnOptions.Writable,
@@ -62,7 +66,16 @@ function restorePlatform(): void {
 	if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
 }
 
-const ENV_KEYS = ["WSL_DISTRO_NAME", "WSL_INTEROP", "DISPLAY", "WAYLAND_DISPLAY", "TERMUX_VERSION"] as const;
+const ENV_KEYS = [
+	"WSL_DISTRO_NAME",
+	"WSL_INTEROP",
+	"DISPLAY",
+	"WAYLAND_DISPLAY",
+	"TERMUX_VERSION",
+	"SSH_CLIENT",
+	"SSH_TTY",
+	"SSH_CONNECTION",
+] as const;
 let savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 
 beforeEach(() => {
@@ -463,6 +476,32 @@ describe("readClipboardContent", () => {
 		expect(Array.from(content.image!.data.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 		expect(calls).toHaveLength(1);
 		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("Main never re-reads the Windows clipboard when its snapshot names a vanished image", async () => {
+		using temp = TempDir.createSync("@pi-wsl-paste-");
+		setPlatform("linux");
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, [
+			JSON.stringify({ image: null, text: temp.join("vanished.png") }),
+			JSON.stringify({ image: RED_1X1_PNG_BASE64, text: "later clipboard" }),
+		]);
+		const composer = new Composer();
+		const showStatus = vi.fn();
+		const ctx = {
+			composer,
+			shell: { focused: () => composer.field },
+			sessionManager: { getCwd: () => temp.path() },
+			showStatus,
+		} as unknown as InteractiveModeContext;
+
+		await new InputController(ctx).handleImagePaste();
+
+		expect(calls.map(call => call.cmd[0])).toEqual(["powershell.exe"]);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Image not found at"));
+		expect(composer.pendingImages).toHaveLength(0);
+		expect(composer.text()).toBe("");
 	});
 
 	it("does not replace a successful empty host clipboard with stale Linux content", async () => {
