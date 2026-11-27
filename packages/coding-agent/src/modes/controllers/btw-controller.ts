@@ -1409,7 +1409,7 @@ export class BtwController {
 				break;
 			case "steering":
 			case "followUp": {
-				const message = session.takeQueuedMessage(edit.text, edit.kind);
+				const message = session.takeQueuedMessageAt(edit.kind, edit.index, edit.text, edit.id);
 				if (message) this.#restoreThreadDraft(workspace, key, message);
 				break;
 			}

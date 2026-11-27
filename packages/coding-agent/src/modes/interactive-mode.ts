@@ -1726,7 +1726,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hud.pills.onOpenJobs = () => this.showJobsSheet();
 		this.hud.subagents.onFocus = id => this.#focusSubagentFromHud(id);
 		this.hud.subagents.onToggle = () => this.#togglePinnedHudExpanded();
-		this.hud.queue.onEdit = () => this.handleDequeue();
 
 		this.#display.toolActivity.set(cfgDisplayToolActivity.get(settings));
 		this.#display.proseOnlyThinking.set(cfgProseOnlyThinking.get(settings));
@@ -8605,8 +8604,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		host.replayHistory();
 	}
 
-	handleDequeue(): void {
-		this.#inputController.handleDequeue();
+	restoreEditedQueueMessage(message: Pick<SubmittedUserInput, "text" | "images" | "imageLinks"> | undefined): void {
+		this.#inputController.restoreEditedQueueMessage(message);
 	}
 
 	restoreCompactionQueueToEditor(status?: string): void {

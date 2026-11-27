@@ -25,7 +25,7 @@ import { lookupBuiltinSlashCommand } from "../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../slash-commands/helpers/draft";
 import { parseSlashCommand } from "../slash-commands/helpers/parse";
 import { Composer } from "../ui/composer/composer";
-import { QueueModel, QueuedMessages } from "../ui/dock/queue";
+import { QueueModel, QueuedMessages, type QueuedMessageEdit } from "../ui/dock/queue";
 import { PaneExtensionWidgets, useExtensionPresentation } from "../ui/dock/widgets";
 import { AgentTranscriptViewerModel } from "../ui/overlays/panels/agent-transcript-viewer-model";
 import { AgentWorkspaceStatus, AgentWorkspaceTranscript } from "../ui/overlays/panels/agent-transcript-viewer";
@@ -167,7 +167,8 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	const local = sendable && lifecycle !== undefined && !remote;
 	const queueModel = new QueueModel();
 	queueModel.dequeueKey.set(keybindings.keysFor("app.message.dequeue")[0] ?? "alt+up");
-	queueModel.onEdit = dequeue;
+	const heldEditIds = new WeakMap<object, number>();
+	let heldEditSeq = 0;
 	const model = new AgentTranscriptViewerModel({
 		agentId,
 		transcript: agentTranscriptSource,
@@ -228,23 +229,82 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 
 	function updateQueue(session = current()): void {
 		if (disposed || session !== current()) return;
-		const queued = session?.getQueuedMessages();
-		const held = session && sessionCommandQueue(session);
-		const request = held?.request;
-		queueModel.groups.set(
-			queued
-				? [
-						{ label: "Steering", messages: queued.steering },
-						{ label: "After yield", messages: queued.followUp },
-						{ label: "Compaction queued", messages: request ? [request.text] : [] },
-						{
-							label: "After compaction",
-							messages:
-								held?.messages.filter(message => !drainingHeld.has(message)).map(message => message.text) ?? [],
-						},
-					]
-				: [],
-		);
+		if (!session) {
+			queueModel.groups.set([]);
+			return;
+		}
+		const queued = session.getQueuedMessages();
+		const ids = local ? session.getQueuedMessageEditIds() : undefined;
+		const held = sessionCommandQueue(session);
+		const request = held.request;
+		const pending = held.messages.filter(message => !drainingHeld.has(message));
+		const edit = (id: string, take: () => Draft | undefined): QueuedMessageEdit => ({
+			id: `${session.instanceKey}/${id}`,
+			restore() {
+				if (disposed || current() !== session) return;
+				interacted = true;
+				const restored = take();
+				if (restored) draft.restore(restored);
+				else notice("That message is no longer queued");
+				updateQueue(session);
+				surface.focus(composer.field);
+			},
+		});
+		const ordinaryEdits = (queue: "steering" | "followUp") =>
+			queued[queue].map((text, index) => {
+				const id = ids?.[queue][index];
+				if (id === undefined) return undefined;
+				return edit(id, () => {
+					const message = session.takeQueuedMessageAt(queue, index, text, id);
+					if (!message) return undefined;
+					return {
+						text: queue === "followUp" ? formatQueueShorthand([message.text]) : message.text,
+						images: message.images,
+					};
+				});
+			});
+		const heldEdit = (entry: object, take: () => Draft | undefined) => {
+			if (!local) return undefined;
+			let id = heldEditIds.get(entry);
+			if (id === undefined) {
+				id = ++heldEditSeq;
+				heldEditIds.set(entry, id);
+			}
+			return edit(`held:${id}`, take);
+		};
+		queueModel.groups.set([
+			{ label: "Steering", messages: queued.steering, edits: ordinaryEdits("steering") },
+			{ label: "After yield", messages: queued.followUp, edits: ordinaryEdits("followUp") },
+			{
+				label: "Compaction queued",
+				messages: request ? [request.text] : [],
+				edits: request
+					? [
+							heldEdit(request, () => {
+								if (held.request !== request) return undefined;
+								held.request = undefined;
+								return { text: `/queue ${request.text}` };
+							}),
+						]
+					: [],
+			},
+			{
+				label: "After compaction",
+				messages: pending.map(message => message.text),
+				edits: pending.map(message =>
+					heldEdit(message, () => {
+						const index = held.messages.indexOf(message);
+						if (index < 0 || drainingHeld.has(message)) return undefined;
+						held.messages.splice(index, 1);
+						return {
+							text: message.mode === "followUp" ? formatQueueShorthand([message.text]) : message.text,
+							images: message.images,
+							links: message.imageLinks,
+						};
+					}),
+				),
+			},
+		]);
 	}
 
 	function dequeue(): void {

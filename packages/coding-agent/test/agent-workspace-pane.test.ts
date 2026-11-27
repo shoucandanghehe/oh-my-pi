@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createSurface, jsx, type PresentedFrame, startHost } from "@oh-my-pi/pi-tui";
 import { NativeSurfaces, TspConnection } from "@oh-my-pi/pi-tui/native/index";
@@ -14,16 +14,26 @@ import { sliceColumns } from "@oh-my-pi/pi-tui/text/width";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { FakeTern, ManualClock } from "../../tui/test/native/fake-tern";
+import { ModelRegistry } from "../src/config/model-registry";
 import { Settings } from "../src/config/settings";
 import type { ExtensionPresentationSource } from "../src/extensibility/extensions/presentation";
 import { AgentPaneDraft, type AgentWorkspaceSurface, mountAgentWorkspacePane } from "../src/modes/agent-workspace-pane";
 import { NativeAgentPanes } from "../src/modes/controllers/native-agent-panes";
 import type { NativeWorkspaceView } from "../src/modes/native-workspace/workspace";
 import { type AgentRef, AgentRegistry } from "../src/registry/agent-registry";
+import { AgentSession } from "../src/session/agent-session";
 import type { AgentViewSession } from "../src/session/agent-session-handle";
 import type { DequeuedMessage, PromptOptions, RestoredQueuedInput } from "../src/session/agent-session-types";
 import type { SessionTreeNode } from "../src/session/session-entries";
+import { SessionManager } from "../src/session/session-manager";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { waitFor } from "./collab/helpers/throttled-host";
+
+const PANE_PNG: ImageContent = {
+	type: "image",
+	mimeType: "image/png",
+	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
+};
 
 async function display(mount: AgentWorkspaceSurface) {
 	const tern = new FakeTern();
@@ -50,11 +60,11 @@ async function display(mount: AgentWorkspaceSurface) {
 			tern.input({ type: "key", key: { id, kind: "press", raw: id } });
 			refresh();
 		},
-		act(act: string) {
-			const node = [...doc.nodes.values()].find(
+		act(act: string, index = 0) {
+			const node = [...doc.nodes.values()].filter(
 				({ p }) => p.actions && typeof p.actions === "object" && Reflect.get(p.actions, "click") === act,
-			);
-			if (!node) throw new Error(`No native control for ${act}`);
+			)[index];
+			if (!node) throw new Error(`No native control for ${act} at index ${index}`);
 			tern.event({ ev: "action", sf: doc.root, id: node.id, act });
 			refresh();
 		},
@@ -148,6 +158,22 @@ function workspaceAgent(id: string, options: { cwd?: string; assistant?: Assista
 			followUp: [...followUp],
 			liveSteered: claimed.length,
 		}),
+		getQueuedMessageEditIds: () => ({
+			steering: [...claimed.map(() => undefined), ...steering.map(text => `q:${text}`)],
+			followUp: followUp.map(text => `q:${text}`),
+		}),
+		takeQueuedMessageAt(
+			queue: "steering" | "followUp",
+			index: number,
+			text: string,
+			id: string,
+		): { text: string } | undefined {
+			const messages = queue === "steering" ? steering : followUp;
+			const pending = queue === "steering" ? index - claimed.length : index;
+			if (messages[pending] !== text || `q:${text}` !== id) return undefined;
+			messages.splice(pending, 1);
+			return { text };
+		},
 		popLastQueuedMessage(): DequeuedMessage | undefined {
 			const steer = steering.pop();
 			if (steer !== undefined) return { text: steer, queue: "steering" };
@@ -377,7 +403,7 @@ test("native queue Edit and dequeue restore pending agent input, while Ctrl+C re
 	const idle = Promise.withResolvers<void>();
 	agent.holdIdle(idle.promise);
 	agent.claimed.push("claimed steering");
-	agent.steering.push("pending steering");
+	agent.steering.push("first pending", "selected pending", "newest pending");
 	agent.followUp.push("older follow-up");
 	const pane = await agent.mount();
 	try {
@@ -391,7 +417,9 @@ test("native queue Edit and dequeue restore pending agent input, while Ctrl+C re
 		const dockText = JSON.stringify(pane.doc.shape("dock"));
 		for (const text of [
 			"claimed steering",
-			"pending steering",
+			"first pending",
+			"selected pending",
+			"newest pending",
 			"older follow-up",
 			"/compact keep the evidence",
 			"held for compaction",
@@ -399,13 +427,20 @@ test("native queue Edit and dequeue restore pending agent input, while Ctrl+C re
 			expect(dockText).toContain(text);
 		}
 
-		pane.act("queue.edit");
-		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe("pending steering");
+		pane.act("queue.edit", 1);
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe("selected pending");
+		expect(agent.steering).toEqual(["first pending", "newest pending"]);
 		pane.press("alt+up");
-		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe("=> held for compaction\n\npending steering");
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe("newest pending\n\nselected pending");
+		pane.press("alt+up");
+		expect(agent.steering).toEqual([]);
 		pane.press("alt+up");
 		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe(
-			"/queue /compact keep the evidence\n\n=> held for compaction\n\npending steering",
+			"=> held for compaction\n\nfirst pending\n\nnewest pending\n\nselected pending",
+		);
+		pane.press("alt+up");
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe(
+			"/queue /compact keep the evidence\n\n=> held for compaction\n\nfirst pending\n\nnewest pending\n\nselected pending",
 		);
 		expect(agent.claimed).toEqual(["claimed steering"]);
 		expect(agent.followUp).toEqual(["older follow-up"]);
@@ -419,6 +454,52 @@ test("native queue Edit and dequeue restore pending agent input, while Ctrl+C re
 	} finally {
 		idle.resolve();
 		pane.close();
+	}
+});
+
+test("a queued chip selects the second of identical texts and rejects a stale identity", async () => {
+	const agent = new Agent({ initialState: { model: getBundledModel("anthropic", "claude-sonnet-4-5")! } });
+	const auth = createInMemoryAuthStorage();
+	const session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(),
+		settings: Settings.isolated({}),
+		modelRegistry: new ModelRegistry(auth, undefined, { ignoreLocalModelConfig: true }),
+	});
+	const secondImage: ImageContent = {
+		...PANE_PNG,
+		data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD3sAAAAASUVORK5CYII=",
+	};
+	const first: AgentMessage = {
+		role: "user",
+		content: [{ type: "text", text: "same caption" }, PANE_PNG],
+		timestamp: 1,
+	};
+	const second: AgentMessage = {
+		role: "user",
+		content: [{ type: "text", text: "same caption" }, secondImage],
+		timestamp: 2,
+	};
+	const companion: AgentMessage = {
+		role: "custom",
+		attribution: "user",
+		customType: "image-attachment",
+		content: "second source",
+		display: false,
+		timestamp: 2,
+	};
+	try {
+		agent.replaceQueue("followUp", [first, companion, second]);
+		const [firstId, secondId] = session.getQueuedMessageEditIds().followUp;
+		expect(session.getQueuedMessages().followUp).toEqual(["same caption", "same caption"]);
+		expect(session.takeQueuedMessageAt("followUp", 1, "same caption", firstId)).toBeUndefined();
+		expect(session.takeQueuedMessageAt("followUp", 1, "same caption", secondId)?.images).toEqual([secondImage]);
+		expect(agent.peekFollowUpQueue()).toEqual([first]);
+		expect(session.takeQueuedMessageAt("followUp", 0, "same caption", secondId)).toBeUndefined();
+		expect(session.takeQueuedMessageAt("followUp", 0, "same caption", firstId)?.images).toEqual([PANE_PNG]);
+	} finally {
+		await session.dispose();
+		auth.close();
 	}
 });
 

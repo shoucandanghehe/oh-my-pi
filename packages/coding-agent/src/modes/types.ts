@@ -1034,7 +1034,7 @@ export interface InteractiveModeContext {
 	handleCtrlZ(): void;
 	/** Re-query terminal appearance for an explicit display reset, then immediately replay the display. */
 	resetDisplayAfterAppearanceRefresh(): void;
-	handleDequeue(): void;
+	restoreEditedQueueMessage(message: Pick<SubmittedUserInput, "text" | "images" | "imageLinks"> | undefined): void;
 	handleImagePaste(): Promise<boolean>;
 	/** Attach a pasted image path to the main editor or an image-accepting prompt; other prompts refuse. */
 	handleImagePathPaste(path: string): Promise<void>;

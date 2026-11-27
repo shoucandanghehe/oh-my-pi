@@ -470,6 +470,12 @@ export class SessionPublisher {
 			copyViewField(patch, next, field);
 			changed = true;
 		}
+		// The mirror may optimistically remove an entry. Refresh both sides of the
+		// visual-to-pending mapping together whenever either side changes at home.
+		if (patch.queuedMessages || patch.restorableQueue) {
+			patch.queuedMessages = next.queuedMessages;
+			patch.restorableQueue = next.restorableQueue;
+		}
 		if (changed) this.#bridge.remote.notify("viewPatch", this.#key, patch);
 	}
 

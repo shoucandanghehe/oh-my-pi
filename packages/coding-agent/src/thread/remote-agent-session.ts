@@ -80,6 +80,7 @@ import type {
 	PromptOptions,
 	ResolvedRoleModel,
 	RestoredQueuedInput,
+	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -809,6 +810,39 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#view.queuedMessages;
 	}
 
+	getQueuedMessageEditIds(): Record<"steering" | "followUp", readonly (string | undefined)[]> {
+		const ids = (queue: "steering" | "followUp") => {
+			const entries = this.#view.restorableQueue[queue];
+			const prefix = this.#view.queuedMessages[queue].length - entries.length;
+			return [
+				...Array<string | undefined>(prefix).fill(undefined),
+				...entries.map(entry => (this.#isRestorable(entry) ? entry.id : undefined)),
+			];
+		};
+		return { steering: ids("steering"), followUp: ids("followUp") };
+	}
+
+	takeQueuedMessageAt(
+		queue: "steering" | "followUp",
+		index: number,
+		expectedText: string,
+		expectedId?: string,
+	): RestoredQueuedMessage | undefined {
+		if (this.#closed !== undefined || !this.#host) return undefined;
+		const chips = this.#view.queuedMessages[queue];
+		const entries = this.#view.restorableQueue[queue];
+		const entryIndex = index - (chips.length - entries.length);
+		const entry = entries[entryIndex];
+		if (
+			chips[index] !== expectedText ||
+			!entry ||
+			!this.#isRestorable(entry) ||
+			(expectedId !== undefined && entry.id !== expectedId)
+		)
+			return undefined;
+		return this.#takePendingQueuedEntry(queue, entryIndex);
+	}
+
 	/**
 	 * Restore the newest user-authored queued message (steering first) the home
 	 * has not claimed for delivery, drop it from the mirror, and have the home
@@ -818,35 +852,25 @@ export class RemoteAgentSession implements AgentViewSession {
 	 */
 	popLastQueuedMessage(): DequeuedMessage | undefined {
 		const queue = this.#view.restorableQueue;
-		const chips = this.#view.queuedMessages;
 		const steering = this.#lastRestorable(queue.steering);
 		const followUp = steering < 0 ? this.#lastRestorable(queue.followUp) : -1;
-		let popped: SessionQueuedEntry;
-		let from: DequeuedMessage["queue"];
-		if (steering >= 0) {
-			popped = queue.steering[steering];
-			from = "steering";
-			// Chips list live-steered messages ahead of the queue: restorable entries align with their tail.
-			const chip = chips.steering.length - (queue.steering.length - steering);
-			this.#view = {
-				...this.#view,
-				restorableQueue: { steering: withoutIndex(queue.steering, steering), followUp: queue.followUp },
-				queuedMessages: { ...chips, steering: withoutIndex(chips.steering, chip) },
-			};
-		} else if (followUp >= 0) {
-			popped = queue.followUp[followUp];
-			from = "followUp";
-			const chip = chips.followUp.length - (queue.followUp.length - followUp);
-			this.#view = {
-				...this.#view,
-				restorableQueue: { steering: queue.steering, followUp: withoutIndex(queue.followUp, followUp) },
-				queuedMessages: { ...chips, followUp: withoutIndex(chips.followUp, chip) },
-			};
-		} else {
-			return undefined;
-		}
-		this.#withdraw(popped.id);
-		return { ...popped.message, queue: from };
+		if (steering >= 0) return { ...this.#takePendingQueuedEntry("steering", steering), queue: "steering" };
+		if (followUp >= 0) return { ...this.#takePendingQueuedEntry("followUp", followUp), queue: "followUp" };
+	}
+
+	#takePendingQueuedEntry(queue: "steering" | "followUp", index: number): RestoredQueuedMessage {
+		const entries = this.#view.restorableQueue;
+		const chips = this.#view.queuedMessages;
+		const entry = entries[queue][index];
+		// Restorable entries align with the tail: delivery chips occupy the leading slots.
+		const chip = chips[queue].length - entries[queue].length + index;
+		this.#view = {
+			...this.#view,
+			restorableQueue: { ...entries, [queue]: withoutIndex(entries[queue], index) },
+			queuedMessages: { ...chips, [queue]: withoutIndex(chips[queue], chip) },
+		};
+		this.#withdraw(entry.id);
+		return entry.message;
 	}
 
 	/**
@@ -1216,11 +1240,14 @@ export class RemoteAgentSession implements AgentViewSession {
 		);
 	}
 
+	#isRestorable(entry: SessionQueuedEntry): boolean {
+		return !entry.claimed && !this.#settledQueued.has(entry.id) && !this.#withdrawnQueued.has(entry.id);
+	}
+
 	/** Index of the newest entry of `entries` neither claimed for delivery nor already restored; -1 when none. */
 	#lastRestorable(entries: readonly SessionQueuedEntry[]): number {
 		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (!entry.claimed && !this.#settledQueued.has(entry.id) && !this.#withdrawnQueued.has(entry.id)) return i;
+			if (this.#isRestorable(entries[i])) return i;
 		}
 		return -1;
 	}

@@ -5,9 +5,8 @@
  *
  * - Natively (role `omp.queue`): a stack of pills, one per message: a
  *   `corner-down-right` icon, the text on one line, the total (`2 queued`)
- *   in the first pill when several wait, and an Edit control
- *   (`omp.queue.edit`) whose click sends `queue.edit` — answered like the
- *   dequeue key (the messages go back into the editor).
+ *   in the first pill when several wait, and an Edit control for each
+ *   restorable message. A view without per-message edits keeps its dequeue action.
  * - In a text terminal (`src/ui/styles/dock/queue.ts`): a blank row, then per
  *   group a muted `Steering · 1` heading over dim numbered rows, then the dim
  *   hint `└ ⌥↑ to edit`; every row cut to one line.
@@ -23,6 +22,13 @@ export interface QueuedMessageGroup {
 	/** `Steering`, `After yield`. */
 	readonly label: string;
 	readonly messages: readonly string[];
+	/** Per-chip actions when supplied; undefined slots cannot be edited. */
+	readonly edits?: readonly (QueuedMessageEdit | undefined)[];
+}
+
+export interface QueuedMessageEdit {
+	readonly id: string;
+	restore(): void;
 }
 
 /** What the band shows; the controller feeds it from the session queue. */
@@ -31,7 +37,7 @@ export class QueueModel {
 	readonly groups = signal<readonly QueuedMessageGroup[]>([]);
 	/** The `app.message.dequeue` key. */
 	readonly dequeueKey = signal("alt+up");
-	/** The Edit control (natively): the dequeue key's handler. */
+	/** Default native Edit action for views without per-chip actions. */
 	onEdit: (() => void) | undefined;
 }
 
@@ -53,10 +59,17 @@ export function QueuedMessages(props: { readonly model: QueueModel }): JSXNode {
 		const pills: JSXNode[] = [];
 		for (const group of groups) {
 			group.messages.forEach((message, index) => {
+				const edit = group.edits?.[index];
 				const lead = first && count > 1;
 				first = false;
 				pills.push(
-					<row key={`${group.label}/${index}`} role="omp.queue.item" align="center" gap="sm" title={group.label}>
+					<row
+						key={`${group.label}/${edit?.id ?? index}`}
+						role="omp.queue.item"
+						align="center"
+						gap="sm"
+						title={group.label}
+					>
 						<icon key="icon" name="corner-down-right" />
 						<text key="text" text={queuedLine(message)} wrap="none" truncate="end" grow={1} />
 						{lead && (
@@ -67,30 +80,30 @@ export function QueuedMessages(props: { readonly model: QueueModel }): JSXNode {
 								role="omp.queue.count"
 							/>
 						)}
-						<row
-							key="edit"
-							role="omp.queue.edit"
-							gap="xs"
-							align="center"
-							title={title}
-							actions={{ click: "queue.edit" }}
-						>
-							<kbd keys={kbdKeys(key)} />
-							<text text="Edit" />
-						</row>
+						{(edit || !group.edits) && (
+							<row
+								key="edit"
+								role="omp.queue.edit"
+								gap="xs"
+								align="center"
+								title={title}
+								actions={{ click: "queue.edit" }}
+								onAction={act => {
+									if (act !== "queue.edit") return;
+									if (edit) edit.restore();
+									else model.onEdit?.();
+								}}
+							>
+								<kbd keys={kbdKeys(key)} />
+								<text text="Edit" />
+							</row>
+						)}
 					</row>,
 				);
 			});
 		}
 		return (
-			<col
-				role="omp.queue"
-				gap="xs"
-				term={{ groups, key }}
-				onAction={act => {
-					if (act === "queue.edit") model.onEdit?.();
-				}}
-			>
+			<col role="omp.queue" gap="xs" term={{ groups, key }}>
 				{pills}
 			</col>
 		);

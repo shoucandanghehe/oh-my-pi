@@ -44,6 +44,7 @@ import type {
 	PromptOptions,
 	ResolvedRoleModel,
 	RestoredQueuedInput,
+	RestoredQueuedMessage,
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SessionStats,
@@ -427,6 +428,15 @@ export interface AgentViewSession extends AgentSessionHandle {
 	hasBuiltInTool(name: string): boolean;
 	/** Queued steering and follow-up messages. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number };
+	/** Stable identities in visible chip order, with undefined for claimed chips. */
+	getQueuedMessageEditIds(): Record<"steering" | "followUp", readonly (string | undefined)[]>;
+	/** Restore one unclaimed visual queue entry. Never treat a claimed chip as pending. */
+	takeQueuedMessageAt(
+		queue: "steering" | "followUp",
+		index: number,
+		expectedText: string,
+		expectedId?: string,
+	): RestoredQueuedMessage | undefined;
 	/** Remove and return the newest queued message with the queue it came from. */
 	popLastQueuedMessage(): DequeuedMessage | undefined;
 	interruptAndRestoreQueue(restore: (input: RestoredQueuedInput) => void, hasHeldInput?: boolean): Promise<void>;

@@ -37,6 +37,7 @@ import {
 } from "../../session/transcript/transcript-render-helpers";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
+import type { QueuedMessageEdit } from "../../ui/dock/queue";
 import type { Shell, TranscriptBlock } from "../../ui/shell";
 import { NoticeLine, StatusBlock, StatusNotice, StrippedToolCalls } from "../../ui/transcript/messages/notices";
 import { ToolActivity } from "../../ui/transcript/messages/panel";
@@ -63,6 +64,7 @@ import type {
 	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ShowStatusOptions,
+	SubmittedUserInput,
 } from "../types";
 import { TurnUsageTally, turnElapsedMs } from "../view-model/overlays/usage-row";
 import {
@@ -132,11 +134,6 @@ function waitForImmediate(): Promise<void> {
 	return promise;
 }
 
-type QueuedMessages = {
-	steering: string[];
-	followUp: string[];
-	liveSteered: number;
-};
 type AddMessageOptions = {
 	imageLinks?: readonly (string | undefined)[];
 	live?: boolean;
@@ -251,6 +248,8 @@ export class UiHelpers {
 	readonly #notices = new WeakSet<TranscriptBlock>();
 	/** Session and model the last active-model notice named; cleared while no declaring provider serves. */
 	#activeModelNoticeKey: string | undefined;
+	readonly #heldEditIds = new WeakMap<object, number>();
+	#heldEditSeq = 0;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -1112,25 +1111,63 @@ export class UiHelpers {
 
 	/** Feed the queued-message band: the session's steering and follow-ups, plus the compaction queue. */
 	updatePendingMessagesDisplay(): void {
-		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
-		const steeringMessages = [...queuedMessages.steering];
-		const followUpMessages = [...queuedMessages.followUp];
+		const session = this.ctx.viewSession;
+		const queued = session.getQueuedMessages();
+		const ids = queued.steering.length || queued.followUp.length ? session.getQueuedMessageEditIds() : undefined;
+		const edit = (
+			id: string,
+			take: () => Pick<SubmittedUserInput, "text" | "images" | "imageLinks"> | undefined,
+		): QueuedMessageEdit => ({
+			id: `${session.instanceKey}/${id}`,
+			restore: () => {
+				if (this.ctx.viewSession === session) this.ctx.restoreEditedQueueMessage(take());
+			},
+		});
+		const group = (label: string, kind: "steering" | "followUp") => ({
+			label,
+			messages: [...queued[kind]],
+			edits: queued[kind].map((text, index) => {
+				const id = ids?.[kind][index];
+				return id === undefined ? undefined : edit(id, () => session.takeQueuedMessageAt(kind, index, text, id));
+			}),
+		});
+		const steering = group("Steering", "steering");
+		const followUp = group("After yield", "followUp");
 		if (!this.ctx.focusedAgentId) {
-			if (this.ctx.yieldCompaction) followUpMessages.push(this.ctx.yieldCompaction.text);
-			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-				if (entry.mode === "steer") steeringMessages.push(entry.text);
-				else followUpMessages.push(entry.text);
+			const heldId = (entry: object) => {
+				let id = this.#heldEditIds.get(entry);
+				if (id === undefined) {
+					id = ++this.#heldEditSeq;
+					this.#heldEditIds.set(entry, id);
+				}
+				return `held:${id}`;
+			};
+			const request = this.ctx.yieldCompaction;
+			if (request) {
+				followUp.messages.push(`Compaction queued · ${request.text}`);
+				followUp.edits.push({
+					id: `${session.instanceKey}/${heldId(request)}`,
+					restore: () => {
+						if (this.ctx.viewSession !== session || this.ctx.yieldCompaction !== request) return;
+						this.ctx.restoreCompactionQueueToEditor("Restored queued compaction and held input to editor");
+					},
+				});
+			}
+			for (const entry of this.ctx.compactionQueuedMessages) {
+				const target = entry.mode === "steer" ? steering : followUp;
+				target.messages.push(entry.text);
+				target.edits.push(
+					edit(heldId(entry), () => {
+						const index = this.ctx.compactionQueuedMessages.indexOf(entry);
+						if (index < 0) return undefined;
+						return this.ctx.compactionQueuedMessages.splice(index, 1)[0];
+					}),
+				);
 			}
 		}
 		const queue = this.ctx.hud.queue;
 		queue.dequeueKey.set(this.ctx.keybindings.keysFor("app.message.dequeue")[0] ?? "alt+up");
-		queue.onEdit = () => this.ctx.handleDequeue();
-		queue.groups.set(
-			[
-				{ label: "Steering", messages: steeringMessages },
-				{ label: "After yield", messages: followUpMessages },
-			].filter(group => group.messages.length > 0),
-		);
+		queue.groups.set([steering, followUp].filter(group => group.messages.length > 0));
 	}
 
 	queueCompactionMessage(

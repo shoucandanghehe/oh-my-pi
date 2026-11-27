@@ -67,7 +67,7 @@ export interface BtwPaneDraft {
 }
 
 export type BtwQueueEdit =
-	| { kind: "steering" | "followUp"; text: string }
+	| { kind: "steering" | "followUp"; text: string; index: number; id: string }
 	| { kind: "held"; message: CompactionQueuedMessage }
 	| { kind: "compact"; request: YieldCompaction };
 
@@ -643,16 +643,16 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		const session = thread?.conversation.session;
 		const queue = session && sessionCommandQueue(session);
 		const pending = session?.getQueuedMessages();
-		const queued: { label: string; text: string; action?: BtwQueueEdit }[] = [];
-		if (pending) {
-			for (const [index, text] of pending.steering.entries())
-				queued.push({
-					label: "Steering",
-					text,
-					action: index < pending.liveSteered ? undefined : { kind: "steering", text },
-				});
-			for (const text of pending.followUp)
-				queued.push({ label: "After yield", text, action: { kind: "followUp", text } });
+		const queued: { id?: string; label: string; text: string; action?: BtwQueueEdit }[] = [];
+		if (pending && session) {
+			const ids = session.getQueuedMessageEditIds();
+			for (const kind of ["steering", "followUp"] as const) {
+				const label = kind === "steering" ? "Steering" : "After yield";
+				for (const [index, text] of pending[kind].entries()) {
+					const id = ids[kind][index];
+					queued.push({ id, label, text, action: id ? { kind, text, index, id } : undefined });
+				}
+			}
 		}
 		if (queue?.request) {
 			const request = queue.request;
@@ -666,15 +666,15 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 					<col
 						role="omp.btw.queue"
 						onAction={act => {
-							const item = queued[Number(act)];
+							const item = queued.find(({ id }, index) => (id ?? String(index)) === act);
 							if (item?.action && !this.#approval.peek() && !this.#overlays.open())
 								this.options.editQueued(thread.key, item.action);
 						}}
 					>
-						{queued.map(({ label, text, action }, index) => (
-							<row key={String(index)} gap="sm">
+						{queued.map(({ id, label, text, action }, index) => (
+							<row key={id ?? String(index)} gap="sm">
 								<text grow={1} truncate="end" text={`${label} · ${queuedLine(text)}`} />
-								{action && <PaneButton id={String(index)} label="Edit" />}
+								{action && <PaneButton id={id ?? String(index)} label="Edit" />}
 							</row>
 						))}
 					</col>

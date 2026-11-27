@@ -1963,12 +1963,24 @@ export class InputController {
 			this.ctx.showStatus("No queued messages to restore");
 			return;
 		}
-		// Drop only the popped message's local-submission signature; the messages
-		// left in the queue keep theirs so their delivery echo is still recognized
-		// as local and does not blank the editor the dequeue just restored to.
-		this.ctx.locallySubmittedUserSignatures.delete(`${popped.text}\u0000${popped.images?.length ?? 0}`);
-		this.#restoreEntriesToEditor([popped], { queued: this.#restoresAsQueued(popped) });
+		this.#restoreOneQueueMessage(popped, this.#restoresAsQueued(popped));
 		this.ctx.showStatus("Restored last queued message to editor");
+	}
+
+	restoreEditedQueueMessage(message: Pick<SubmittedUserInput, "text" | "images" | "imageLinks"> | undefined): void {
+		if (!message) {
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.showStatus("Queued message is no longer available to edit");
+			return;
+		}
+		this.#restoreOneQueueMessage(message);
+		this.ctx.showStatus("Restored queued message to editor");
+	}
+
+	#restoreOneQueueMessage(message: RestoredQueuedMessage, queued = false): void {
+		// Keep the signatures of the entries still queued, so their delivery echo leaves the draft alone.
+		this.ctx.locallySubmittedUserSignatures.delete(`${message.text}\u0000${message.images?.length ?? 0}`);
+		this.#restoreEntriesToEditor([message], { queued });
 	}
 
 	/**

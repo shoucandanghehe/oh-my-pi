@@ -12243,6 +12243,64 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const index = this.#findQueuedUserMessage(selected, text);
 		if (index < 0) return undefined;
 
+		return this.#takePendingQueuedMessage(queue, selected, index);
+	}
+
+	#queuedMessageEditIds = new WeakMap<AgentMessage, string>();
+	#queuedMessageEditSeq = 0;
+
+	/** Stable identities of editable chips; claimed chips occupy their existing visual slots. */
+	getQueuedMessageEditIds(): Record<"steering" | "followUp", readonly (string | undefined)[]> {
+		const ids = (queue: "steering" | "followUp", pending: readonly AgentMessage[]) => [
+			...Array<string | undefined>(this.#claimedQueuedUserCount(queue)).fill(undefined),
+			...pending.filter(isUserAuthoredQueuedMessage).map(message => {
+				let id = this.#queuedMessageEditIds.get(message);
+				if (id === undefined) {
+					id = `q${++this.#queuedMessageEditSeq}`;
+					this.#queuedMessageEditIds.set(message, id);
+				}
+				return id;
+			}),
+		];
+		return {
+			steering: ids("steering", this.agent.peekSteeringQueue()),
+			followUp: ids("followUp", this.agent.peekFollowUpQueue()),
+		};
+	}
+
+	/** Restore one pending visual chip without touching duplicates or any claimed input. */
+	takeQueuedMessageAt(
+		queue: "steering" | "followUp",
+		index: number,
+		expectedText: string,
+		expectedId?: string,
+	): RestoredQueuedMessage | undefined {
+		let remaining = index - this.#claimedQueuedUserCount(queue);
+		if (remaining < 0 || !Number.isInteger(remaining)) return undefined;
+		const selected = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
+		const rawIndex = selected.findIndex(message => isUserAuthoredQueuedMessage(message) && remaining-- === 0);
+		const message = selected[rawIndex];
+		if (
+			message === undefined ||
+			queueChipText(message) !== expectedText ||
+			(expectedId !== undefined && this.#queuedMessageEditIds.get(message) !== expectedId)
+		)
+			return undefined;
+		return this.#takePendingQueuedMessage(queue, selected, rawIndex);
+	}
+
+	#claimedQueuedUserCount(queue: "steering" | "followUp"): number {
+		const delivering = this.agent.peekDeliveringMessages(queue).filter(isUserAuthoredQueuedMessage).length;
+		return queue === "steering"
+			? delivering + this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length
+			: delivering;
+	}
+
+	#takePendingQueuedMessage(
+		queue: "steering" | "followUp",
+		selected: readonly AgentMessage[],
+		index: number,
+	): RestoredQueuedMessage {
 		const removed = selected[index];
 		this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(selected, index));
 		this.#reconcileQueuedMessageDrain();
