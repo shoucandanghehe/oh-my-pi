@@ -49,6 +49,8 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 	let selected: BtwThread | undefined = threads[0];
 	const submitted: { key: string | undefined; draft: BtwPaneDraft; mode: string }[] = [];
 	const cancelled: string[] = [];
+	const retried: string[] = [];
+	const copied: string[] = [];
 	const errors: unknown[] = [];
 	const pane = new BtwConversationPane({
 		cwd,
@@ -78,10 +80,12 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 		},
 		newThread() {},
 		cancel: key => void cancelled.push(key),
+		retry: key => void retried.push(key),
 		dequeue() {},
 		editQueued() {},
 		delete() {},
 		copy() {},
+		copyText: async text => void copied.push(text),
 		canPromote: () => false,
 		promote() {},
 		close() {},
@@ -100,6 +104,8 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 	return {
 		submitted,
 		cancelled,
+		retried,
+		copied,
 		errors,
 		doc,
 		tern,
@@ -111,6 +117,14 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 		},
 		paste(text: string) {
 			tern.input({ type: "paste", paste: { text } });
+			refresh();
+		},
+		act(act: string) {
+			const node = [...doc.nodes.values()].find(
+				({ p }) => p.actions && typeof p.actions === "object" && Reflect.get(p.actions, "click") === act,
+			);
+			if (!node) throw new Error(`No native action for ${act}`);
+			tern.event({ ev: "action", sf: doc.root, id: node.id, act });
 			refresh();
 		},
 		close() {
@@ -190,7 +204,7 @@ test("BTW pastes the original Finder images, falling back to the clipboard when 
 	}
 });
 
-test("BTW transcript resolves relative links against the selected topic", async () => {
+test("BTW transcript copies individual prompts, answers and errors and retries the selected topic", async () => {
 	using temp = TempDir.createSync("@pi-btw-pane-links-");
 	const main = temp.join("main");
 	const side = temp.join("side");
@@ -216,6 +230,13 @@ test("BTW transcript resolves relative links against the selected topic", async 
 			ui.refresh();
 			return JSON.stringify(ui.doc.shape("main")).includes(url.pathToFileURL(note).pathname);
 		}, "BTW did not resolve the relative link against the selected topic's cwd");
+		ui.act("copy-message");
+		ui.act("copy-answer");
+		ui.act("copy-error");
+		ui.act("retry");
+		ui.key("f5");
+		expect(ui.copied).toEqual(["A first question", answer, failure]);
+		expect(ui.retried).toEqual(["topic", "topic"]);
 	} finally {
 		ui.close();
 	}

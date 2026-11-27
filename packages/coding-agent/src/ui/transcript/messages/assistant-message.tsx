@@ -128,6 +128,8 @@ export interface AssistantMessageModel {
 	readonly allowAction?: (act: string) => boolean;
 	/** Original reply when this block renders only the lead before interleaved tool cards. */
 	readonly actionMessage?: AssistantMessage;
+	/** Side replies have copy controls even when they do not show a turn usage summary. */
+	readonly copyAnswerWithoutUsage?: boolean;
 	/** Live thinking speed (tok/s); shown from 0.05 up. */
 	readonly thinkingRate?: Reactive<number>;
 	/** Clock for thinking durations (ms; default `performance.now`). */
@@ -547,6 +549,7 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 	const rewound = (): boolean => flag(model.rewound, false);
 	const actions = (): boolean => flag(model.actions, false);
 	const usage = (): TurnUsageSummary | undefined => read(model.turnUsage);
+	const canCopyAnswer = () => answered() && actions() && model.allowAction?.("copy-answer") !== false;
 	const slots = computed(() => [...parts().keys()], { equals: sameSlots });
 	const thinkingDots = (): { tokens: number; rate: number } | undefined => {
 		const current = reply();
@@ -563,7 +566,11 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 			role={() => (rewound() ? "omp.assistant.rewound" : "omp.assistant")}
 			actions={() => {
 				const at = actionMessage()?.timestamp;
-				return usage() && answered() && at !== undefined && !rewound() && actions()
+				return (usage() || model.copyAnswerWithoutUsage) &&
+					answered() &&
+					at !== undefined &&
+					!rewound() &&
+					actions()
 					? {
 							hold: turnHoldEntries(
 								"assistant",
@@ -626,24 +633,28 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 			{() => rewound() && <badge key="rewound" text="↺ rewound" tone="muted" role="omp.assistant.rewound-tag" />}
 			{() => {
 				const summary = usage();
-				if (!summary) return undefined;
-				const line = formatTurnUsage(summary);
+				if (!summary && !(model.copyAnswerWithoutUsage && canCopyAnswer())) return undefined;
+				const line = summary ? formatTurnUsage(summary) : undefined;
 				return (
-					<row key="turn-usage" role="omp.turn.usage" gap="xs" align="center" title={line.title}>
-						{answered() &&
-							actions() &&
-							model.allowAction?.("copy-answer") !== false && [
-								<icon
-									key="copy"
-									name="copy"
-									role="omp.turn.copy"
-									title="Copy answer"
-									aria="Copy answer"
-									actions={{ click: "copy-answer" }}
-								/>,
-								<text key="dot" text="·" />,
-							]}
-						<text key="text" text={line.text} />
+					<row
+						key="turn-usage"
+						role={line ? "omp.turn.usage" : "omp.turn.actions"}
+						gap="xs"
+						align="center"
+						title={line?.title}
+					>
+						{canCopyAnswer() && [
+							<icon
+								key="copy"
+								name="copy"
+								role="omp.turn.copy"
+								title="Copy answer"
+								aria="Copy answer"
+								actions={{ click: "copy-answer" }}
+							/>,
+							line && <text key="dot" text="·" />,
+						]}
+						{line && <text key="text" text={line.text} />}
 					</row>
 				);
 			}}

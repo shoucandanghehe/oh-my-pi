@@ -1603,6 +1603,23 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 
 		send("wait before interruption");
 		await drawn("Stop");
+		for (const command of ["/stop", "/retry"]) {
+			const invalid = `${command} unexpected`;
+			send(invalid);
+			expect(showError).toHaveBeenLastCalledWith(expect.stringContaining(`Usage: ${command}`));
+			expect(nodeText(mounted!.surface.focused()!)).toContain(invalid);
+			expect(draw()).toContain("Stop");
+		}
+		showError.mockClear();
+		mounted?.surface.focused()?.handlers.onEdit?.({
+			from: 0,
+			to: "/retry unexpected".length,
+			text: "",
+			cursor: 0,
+			len: "/retry unexpected".length,
+			type: "edit",
+			key: "",
+		});
 		send("/queue pending to take back");
 		await drawn("After yield · pending to take back");
 		// The non-modal rail cannot take the interruption away from the running topic.
@@ -1625,6 +1642,31 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(draw()).toContain("Widget updated while closed");
 		sideRunner.getUIContext().setWidget("fixture", undefined);
 		expect(draw()).not.toContain("Widget updated while closed");
+
+		const resumed: AgentSession[] = [];
+		const hasPaused = vi.spyOn(AgentSession.prototype, "hasPausedAgents").mockReturnValue(true);
+		const resume = vi
+			.spyOn(AgentSession.prototype, "continuePausedAgents")
+			.mockImplementation(async function (this: AgentSession) {
+				resumed.push(this);
+				return { continued: 1, skipped: [], complete: true };
+			});
+		const paneResume = Promise.withResolvers<void>();
+		const status = vi.spyOn(ctx, "showStatus").mockImplementationOnce(() => paneResume.resolve());
+		try {
+			send("/continue");
+			await paneResume.promise;
+			expect(resumed).toHaveLength(1);
+			expect(resumed[0]).toBe(child);
+			resumed.length = 0;
+			expect(await controller.getPausedExitParticipants()[0]!.continuePaused()).toMatchObject({ continued: 2 });
+			expect(resumed).toContain(child);
+			expect(resumed.every(session => session !== main)).toBe(true);
+		} finally {
+			status.mockRestore();
+			resume.mockRestore();
+			hasPaused.mockRestore();
+		}
 
 		send("find side topic");
 		await drawn("Looking up the side topic");

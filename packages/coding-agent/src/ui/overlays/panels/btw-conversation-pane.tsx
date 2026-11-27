@@ -50,11 +50,13 @@ import {
 	refreshAssistantMessageLinkTargets,
 } from "../../../session/transcript/link-targets";
 import {
+	copyToClipboard,
 	isClipboardTerminalLocal,
 	readClipboardContent,
 	readTextFromClipboard,
 } from "../../../utils/clipboard";
 import { EnhancedPasteController } from "../../../utils/enhanced-paste";
+import { getEditorCommand, openInEditor } from "../../../utils/external-editor";
 import { htmlToPaste } from "../../../utils/html-paste";
 import { ensureSupportedImageInput } from "../../../utils/image-input";
 import { imageAttachmentSource } from "../../../utils/image-source";
@@ -95,6 +97,8 @@ interface BtwPaneOptions {
 	/** Presence distinguishes a Tern workspace surface from an ANSI pane. */
 	readonly nativeSupports?: (kind: string) => boolean;
 	readonly writeRaw?: (data: string) => void;
+	readonly editInTerminal?: (run: () => Promise<string | null>) => Promise<string | null>;
+	readonly copyText?: (text: string) => Promise<void>;
 	readonly keybindings: KeybindingsManager;
 	readonly revision: () => number;
 	threads(): readonly BtwThread[];
@@ -106,6 +110,7 @@ interface BtwPaneOptions {
 	submit(key: string | undefined, input: BtwPaneDraft, mode: "steer" | "followUp"): boolean;
 	newThread(): void;
 	cancel(key: string): void;
+	retry(key: string): void;
 	dequeue(key: string): void;
 	editQueued(key: string, message: BtwQueueEdit): void;
 	delete(key: string): void;
@@ -220,6 +225,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 							thread={this.#displayed}
 							expanded={this.#expanded}
 							options={options}
+							onAction={this.#onTurnAction}
+							canRetry={() => this.#displayed() === this.#thread()}
 						/>
 					);
 				},
@@ -259,8 +266,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		});
 		composer.addActionHandler(action => {
 			if (action !== "interrupt") return false;
-			const thread = this.#thread();
-			if (thread?.phase === "running" || thread?.conversation.session?.isCompacting) options.cancel(thread.key);
+			this.#interruptOrClear();
 			return true;
 		});
 		if (isClipboardTerminalLocal()) composer.readClipboard = readTextFromClipboard;
@@ -640,6 +646,56 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		return true;
 	}
 
+	#copy(text: string): void {
+		if (text) void (this.options.copyText ?? copyToClipboard)(text).catch(this.options.showError);
+	}
+
+	readonly #onTurnAction = (thread: BtwThread, act: string, text?: string): void => {
+		if (this.#disposed || this.#approval.peek() || this.#overlays.open() || this.#displayed() !== thread) return;
+		if (act === "retry") {
+			if (this.#thread() === thread) this.options.retry(thread.key);
+		} else if (text !== undefined) this.#copy(text);
+	};
+
+	#interruptOrClear(closeWhenIdle = false): void {
+		const thread = this.#thread();
+		const session = thread?.conversation.session;
+		if (
+			thread &&
+			(thread.phase === "running" || session?.isCompacting || session?.isRetrying || session?.hasInterruptibleInput)
+		) {
+			this.ansiRail?.clearHover();
+			this.options.cancel(thread.key);
+		} else if (!closeWhenIdle) {
+			this.#composer.clearDraft();
+			this.saveDraft();
+		} else if (!this.ansiRail?.dismiss()) this.options.close();
+	}
+
+	#editDraftExternally(edit: NonNullable<BtwPaneOptions["editInTerminal"]>): void {
+		const command = getEditorCommand();
+		if (!command) {
+			this.options.showError("No editor configured. Set $VISUAL or $EDITOR.");
+			return;
+		}
+		const generation = this.#draftGeneration;
+		const original = this.#composer.expandedText();
+		void edit(() => openInEditor(command, original, { extension: ".omp.md" })).then(
+			text => {
+				if (
+					text !== null &&
+					!this.#disposed &&
+					generation === this.#draftGeneration &&
+					this.#composer.expandedText() === original
+				) {
+					this.#composer.setCollapsedText(text);
+					this.saveDraft();
+				}
+			},
+			error => this.options.showError(`Failed to open external editor: ${String(error)}`),
+		);
+	}
+
 	async approve(title: string, summary: string, signal?: AbortSignal): Promise<boolean> {
 		const lifetime = this.#lifetime.signal;
 		const cancel = signal ? AbortSignal.any([signal, lifetime]) : lifetime;
@@ -708,7 +764,32 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			if (thread) this.options.dequeue(thread.key);
 			return true;
 		}
+		if (keybindings.matches(key, "app.clear")) {
+			this.#interruptOrClear();
+			return true;
+		}
+		if (keybindings.matches(key, "app.retry")) {
+			if (thread) this.options.retry(thread.key);
+			return true;
+		}
+		if (keybindings.matches(key, "app.clipboard.copyPrompt")) {
+			this.#copy(this.#composer.expandedText());
+			return true;
+		}
+		if (keybindings.matches(key, "app.clipboard.copyLine")) {
+			const text = this.#composer.text();
+			const cursor = this.#composer.cursor();
+			const start = cursor === 0 ? 0 : text.lastIndexOf("\n", cursor - 1) + 1;
+			const end = text.indexOf("\n", cursor);
+			this.#copy(text.slice(start, end === -1 ? text.length : end));
+			return true;
+		}
 		if (keybindings.matches(key, "app.clipboard.pasteTextRaw")) return this.#pasteClipboard("raw");
+		const edit = this.options.editInTerminal;
+		if (!this.options.nativeSupports && edit && keybindings.matches(key, "app.editor.external")) {
+			this.#editDraftExternally(edit);
+			return true;
+		}
 		if (matchesAnyKey(key, appFollowUpKeys(keybindings))) {
 			this.#mode = "followUp";
 			try {
@@ -727,10 +808,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			!this.#composer.vimConsumesEscape() &&
 			!this.#composer.completing()
 		) {
-			if (thread?.phase === "running" || thread?.conversation.session?.isCompacting) {
-				this.ansiRail?.clearHover();
-				this.options.cancel(thread.key);
-			} else if (!this.ansiRail?.dismiss()) this.options.close();
+			this.#interruptOrClear(true);
 			return true;
 		}
 		switch (key.id) {
@@ -999,6 +1077,8 @@ function ThreadTranscript(props: {
 	thread(): BtwThread | undefined;
 	expanded(): boolean;
 	options: BtwPaneOptions;
+	onAction(thread: BtwThread, act: string, text?: string): void;
+	canRetry(): boolean;
 	key?: string;
 }): JSXNode {
 	const source = computed<readonly BtwTranscriptSource[]>(previous => {
@@ -1025,6 +1105,8 @@ function ThreadTranscript(props: {
 					source={current}
 					thread={props.thread}
 					options={props.options}
+					onAction={props.onAction}
+					canRetry={props.canRetry}
 					expanded={props.expanded}
 				/>
 			)}
@@ -1037,6 +1119,8 @@ function ThreadTranscriptBody(props: {
 	thread(): BtwThread | undefined;
 	expanded(): boolean;
 	options: BtwPaneOptions;
+	onAction(thread: BtwThread, act: string, text?: string): void;
+	canRetry(): boolean;
 }): JSXNode {
 	const { thread, conversation, session } = props.source;
 	const manager = conversation.sessionManager;
@@ -1056,6 +1140,7 @@ function ThreadTranscriptBody(props: {
 			}),
 	};
 	const linkTargets = signal(getAssistantMessageLinkTargets(linkHost));
+	const onAction = (act: string, text?: string) => props.onAction(thread, act, text);
 	let mounted = true;
 	let linkTail = Promise.resolve();
 	const display = sideTranscriptDisplay(
@@ -1118,6 +1203,7 @@ function ThreadTranscriptBody(props: {
 		);
 	});
 
+	const last = computed(() => messages().findLast(message => message.role === "assistant" || message.role === "user"));
 	const blocks = (
 		<>
 			{() => !messages().length && <text text="Ask a side question without interrupting Main." tone="muted" />}
@@ -1129,6 +1215,8 @@ function ThreadTranscriptBody(props: {
 						tools={tools}
 						display={display}
 						linkTargets={linkTargets}
+						onAction={onAction}
+						canRetry={() => props.canRetry() && thread.phase !== "running" && last() === message}
 					/>
 				)}
 			</For>
@@ -1146,7 +1234,27 @@ function ThreadTranscriptBody(props: {
 				if (thread !== props.source.thread || thread.conversation !== conversation) return undefined;
 				if (thread.conversation.session?.isCompacting) return <spinner label="Compacting BTW" />;
 				if (thread.phase === "running") return <spinner label="Replying" />;
-				if (thread.error) return <text text={thread.error} tone="error" wrap="word" />;
+				const final = last();
+				if (thread.error && !(final?.role === "assistant" && final.stopReason === "error")) {
+					const error = thread.error;
+					return (
+						<card
+							key="btw-error"
+							role="omp.error"
+							tone="error"
+							onAction={act => {
+								if (act === "retry" && props.canRetry()) onAction(act);
+								else if (act === "copy-error") onAction(act, error);
+							}}
+						>
+							<text text={error} tone="error" wrap="word" />
+							<row gap="sm" role="omp.error.actions">
+								{props.canRetry() && <PaneButton id="retry" label="Retry" />}
+								<PaneButton id="copy-error" label="Copy error" />
+							</row>
+						</card>
+					);
+				}
 				if (readAgentsPaused(thread.conversation.sessionManager.getBranch()))
 					return <text text="BTW thread paused · /continue to resume" tone="muted" />;
 			}}
@@ -1168,6 +1276,8 @@ function ThreadMessage(props: {
 	tools: SideToolCalls;
 	display: SideTranscriptDisplay;
 	linkTargets(): ReadonlyMap<string, string>;
+	onAction(act: string, text?: string): void;
+	canRetry(): boolean;
 }): JSXNode {
 	const { message } = props;
 	if (message.role === "toolResult") return undefined;
@@ -1175,12 +1285,16 @@ function ThreadMessage(props: {
 		const parts =
 			typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
 		const images = parts.filter(part => part.type === "image");
+		const text = parts.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
 		return (
 			<UserMessage
 				model={{
-					text: parts.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n"),
+					text,
 					images,
 					timestamp: message.timestamp,
+					actions: true,
+					allowAction: act => act === "copy-message",
+					onAction: act => props.onAction(act, text),
 				}}
 			/>
 		);
@@ -1192,6 +1306,8 @@ function ThreadMessage(props: {
 			tools={props.tools}
 			display={props.display}
 			linkTargets={props.linkTargets}
+			onAction={props.onAction}
+			allowAction={act => act === "copy-answer" || act === "copy-error" || (act === "retry" && props.canRetry())}
 			hideThinking={props.options.hideThinking}
 			proseOnlyThinking={props.options.proseOnlyThinking()}
 		/>

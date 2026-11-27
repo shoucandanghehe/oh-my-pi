@@ -1800,6 +1800,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this, {
 			available: () => Boolean(this.nativeWorkspace || this.shell.host?.ansiWorkspace),
+			editInTerminal: run => this.suspend(run),
 			open: async create => {
 				const workspace = this.nativeWorkspace;
 				if (workspace) {

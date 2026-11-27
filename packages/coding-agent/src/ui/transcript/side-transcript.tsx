@@ -163,6 +163,8 @@ export function SideReply(props: {
 	readonly hideThinking?: Accessor<boolean>;
 	readonly proseOnlyThinking?: boolean;
 	readonly linkTargets?: Accessor<ReadonlyMap<string, string>>;
+	readonly allowAction?: AssistantMessageModel["allowAction"];
+	readonly onAction?: AssistantMessageModel["onAction"];
 }): JSXNode {
 	const { message, live, display, hideThinking, proseOnlyThinking } = props;
 	const timeline = computed(() => {
@@ -181,6 +183,7 @@ export function SideReply(props: {
 		segment: Accessor<AssistantMessage | undefined>,
 		contentOffset: number,
 		isTransient: Accessor<boolean>,
+		actionMessage?: AssistantMessage,
 	): JSXNode => (
 		<SideAssistantBlock
 			display={display}
@@ -191,6 +194,11 @@ export function SideReply(props: {
 				transient: isTransient,
 				hideThinking,
 				linkTargets: props.linkTargets,
+				actions: actionMessage !== undefined,
+				actionMessage,
+				allowAction: props.allowAction,
+				onAction: actionMessage !== undefined ? props.onAction : undefined,
+				copyAnswerWithoutUsage: actionMessage !== undefined,
 				proseOnlyThinking,
 				reacts: false,
 			}}
@@ -209,8 +217,9 @@ export function SideReply(props: {
 				}
 			: split.beforeTools;
 	});
+	const actionMessage = !live && props.onAction ? untrack(message) : undefined;
 	return [
-		block(lead, 0, () => live === true && !timeline()?.hasToolCalls),
+		block(lead, 0, () => live === true && !timeline()?.hasToolCalls, actionMessage),
 		<For each={calls}>
 			{call => [
 				<SideToolCard call={call} display={display} />,

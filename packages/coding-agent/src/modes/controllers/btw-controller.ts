@@ -70,6 +70,7 @@ export interface BtwWorkspaceAdapter {
 		) => NativeWorkspaceSurface,
 	): Promise<boolean>;
 	close(): void;
+	editInTerminal?(run: () => Promise<string | null>): Promise<string | null>;
 }
 
 type BtwHost = InteractiveModeContext & {
@@ -958,6 +959,7 @@ export class BtwController {
 					columns,
 					nativeSupports,
 					writeRaw,
+					editInTerminal: nativeSupports ? undefined : this.workspace?.editInTerminal,
 					keybindings: this.ctx.keybindings,
 					revision: this.#durableRevision,
 					threads: () => manager.children,
@@ -984,6 +986,7 @@ export class BtwController {
 					submit: (key, input, mode) => this.#sendThreadInput(workspace, key, input, mode),
 					newThread: () => void this.#createThread(workspace, "", { reuseBlank: true }),
 					cancel: key => this.#stopThread(workspace, key),
+					retry: key => this.#retryThread(workspace, key),
 					dequeue: key => this.#dequeueThread(workspace, key),
 					editQueued: (key, message) => this.#editThreadQueue(workspace, key, message),
 					delete: key => void this.#deleteThread(workspace, key),
@@ -1067,6 +1070,10 @@ export class BtwController {
 		if (!text && !input.images.length) return false;
 		const { manager } = workspace;
 		const command = parseSlashCommand(text);
+		if ((command?.name === "stop" || command?.name === "retry") && (command.args || input.images.length)) {
+			this.ctx.showError(`Usage: /${command.name} (without arguments or attachments)`);
+			return false;
+		}
 		let key = source;
 		let question = text;
 		if (command?.name === "new") {
@@ -1098,8 +1105,9 @@ export class BtwController {
 					this.#stopThread(workspace, key);
 					return true;
 				case "continue":
-					void this.#pausedExit
-						.continuePaused()
+					if (!key) return false;
+					void manager
+						.continuePaused(key)
 						.then(result => {
 							this.ctx.showStatus(`Resumed ${result.continued} paused BTW threads`);
 							if (result.skipped.length) this.ctx.showError(result.skipped.join("; "));
@@ -1108,10 +1116,7 @@ export class BtwController {
 					return true;
 				case "retry":
 					if (!key) return false;
-					void manager
-						.session(key)
-						.then(session => session.retry())
-						.catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+					this.#retryThread(workspace, key);
 					return true;
 				case "handoff":
 					if (!key) return false;
@@ -1377,6 +1382,15 @@ export class BtwController {
 			this.#restoreThreadQueue(workspace, key, session);
 		}
 		void workspace.manager.abort(key).catch(error => this.ctx.showError(sanitizeErrorLine(error)));
+	}
+
+	#retryThread(workspace: DurableWorkspace, key: string): void {
+		if (!this.#owns(workspace) || this.#branchInFlight || this.#transitionCount > 0 || !workspace.manager.thread(key))
+			return;
+		void workspace.manager
+			.session(key)
+			.then(session => session.retry())
+			.catch(error => this.ctx.showError(sanitizeErrorLine(error)));
 	}
 
 	#dequeueThread(workspace: DurableWorkspace, key: string): void {

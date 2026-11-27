@@ -517,12 +517,13 @@ export class BtwManager {
 		this.#onChange?.();
 	}
 
-	async continuePaused(): Promise<ContinuePausedAgentsResult> {
+	async continuePaused(key?: string): Promise<ContinuePausedAgentsResult> {
 		const skipped: string[] = [];
 		let continued = 0;
 		let complete = true;
+		const threads = key === undefined ? this.children : this.children.filter(thread => thread.key === key);
 		await Promise.all(
-			this.children.map(async thread => {
+			threads.map(async thread => {
 				try {
 					const session = await this.session(thread.key);
 					if (!session.hasPausedAgents()) return;
