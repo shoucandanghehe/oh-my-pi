@@ -32,6 +32,7 @@ import { type AiuTotals, sessionAiu } from "../../session/aiu-billing";
 import { latestJobWidget } from "../../tools/details/job-widget";
 import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
 import type { CollabStatus, StatusLineModel } from "../types";
+import { cfgGitEnabled } from "../settings";
 import { readStatusLineSettings, statusLineHost } from "../status-line-host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "../view-model/status-line/loop";
 import {
@@ -732,7 +733,8 @@ export class SessionStatusLine implements StatusLineModel {
 		if (this.#checkoutHomed) return {};
 		const wantsGit = segments.includes("git") || segments.includes("pr");
 		const wantsPath = segments.includes("path");
-		if ((!wantsGit && !wantsPath) || !statusLineHost.gitEnabled()) return {};
+		if (!wantsGit && !wantsPath) return {};
+		if (this.#workspacePane ? !cfgGitEnabled.get(this.#session.settings) : !statusLineHost.gitEnabled()) return {};
 		const snapshot = this.#vcs();
 		const cwd = getProjectDir();
 		if (!this.#vcsInFlight && (this.#vcsStale || snapshot?.cwd !== cwd)) {

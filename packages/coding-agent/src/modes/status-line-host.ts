@@ -1,4 +1,5 @@
 import type { StatusLineHost, StatusLineSession } from "./view-model/status-line/host";
+import { combine } from "../config/registry";
 import { Settings, settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import { getSessionCompactionBoundaries } from "../session/context-usage-runtime";
@@ -33,19 +34,21 @@ import { cfgGoalStatusInFooter } from "../goals/settings";
 export type StatusLineHostSession = StatusLineSession &
 	Partial<Pick<AgentSession, "settings" | "modelRegistry" | "sessionId" | "fetchUsageReports">>;
 
+export const statusLineSettings = combine({
+	preset: cfgStatusLinePreset,
+	leftSegments: cfgStatusLineLeftSegments,
+	rightSegments: cfgStatusLineRightSegments,
+	separator: cfgStatusLineSeparator,
+	showHookStatus: cfgStatusLineShowHookStatus,
+	segmentOptions: cfgStatusLineSegmentOptions,
+	sessionAccent: cfgStatusLineSessionAccent,
+	transparent: cfgStatusLineTransparent,
+	compactThinkingLevel: cfgStatusLineCompactThinkingLevel,
+	contextLine: cfgStatusLineContextLine,
+});
+
 export function readStatusLineSettings(source = settings) {
-	return {
-		preset: cfgStatusLinePreset.get(source),
-		leftSegments: cfgStatusLineLeftSegments.get(source),
-		rightSegments: cfgStatusLineRightSegments.get(source),
-		separator: cfgStatusLineSeparator.get(source),
-		showHookStatus: cfgStatusLineShowHookStatus.get(source),
-		segmentOptions: cfgStatusLineSegmentOptions.get(source),
-		sessionAccent: cfgStatusLineSessionAccent.get(source),
-		transparent: cfgStatusLineTransparent.get(source),
-		compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(source),
-		contextLine: cfgStatusLineContextLine.get(source),
-	};
+	return statusLineSettings.get(source);
 }
 
 /** Application policy and runtime services consumed by the portable status renderer. */

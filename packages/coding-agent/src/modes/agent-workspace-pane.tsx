@@ -1,6 +1,7 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { createSurface, effect, onCleanup, Show, untrack, type KeyEvent } from "@oh-my-pi/pi-tui";
+import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { CombinedAutocompleteProvider } from "../autocomplete/autocomplete";
 import { getKeybindings } from "../config/keybindings/keybindings";
 import {
@@ -47,6 +48,7 @@ import { agentTranscriptSource } from "./agent-hub-runtime";
 import { firstOfKind } from "./controllers/selector-views";
 import { SessionStatusLine } from "./interactive/status-line";
 import { cfgAutocompleteMaxVisible, cfgTuiVimMode, cfgTuiVimStartMode, cfgTuiVimYankToClipboard } from "./settings";
+import { statusLineSettings } from "./status-line-host";
 import type { NativeWorkspaceSurface } from "./native-workspace/workspace";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import { compactImageMarkers, shiftImageMarkers } from "./view-model/prompt/composer-attachments";
@@ -70,6 +72,7 @@ const COMMANDS = [
 	{ name: "compact", description: "Compact this agent’s context", argumentHint: "[mode] [focus]", allowArgs: true },
 	{ name: "tree", description: "Navigate this agent’s history" },
 ];
+const MISSING_SESSION_STATUS = "Status unavailable · no live session";
 
 /** An entry remains in the barrier until admission; it can still be restored by interrupt. */
 const drainingHeld = new WeakSet<CompactionQueuedMessage>();
@@ -761,6 +764,13 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			deferSubmit: replay => pasteBarrier.hold(replay),
 		});
 		composer.setNativePlaceholder(`Message ${agentId}`);
+		if (!options.nativeSupports && !remote) {
+			composer.setStatus(({ theme }) =>
+				model.live()
+					? undefined
+					: { content: theme.fg("muted", MISSING_SESSION_STATUS), width: visibleWidth(MISSING_SESSION_STATUS) },
+			);
+		}
 		composer.onSubmit = text => submit(text, submitMode);
 		composer.addKeyHandler(onKey);
 		composer.addPasteHandler(({ text }) => {
@@ -833,26 +843,19 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 					<QueuedMessages model={queueModel} />
 					<AgentWorkspaceStatus model={model} />
 					<PaneExtensionWidgets runner={presentationSource} placement="aboveEditor" size={size} />
+					{() =>
+						!model.live() &&
+						options.nativeSupports &&
+						!remote && <text key="missing-session" text={MISSING_SESSION_STATUS} tone="muted" />
+					}
 					{sendable && composer.node}
 					<PaneExtensionWidgets runner={presentationSource} placement="belowEditor" size={size} />
-					<Show
-						when={model.live}
-						fallback={
-							!remote && <text key="missing-session" text="Status unavailable · no live session" tone="muted" />
-						}
-					>
+					<Show when={model.live}>
 						{session => {
 							const status = new SessionStatusLine(session, { workspacePane: true });
 							status.setSession(session, agentId);
 							onCleanup(() => status.dispose());
-							// Keep the Main renderer, but only request facts useful in a narrow agent pane.
-							status.previewSettings({
-								preset: "custom",
-								leftSegments: ["model"],
-								rightSegments: ["context_pct", "token_total", "cost"],
-								segmentOptions: { model: { showThinkingLevel: true } },
-								compactThinkingLevel: false,
-							});
+							onCleanup(statusLineSettings.listen(session.settings, () => status.reloadSettings()));
 							return (
 								<StatusLine
 									settings={status.settings}
