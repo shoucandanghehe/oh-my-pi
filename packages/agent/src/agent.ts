@@ -438,6 +438,7 @@ interface CursorToolResultEntry {
 interface LiveSteeredEntry {
 	message: AgentMessage;
 	controller: AbortController | undefined;
+	accepted?: boolean;
 	/** Context preparation committed for the batch, carried by its last adopted entry. Never requeued. */
 	additional?: readonly AgentMessage[];
 }
@@ -1317,9 +1318,7 @@ export class Agent {
 				delivery.next = 0;
 			}
 		}
-		// The adopted messages move into #liveSteered, which queue snapshots
-		// (peekLiveSteeredMessages) count as still pending; listeners must hear
-		// about the swap or their queue view goes stale for the rest of the turn.
+		// Adoption keeps the claim recoverable independently of pending queue edits.
 		if (adopted) this.#emitQueueChanged();
 	}
 
@@ -1339,8 +1338,7 @@ export class Agent {
 			suppress(message, controller);
 			for (const context of additional ?? []) suppress(context, controller);
 		}
-		// Every snapshot counts live-steered and delivering messages as pending, so clearing
-		// them is a queue change even when the caller re-queues them right after.
+		// Clearing unrecorded input can change the queue snapshot.
 		const hadUndelivered = this.#liveSteered.length > 0 || this.#queuedMessageDeliveries.size > 0;
 		this.#liveSteered = [];
 		for (const delivery of this.#queuedMessageDeliveries) {
@@ -1356,10 +1354,9 @@ export class Agent {
 		return withdrawn;
 	}
 
-	/** Steering live steering took for the streaming response; the transcript records it once
-	 *  that response (or its tool batch) ends, which is when the model switches to it. */
-	peekLiveSteeredMessages(): AgentMessage[] {
-		return this.#liveSteered.map(entry => entry.message);
+	/** Live-steering claims that have not reached the transcript. Queue displays exclude accepted claims. */
+	peekLiveSteeredMessages(options?: { pendingOnly?: boolean }): AgentMessage[] {
+		return this.#liveSteered.filter(entry => !options?.pendingOnly || !entry.accepted).map(entry => entry.message);
 	}
 
 	setProviderResponseInterceptor(fn: SimpleStreamOptions["onResponse"] | undefined): void {
@@ -2303,6 +2300,15 @@ export class Agent {
 				),
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
+			onLiveSteeringAccepted: messages => {
+				let changed = false;
+				for (const entry of this.#liveSteered) {
+					if (entry.controller !== loopAbortController || !messages.includes(entry.message)) continue;
+					entry.accepted = true;
+					changed = true;
+				}
+				if (changed) this.#emitQueueChanged();
+			},
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,

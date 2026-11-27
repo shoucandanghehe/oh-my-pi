@@ -12168,20 +12168,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.queuedMessageCount > 0 || this.agent.peekUndeliveredQueuedMessages().some(isDisplayableQueuedMessage);
 	}
 
-	/** Chip texts for the queue display. Input the agent already took stays listed, first in its
-	 *  queue, until the transcript records it: steering live steering took for the streaming
-	 *  response (the model switches to it then), and messages on their way into the next request
-	 *  (recorded once it opens). `liveSteered` counts the steering among them. */
+	/** Pending queue chips. A claimed row leads its queue while still awaiting delivery;
+	 *  `liveSteered` is the number of these non-editable steering rows. Live steering
+	 *  disappears once accepted, even if it has not reached the transcript yet. */
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
-		const sent = [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekDeliveringMessages("steering")].filter(
-			isUserAuthoredQueuedMessage,
-		);
+		const delivering = this.#visibleClaimedInput("steering");
 		return {
-			steering: [...sent, ...this.agent.peekSteeringQueue().filter(isUserAuthoredQueuedMessage)].map(queueChipText),
-			followUp: [...this.agent.peekDeliveringMessages("followUp"), ...this.agent.peekFollowUpQueue()]
-				.filter(isUserAuthoredQueuedMessage)
-				.map(queueChipText),
-			liveSteered: sent.length,
+			steering: [...delivering, ...this.agent.peekSteeringQueue().filter(isUserAuthoredQueuedMessage)].map(
+				queueChipText,
+			),
+			followUp: [
+				...this.#visibleClaimedInput("followUp"),
+				...this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage),
+			].map(queueChipText),
+			liveSteered: delivering.length,
 		};
 	}
 
@@ -12263,7 +12263,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Stable identities of editable chips; claimed chips occupy their existing visual slots. */
 	getQueuedMessageEditIds(): Record<"steering" | "followUp", readonly (string | undefined)[]> {
 		const ids = (queue: "steering" | "followUp", pending: readonly AgentMessage[]) => [
-			...Array<string | undefined>(this.#claimedQueuedUserCount(queue)).fill(undefined),
+			...Array<string | undefined>(this.#visibleClaimedInput(queue).length).fill(undefined),
 			...pending.filter(isUserAuthoredQueuedMessage).map(message => {
 				let id = this.#queuedMessageEditIds.get(message);
 				if (id === undefined) {
@@ -12286,7 +12286,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		expectedText: string,
 		expectedId?: string,
 	): RestoredQueuedMessage | undefined {
-		let remaining = index - this.#claimedQueuedUserCount(queue);
+		let remaining = index - this.#visibleClaimedInput(queue).length;
 		if (remaining < 0 || !Number.isInteger(remaining)) return undefined;
 		const selected = queue === "steering" ? this.agent.peekSteeringQueue() : this.agent.peekFollowUpQueue();
 		const rawIndex = selected.findIndex(message => isUserAuthoredQueuedMessage(message) && remaining-- === 0);
@@ -12300,11 +12300,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#takePendingQueuedMessage(queue, selected, rawIndex);
 	}
 
-	#claimedQueuedUserCount(queue: "steering" | "followUp"): number {
-		const delivering = this.agent.peekDeliveringMessages(queue).filter(isUserAuthoredQueuedMessage).length;
-		return queue === "steering"
-			? delivering + this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length
-			: delivering;
+	#visibleClaimedInput(queue: "steering" | "followUp"): AgentMessage[] {
+		const delivering = this.agent.peekDeliveringMessages(queue);
+		return (
+			queue === "steering"
+				? [...this.agent.peekLiveSteeredMessages({ pendingOnly: true }), ...delivering]
+				: delivering
+		).filter(isUserAuthoredQueuedMessage);
 	}
 
 	#takePendingQueuedMessage(

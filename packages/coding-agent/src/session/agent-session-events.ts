@@ -113,12 +113,11 @@ export type AgentSessionEvent =
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
 	// Coalesced snapshot of the displayable steering/follow-up queue: emitted
 	// whenever it differs from the last `queue_update` (enqueue, remove,
-	// clear/restore, the transcript recording delivered input, live-steering
-	// adoption/withdrawal, or session switch), never on a no-op mutation.
-	// Mirrors `AgentSession.getQueuedMessages()`: input the agent already took
-	// leads its list until the transcript records it; `liveSteered` counts the
-	// leading `steering` entries among it, which `remove_queued_message` cannot
-	// reach.
+	// clear/restore, the transcript recording delivered input, provider acceptance
+	// of live steering, or session switch), never on a no-op mutation.
+	// Mirrors `AgentSession.getQueuedMessages()`: claimed input awaiting delivery
+	// leads its list; `liveSteered` counts the leading `steering` entries that
+	// `remove_queued_message` cannot reach.
 	| { type: "queue_update"; steering: string[]; followUp: string[]; liveSteered: number };
 
 /**

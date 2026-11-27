@@ -359,6 +359,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * unrecorded for the host to requeue.
 	 */
 	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
+	/** The provider accepted a live-steering claim; it is not yet necessarily in session context. */
+	onLiveSteeringAccepted?: (messages: AgentMessage[]) => void;
 
 	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.

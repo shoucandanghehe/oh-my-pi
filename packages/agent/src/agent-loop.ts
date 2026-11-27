@@ -2107,6 +2107,7 @@ function openLiveSteering(
 			if (messages.length > 0) config.onLiveSteeringTaken?.(messages);
 			return messages;
 		},
+		accepted: config.onLiveSteeringAccepted,
 		toProvider: async (messages, signal) => {
 			const transformed = config.transformContext
 				? await config.transformContext(messages, bound(signal))

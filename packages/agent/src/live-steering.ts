@@ -17,6 +17,8 @@ export interface LiveSteeringQueue {
 	wait(signal: AbortSignal): Promise<void>;
 	/** Dequeues the next steering batch. */
 	take(signal: AbortSignal): Promise<AgentMessage[]>;
+	/** The provider delivered this claim into its response. */
+	accepted?(messages: AgentMessage[]): void;
 	/**
 	 * Provider view of `messages` appended to the in-flight call's context, or
 	 * `undefined` when that view is not purely user messages.
@@ -78,6 +80,7 @@ export class LiveSteeringChannel implements LiveSteering {
 				if (settled) return;
 				settled = true;
 				this.accepted.push(...messages);
+				this.#queue.accepted?.(messages);
 			},
 			reject: () => {
 				if (settled) return;

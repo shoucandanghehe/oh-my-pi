@@ -4,6 +4,7 @@ import { Type } from "@oh-my-pi/omptype/typebox";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1089,6 +1090,87 @@ describe("queued user delivery policy", () => {
 		expect(events.map(event => event.prompt)).toEqual(["user task"]);
 		expect(requests).toHaveLength(2);
 		expect(requests[1].systemPrompt).toEqual(requests[0].systemPrompt);
+	});
+
+	it.each([false, true])("restores accepted steering only if absent from context (%s)", async recorded => {
+		const { agent, requests, manager } = setup(undefined, undefined, { policy: false });
+		const started = Promise.withResolvers<void>();
+		const claimed = Promise.withResolvers<void>();
+		const accept = Promise.withResolvers<void>();
+		const accepted = Promise.withResolvers<void>();
+		const settleFirst = Promise.withResolvers<void>();
+		const recordedSteering = Promise.withResolvers<void>();
+		const text = "switch to the revised plan";
+		session.subscribe(event => {
+			if (event.type !== "message_end" || event.message.role !== "user") return;
+			if (JSON.stringify(event.message).includes(text)) recordedSteering.resolve();
+		});
+		const delegate = agent.streamFn;
+		let call = 0;
+		agent.streamFn = (model, context, options) => {
+			if (++call === 1 || (call === 2 && recorded)) {
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				signal?.addEventListener("abort", () => stream.fail(new Error("aborted")), { once: true });
+				if (call === 1) {
+					const live = options?.liveSteering;
+					if (!signal || !live) throw new Error("expected live steering");
+					started.resolve();
+					void (async () => {
+						await live.wait(signal);
+						const claim = await live.claim(signal);
+						if (!claim) throw new Error("expected a provider claim");
+						claimed.resolve();
+						await accept.promise;
+						claim.accept();
+						accepted.resolve();
+						await settleFirst.promise;
+						if (!signal.aborted) {
+							const message = createAssistantMessage("first response");
+							stream.push({ type: "done", reason: "stop", message });
+						}
+					})().catch(error => {
+						if (!signal.aborted) stream.fail(error);
+					});
+				}
+				return stream;
+			}
+			return delegate(model, context, options);
+		};
+
+		const running = session.prompt("start work");
+		try {
+			await started.promise;
+			await session.steer(text);
+			await claimed.promise;
+			expect(session.getQueuedMessages().steering).toEqual([text]);
+			accept.resolve();
+			await accepted.promise;
+			expect(session.getQueuedMessages().steering).toEqual([]);
+			expect(session.getQueuedMessageEditIds().steering).toEqual([]);
+			expect(session.popLastQueuedMessage()).toBeUndefined();
+
+			if (recorded) {
+				settleFirst.resolve();
+				await recordedSteering.promise;
+			}
+			const restore = vi.fn();
+			await session.interruptAndRestoreQueue(restore);
+			await running;
+			expect(restore).toHaveBeenCalledWith({
+				steering: recorded ? [] : [expect.objectContaining({ text })],
+				followUp: [],
+			});
+			expect(JSON.stringify(manager.buildSessionContext().messages).includes(text)).toBe(recorded);
+
+			await session.prompt("continue with the work");
+			expect(JSON.stringify(requests.at(-1)?.messages).includes(text)).toBe(recorded);
+		} finally {
+			accept.resolve();
+			settleFirst.resolve();
+			await session.abort();
+			await running;
+		}
 	});
 
 	it.each(["steering", "followUp"] as const)(

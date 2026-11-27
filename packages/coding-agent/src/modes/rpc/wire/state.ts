@@ -45,12 +45,12 @@ export const stateDefs = {
 			liveSteered: absentAs(
 				doc(
 					"number.integer",
-					"Leading `steering` entries the agent already took (live steering inside the streaming response, or steering on its way into the next request); `remove_queued_message` cannot reach them.",
+					"Leading `steering` entries claimed by the agent but still awaiting delivery; `remove_queued_message` cannot reach them.",
 				),
 				0,
 			),
 		},
-		"Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`. Input the agent already took leads its list until the transcript records it.",
+		"Displayable queue-chip text for pending user-authored messages. Claimed input awaiting delivery leads its list; steering leaves the list once delivered into the streaming response.",
 	),
 	ToolDescriptor: { name: "string", description: "string", "parameters?": "unknown", "examples?": "unknown[]" },
 	Goal: doc(
