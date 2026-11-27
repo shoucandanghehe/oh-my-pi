@@ -119,6 +119,8 @@ export interface VisitEntriesFromFileStreamOptions {
 	 * callers derive the exact snapshot size without re-stating the file.
 	 */
 	onBytesConsumed?: (bytes: number) => void;
+	/** Return the final unterminated bytes instead of parsing them as a completed record. */
+	onTrailingPartial?: (bytes: Uint8Array) => void;
 }
 
 /** Controls how a missing session file is handled. */
@@ -411,8 +413,11 @@ export async function visitEntriesFromFileStream(
 		// A trailing record without a final newline: terminate it so the parser
 		// can complete it (readline yielded it; parseChunk needs the delimiter).
 		if (!stopped && !sink.isEmpty) {
-			sink.append(LF);
-			await drain(true);
+			if (options.onTrailingPartial) options.onTrailingPartial(sink.flush()!);
+			else {
+				sink.append(LF);
+				await drain(true);
+			}
 		}
 	} catch (err) {
 		if (visitorThrew) throw err;

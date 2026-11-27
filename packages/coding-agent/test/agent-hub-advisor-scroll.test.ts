@@ -15,6 +15,7 @@ import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub
 import type { AgentHubRemote } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { createRoot, effect } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { AgentTranscriptViewer } from "../src/ui/overlays/panels/agent-transcript-viewer";
 import { AgentTranscriptViewerModel } from "../src/ui/overlays/panels/agent-transcript-viewer-model";
@@ -452,6 +453,55 @@ describe("AgentTranscriptViewer", () => {
 		}
 	});
 
+	it("shows a first batch of a large parked transcript before the last journal record", async () => {
+		vi.useRealTimers();
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
+		const file = path.join(dir, "__advisor.jsonl");
+		const count = 300;
+		const content = "x".repeat(8_000);
+		const header = JSON.stringify({
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "adv",
+			timestamp: TS,
+			cwd: dir,
+		});
+		const ids = Array.from({ length: count }, (_, i) => `user-${i}`);
+		fs.writeFileSync(file, [header, ...ids.map(id => messageLine(id, content)), ""].join("\n"));
+		const model = new AgentTranscriptViewerModel({
+			transcript: agentTranscriptSource,
+			agentId: "advisor",
+			registry: { get: () => ({ kind: "advisor", status: "parked", sessionFile: file }) },
+			terminalRows: () => 24,
+			expandKeys: [],
+			hubKeys: [],
+			onClose: () => {},
+			onHubClose: () => {},
+		});
+		const first = Promise.withResolvers<readonly string[]>();
+		const finished = Promise.withResolvers<void>();
+		const stop = createRoot(dispose => {
+			effect(() => {
+				const rows = model.blocks();
+				if (rows.length > 0) first.resolve(rows.map(block => block.id));
+				if (rows.at(-1)?.id === "user-299") finished.resolve();
+			});
+			return dispose;
+		});
+		try {
+			expect(model.blocks.peek()).toEqual([]);
+			const batch = await first.promise;
+			expect(batch[0]).toBe("user-0");
+			expect(batch).not.toContain("user-299");
+			await finished.promise;
+			expect(model.blocks.peek().map(block => block.id)).toEqual(ids);
+		} finally {
+			stop();
+			model.dispose();
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("reloads a rewrite that keeps the file size and mtime within a few idle polls", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
 		const file = path.join(dir, "__advisor.jsonl");
@@ -467,12 +517,15 @@ describe("AgentTranscriptViewer", () => {
 			expect(body()).toContain("OLDMARKER");
 			fs.writeFileSync(file, `${buildJsonl()}${messageLine("same", "NEWMARKER")}\n`);
 			fs.utimesSync(file, original.atime, original.mtime);
-			const readFile = vi.spyOn(fs.promises, "readFile");
+			const visit = vi.spyOn(agentTranscriptSource, "visitEntries");
 			vi.advanceTimersByTime(250 * 5);
-			expect(readFile).toHaveBeenCalledTimes(1);
-			await readFile.mock.results[0]!.value;
+			expect(body()).toContain("OLDMARKER");
+			const reload = visit.mock.results[0];
+			if (!reload) throw new Error("the changed transcript did not begin reloading after five idle polls");
+			await reload.value;
 			await settleRemoteRefresh();
 			expect(body()).toContain("NEWMARKER");
+			expect(body()).not.toContain("OLDMARKER");
 		} finally {
 			viewer.dispose();
 			fs.rmSync(dir, { recursive: true, force: true });

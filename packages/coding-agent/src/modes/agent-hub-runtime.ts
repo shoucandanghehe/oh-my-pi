@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import type { AgentRecordLike } from "../registry/agent-hub-types";
 import { type AgentCostSnapshot, type AgentTreeSpend, aggregateCost } from "./view-model/overlays/agent-hub-projection";
-import type { AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
+import type { AgentTranscriptEntry, AgentTranscriptSource } from "./view-model/overlays/agent-transcript-viewer";
 import type { ObservableSession, SessionObserverRegistry } from "../task/session-observer-registry";
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
@@ -11,25 +11,32 @@ import { IrcBus, type IrcBusApi } from "../irc/bus";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { isSessionTreeRef, registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
-import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
+import type { FileEntry } from "../session/session-entries";
+import { normalizeAssistantUsage, parseSessionEntries, visitEntriesFromFileStream } from "../session/session-loader";
 import type { AgentHubProps } from "../ui/overlays/pickers/agent-hub";
+
+function isTranscriptEntry(entry: FileEntry): entry is FileEntry & AgentTranscriptEntry {
+	if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
+	return (
+		entry.type === "session" ||
+		entry.type === "message" ||
+		entry.type === "custom_message" ||
+		entry.type === "model_change"
+	);
+}
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
-	parseEntries: text => {
-		const entries = parseSessionEntries(text).filter(
-			entry =>
-				entry.type === "session" ||
-				entry.type === "message" ||
-				entry.type === "custom_message" ||
-				entry.type === "model_change",
-		);
-		for (const entry of entries) {
-			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
-		}
-		return entries;
-	},
+	parseEntries: text => parseSessionEntries(text).filter(isTranscriptEntry),
+	visitEntries: (file, visit, options) =>
+		visitEntriesFromFileStream(
+			file,
+			entry => {
+				if (isTranscriptEntry(entry)) visit(entry);
+			},
+			options,
+		),
 };
 
 /** Host services the Agent Hub reads (registry, lifecycle, IRC, activity), plus the transcript source its viewer reads. */

@@ -55,6 +55,7 @@ const transcript = {
 			.filter(Boolean)
 			.map(line => JSON.parse(line))
 			.filter((entry: { type: string }) => entry.type === "message" || entry.type === "model_change"),
+	visitEntries: async () => {},
 };
 
 // The recording opened its transcripts after their directory was removed: the local files are missing.

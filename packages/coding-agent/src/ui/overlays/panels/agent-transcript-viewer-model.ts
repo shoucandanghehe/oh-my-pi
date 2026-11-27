@@ -165,6 +165,8 @@ const POLL_MS = 250;
 /** Every Nth idle poll re-reads the sentinels (rewrites that keep size and mtime). */
 const SENTINEL_CHECK_EVERY = 5;
 const SENTINEL_BYTES = 4096;
+const STREAM_LOAD_THRESHOLD_BYTES = 2 * 1024 * 1024;
+const STREAM_ENTRIES_PER_BATCH = 128;
 
 interface Sentinel {
 	readonly offset: number;
@@ -178,7 +180,7 @@ interface LocalState {
 	readonly size: number;
 	readonly mtimeMs: number;
 	/** Bytes after the last complete line. */
-	readonly pending: string;
+	readonly pending: Buffer;
 	readonly sentinels: readonly Sentinel[];
 }
 
@@ -214,11 +216,9 @@ function sentinelWindows(size: number): number[] {
 	return tail === 0 ? [0] : [0, tail];
 }
 
-function sentinelsOf(data: Buffer): Sentinel[] {
-	return sentinelWindows(data.byteLength).map(offset => ({
-		offset,
-		bytes: Buffer.from(data.subarray(offset, Math.min(data.byteLength, offset + SENTINEL_BYTES))),
-	}));
+function splitLocalBytes(data: Buffer): { complete: string; pending: Buffer } {
+	const end = data.lastIndexOf(0x0a) + 1;
+	return { complete: data.toString("utf-8", 0, end), pending: Buffer.from(data.subarray(end)) };
 }
 
 /** Complete JSONL lines of `text` and the partial line after them. */
@@ -274,7 +274,7 @@ export class AgentTranscriptViewerModel {
 		| undefined;
 	#refreshQueued = false;
 	#localUnavailable = "";
-	#loading = false;
+	#loading: Pick<LocalState, "path" | "dev" | "ino"> | undefined;
 	#idlePolls = 0;
 	#tally = new TurnUsageTally();
 	#turnStartedAt: number | undefined;
@@ -370,6 +370,7 @@ export class AgentTranscriptViewerModel {
 			return this.hasRemoteData ? "No messages yet." : "Loading transcript from host…";
 		}
 		if (this.live.peek()) return "No messages yet.";
+		if (this.#loading) return "Loading transcript…";
 		if (this.#localUnavailable === "missing") return "This agent’s session file is missing or unreadable.";
 		return this.ref()?.sessionFile ? "No messages yet." : "No session file available yet.";
 	}
@@ -401,6 +402,7 @@ export class AgentTranscriptViewerModel {
 		}
 		const live = this.deps.liveSession?.();
 		if (live) {
+			this.#loading = undefined;
 			this.#refreshLive(live);
 			return;
 		}
@@ -417,7 +419,6 @@ export class AgentTranscriptViewerModel {
 				this.#rebuild([]);
 			});
 		}
-		if (this.#loading) return;
 		const file = this.ref()?.sessionFile;
 		if (!file) {
 			this.#clearLocal("none");
@@ -430,6 +431,9 @@ export class AgentTranscriptViewerModel {
 			this.#clearLocal("missing");
 			return;
 		}
+		const loading = this.#loading;
+		if (loading?.path === file && loading.dev === stat.dev && loading.ino === stat.ino) return;
+		this.#loading = undefined;
 		const state = this.#local;
 		if (state && state.path === file && state.dev === stat.dev && state.ino === stat.ino) {
 			if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) {
@@ -496,6 +500,7 @@ export class AgentTranscriptViewerModel {
 	}
 
 	#clearLocal(reason: string): void {
+		this.#loading = undefined;
 		if (!this.#local && this.#localUnavailable === reason) return;
 		this.#local = undefined;
 		this.#bindLinks(undefined, undefined);
@@ -515,22 +520,8 @@ export class AgentTranscriptViewerModel {
 	}
 
 	#loadFull(file: string, stat: fs.Stats, allowAsync: boolean): void {
-		const promises = allowAsync ? this.deps.transcript.fs.promises : undefined;
-		if (promises) {
-			this.#loading = true;
-			promises
-				.readFile(file)
-				.then(data => {
-					this.#loading = false;
-					if (!this.#disposed && !this.deps.liveSession?.() && this.ref()?.sessionFile === file) {
-						this.#applyFull(file, stat, data);
-					}
-				})
-				.catch((error: unknown) => {
-					// The state stays: the next poll retries.
-					this.#loading = false;
-					logger.debug("transcript viewer: read failed", { error: String(error) });
-				});
+		if (allowAsync || stat.size >= STREAM_LOAD_THRESHOLD_BYTES) {
+			void this.#loadFullAsync(file, stat);
 			return;
 		}
 		try {
@@ -540,13 +531,69 @@ export class AgentTranscriptViewerModel {
 		}
 	}
 
+	async #loadFullAsync(file: string, stat: fs.Stats): Promise<void> {
+		const loading = { path: file, dev: stat.dev, ino: stat.ino };
+		this.#loading = loading;
+		const active = () =>
+			this.#loading === loading && !this.#disposed && !this.deps.liveSession?.() && this.ref()?.sessionFile === file;
+		const incremental = this.blocks.peek().length === 0;
+		const entries: AgentTranscriptEntry[] = [];
+		let pending = Buffer.alloc(0);
+		let size = 0;
+		try {
+			await this.deps.transcript.visitEntries(
+				file,
+				entry => {
+					entries.push(entry);
+					if (!incremental || entries.length < STREAM_ENTRIES_PER_BATCH) return;
+					this.#applyLocalEntries(file, entries, false);
+					entries.length = 0;
+				},
+				{
+					maxBytes: stat.size,
+					yieldEveryEntries: STREAM_ENTRIES_PER_BATCH,
+					shouldContinue: active,
+					throwIfMissing: true,
+					onBytesConsumed: bytes => (size += bytes),
+					onTrailingPartial: bytes => (pending = Buffer.from(bytes)),
+				},
+			);
+			if (!active()) return;
+			const after = this.deps.transcript.fs.statSync(file);
+			if (after.dev !== stat.dev || after.ino !== stat.ino || after.size < size) return;
+			this.#local = {
+				...loading,
+				size,
+				mtimeMs: stat.mtimeMs,
+				pending,
+				sentinels: this.#readSentinels(file, size),
+			};
+			this.#localUnavailable = "";
+			this.#applyLocalEntries(file, entries, !incremental);
+		} catch (error) {
+			logger.debug("transcript viewer: read failed", { error: String(error) });
+		} finally {
+			if (this.#loading === loading) {
+				this.#loading = undefined;
+				if (!this.#disposed) this.touch();
+			}
+		}
+	}
+
+	#readSentinels(file: string, size: number): Sentinel[] {
+		return sentinelWindows(size).map(offset => ({
+			offset,
+			bytes: readRange(this.deps.transcript.fs, file, offset, Math.min(SENTINEL_BYTES, size - offset)),
+		}));
+	}
+
 	#applyFull(file: string, stat: fs.Stats, data: Buffer): void {
 		// Identity and mtime after the read: the file may have grown since the stat.
 		let after = stat;
 		try {
 			after = this.deps.transcript.fs.statSync(file);
 		} catch {}
-		const { complete, pending } = splitComplete(data.toString("utf-8"));
+		const { complete, pending } = splitLocalBytes(data);
 		this.#localUnavailable = "";
 		this.#local = {
 			path: file,
@@ -555,40 +602,44 @@ export class AgentTranscriptViewerModel {
 			size: data.byteLength,
 			mtimeMs: after.mtimeMs,
 			pending,
-			sentinels: sentinelsOf(data),
+			sentinels: sentinelWindows(data.byteLength).map(offset => ({
+				offset,
+				bytes: Buffer.from(data.subarray(offset, offset + SENTINEL_BYTES)),
+			})),
 		};
-		this.model = undefined;
-		const entries = this.deps.transcript.parseEntries(complete);
+		this.#applyLocalEntries(file, this.deps.transcript.parseEntries(complete), true);
+	}
+
+	#applyLocalEntries(file: string, entries: readonly AgentTranscriptEntry[], replace: boolean): void {
 		const header = entries.find(entry => entry.type === "session");
 		batch(() => {
-			this.#bindLinks(file, header?.cwd);
-			this.#rebuild(this.#messages(entries));
+			if (replace) {
+				this.model = undefined;
+				this.#bindLinks(file, header?.cwd);
+				this.#rebuild(this.#messages(entries));
+			} else {
+				if (header) this.#bindLinks(file, header.cwd);
+				const messages = this.#messages(entries);
+				if (messages.length > 0) this.#append(messages);
+				else this.touch();
+			}
 		});
 	}
 
 	#appendLocal(file: string, stat: fs.Stats, state: LocalState, allowAsync: boolean): void {
-		let chunk: string;
+		let chunk: Buffer;
 		let sentinels: Sentinel[];
 		try {
-			chunk = readRange(this.deps.transcript.fs, file, state.size, stat.size - state.size).toString("utf-8");
-			sentinels = sentinelWindows(stat.size).map(offset => ({
-				offset,
-				bytes: readRange(this.deps.transcript.fs, file, offset, Math.min(SENTINEL_BYTES, stat.size - offset)),
-			}));
+			chunk = readRange(this.deps.transcript.fs, file, state.size, stat.size - state.size);
+			sentinels = this.#readSentinels(file, state.size + chunk.byteLength);
 		} catch (error) {
 			logger.debug("transcript viewer: tail read failed", { error: String(error) });
 			this.#loadFull(file, stat, allowAsync);
 			return;
 		}
-		const { complete, pending } = splitComplete(state.pending + chunk);
-		this.#local = { ...state, size: stat.size, mtimeMs: stat.mtimeMs, pending, sentinels };
-		const previousModel = this.model;
-		const entries = complete ? this.deps.transcript.parseEntries(complete) : [];
-		const header = entries.find(entry => entry.type === "session");
-		if (header) this.#bindLinks(file, header.cwd);
-		const parsed = this.#messages(entries);
-		if (parsed.length > 0) this.#append(parsed);
-		else if (this.model !== previousModel) this.touch();
+		const { complete, pending } = splitLocalBytes(Buffer.concat([state.pending, chunk]));
+		this.#local = { ...state, size: state.size + chunk.byteLength, mtimeMs: stat.mtimeMs, pending, sentinels };
+		if (complete) this.#applyLocalEntries(file, this.deps.transcript.parseEntries(complete), false);
 	}
 
 	#fetchRemote(): void {
