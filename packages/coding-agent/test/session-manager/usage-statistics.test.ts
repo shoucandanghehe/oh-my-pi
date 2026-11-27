@@ -249,8 +249,9 @@ describe("SessionManager usage statistics", () => {
 		expect(usage.premiumRequests).toBe(3);
 	});
 
-	it("tracks task-result cost as the subagent portion of total cost", () => {
-		const session = SessionManager.inMemory();
+	it("keeps primary assistant usage separate from task results and side calls after reopening", async () => {
+		using tempDir = TempDir.createSync("@omp-assistant-usage-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
 		const usage = (total: number) => ({
 			input: 1,
 			output: 1,
@@ -282,6 +283,27 @@ describe("SessionManager usage statistics", () => {
 		const stats = session.getUsageStatistics();
 		expect(stats.cost).toBeCloseTo(0.5);
 		expect(stats.subagentCost).toBeCloseTo(0.12);
+
+		session.appendModelUsage(modelUsage, {
+			sessionId: session.getSessionId(),
+			parentId: session.getLeafId(),
+		});
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a session file");
+		await session.close();
+
+		const reopened = await SessionManager.open(sessionFile);
+		try {
+			const total = reopened.getUsageStatistics();
+			expect(total).toMatchObject({ input: 13, output: 4, totalTokens: 20, subagentCost: 0.12 });
+			expect(total.cost).toBeCloseTo(0.50153);
+			const assistant = reopened.getAssistantUsageStatistics();
+			expect(assistant).toMatchObject({ input: 1, output: 1, totalTokens: 2, cost: 0.38, subagentCost: 0 });
+			assistant.output = 999;
+			expect(reopened.getAssistantUsageStatistics().output).toBe(1);
+		} finally {
+			await reopened.close();
+		}
 	});
 
 	it("keeps orchestration usage out of ordinary input while preserving total tokens", () => {

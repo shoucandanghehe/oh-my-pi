@@ -649,6 +649,7 @@ export class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	#assistantUsage = emptyUsageStatistics();
 	// Branch memo: getBranch() walks leaf-to-root per call (array + Set +
 	// reverse) on per-frame/per-turn paths. The branch only changes on
 	// insert/rebuild/setLeaf, so cache the array keyed on (leaf, generation).
@@ -673,6 +674,7 @@ export class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#assistantUsage = emptyUsageStatistics();
 		this.#generation++;
 		this.#branchCache = undefined;
 	}
@@ -730,16 +732,18 @@ export class SessionEntryIndex {
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
 		}
+		const assistant = entry.type === "message" && entry.message.role === "assistant" ? entry.message : undefined;
+		if (assistant) addUsage(this.#assistantUsage, usage);
 		// Credits count only where calls are recorded; a reset fork's copies had theirs cleared.
-		const call: AiuCall | undefined =
-			entry.type === "model_usage"
-				? entry
-				: entry.type === "message" && entry.message.role === "assistant"
-					? entry.message
-					: undefined;
+		const call: AiuCall | undefined = entry.type === "model_usage" ? entry : assistant;
 		const aiu = call ? callAiu(call) : undefined;
-		if (aiu === "unknown") this.#usage.aiuUnknownCalls++;
-		else if (aiu !== undefined) this.#usage.aiuNano += aiu;
+		if (aiu === "unknown") {
+			this.#usage.aiuUnknownCalls++;
+			if (assistant) this.#assistantUsage.aiuUnknownCalls++;
+		} else if (aiu !== undefined) {
+			this.#usage.aiuNano += aiu;
+			if (assistant) this.#assistantUsage.aiuNano += aiu;
+		}
 	}
 
 	has(id: string): boolean {
@@ -852,6 +856,10 @@ export class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	assistantUsageSnapshot(): UsageStatistics {
+		return { ...this.#assistantUsage };
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -3408,6 +3416,11 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+
+	/** Cumulative usage from primary assistant messages only. */
+	getAssistantUsageStatistics(): UsageStatistics {
+		return this.#index.assistantUsageSnapshot();
 	}
 
 	/**
