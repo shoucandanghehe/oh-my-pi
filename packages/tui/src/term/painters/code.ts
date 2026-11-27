@@ -44,15 +44,19 @@ definePainter("code", (node, cx): Block => {
 			gutter = `${tone ? theme.style(tone, label) : theme.style("dim", label)} `;
 			rest = " ".repeat(visibleWidth(gutter));
 		}
-		const room = Math.max(1, width - visibleWidth(gutter));
+		const start = visibleWidth(gutter);
+		const room = Math.max(1, width - start);
 		const line = styled[i] ?? "";
 		if (props.wrap) {
-			const start = visibleWidth(gutter);
 			wrapRows(line, room).forEach(({ text, textRow }, j) => {
 				textRows[rows.length] = { ...textRow, start, end: start + textRow.end };
 				rows.push(`${j === 0 ? gutter : rest}${text}`);
 			});
-		} else rows.push(`${gutter}${truncate(line, room, theme.symbols.ellipsis)}`);
+		} else {
+			const text = truncate(line, room, theme.symbols.ellipsis);
+			textRows[rows.length] = { start, end: start + visibleWidth(text) };
+			rows.push(gutter + text);
+		}
 	}
 	return { rows, textRows };
 });

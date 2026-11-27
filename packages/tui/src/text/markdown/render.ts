@@ -93,21 +93,25 @@ export interface MarkdownOptions {
 /** A styled row, or a row carrying its logical text and placement. */
 type Row = string | (WrappedRow & { readonly literal?: boolean });
 
-/** Add visual chrome, excluding repeated prefixes at soft continuations from copied text. */
-function decorateRow(row: Row, prefix: string, style?: (text: string) => string): Row {
-	if (typeof row === "string") return prefix + (style ? style(row) : row);
-	if (row.literal) return row;
+/** List markers are content. Quote bars and hanging indents only position content. */
+function decorateRow(row: Row, prefix: string, keepMarker: boolean, style?: (text: string) => string): Row {
+	if (typeof row !== "string" && row.literal) return row;
 	const shift = visibleWidth(prefix);
-	const { textRow } = row;
+	const raw = typeof row === "string" ? row : row.text;
+	const textRow: TextRow = typeof row === "string" ? { start: 0, end: visibleWidth(raw) } : row.textRow;
 	return {
-		text: prefix + (style ? style(row.text) : row.text),
-		textRow: { ...textRow, start: textRow.join === undefined ? 0 : textRow.start + shift, end: textRow.end + shift },
+		text: prefix + (style ? style(raw) : raw),
+		textRow: {
+			...textRow,
+			start: keepMarker && textRow.join === undefined ? 0 : textRow.start + shift,
+			end: textRow.end + shift,
+		},
 	};
 }
 
 /** `rows` with `first` before the first text row and `rest` before the others; literal rows pass through. */
 function prefixRows(rows: readonly Row[], first: string, rest: string): Row[] {
-	return rows.map((row, i) => decorateRow(row, i === 0 ? first : rest));
+	return rows.map((row, i) => decorateRow(row, i === 0 ? first : rest, i === 0 && first.trim() !== ""));
 }
 
 /** Widest a horizontal rule draws. */
@@ -248,7 +252,7 @@ function renderHtmlBlock(r: Renderer, raw: string, width: number, ctx: InlineCon
 			restore: stylePrefix(styles.quote),
 		});
 		return wrapRows(inner, Math.max(1, width - visibleWidth(border))).map(row =>
-			decorateRow(row, border, styles.quote),
+			decorateRow(row, border, false, styles.quote),
 		);
 	}
 	return wrapRows(renderInline(r.inline, lexInline(trimmed), ctx), width);
@@ -369,7 +373,13 @@ function renderCode(r: Renderer, token: Tokens.Code, width: number): Row[] {
 		if (fence && i === lines.length - 1) fence.head = out.length;
 		const line = options.hyperlinks ? linkUrls(lines[i]!) : lines[i]!;
 		if (indent > 0) {
-			out.push(...wrapRows(spaces(indent) + line, width));
+			let padding = indent;
+			for (const { text, textRow } of wrapRows(spaces(indent) + line, width)) {
+				const hidden = Math.min(padding, textRow.join?.length ?? 0);
+				const start = Math.min(padding - hidden, textRow.end);
+				padding -= hidden + start;
+				out.push({ text, textRow: { ...textRow, start, ...(hidden && { join: textRow.join!.slice(hidden) }) } });
+			}
 		} else {
 			for (const row of wrapRows(line, r.fullWidth)) out.push({ ...row, literal: true });
 		}
@@ -470,7 +480,7 @@ function renderQuote(r: Renderer, token: Tokens.Blockquote, width: number): Row[
 	const borderWidth = visibleWidth(border);
 	const ctx: InlineContext = { text: text => text, restore: stylePrefix(styles.quote) };
 	const inner = renderBlocks(r, token.tokens, Math.max(1, width - borderWidth), ctx, false);
-	return inner.map(row => decorateRow(row, border, styles.quote));
+	return inner.map(row => decorateRow(row, border, false, styles.quote));
 }
 
 function renderDisplayMath(r: Renderer, latex: string, width: number, ctx: InlineContext): Row[] {
