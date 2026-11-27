@@ -132,15 +132,21 @@ describe("AgentSession magic keyword settings", () => {
 	it("updates the workflowz notice when scout is disabled during the session", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;
-		cfgTaskDisabledAgents.set(created.settings, ["scout"]);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
 		await session.prompt("please workflowz this");
+		cfgTaskDisabledAgents.set(created.settings, ["scout"]);
+		await session.prompt("please workflowz this");
 
-		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
-		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
-		expect(notice.toLowerCase()).not.toContain("scout");
-		expect(notice).toContain("Explore inline FIRST");
+		const notices = promptSpy.mock.calls.map(
+			([messages]) =>
+				(messages as unknown as Array<{ content?: string; customType?: string }>).find(
+					message => message.customType === "workflow-notice",
+				)?.content,
+		);
+		expect(notices[0]).toContain('workpool("scout",');
+		expect(notices[1]).toMatch(/workpool\((?:\{|name="review")/);
+		expect(notices[1]).not.toContain('"scout"');
 	});
 
 	it("skips workflowz notice when the task tool is inactive", async () => {

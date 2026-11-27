@@ -19,32 +19,27 @@ describe("orchestrate notice", () => {
 		});
 		expect(notice.startsWith("<system-notice>")).toBe(true);
 		expect(notice.endsWith("</system-notice>")).toBe(true);
-		expect(notice).toContain("orchestrator");
+		expect(notice).toContain("Own decomposition, delegation, integration, and verification");
+		expect(notice).toContain("Dispatch independent assignments concurrently");
+		expect(notice).toContain("Preserve explicit review and approval gates");
+		expect(notice).toContain("through `task`");
+		expect(notice).toContain("with `todo`");
 		// The contract must not retain the slash-command input placeholder.
 		expect(notice).not.toContain("$@");
 	});
 
-	it("omits tool-budget mentions for tools absent from the session", () => {
+	it("does not direct the model to call task or todo when those tools are absent", () => {
 		const notice = renderOrchestrateNotice({ tools: ["read"] });
-		expect(notice).not.toContain("`task` for dispatch");
+		expect(notice).toContain("Delegate substantial independent work.");
+		expect(notice).not.toContain("`task`");
+		expect(notice).not.toContain("`todo`");
+	});
+
+	it.each(["edit", "write"])("does not prescribe a file mutation tool when only %s is available", tool => {
+		const notice = renderOrchestrateNotice({ tools: ["read", tool] });
+		expect(notice).toContain("Handle small, tightly coupled integration fixes directly");
 		expect(notice).not.toContain("`edit`");
 		expect(notice).not.toContain("`write`");
-		expect(notice).not.toContain("`lsp diagnostics`");
-		expect(notice).not.toContain("via `bash`");
-		expect(notice).not.toContain("`todo` for tracking");
-	});
-
-	it("does not name edit when only write is available", () => {
-		const writeOnly = renderOrchestrateNotice({ tools: ["read", "write"] });
-		expect(writeOnly).toContain("with `write`");
-		expect(writeOnly).not.toContain("`edit`/`write`");
-		expect(writeOnly).not.toContain("with `edit`");
-	});
-
-	it("does not name write when only edit is available", () => {
-		const editOnly = renderOrchestrateNotice({ tools: ["read", "edit"] });
-		expect(editOnly).toContain("with `edit`");
-		expect(editOnly).not.toContain("`edit`/`write`");
 	});
 });
 
@@ -62,11 +57,14 @@ describe("workflow notice", () => {
 	it("defaults to workpools and hides eval-defined tools when disabled", () => {
 		const enabled = renderWorkflowNotice(base);
 		const disabled = renderWorkflowNotice({ ...base, evalTools: false });
-		expect(enabled).toContain("Default to `workpool()`");
+		expect(enabled).toContain("Prefer `workpool()` for two or more independent items");
 		expect(enabled).toContain("`@tool`");
-		expect(disabled).toContain("Default to `workpool()`");
+		expect(enabled).toContain("tools=None");
+		expect(enabled).toContain("tool(fn, { name, description, parameters })");
+		expect(disabled).toContain("Prefer `workpool()` for two or more independent items");
 		expect(disabled).not.toContain("`@tool`");
 		expect(disabled).not.toContain("tools=None");
+		expect(disabled).not.toContain("tool(fn, { name, description, parameters })");
 	});
 
 	it("describes the pool dispatch mode the session will actually use", () => {
