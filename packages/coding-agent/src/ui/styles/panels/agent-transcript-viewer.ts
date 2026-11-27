@@ -19,6 +19,7 @@ import type {
 	ViewerAgentStatus,
 } from "../../overlays/panels/agent-transcript-viewer-model";
 import { formatContextUsage } from "../../status/format";
+import { syntheticReplayId } from "../../transcript/messages/user-message";
 import { type ComposerChromeContext, caretOverflow, composerRowLines, composerShape } from "../composer/shapes";
 import "../messages";
 import "../tools";
@@ -131,9 +132,10 @@ function bare(row: string): boolean {
  * The transcript's blocks one blank row apart, each without bare edge rows (a
  * bubble keeps its padding), and the row each block starts at.
  */
-function transcriptRows(cx: PaintContext, transcript: UiNode, width: number): { rows: string[]; starts: number[] } {
+function transcriptRows(cx: PaintContext, transcript: UiNode, width: number) {
 	const rows: string[] = [];
 	const starts: number[] = [];
+	const replays: { id: string; start: number; end: number }[] = [];
 	for (const child of transcript.children()) {
 		const block = cx.paint(child, width).rows;
 		let start = 0;
@@ -142,9 +144,11 @@ function transcriptRows(cx: PaintContext, transcript: UiNode, width: number): { 
 		while (end > start && bare(block[end - 1]!)) end--;
 		if (rows.length > 0 && start < end) rows.push("");
 		starts.push(rows.length);
+		const id = syntheticReplayId(child);
+		if (id !== undefined && start < end) replays.push({ id, start: rows.length, end: rows.length + end - start });
 		rows.push(...block.slice(start, end));
 	}
-	return { rows, starts };
+	return { rows, starts, replays };
 }
 
 /** The body window: `lines` from the model's scroll, a scrollbar in the last column when they overflow. */
@@ -195,9 +199,11 @@ defineRolePainter("card", "omp.hub.transcript", (node, cx): Block => {
 
 	const transcript = findNode(node, child => roleOf(child) === "omp.transcript");
 	let lines = [` ${theme.fg("dim", sanitizeErrorLine(model.placeholder(), Math.max(10, content - 1)))}`];
+	let replays: { id: string; start: number; end: number }[] = [];
 	if (transcript) {
 		const painted = transcriptRows(cx, transcript, content);
 		lines = painted.rows;
+		replays = painted.replays;
 		// Opened from an activity row: start at that entry once.
 		const reveal = model.revealEntry;
 		const at = reveal === undefined ? -1 : model.blocks().findIndex(block => block.id === reveal);
@@ -209,15 +215,11 @@ defineRolePainter("card", "omp.hub.transcript", (node, cx): Block => {
 	}
 	const height = Math.max(0, Math.trunc(model.deps.terminalRows()));
 	const bodyHeight = Math.max(3, height - header.length - footer.length - 3);
+	const body = bodyWindow(theme, model, lines, bodyHeight, width);
+	const visible = replays.filter(replay => replay.end > model.scroll && replay.start < model.scroll + bodyHeight);
+	model.ansiReplayAnchor = (model.followTail ? visible.at(-1) : visible[0])?.id;
 	const rule = theme.fg("border", theme.symbols.box.horizontal.repeat(width));
-	const rows = [
-		rule,
-		...header.map(chrome),
-		rule,
-		...bodyWindow(theme, model, lines, bodyHeight, width),
-		...footer.map(chrome),
-		rule,
-	];
+	const rows = [rule, ...header.map(chrome), rule, ...body, ...footer.map(chrome), rule];
 	return { rows, hits: [{ row: 0, col: 0, width, height: rows.length, node }] };
 });
 

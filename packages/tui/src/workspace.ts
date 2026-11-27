@@ -51,6 +51,12 @@ export interface WorkspaceOpenOptions extends WorkspacePaneMinimum {
 	readonly focus?: boolean;
 }
 
+/** Transcript blocks intersecting the last painted viewport, in display order. */
+export interface WorkspaceMainView {
+	readonly nodes: readonly UiNode[];
+	readonly followingTail: boolean;
+}
+
 export interface AnsiWorkspace {
 	/** Id of the focused pane (reactive). The original host surface is `main`. */
 	active(): string;
@@ -58,6 +64,8 @@ export interface AnsiWorkspace {
 	pointerMotion(): boolean;
 	/** Focus an existing visible pane. */
 	focus(id: string): boolean;
+	/** Query the visible transcript blocks of a mounted pane. */
+	visibleMain(surface: Surface): WorkspaceMainView | undefined;
 	/** Close a secondary pane without stopping its session or closing the main surface. */
 	close(id: string): boolean;
 	/**

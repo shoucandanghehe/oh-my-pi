@@ -1443,6 +1443,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			columns,
 			writeRaw,
 			nativeSupports,
+			ansiWorkspace: nativeSupports ? undefined : this.shell.host?.ansiWorkspace,
 			registry: { get: id => this.#agentPaneRef(id) },
 			remote,
 			lifecycle: this.collabGuest ? undefined : AgentLifecycleManager.global(),

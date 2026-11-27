@@ -2,11 +2,13 @@ import type { MouseEvent } from "../driver/contract";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
 import { batch, computed, createRoot, signal } from "../reactive";
+import type { Surface } from "../surface";
 import { stripEscapes } from "../text/ansi";
 import { flattenLine, stripControl } from "../text/sanitize";
 import type {
 	AnsiWorkspace,
 	WorkspaceEdge,
+	WorkspaceMainView,
 	WorkspaceOpenOptions,
 	WorkspacePaneMinimum,
 	WorkspaceSurface,
@@ -277,6 +279,13 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			if (this.#panes.get(id)?.mount.ansiRail) return true;
 		}
 		return false;
+	}
+
+	visibleMain(surface: Surface): WorkspaceMainView | undefined {
+		for (const pane of this.#panes.values()) {
+			if (pane.mount.surface === surface) return pane.viewport.visibleMain();
+		}
+		return undefined;
 	}
 
 	pane(id: string): WorkspacePane | undefined {

@@ -13,7 +13,7 @@ import type * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type Accessor, batch, signal, untrack } from "@oh-my-pi/pi-tui";
+import { type Accessor, batch, nativeRendering, signal, untrack } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../../config/settings";
 import { resolveMarkdownLinkHrefs } from "../../../internal-urls/hyperlink-targets";
@@ -237,6 +237,7 @@ export class AgentTranscriptViewerModel {
 	readonly linkTargets = signal<ReadonlyMap<string, string>>(new Map());
 	/** Tools and thinking expanded (Ctrl+O). */
 	readonly expanded = signal(false);
+	readonly #replayScope = signal<{ anchor?: string } | undefined>(undefined);
 	readonly runner = signal<ExtensionRunner | undefined>(undefined);
 	readonly settings = signal<Settings | undefined>(undefined);
 	readonly tools: SideToolCalls;
@@ -248,6 +249,8 @@ export class AgentTranscriptViewerModel {
 	/** Terminal body scroll (logical rows) and whether it sticks to the end. */
 	scroll = 0;
 	followTail = true;
+	/** The visible ANSI overlay card preferred by Ctrl+O. */
+	ansiReplayAnchor: string | undefined;
 	/** Entry the next terminal paint scrolls to, once. */
 	revealEntry: string | undefined;
 	/** Body geometry of the last terminal paint. */
@@ -897,9 +900,19 @@ export class AgentTranscriptViewerModel {
 
 	// ─── Input ────────────────────────────────────────────────────────────
 
-	toggleExpanded(): void {
-		const expanded = !untrack(this.expanded);
-		this.expanded.set(expanded);
+	replayExpanded(id: string): boolean {
+		const scope = this.#replayScope();
+		return this.expanded() && (nativeRendering() || !scope || scope.anchor === id);
+	}
+
+	toggleExpanded(replay?: { anchor?: string }): void {
+		const previous = this.#replayScope.peek();
+		const changedAnchor = replay?.anchor !== undefined && previous !== undefined && replay.anchor !== previous.anchor;
+		const expanded = !this.expanded.peek() || changedAnchor;
+		batch(() => {
+			this.#replayScope.set(replay);
+			this.expanded.set(expanded);
+		});
 		this.tools.setExpanded(expanded);
 		this.touch();
 	}
@@ -966,7 +979,7 @@ export class AgentTranscriptViewerModel {
 			return true;
 		}
 		if (this.deps.expandKeys.includes(id)) {
-			this.toggleExpanded();
+			this.toggleExpanded(nativeRendering() ? undefined : { anchor: this.ansiReplayAnchor });
 			return true;
 		}
 		// Typing a message takes every key; an empty draft leaves them to scrolling.

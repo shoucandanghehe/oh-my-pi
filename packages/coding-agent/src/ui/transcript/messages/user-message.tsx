@@ -15,7 +15,7 @@
  *
  * Terminal look: `omp.user` (`src/ui/styles/messages/user.ts`).
  */
-import { For, type JSXNode, type Reactive, read, Show } from "@oh-my-pi/pi-tui";
+import { For, type JSXNode, type Reactive, read, Show, type UiNode } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type GlowingKeyword, magicKeywordLetters } from "../../composer/magic-keywords";
@@ -134,6 +134,14 @@ export function syntheticSummary(text: string): string {
 	return `${syntheticLabel(text)} · ${formatBytes(Buffer.byteLength(text, "utf-8"))} · ${lines} line${lines === 1 ? "" : "s"}`;
 }
 
+const SYNTHETIC_ROLE = "omp.user.synthetic";
+
+/** A replay entry rendered as a top-level synthetic card. */
+export function syntheticReplayId(node: UiNode): string | undefined {
+	const props = node.props();
+	return "role" in props && props.role === SYNTHETIC_ROLE ? node.key() : undefined;
+}
+
 /**
  * A collapsed synthetic (agent-attributed) input in a replayed transcript,
  * such as the advisor's `Session update` dumps: a muted collapsible card
@@ -142,6 +150,7 @@ export function syntheticSummary(text: string): string {
  */
 export function SyntheticMessage(props: {
 	text: string;
+	entryId?: string;
 	imageLinks?: readonly (string | undefined)[];
 	expanded: Reactive<boolean>;
 	onToggle?: (expanded: boolean) => void;
@@ -155,7 +164,8 @@ export function SyntheticMessage(props: {
 	};
 	return (
 		<card
-			role="omp.user.synthetic"
+			key={props.entryId}
+			role={SYNTHETIC_ROLE}
 			tone="muted"
 			head={[{ t: syntheticSummary(props.text), s: "dim" }]}
 			collapsible

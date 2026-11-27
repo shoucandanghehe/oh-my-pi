@@ -1,6 +1,6 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { createSurface, effect, onCleanup, Show, untrack, type KeyEvent } from "@oh-my-pi/pi-tui";
+import { type AnsiWorkspace, createSurface, effect, type KeyEvent, onCleanup, Show, untrack } from "@oh-my-pi/pi-tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { CombinedAutocompleteProvider } from "../autocomplete/autocomplete";
 import { getKeybindings } from "../config/keybindings/keybindings";
@@ -33,6 +33,7 @@ import { AgentWorkspaceStatus, AgentWorkspaceTranscript } from "../ui/overlays/p
 import { TreeSelector } from "../ui/overlays/pickers/tree-selector";
 import { Overlays } from "../ui/shell/overlays";
 import { StatusLine } from "../ui/status/status-line";
+import { syntheticReplayId } from "../ui/transcript/messages/user-message";
 import {
 	copyToClipboard,
 	isClipboardTerminalLocal,
@@ -149,6 +150,7 @@ interface AgentPaneOptions {
 	readonly editInTerminal?: (run: () => Promise<string | null>) => Promise<string | null>;
 	readonly showHub?: () => void;
 	readonly nativeSupports?: (kind: string) => boolean;
+	readonly ansiWorkspace?: Pick<AnsiWorkspace, "visibleMain">;
 }
 
 export interface AgentWorkspaceSurface extends NativeWorkspaceSurface {
@@ -640,7 +642,11 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	const onKey = (key: KeyEvent): boolean => {
 		if (key.kind === "release") return false;
 		if (matchesAnyKey(key, appToolsExpandKeys(keybindings))) {
-			model.toggleExpanded();
+			if (options.ansiWorkspace) {
+				const view = options.ansiWorkspace.visibleMain(surface);
+				const replays = view?.nodes.map(syntheticReplayId).filter(id => id !== undefined);
+				model.toggleExpanded({ anchor: view?.followingTail ? replays?.at(-1) : replays?.[0] });
+			} else model.toggleExpanded();
 			return true;
 		}
 		if (keybindings.matches(key, "app.clipboard.pasteImage")) {

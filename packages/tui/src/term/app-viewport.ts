@@ -2,6 +2,7 @@ import type { MouseEvent } from "../driver/contract";
 import { hasGraphics } from "../driver/output/ansi";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
+import type { WorkspaceMainView } from "../workspace";
 import { untrack } from "../reactive";
 import type { MainScrollScope, Surface } from "../surface";
 import { stripEscapes, tokens } from "../text/ansi";
@@ -306,6 +307,21 @@ export class AppViewport {
 	#scrollbarGrab: number | undefined;
 
 	constructor(private readonly options: AppViewportOptions) {}
+
+	visibleMain(): WorkspaceMainView | undefined {
+		const view = this.#view;
+		if (!view) return undefined;
+		const { document, from, to } = view;
+		const { rows, blocks } = document;
+		const nodes: UiNode[] = [];
+		for (let i = rows.find(from); i < blocks.length; i = rows.find(rows.start(i + 1))) {
+			const block = blocks[i]!;
+			const start = rows.start(i) + block.lead;
+			if (start >= to) break;
+			if (block.body && start + block.body > from && from < to) nodes.push(block.node);
+		}
+		return { nodes, followingTail: this.#anchor === undefined };
+	}
 
 	#document(width: number): Document {
 		const nodes = this.options.surface.main();

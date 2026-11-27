@@ -53,7 +53,7 @@ function Block(props: {
 	switch (block.kind) {
 		case "user":
 			return block.synthetic ? (
-				<SyntheticMessage text={block.text} expanded={model.expanded} />
+				<SyntheticMessage entryId={block.id} text={block.text} expanded={() => model.replayExpanded(block.id)} />
 			) : (
 				<UserMessage
 					model={{
