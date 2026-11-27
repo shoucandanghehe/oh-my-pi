@@ -11,12 +11,15 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type Accessor, type JSXNode, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "../../collab/protocol";
 import type { MessageRenderer } from "../../extensibility/extensions/render-types";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
+	BTW_SUMMARY_MESSAGE_TYPE,
+	type BtwSummaryMessageDetails,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
@@ -50,6 +53,7 @@ import { TangentDispatch, TangentResult } from "../../ui/transcript/messages/not
 import { SkillMessage } from "../../ui/transcript/messages/skill-message";
 import {
 	BranchSummaryBlock,
+	BtwSummaryCards,
 	CompactionSummaryBlock,
 	HandoffSummaryBlock,
 } from "../../ui/transcript/messages/summaries";
@@ -130,6 +134,20 @@ export function messageFace(
 		default:
 			return undefined;
 	}
+}
+
+function isBtwSummaryDetails(details: unknown): details is BtwSummaryMessageDetails {
+	return (
+		isRecord(details) &&
+		Array.isArray(details.summaries) &&
+		details.summaries.every(
+			entry =>
+				isRecord(entry) &&
+				typeof entry.threadKey === "string" &&
+				typeof entry.threadTitle === "string" &&
+				typeof entry.summary === "string",
+		)
+	);
 }
 
 function customFace(message: CustomOrHookMessage, env: MessageFaceEnv): MessageFace | undefined {
@@ -218,7 +236,12 @@ function customFace(message: CustomOrHookMessage, env: MessageFaceEnv): MessageF
 	}
 	const renderer = env.renderer(customType);
 	const output = signal<unknown>(undefined);
-	const frameRenderer = renderer ? extensionFace(message, renderer, env, output) : undefined;
+	let frameRenderer = renderer ? extensionFace(message, renderer, env, output) : undefined;
+	if (customType === BTW_SUMMARY_MESSAGE_TYPE && isBtwSummaryDetails(message.details)) {
+		const { summaries } = message.details;
+		const override = frameRenderer;
+		frameRenderer = expanded => override?.(expanded) ?? <BtwSummaryCards summaries={summaries} />;
+	}
 	const compact = () => isCompactOutput(output());
 	if (message.role === "hookMessage") {
 		return {

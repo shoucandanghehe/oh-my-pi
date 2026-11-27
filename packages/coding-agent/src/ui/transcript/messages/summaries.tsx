@@ -10,9 +10,13 @@
  */
 import { type JSXNode, type Reactive, read } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { sanitizeDisplayText } from "../../../extensibility/inventory/display-text";
+import type { BtwSummary } from "../../../session/messages";
 import { cardExpansion } from "../expansion";
+import { MessageFrame } from "./frame";
 import { Notice } from "./notices";
 
 /** What a summary divider shows in a text terminal. */
@@ -172,6 +176,21 @@ export function HandoffSummaryBlock(props: {
 			<md text={detail} />
 		</SummaryDivider>
 	);
+}
+
+/** One card per persisted BTW source. The model-facing XML is not transcript content. */
+export function BtwSummaryCards(props: { summaries: readonly BtwSummary[] }): JSXNode {
+	return props.summaries.map(({ threadTitle, summary }) => (
+		<MessageFrame
+			role="omp.custom.btw-summary"
+			message={{
+				customType: `From BTW · ${flattenLine(sanitizeDisplayText(threadTitle))}`,
+				content: sanitizeDisplayText(summary),
+			}}
+			borderColor="borderAccent"
+			expanded={true}
+		/>
+	));
 }
 
 /** A side branch collapsed back into the main line. */

@@ -101,7 +101,7 @@ function paintFrameCustom(node: UiNode, cx: PaintContext): Block {
 	return { rows: block.rows, textRows: block.textRows };
 }
 
-for (const role of ["omp.custom", "omp.custom.delegation", "omp.hook"]) {
+for (const role of ["omp.custom", "omp.custom.delegation", "omp.custom.btw-summary", "omp.hook"]) {
 	defineRolePainter("card", role, paintFrameCard);
 	defineRolePainter("col", role, paintFrameCustom);
 }
