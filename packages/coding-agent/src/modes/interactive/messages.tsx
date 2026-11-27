@@ -33,6 +33,7 @@ import {
 	type CustomMessage,
 } from "../../session/transcript/messages";
 import { imageContent, userMessageDisplayText } from "../../session/transcript/transcript-entry";
+import { parentIrcForDisplay } from "../../session/transcript/transcript-render-helpers";
 import { extensionTheme, isCompactOutput, renderExtension } from "../../ui/extensions/render-output";
 import { CollabPrompt } from "../../ui/transcript/figures/collab";
 import { AdvisorMessage } from "../../ui/transcript/messages/advisor-message";
@@ -290,8 +291,8 @@ function promptFace(
 	env: MessageFaceEnv,
 	options: MessageFaceOptions | undefined,
 ): MessageFace | undefined {
-	if (message.role === "user" && message.parentIrc) {
-		const parentIrc = message.parentIrc;
+	const parentIrc = message.role === "user" ? parentIrcForDisplay(message) : undefined;
+	if (parentIrc) {
 		return {
 			face: () => <ParentIrcMessage parentIrc={parentIrc} timestamp={message.timestamp} expanded={env.expanded} />,
 		};

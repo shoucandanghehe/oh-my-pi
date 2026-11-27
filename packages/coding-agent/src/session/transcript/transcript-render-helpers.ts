@@ -1,10 +1,23 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { replaceTabs, truncateToWidth } from "../../utils/text-width";
 import { TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import { userMessageDisplayText } from "./transcript-entry";
 
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+
+/** Recover the source and body of older parent steering without changing model context. */
+export function parentIrcForDisplay(message: UserMessage): UserMessage["parentIrc"] {
+	if (message.parentIrc) return message.parentIrc;
+	if (message.attribution !== "agent" || message.steering !== true) return undefined;
+	const legacy =
+		/^\[Wait interrupted by message\]\r?\n<irc from="parent" agent="([^"]+)">\r?\n([\s\S]*)\r?\n<\/irc>\s*$/.exec(
+			userMessageDisplayText(message.content),
+		);
+	return legacy ? { from: legacy[1], body: legacy[2] } : undefined;
+}
 
 /**
  * Whether an assistant turn has visible text, thinking, or image content — i.e.

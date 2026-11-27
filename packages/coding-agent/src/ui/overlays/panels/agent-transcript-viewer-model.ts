@@ -32,7 +32,10 @@ import {
 	type SessionMessageEntryLike,
 	userMessageDisplayText,
 } from "../../../session/transcript/transcript-entry";
-import { splitAssistantMessageToolTimeline } from "../../../session/transcript/transcript-render-helpers";
+import {
+	parentIrcForDisplay,
+	splitAssistantMessageToolTimeline,
+} from "../../../session/transcript/transcript-render-helpers";
 import { type LinkTargetHost, refreshAssistantMessageLinkTargets } from "../../../session/transcript/link-targets";
 import { SideToolCalls } from "../../transcript/side-tool-calls";
 import type { ToolCall, ToolCallOptions } from "../../transcript/tool-block";
@@ -690,11 +693,12 @@ export class AgentTranscriptViewerModel {
 						this.#turnStartedAt = message.userInitiated ? message.timestamp : undefined;
 					}
 					if (message.role !== "user") break;
-					if (message.parentIrc) {
+					const parentIrc = parentIrcForDisplay(message);
+					if (parentIrc) {
 						added.push({
 							kind: "parentIrc",
 							id: entry.id,
-							parentIrc: message.parentIrc,
+							parentIrc,
 							timestamp: message.timestamp,
 						});
 						break;
