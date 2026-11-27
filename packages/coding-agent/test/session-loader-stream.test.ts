@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -126,11 +126,32 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(headerTitleSource).toBe("user");
 	});
 
+	it("reads only the bytes present when the journal scan started", async () => {
+		const initial = [JSON.stringify(HEADER), JSON.stringify(msg("original", "s1", "x".repeat(5 * 1024 * 1024)))];
+		const file = await writeTemp(`${initial.join("\n")}\n`);
+		const visited: FileEntry[] = [];
+		let appended = false;
+		await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), {
+			onBytesConsumed: () => {
+				if (appended) return;
+				appended = true;
+				fs.appendFileSync(file, JSON.stringify(msg("appended", "original", "next snapshot")));
+			},
+		});
+
+		expect(entryIds(visited)).toEqual(["s1", "original"]);
+		expect(entryIds((await sessionLoader.loadEntriesFromFileStream(file)).entries)).toEqual([
+			"s1",
+			"original",
+			"appended",
+		]);
+	});
+
 	it("does not revisit entries before a malformed line spanning stream chunks", async () => {
 		const content = [
 			JSON.stringify(HEADER),
 			JSON.stringify(msg("m1", "s1", "first")),
-			`{ this is not valid json ${"x".repeat(256 * 1024)}`,
+			`{ this is not valid json ${"x".repeat(4 * 1024 * 1024)}`,
 			JSON.stringify(msg("m2", "m1", "second")),
 		].join("\n");
 		const file = await writeTemp(content);
@@ -221,17 +242,13 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(entryIds(stream.entries)).toEqual(["s1", "m1", "m2"]);
 	});
 
-	it("matches parseSessionContent on multibyte UTF-8 spanning many stream chunks", async () => {
-		// Fixture larger than Bun's default stream chunk (~64KiB) with multibyte
-		// content (✓ is 3 bytes, emoji 4) that must survive chunk-boundary splits
-		// without U+FFFD corruption — the regression this path had when the buffer
-		// was a decoded string concatenated per chunk.
-		const multibyte = "✓ checkmark, 🚀 emoji, こんにちは unicode ✓ ".repeat(20);
-		const lines: string[] = [JSON.stringify(HEADER)];
-		for (let i = 1; lines.join("\n").length < 128 * 1024; i++) {
-			lines.push(JSON.stringify(msg(`m${i}`, i === 1 ? "s1" : `m${i - 1}`, multibyte)));
-		}
-		const content = lines.join("\n");
+	it("matches parseSessionContent when a read splits a UTF-8 code point", async () => {
+		const header = JSON.stringify(HEADER);
+		const fixture = JSON.stringify(msg("m1", "s1", "🚀"));
+		const prefix = `${header}\n${fixture.slice(0, fixture.indexOf("🚀"))}`;
+		// Start the four-byte emoji one byte before the physical read boundary.
+		const multibyte = `${"x".repeat(4 * 1024 * 1024 - Buffer.byteLength(prefix) - 1)}🚀`;
+		const content = `${header}\n${JSON.stringify(msg("m1", "s1", multibyte))}`;
 		const file = await writeTemp(content);
 
 		const stream = await sessionLoader.loadEntriesFromFileStream(file);
@@ -343,35 +360,17 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(content).not.toInclude("\n");
 		const file = await writeTemp(content);
 
-		let bytesRead = 0;
-		let firstChunkBytes = 0;
-		const realBunFile = Bun.file.bind(Bun);
-		const bunFileSpy = spyOn(Bun, "file").mockImplementation((arg: unknown, opts?: BlobPropertyBag) => {
-			const handle = realBunFile(arg as string, opts);
-			const realStream = handle.stream.bind(handle);
-			// An async generator, not a piped stream: it is strictly pull-driven, so
-			// the count reflects what the loader asked for and not read-ahead.
-			handle.stream = () =>
-				(async function* () {
-					for await (const chunk of realStream() as AsyncIterable<Uint8Array>) {
-						if (firstChunkBytes === 0) firstChunkBytes = chunk.byteLength;
-						bytesRead += chunk.byteLength;
-						yield chunk;
-					}
-				})() as unknown as ReadableStream<Uint8Array<ArrayBuffer>>;
-			return handle;
+		const chunks: number[] = [];
+		const visited: FileEntry[] = [];
+		await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), {
+			maxRecords: 0,
+			onBytesConsumed: bytes => void chunks.push(bytes),
 		});
 
-		try {
-			const visited: FileEntry[] = [];
-			await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), { maxRecords: 0 });
-
-			expect(visited).toEqual([]);
-			expect(firstChunkBytes).toBeLessThan(Buffer.byteLength(content));
-			expect(bytesRead).toBe(firstChunkBytes);
-		} finally {
-			bunFileSpy.mockRestore();
-		}
+		expect(visited).toEqual([]);
+		expect(chunks).toHaveLength(1);
+		expect(chunks[0]).toBeGreaterThan(0);
+		expect(chunks[0]).toBeLessThan(Buffer.byteLength(content));
 	});
 
 	it("retains an unfinished value across embedded newlines before the trailing fragment", async () => {
@@ -384,7 +383,7 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 	});
 
 	it("counts an unfinished malformed record across chunks before a valid trailing record", async () => {
-		const content = `${JSON.stringify(HEADER)}\n{${" ".repeat(128 * 1024)}\n${JSON.stringify(msg("tail", "s1", "x".repeat(128 * 1024)))}\n`;
+		const content = `${JSON.stringify(HEADER)}\n{${" ".repeat(4 * 1024 * 1024)}\n${JSON.stringify(msg("tail", "s1", "x".repeat(128 * 1024)))}\n`;
 		const file = await writeTemp(content);
 		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
 
