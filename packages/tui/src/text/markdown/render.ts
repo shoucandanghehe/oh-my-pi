@@ -773,6 +773,13 @@ function isClosedFence(token: Token): boolean {
 /** Rows of the settled heads of streaming documents, by prefix (see `renderMarkdownFrame`). */
 const settledHeads = new LRUCache<string, readonly Row[]>({ max: 64 });
 
+/** Lexemes do not depend on reflow width or paint options. Only completed documents go here. */
+const completedLexed = new LRUCache<string, TokensList>({
+	max: 64,
+	maxSize: 1024 * 1024,
+	sizeCalculation: (_tokens, source) => source.length,
+});
+
 const kThemeId = Symbol("pi-tui.markdown.theme-id");
 let nextThemeId = 0;
 
@@ -953,14 +960,13 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 	const inner = Math.max(1, width - 2 * (options.paddingX ?? 0));
 	const paddingY = options.paddingY ?? 0;
 	if (!stream) {
-		const rows = renderPart(
-			lexMarkdown(repairOrphanClosingFence(normalized)),
-			inner,
-			width,
-			options,
-			undefined,
-			false,
-		);
+		const text = repairOrphanClosingFence(normalized);
+		let tokens = completedLexed.get(text);
+		if (!tokens) {
+			tokens = lexMarkdown(text);
+			completedLexed.set(text, tokens);
+		}
+		const rows = renderPart(tokens, inner, width, options, undefined, false);
 		return markdownFrame(paddingY > 0 ? padVertically(rows, width, paddingY, []) : rows, 0);
 	}
 	const lexed = lexStream(source, normalized);
