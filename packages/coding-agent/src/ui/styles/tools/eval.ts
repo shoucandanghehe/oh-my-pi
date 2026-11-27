@@ -27,7 +27,7 @@ import { resultPictures, withoutDrawnPlaceholders } from "./file-common";
 import { codeCellRows } from "./code-cell";
 import { bracketed, frameInner, PREVIEW_WINDOW_ROWS } from "./frame";
 import { COLLAPSED_TREE, EXPANDED_TREE, jsonTreeRows } from "./json-tree";
-import { defineToolLook, isExpanded, toolProps } from "./look";
+import { defineToolLook, isExpanded, resultMediaRows, toolProps } from "./look";
 
 /** Status lines a collapsed cell shows. */
 const COLLAPSED_STATUS = 3;
@@ -455,6 +455,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 	}
 	const previewLines = Math.min(term.previewLines ?? 10, PREVIEW_WINDOW_ROWS);
 	const notes = callNotes(theme, term);
+	const media = resultMediaRows(node, cx, width);
 	if (term.phase === "cells") {
 		const rows: string[] = [];
 		cells.forEach((cell, i) => {
@@ -490,7 +491,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 			if (cell.agents && cell.agents.length > 0) rows.push(...agentRows(cx, cell.agents, width));
 			if (i < cells.length - 1) rows.push("");
 		});
-		return { rows: [...rows, ...imagePlaceholderRows(node, cx), ...notes] };
+		return { rows: [...rows, ...imagePlaceholderRows(node, cx), ...media, ...notes] };
 	}
 	const output = withoutDrawnPlaceholders(
 		term.output ?? "",
@@ -499,11 +500,12 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 	).trimEnd();
 	const status = statusRows(theme, term.events ?? [], expanded, term.elided);
 	const statusBlock = status.length > 0 ? [theme.fg("dim", "Status"), ...status] : [];
-	if (!output && status.length === 0) return { rows: notes.length > 0 ? wrap(notes.join("\n"), width) : [] };
+	if (!output && status.length === 0)
+		return { rows: [...media, ...(notes.length > 0 ? wrap(notes.join("\n"), width) : [])] };
 	if (!output || expanded) {
 		const styled = output ? output.split("\n").map(line => theme.fg("toolOutput", line)) : [];
 		return {
-			rows: wrap([...styled, ...statusBlock, ...notes].join("\n"), width),
+			rows: [...wrap([...styled, ...statusBlock, ...notes].join("\n"), width), ...media],
 		};
 	}
 	const styled = output.split("\n").map(line => theme.fg("toolOutput", line));
@@ -521,7 +523,7 @@ function paintEval(node: UiNode, cx: PaintContext): Block {
 			),
 		);
 	}
-	rows.push(...tail.rows);
+	rows.push(...tail.rows, ...media);
 	for (const line of [...statusBlock, ...notes]) rows.push(truncate(line, width));
 	return { rows };
 }

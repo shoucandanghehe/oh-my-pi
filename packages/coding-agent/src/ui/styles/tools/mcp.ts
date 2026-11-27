@@ -13,7 +13,7 @@ import { argsSummaryCells } from "../../tools/args";
 import type { McpTerm } from "../../tools/mcp";
 import { expandHint, hangingWrap, moreLinesHint, spinnerGlyph } from "./frame";
 import { COLLAPSED_TREE, EXPANDED_TREE, jsonTreeRows } from "./json-tree";
-import { defineToolLook, toolProps } from "./look";
+import { defineToolLook, resultMediaRows, toolProps } from "./look";
 import { renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
 
 /** Fewest cells a pending call's args summary gets. */
@@ -57,6 +57,7 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 	const rows = [...callRows, ...wrap(`${glyph} ${title}`, cx.width)];
 	const expanded = props.collapsed === false;
 	const output: string[] = [];
+	const media = resultMediaRows(node, cx, cx.width);
 	let hint: string | undefined;
 	if (term.json !== undefined) {
 		// Tree rows are cut to the width: a wrapped row would restart left of its gutter.
@@ -65,8 +66,9 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 		if (!expanded) hint = expandHint(theme);
 	} else {
 		const text = term.error ?? term.text;
-		if (text === undefined) output.push(theme.fg("dim", "(no output)"));
-		else {
+		if (text === undefined) {
+			if (media.length === 0) output.push(theme.fg("dim", "(no output)"));
+		} else {
 			const lines =
 				term.markdown && term.error === undefined
 					? renderMarkdownFrame(text, cx.width, {
@@ -94,6 +96,7 @@ function paintMcp(node: UiNode, cx: PaintContext): Block {
 				]
 			: output;
 	for (const line of lines) rows.push(...(line === "" ? [""] : wrap(line, cx.width)));
+	rows.push(...media);
 	if (hint) rows.push(...wrap(hint, cx.width));
 	return { rows };
 }
