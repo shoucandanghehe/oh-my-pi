@@ -50,11 +50,17 @@ const FULL_ROW = {
 };
 
 describe("Chutes provider discovery", () => {
-	test("a live row drops bundled reasoning and vision, fresh and from cache", async () => {
-		const bundled = getBundledModels("chutes").find(model => model.reasoning && model.input.includes("image"));
+	test.each([
+		["drops", true, ["text"], ["text"]],
+		["adds", false, ["text", "image"], ["text", "image"]],
+		["preserves", true, undefined, ["text", "image"]],
+	] as const)("%s vision in live and cached models", async (_action, hadImage, live, expected) => {
+		const bundled = getBundledModels("chutes").find(
+			model => model.reasoning && model.input.includes("image") === hadImage,
+		);
 		expect(bundled?.thinking).toBeDefined();
 		const { fetch } = chutesModelsFetch([
-			{ ...FULL_ROW, id: bundled!.id, supported_features: ["tools"], input_modalities: ["text"] },
+			{ ...FULL_ROW, id: bundled!.id, supported_features: ["tools"], input_modalities: live },
 		]);
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-chutes-authority-"));
 		try {
@@ -63,9 +69,12 @@ describe("Chutes provider discovery", () => {
 				cacheDbPath: path.join(tempDir, "models.db"),
 			};
 			for (const strategy of ["online", "offline"] as const) {
-				const { models } = await createModelManager(options).refresh(strategy);
+				const { models, source } = await createModelManager(options).refresh(strategy);
+				expect(source).toBe(strategy === "online" ? "provider" : "cache");
 				const model = models.find(entry => entry.id === bundled!.id);
-				expect(model).toMatchObject({ reasoning: false, input: ["text"] });
+				expect(model?.input).toEqual([...expected]);
+				expect(model?.vendorInput).toEqual([...expected]);
+				expect(model?.reasoning).toBe(false);
 				expect(model?.thinking).toBeUndefined();
 			}
 		} finally {

@@ -6,8 +6,8 @@ import type { Api, Model, ModelSpec } from "../types";
 /**
  * Project a built `Model` back to spec stage: `compat` becomes the verbatim
  * sparse override record (`compatConfig`), never the resolved view. Discovery
- * mappers spread these references into the specs they hand to the model
- * manager, which rebuilds via `buildModel`.
+ * mappers override `input` with live evidence; project the default route's
+ * vendor evidence there, not its encoder-filtered user or tool capabilities.
  */
 export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TApi> {
 	const {
@@ -15,12 +15,15 @@ export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TAp
 		compatConfig,
 		supportsComputerUse: _derivedComputerUse,
 		supportsComputerUseConfig,
+		vendorInput,
+		toolResultInput: _derivedToolInput,
 		...rest
 	} = model;
 	// Unverified thinking is derived output too: references must not carry it to
 	// another host as reasoning capability.
 	return {
 		...rest,
+		input: vendorInput ?? model.input,
 		...(model.thinking?.unverified ? { reasoning: undefined, thinking: undefined } : {}),
 		...(supportsComputerUseConfig !== undefined ? { supportsComputerUse: supportsComputerUseConfig } : {}),
 		compat: compatConfig,

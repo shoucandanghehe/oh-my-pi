@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { toPiNativeModelSpec } from "@oh-my-pi/pi-catalog/discovery/pi-native";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	BUILTIN_MEDIA_POLICIES,
 	findSupportedMediaForm,
 	resolveModelRoute,
 } from "@oh-my-pi/pi-catalog/media-capabilities";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import type { InputModality, KnownApi, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const APIS = [
@@ -130,6 +132,21 @@ describe("route-resolved media capability policy", () => {
 			expect(built.input, `${api} user`).toEqual([...EXPECTED[api][0]]);
 			expect(built.toolResultInput ?? [], `${api} tools`).toEqual([...EXPECTED[api][1]]);
 		}
+	});
+
+	test("a discovery reference can replace default vendor evidence without losing another wire route", () => {
+		const built = model("openai-responses", {
+			vendorInputByWireModel: { sibling: ["text", "video"] },
+		});
+		const reference = toModelSpec(built);
+		// A new transport can use vendor media the old one could not send.
+		const rerouted = buildModel({ ...reference, api: "openai-completions" });
+		expect(rerouted.input).toEqual(["text", "image", "audio", "video"]);
+		expect(toPiNativeModelSpec(built).input).toEqual(["text", "image"]);
+
+		const refreshed = buildModel({ ...reference, input: ["text"] });
+		expect(refreshed.vendorInput).toEqual(["text"]);
+		expect(resolveModelRoute(refreshed, undefined, "sibling").vendorInput).toEqual(["text", "video"]);
 	});
 
 	test("MIME gates accept canonical MP3 forms and reject unsupported Ogg", () => {

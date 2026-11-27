@@ -65,6 +65,7 @@
 ### Fixed
 
 - Preserved GPT-6.2 reasoning across routine tool-result pruning ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).
+- Chutes, Inception, CoralBricks and Cursor now pick up changes to image support from live model discovery, including when a bundled model already has an older capability list.
 
 ## [19.2.1] - 2026-11-25
 

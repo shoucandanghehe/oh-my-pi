@@ -82,7 +82,8 @@ function pickPiNativeSpec(spec: PiNativeModelSpec): PiNativeModelSpec {
  * reasoning capability.
  */
 export function toPiNativeModelSpec(model: Model<Api>): PiNativeModelSpec {
-	return pickPiNativeSpec(toModelSpec(model));
+	// Advertise what the gateway can send, not all modalities reported by its vendor.
+	return pickPiNativeSpec({ ...toModelSpec(model), input: model.input });
 }
 
 /** Where and as whom to read one provider's roster from a gateway. */

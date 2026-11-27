@@ -60,6 +60,7 @@ describe("Inception model discovery", () => {
 						{
 							...chatMetadata,
 							id: "mercury-2",
+							input_modalities: ["text", "image"],
 							context_length: 256_000,
 							max_output_length: 40_000,
 							pricing: {
@@ -80,7 +81,7 @@ describe("Inception model discovery", () => {
 		expect(model).toMatchObject({
 			contextWindow: 256_000,
 			maxTokens: 40_000,
-			input: ["text"],
+			input: ["text", "image"],
 			supportsTools: true,
 			cost: { input: 0.25, output: 0.75, cacheWrite: 0 },
 			reasoning: true,
