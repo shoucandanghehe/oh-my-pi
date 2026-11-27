@@ -5,10 +5,8 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { elapsedAt } from "@oh-my-pi/pi-tui/term/painters/elapsed";
 import { replaceTabs, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/text/width";
-import { formatAge } from "@oh-my-pi/pi-utils";
-import type { TspElapsedProps, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { type IrcMessage, ircTitle } from "../../tools/irc";
 import { expandHint } from "./frame";
 
@@ -53,14 +51,6 @@ function paintIrcCard(node: UiNode, cx: PaintContext): Block {
 	const head = props.head ?? [];
 	const meta = head.slice(1).map(span => span.t.trim());
 	const children = node.children();
-	const elapsed = children
-		.find(child => child.kind === "row")
-		?.children()
-		.find(child => child.kind === "elapsed");
-	if (elapsed) {
-		const ms = elapsedAt(elapsed, elapsed.props() as TspElapsedProps, cx.now());
-		meta.push(formatAge(Math.max(1, Math.round(ms / 1000))));
-	}
 	const title = props.term?.message ? ircTitle(props.term.message, theme) : (head[0]?.t ?? "");
 	let line = `${theme.fg("accent", theme.symbols.symbol("tool.irc"))} ${theme.fg("accent", title)}`;
 	if (meta.length > 0) line += ` ${theme.fg("dim", meta.join(" · "))}`;
