@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { agentLoop, agentPauseGate, type AgentTool, TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import { agentLoop, type AgentTool, TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { SpeculativeOperationCoordinator } from "@oh-my-pi/pi-agent-core/speculative-execution";
 import type { AgentEvent, AgentLoopConfig, AgentMessage, AsideMessage } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
@@ -46,7 +46,6 @@ describe("agent-loop wait wake delivery", () => {
 	});
 
 	afterEach(async () => {
-		agentPauseGate.resume();
 		releaseJob.resolve("released");
 		deliveryReceipt.resolve();
 		await manager.dispose();
@@ -180,7 +179,9 @@ describe("agent-loop wait wake delivery", () => {
 			cancellationReached = true;
 			controller.abort("cancelled by user");
 		};
-		const needsCoordinator = options.cancel === "claim" || options.cancel === "stream discard";
+		let beforeExecuteSignal: AbortSignal | undefined;
+		const needsCoordinator =
+			stage === "queued before execute" || options.cancel === "claim" || options.cancel === "stream discard";
 		const marker: AgentTool<typeof schema> = {
 			name: "marker",
 			label: "Marker",
@@ -201,10 +202,33 @@ describe("agent-loop wait wake delivery", () => {
 		if (needsCoordinator) {
 			const claim = SpeculativeOperationCoordinator.prototype.claim;
 			vi.spyOn(SpeculativeOperationCoordinator.prototype, "claim").mockImplementation(
-				async function (this: SpeculativeOperationCoordinator, tool, toolCall, args) {
-					const outcome = await claim.call(this, tool, toolCall, args);
+				async function (
+					this: SpeculativeOperationCoordinator,
+					tool,
+					toolCall,
+					args,
+					earlierEffectsSettled,
+					signal,
+				) {
+					const outcome = await claim.call(this, tool, toolCall, args, earlierEffectsSettled, signal);
 					if (tool !== wait) return outcome;
-					if (options.cancel === "claim") {
+					if (stage === "queued before execute") {
+						// Pause parks after the batch on this fork. Hold the admitted
+						// wait at its dispatch checkpoint instead, before execute.
+						if (!signal) throw new Error("Missing wait dispatch signal");
+						beforeExecuteSignal = signal;
+						if (options.cancel !== "external") {
+							await queueWake();
+							if (!signal.aborted) {
+								const interrupted = Promise.withResolvers<void>();
+								signal.addEventListener("abort", () => interrupted.resolve(), { once: true });
+								await interrupted.promise;
+							}
+						}
+						if (options.cancel === "external" || options.cancel === "after interrupt") {
+							controller.abort("cancelled by user");
+						}
+					} else if (options.cancel === "claim") {
 						cancelBeforeExecute();
 					} else {
 						this.registerStreamSession(toolCall.id, {
@@ -221,20 +245,16 @@ describe("agent-loop wait wake delivery", () => {
 				},
 			);
 		}
-		let pausedBeforeExecute = false;
 		const mock = createMockModel({
 			responses: [
-				() => {
-					if (stage === "queued before execute") agentPauseGate.pause();
-					return {
-						content: [
-							...(needsCoordinator ? [{ type: "toolCall" as const, name: marker.name, arguments: {} }] : []),
-							...(stage === "queued at admission"
-								? [{ type: "toolCall" as const, name: "barrier", arguments: {} }]
-								: []),
-							{ type: "toolCall" as const, name: target.name, arguments: {} },
-						],
-					};
+				{
+					content: [
+						...(needsCoordinator ? [{ type: "toolCall" as const, name: marker.name, arguments: {} }] : []),
+						...(stage === "queued at admission"
+							? [{ type: "toolCall" as const, name: "barrier", arguments: {} }]
+							: []),
+						{ type: "toolCall" as const, name: target.name, arguments: {} },
+					],
 				},
 				{ content: ["Done"] },
 			],
@@ -272,16 +292,6 @@ describe("agent-loop wait wake delivery", () => {
 				}
 				return messages;
 			},
-			onPauseChange: paused => {
-				if (paused) {
-					pausedBeforeExecute = true;
-					if (options.cancel === "external") controller.abort("cancelled by user");
-					else void queueWake();
-				} else if (pausedBeforeExecute) {
-					if (options.cancel === "after interrupt") controller.abort("cancelled by user");
-					agentPauseGate.resume();
-				}
-			},
 		};
 		const events: AgentEvent[] = [];
 		const stream = agentLoop(
@@ -302,7 +312,11 @@ describe("agent-loop wait wake delivery", () => {
 		);
 		expect(results).toHaveLength(1);
 		expect(manager.isJobResultConsumed(foreignId)).toBe(false);
-		if (stage === "queued before execute") expect(pausedBeforeExecute).toBe(true);
+		if (stage === "queued before execute") {
+			expect(beforeExecuteSignal?.reason).toBe(
+				options.cancel === "external" ? "cancelled by user" : TOOL_INTERRUPT_ABORT_REASON,
+			);
+		}
 		return { result: results[0], messages, payload, jobId, consumed, execute, ordinaryExecute, cancellationReached };
 	}
 
