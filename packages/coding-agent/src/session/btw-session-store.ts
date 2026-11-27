@@ -3,22 +3,14 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { type FileLockHandle, isEnoent, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { writeFileAtomically } from "../utils/atomic-file";
-import { readLegacyBtwThreadSidecars } from "./btw-history";
-import {
-	type BtwThreadEvent,
-	type LegacyRestoredBtwThread,
-	type RestoredBtwThread,
-	restoreLegacyBtwJournal,
-} from "./btw-thread";
-import { projectBtwConversation, seedBtwConversation } from "./ephemeral-conversation";
+import type { BtwThreadEvent, RestoredBtwThread } from "./btw-thread";
+import { projectBtwConversation } from "./ephemeral-conversation";
 import {
 	AGENTS_PAUSED_CUSTOM_TYPE,
 	createInterruptedToolResults,
 	hasRestorableTurn,
 	readAgentsPaused,
 } from "./exit-diagnostics";
-import type { SessionEntry } from "./session-entries";
 import { SessionManager } from "./session-manager";
 
 const BTW_THREAD_METADATA = "btw:thread";
@@ -139,23 +131,15 @@ export class BtwSessionStore {
 		this.#directory = directory;
 	}
 
-	static async open(
-		artifactsDir: string | undefined,
-		cwd: string,
-		legacyEntries: readonly SessionEntry[] = [],
-	): Promise<BtwSessionStore> {
+	static async open(artifactsDir: string | undefined, cwd: string): Promise<BtwSessionStore> {
 		const directory = artifactsDir === undefined ? undefined : path.join(artifactsDir, "btw-history", "threads");
 		const store = new BtwSessionStore(cwd, directory);
-		if (!directory || !artifactsDir) {
-			await store.#importLegacyThreads(undefined, legacyEntries);
-			return store;
-		}
+		if (directory === undefined) return store;
 		await fs.mkdir(directory, { recursive: true, mode: 0o700 });
 		store.#lease = tryAcquireFileLock(path.join(directory, "workspace")) ?? undefined;
 		if (!store.#lease) throw new Error("This BTW workspace is already open in another session");
 		try {
 			await store.#loadManagers();
-			await store.#importLegacyThreads(artifactsDir, legacyEntries);
 			await store.#recoverInterruptedRequests();
 			return store;
 		} catch (error) {
@@ -164,95 +148,13 @@ export class BtwSessionStore {
 		}
 	}
 
-	static async readRecords(
-		artifactsDir: string,
-		cwd: string,
-		legacyEntries: readonly SessionEntry[] = [],
-	): Promise<readonly RestoredBtwThread[]> {
+	static async readRecords(artifactsDir: string, cwd: string): Promise<readonly RestoredBtwThread[]> {
 		const store = new BtwSessionStore(cwd, path.join(artifactsDir, "btw-history", "threads"));
 		try {
 			await store.#loadManagers();
-			const legacy = await store.#legacyCandidates(artifactsDir, legacyEntries);
-			return [...store.getRecords(), ...legacy.filter(thread => !store.#managers.has(thread.key))].sort(
-				(left, right) => left.createdAt - right.createdAt || left.key.localeCompare(right.key),
-			);
+			return store.getRecords();
 		} finally {
 			await store.close();
-		}
-	}
-
-	#legacyReceipt(key: string): string | undefined {
-		if (this.#directory) {
-			const digest = new Bun.CryptoHasher("sha256").update(key).digest("hex");
-			return path.join(this.#directory, `import-${digest}`);
-		}
-	}
-
-	async #legacyCandidates(
-		artifactsDir: string | undefined,
-		entries: readonly SessionEntry[],
-	): Promise<LegacyRestoredBtwThread[]> {
-		// Older builds could migrate out of Main without deleting its original journal events.
-		const migrated =
-			artifactsDir && (await Bun.file(path.join(artifactsDir, "btw-history", ".migrated-v1")).exists());
-		const legacy = new Map((migrated ? [] : restoreLegacyBtwJournal(entries)).map(thread => [thread.key, thread]));
-		if (artifactsDir) {
-			for (const thread of await readLegacyBtwThreadSidecars(artifactsDir)) legacy.set(thread.key, thread);
-		}
-		const candidates: LegacyRestoredBtwThread[] = [];
-		for (const [key, thread] of legacy) {
-			const receipt = this.#legacyReceipt(key);
-			if (!receipt || !(await Bun.file(receipt).exists())) candidates.push(thread);
-		}
-		return candidates;
-	}
-
-	async #importLegacyThreads(artifactsDir: string | undefined, entries: readonly SessionEntry[]): Promise<void> {
-		for (const thread of await this.#legacyCandidates(artifactsDir, entries)) {
-			const { key } = thread;
-			if (!this.#managers.has(key)) {
-				const manager = this.getSessionManager(key);
-				seedBtwConversation(manager, {
-					baseMessages: thread.baseMessages,
-					turns: thread.turns,
-					trailingMessages: thread.trailingMessages,
-					sideSessionId: thread.sideSessionId,
-				});
-				this.appendEvent({
-					version: 1,
-					key,
-					op: "create",
-					title: thread.title,
-					titleExplicit: thread.titleExplicit,
-					createdAt: thread.createdAt,
-					anchorLeafId: thread.anchorLeafId,
-					model: thread.model,
-				});
-				this.appendEvent({
-					version: 1,
-					key,
-					op: "draft",
-					text: thread.draft,
-					images: thread.draftImages,
-					imageLinks: thread.draftImageLinks,
-				});
-				this.appendEvent({ version: 1, key, op: "read", through: thread.readThrough });
-				if (thread.error) this.appendEvent({ version: 1, key, op: "terminal", error: thread.error });
-				if (thread.pausedRequest) {
-					const { input, images, timestamp } = thread.pausedRequest;
-					this.appendEvent({ version: 1, key, op: "request", input, images, timestamp });
-					manager.appendCustomEntry(AGENTS_PAUSED_CUSTOM_TYPE, {
-						pausedAt: new Date(timestamp).toISOString(),
-						agentIds: [MAIN_AGENT_ID],
-						pendingPrompt: { text: input, images, attribution: "agent" },
-					});
-				}
-				await this.#pending;
-				await manager.flush();
-			}
-			// Leave old history intact without resurrecting deleted or promoted topics.
-			const receipt = this.#legacyReceipt(key);
-			if (receipt) await writeFileAtomically(receipt, key);
 		}
 	}
 

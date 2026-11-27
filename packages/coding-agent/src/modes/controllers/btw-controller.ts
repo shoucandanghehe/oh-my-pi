@@ -756,11 +756,7 @@ export class BtwController {
 			const store =
 				!artifactsDir && memory?.sessionId === sessionId
 					? memory.store
-					: await BtwSessionStore.open(
-							artifactsDir ?? undefined,
-							sessionManager.getCwd(),
-							sessionManager.getEntries(),
-						);
+					: await BtwSessionStore.open(artifactsDir ?? undefined, sessionManager.getCwd());
 			try {
 				if (owner !== this.ctx.session || sessionId !== sessionManager.getSessionId())
 					throw new Error("Main session changed while opening BTW");

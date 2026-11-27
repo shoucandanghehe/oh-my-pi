@@ -112,7 +112,7 @@ it("reopens two independent child journals with their own drafts, frozen snapsho
 	}
 });
 
-it("imports a legacy full-thread sidecar once without rewriting it or resurrecting a deleted topic", async () => {
+it("leaves legacy BTW history intact until a manual migration", async () => {
 	using temp = TempDir.createSync("@pi-btw-legacy-migration-");
 	const cwd = temp.path();
 	const legacyPath = path.join(cwd, "btw-history", "entry-first.json");
@@ -140,41 +140,14 @@ it("imports a legacy full-thread sidecar once without rewriting it or resurrecti
 		phase: "ready",
 	});
 	await Bun.write(legacyPath, input);
-	const parent = SessionManager.inMemory(cwd);
-	parent.appendCustomEntry("btw-thread", {
-		version: 1,
-		key: "removed-after-v1-migration",
-		op: "create",
-		title: "Deleted topic",
-		createdAt: 0,
-		anchorLeafId: "anchor",
-		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
-		sideSessionId: "stale-side",
-		baseMessages: [],
-		turns: [],
-	});
-	await Bun.write(path.join(cwd, "btw-history", ".migrated-v1"), "already migrated");
-	const first = await BtwSessionStore.open(cwd, cwd, parent.getEntries());
+	expect(await BtwSessionStore.readRecords(cwd, cwd)).toEqual([]);
+	const store = await BtwSessionStore.open(cwd, cwd);
 	try {
-		expect(first.getRecords()).toMatchObject([
-			{
-				key: "first",
-				draft: "Keep my draft",
-				sideSessionId: "old-side",
-				turns: [{ input: "Old question", replyText: "Old answer" }],
-			},
-		]);
-		expect(first.getSessionManager("first").getSessionFile()).toContain("/threads/");
+		expect(store.getRecords()).toEqual([]);
 	} finally {
-		await first.close();
+		await store.close();
 	}
-	const reopened = await BtwSessionStore.open(cwd, cwd, parent.getEntries());
-	try {
-		expect(reopened.getRecords().map(thread => thread.key)).toEqual(["first"]);
-		await reopened.removeSession("first");
-	} finally {
-		await reopened.close();
-	}
-	expect(await BtwSessionStore.readRecords(cwd, cwd, parent.getEntries())).toEqual([]);
+	const journals = Array.from(new Bun.Glob("*.jsonl").scanSync(path.join(cwd, "btw-history", "threads")));
+	expect(journals).toEqual([]);
 	expect(await Bun.file(legacyPath).text()).toBe(input);
 });

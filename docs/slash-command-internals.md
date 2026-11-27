@@ -399,6 +399,14 @@ alongside the session. Even a session containing only
 side questions is made resumable. `--no-session` keeps history in memory only.
 Ordinary transcript export/share does not include these sidecar records.
 
+Durable workspace threads use standard JSONL session journals under Main's
+`btw-history/threads/` artifacts directory. Version-1 thread JSON checkpoints
+and legacy `btw-thread` entries in Main's journal require a separate, manually
+run migration. Opening a workspace neither loads, rewrites, nor archives those
+legacy records, and OMP does not write both formats. Stop old writers and back
+up the legacy data before migrating; do not resume old writers against migrated
+sessions.
+
 Each topic uses an OS-backed cross-process lease and a revision check before an
 atomic replacement. Running turns keep their lease until a terminal checkpoint;
 another process cannot overwrite a live owner or a stale topic snapshot. A
