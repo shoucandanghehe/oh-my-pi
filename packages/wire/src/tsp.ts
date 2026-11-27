@@ -138,21 +138,10 @@ export type TspText = string | readonly TspSpan[];
 export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | "annotate" | (string & {});
 
 /**
- * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
- * `{ header }`, or a row running action `id`, with its `label`, `icon` and `detail` (the hold menu shows it dim
- * at the row's end).
+ * One entry of `actions.menu` or `actions.hold`, using the same rows as {@link TspMenuProps}.
+ * The hold menu shows a row's `detail` dim at the row's end.
  */
-export type TspMenuEntry =
-	| TspAction
-	| { header: string }
-	| {
-			id: TspAction;
-			label?: string;
-			icon?: string;
-			detail?: string;
-			disabled?: boolean | string;
-			danger?: boolean;
-	  };
+export type TspMenuEntry = TspMenuItem;
 
 /** Props every node accepts. */
 export interface TspCommonProps {
