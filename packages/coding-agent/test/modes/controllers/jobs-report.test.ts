@@ -13,7 +13,8 @@ async function renderFullJobs(running: AsyncJobSnapshotItem[]): Promise<string[]
 	const ctx = {
 		shell: {
 			native: () => false,
-			size: () => ({ columns: WIDTH, rows: 200 }),
+			size: () => ({ columns: 2 * WIDTH, rows: 200 }),
+			mainSize: () => ({ columns: WIDTH, rows: 200 }),
 			dock: { slot: () => ({ set: (factory: () => JSXNode) => (report = factory), clear: () => {} }) },
 		},
 		keybindings: { keysFor: () => ["escape"] },

@@ -428,6 +428,7 @@ describe("interactive /usage account visibility", () => {
 			shell: {
 				native: () => false,
 				size: () => ({ columns: 120, rows: 30 }),
+				mainSize: () => ({ columns: 120, rows: 30 }),
 				dock: { slot: () => ({ set: (factory: () => JSXNode) => (report = factory), clear: () => {} }) },
 			},
 			session: {
