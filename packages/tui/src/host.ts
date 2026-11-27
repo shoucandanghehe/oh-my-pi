@@ -64,10 +64,8 @@ export interface HostOptions extends Pick<
 	readonly native?: boolean;
 	/** The main pane's minimum size when the ANSI workspace is split. */
 	readonly ansiWorkspaceMainMinimum?: WorkspacePaneMinimum;
-	/** Clipboard handling for selected transcript text in the ANSI app viewport. Defaults to OSC 52. */
-	readonly onAppViewportSelectionCopy?: (text: string) => void;
-	/** Paste requested by a right click without an active transcript selection in the ANSI app viewport. */
-	readonly onAppViewportPasteRequest?: () => void;
+	/** In a split workspace, paste into Main after a right click without a transcript selection. */
+	readonly onPasteRequest?: () => void;
 	/** Blank rows between two non-empty main blocks in the terminal renderer. Default 1. */
 	readonly separator?: (above: UiNode, below: UiNode) => number;
 	/** Frame-rate cap of the terminal renderer: shortest gap between frames in ms (may change). Default 16. */
@@ -117,9 +115,9 @@ export interface Host {
 	 * terminal renderer (see {@link startHost}, {@link Host.onChange}).
 	 */
 	readonly native: boolean;
-	/** Active renderer (reactive). The app viewport only applies to an ANSI host. */
-	readonly renderBackend: "native" | "inline" | "app-viewport";
-	/** Split independent surfaces inside the ANSI app viewport; unavailable on other renderers. */
+	/** Active renderer (reactive): Tern or the terminal renderer. */
+	readonly renderBackend: "native" | "inline";
+	/** Split independent surfaces when the terminal renderer uses `tui.screen: fullscreen`. */
 	readonly ansiWorkspace: AnsiWorkspace | undefined;
 	/**
 	 * The terminal's clock from the TSP hello (`false`: 24-hour), reactive;
@@ -287,7 +285,6 @@ type Renderer = Pick<
 export async function startHost(options: HostOptions): Promise<Host> {
 	const native = options.native ?? true;
 	const env = options.driver?.env ?? Bun.env;
-	const appViewport = env.PI_TUI_RENDER_BACKEND === "app-viewport";
 	const watchdog = new LoopWatchdog();
 	let stopped = false;
 	let haltRenderer: (() => void) | undefined;
@@ -296,7 +293,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 	const driver = createTerminalDriver(
 		{
 			isLoopStalled: () => watchdog.isStalled(),
-			deferShellLine: () => !appViewport && options.screen?.() === "fullscreen",
+			deferShellLine: () => options.screen?.() === "fullscreen",
 			...options.driver,
 			...(native ? { hello: encodeHelloQuery(options.version ? { ver: options.version } : {}) } : {}),
 		},
@@ -435,12 +432,8 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			driver: debug ? debug.tap(presenting) : presenting,
 			theme: options.theme,
 			images: driverImages(driver.images, () => driver.capabilities),
-			...(appViewport ? { appViewport } : {}),
 			...(options.ansiWorkspaceMainMinimum ? { ansiWorkspaceMainMinimum: options.ansiWorkspaceMainMinimum } : {}),
-			...(options.onAppViewportSelectionCopy
-				? { onAppViewportSelectionCopy: options.onAppViewportSelectionCopy }
-				: {}),
-			...(options.onAppViewportPasteRequest ? { onAppViewportPasteRequest: options.onAppViewportPasteRequest } : {}),
+			...(options.onPasteRequest ? { onPasteRequest: options.onPasteRequest } : {}),
 			...(options.separator ? { separator: options.separator } : {}),
 			...(options.frameInterval === undefined ? {} : { frameInterval: options.frameInterval }),
 			...(options.hyperlinks ? { hyperlinks: options.hyperlinks } : {}),
@@ -466,15 +459,15 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		});
 		haltRenderer = () => {
 			debug?.stop();
-			backend.stop();
-			backend.workspace?.dispose();
+			backend.dispose();
 		};
 		backend.start();
-		if (appViewport) driver.setMouse(mouseTracking ?? "drag");
 		return {
 			native: false,
-			renderBackend: appViewport ? "app-viewport" : "inline",
-			ansiWorkspace: backend.workspace,
+			renderBackend: "inline",
+			get ansiWorkspace() {
+				return backend.workspace;
+			},
 			hour12: undefined,
 			retired: node => backend.retired(node),
 			replayHistory: () => driver.resetDisplay(),
@@ -484,7 +477,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			checkoutShown: () => false,
 			requestFrame: () => backend.requestRender(),
 			setMouse(tracking) {
-				driver.setMouse(tracking, !appViewport && options.screen?.() === "fullscreen");
+				driver.setMouse(tracking, options.screen?.() === "fullscreen");
 				if (tracking === "off") backend.clearHover();
 			},
 			scroll: by => backend.scroll(by),
@@ -501,21 +494,19 @@ export async function startHost(options: HostOptions): Promise<Host> {
 					if (!stopped) {
 						await driver.start();
 						// Fullscreen-only sessions have no normal-screen content to replay.
-						const fullscreen = !appViewport && options.screen?.() === "fullscreen";
+						const fullscreen = options.screen?.() === "fullscreen";
 						if (fullscreen) driver.setMouse(mouseTracking ?? "off", true);
-						if (!appViewport && (!fullscreen || backend.wroteHistory)) driver.resetDisplay();
+						if (!fullscreen || backend.wroteHistory) driver.resetDisplay();
 						backend.start();
-						if (appViewport) driver.setMouse(mouseTracking ?? "drag");
 					}
 				}
 			},
 			stop() {
-				// The inline transcript goes into history; the app viewport leaves the normal buffer alone.
+				// Only the original surface is flushed to normal-screen history.
 				try {
 					backend.flush();
 				} finally {
-					backend.stop();
-					backend.workspace?.dispose();
+					backend.dispose();
 				}
 			},
 		};

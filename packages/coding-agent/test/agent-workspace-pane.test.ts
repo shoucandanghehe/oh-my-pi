@@ -799,9 +799,15 @@ test("idle automatic agent panes close unless pinned, being used or still focuse
 test("ANSI background panes gray while closing, and focusing one restores its live colors", async () => {
 	const clock = new ManualClock();
 	const surface = createSurface(() => ({}));
-	const memory = memoryTerminal({ columns: 120, rows: 12, env: { PI_TUI_RENDER_BACKEND: "app-viewport" } });
+	const memory = memoryTerminal({ columns: 120, rows: 12 });
 	const theme = loadThemeSync("dark", { depth: "truecolor" });
-	const host = await startHost({ surface, driver: memory.options, theme: () => theme, native: false });
+	const host = await startHost({
+		surface,
+		driver: memory.options,
+		theme: () => theme,
+		native: false,
+		screen: () => "fullscreen",
+	});
 	const workspace = host.ansiWorkspace!;
 	const running = new Set<string>();
 	const policy = new NativeAgentPanes({
@@ -889,9 +895,16 @@ test.each([
 ] as const)("ANSI %s keeps only the automatic panes the user actually operated", async (action, keep) => {
 	const clock = new ManualClock();
 	const surface = createSurface(() => ({}));
-	const memory = memoryTerminal({ columns: 200, rows: 25, env: { PI_TUI_RENDER_BACKEND: "app-viewport" } });
+	const memory = memoryTerminal({ columns: 200, rows: 25 });
 	const theme = loadThemeSync("dark", { depth: "truecolor" });
-	const host = await startHost({ surface, driver: memory.options, theme: () => theme, native: false });
+	const host = await startHost({
+		surface,
+		driver: memory.options,
+		theme: () => theme,
+		native: false,
+		screen: () => "fullscreen",
+	});
+	host.setMouse("drag");
 	const workspace = host.ansiWorkspace!;
 	const ids = action === "resize" ? (["first", "second"] as const) : (["first", "second", "third"] as const);
 	const running = new Set<string>(ids);

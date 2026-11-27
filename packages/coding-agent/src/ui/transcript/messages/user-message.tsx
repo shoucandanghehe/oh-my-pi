@@ -142,6 +142,12 @@ export function syntheticReplayId(node: UiNode): string | undefined {
 	return "role" in props && props.role === SYNTHETIC_ROLE ? node.key() : undefined;
 }
 
+/** A real user prompt is a navigation stop in a side transcript. */
+export function isUserPrompt(node: UiNode): boolean {
+	const props = node.props();
+	return node.kind === "card" && "role" in props && props.role === "omp.user";
+}
+
 /**
  * A collapsed synthetic (agent-attributed) input in a replayed transcript,
  * such as the advisor's `Session update` dumps: a muted collapsible card

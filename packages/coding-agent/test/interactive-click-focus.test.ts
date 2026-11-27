@@ -16,7 +16,7 @@ import type { AgentProgress } from "@oh-my-pi/pi-coding-agent/task/task-details"
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createSurface, jsx, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { cfgTuiMouse } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgTuiMouse, cfgTuiScreen } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { initTheme } from "../src/ui/theme/service";
 import { createModeTerminal, type ModeTerminal, transcriptText } from "./helpers/mode-terminal";
 
@@ -309,7 +309,7 @@ describe("inline click-to-focus geometry", () => {
 	});
 
 	it("hands extension-owned link clicks to their extension only with tui.mouse on, other links unchanged", async () => {
-		Object.assign(term.memory.options.env!, { PI_TUI_RENDER_BACKEND: "app-viewport" });
+		cfgTuiScreen.set(mode.settings, "fullscreen");
 		cfgExtensionAssistantTextRenderers.set(mode.settings, true);
 		cfgTuiMouse.set(mode.settings, true);
 		const { activated, firstActivation } = installDemoLinkExtension();

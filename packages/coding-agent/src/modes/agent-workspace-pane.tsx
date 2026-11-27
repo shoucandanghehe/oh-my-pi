@@ -28,12 +28,13 @@ import { parseSlashCommand } from "../slash-commands/helpers/parse";
 import { Composer } from "../ui/composer/composer";
 import { QueueModel, QueuedMessages, type QueuedMessageEdit } from "../ui/dock/queue";
 import { PaneExtensionWidgets, useExtensionPresentation } from "../ui/dock/widgets";
+import { handleTranscriptKey } from "../ui/keys/transcript";
 import { AgentTranscriptViewerModel } from "../ui/overlays/panels/agent-transcript-viewer-model";
 import { AgentWorkspaceStatus, AgentWorkspaceTranscript } from "../ui/overlays/panels/agent-transcript-viewer";
 import { TreeSelector } from "../ui/overlays/pickers/tree-selector";
 import { Overlays } from "../ui/shell/overlays";
 import { StatusLine } from "../ui/status/status-line";
-import { syntheticReplayId } from "../ui/transcript/messages/user-message";
+import { isUserPrompt, syntheticReplayId } from "../ui/transcript/messages/user-message";
 import {
 	copyToClipboard,
 	isClipboardTerminalLocal,
@@ -150,7 +151,7 @@ interface AgentPaneOptions {
 	readonly editInTerminal?: (run: () => Promise<string | null>) => Promise<string | null>;
 	readonly showHub?: () => void;
 	readonly nativeSupports?: (kind: string) => boolean;
-	readonly ansiWorkspace?: Pick<AnsiWorkspace, "visibleMain">;
+	readonly ansiWorkspace?: Pick<AnsiWorkspace, "visibleMain" | "transcript">;
 }
 
 export interface AgentWorkspaceSurface extends NativeWorkspaceSurface {
@@ -643,6 +644,12 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 
 	const onKey = (key: KeyEvent): boolean => {
 		if (key.kind === "release") return false;
+		if (
+			!overlays.open() &&
+			!composer.completing() &&
+			handleTranscriptKey(key, keybindings, options.ansiWorkspace?.transcript(surface))
+		)
+			return true;
 		if (matchesAnyKey(key, appToolsExpandKeys(keybindings))) {
 			if (options.ansiWorkspace) {
 				const view = options.ansiWorkspace.visibleMain(surface);
@@ -761,7 +768,9 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	};
 
 	function scrollEmptyTranscript(key: KeyEvent): boolean {
-		return !composer.text().trim() && composer.pendingImages.length === 0 && scroll.handle(key);
+		return (
+			!options.ansiWorkspace && !composer.text().trim() && composer.pendingImages.length === 0 && scroll.handle(key)
+		);
 	}
 
 	let paste: EnhancedPasteController | undefined;
@@ -996,7 +1005,8 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	return {
 		surface,
 		onKey,
-		onAppViewportPasteRequest: pasteNative,
+		isPrompt: isUserPrompt,
+		onPasteRequest: pasteNative,
 		intercept(event, replay) {
 			if ((event.type === "key" || event.type === "paste") && takesPaste() && pasteBarrier.hold(replay)) return true;
 			if (

@@ -155,8 +155,6 @@ export interface PaintContext {
  */
 export interface PaintImages {
 	rows(source: ImageSource, request: ImageRequest): ImageRows;
-	/** Potential placement geometry, without taking a reference in an image store. */
-	measure?(source: ImageSource, request: ImageRequest): ImageRows;
 	/** The terminal's cell size in pixels (what an image's natural size in cells is measured by). */
 	cell(): CellSize;
 }
@@ -267,9 +265,8 @@ const MAX_SIZES_PER_NODE = 4;
  * Paint `node` at a size in `env`, through its per-size cache. Painting a
  * node whose kind has no painter throws: every kind must be covered.
  */
-export function paintNode(env: PaintEnvironment, node: UiNode, width: number, height?: number, measure = false): Block {
-	measure &&= env.images?.measure !== undefined;
-	const size = `${width}x${height ?? ""}${measure ? ":measure" : ""}`;
+export function paintNode(env: PaintEnvironment, node: UiNode, width: number, height?: number): Block {
+	const size = `${width}x${height ?? ""}`;
 	const holder = node as CachedNode;
 	let cache = holder[kCache];
 	if (cache && cache.env !== env) releasePaintCache(node);
@@ -288,7 +285,7 @@ export function paintNode(env: PaintEnvironment, node: UiNode, width: number, he
 				cache.entries.delete(oldest);
 			}
 		}
-		const cx = createContext(env, width, height, measure);
+		const cx = createContext(env, width, height);
 		// Detached from whatever paint is running: the entry lives until the node retires or is evicted.
 		entry = createRoot(dispose => ({
 			block: computed(
@@ -315,21 +312,14 @@ export function releasePaintCache(node: UiNode): void {
 	cache.entries.clear();
 }
 
-function createContext(
-	env: PaintEnvironment,
-	width: number,
-	height: number | undefined,
-	measure: boolean,
-): PaintContext {
-	const images = env.images;
-	const measureRows = measure ? images?.measure?.bind(images) : undefined;
+function createContext(env: PaintEnvironment, width: number, height: number | undefined): PaintContext {
 	return {
 		width,
 		height,
 		get theme() {
 			return env.theme();
 		},
-		paint: (child, childWidth, childHeight) => paintNode(env, child, childWidth, childHeight, measure),
+		paint: (child, childWidth, childHeight) => paintNode(env, child, childWidth, childHeight),
 		now: smooth => env.clock(smooth),
 		focused: node => env.focus() === node,
 		hovered: node => {
@@ -345,7 +335,7 @@ function createContext(
 		get textSizing() {
 			return env.textSizing?.() ?? false;
 		},
-		images: images && measureRows ? { rows: measureRows, cell: () => images.cell() } : images,
+		images: env.images,
 	};
 }
 

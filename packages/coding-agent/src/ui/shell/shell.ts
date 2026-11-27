@@ -34,7 +34,6 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { InputEvent, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import type { MouseTracking } from "@oh-my-pi/pi-tui/driver/io";
-import type { TranscriptScroll } from "@oh-my-pi/pi-tui/term/backend";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 
@@ -115,7 +114,7 @@ export class Shell {
 	#host: Host | undefined;
 	#theme: Accessor<Theme> | undefined;
 
-	onAppViewportPasteRequest: (() => void) | undefined;
+	onWorkspacePasteRequest: (() => void) | undefined;
 
 	constructor() {
 		this.overlays = new Overlays({
@@ -164,14 +163,6 @@ export class Shell {
 		return promise;
 	}
 
-	/**
-	 * Scroll the fullscreen transcript (a page, a line, its start or end); its end follows the tail
-	 * again. False when none is on screen (inline mode, a page up, Tern, not started).
-	 */
-	scrollTranscript(by: TranscriptScroll): boolean {
-		return this.#host?.scroll(by) ?? false;
-	}
-
 	/** Set inline mouse reporting; a modal screen's override lasts until it closes. */
 	setInlineMouse(tracking: MouseTracking): void {
 		this.#inlineMouse.set(tracking);
@@ -190,8 +181,7 @@ export class Shell {
 			...(options.version ? { version: options.version } : {}),
 			onKey: key => (options.onKey?.(key) ?? false) || this.#globalKeys.toReversed().some(handler => handler(key)),
 			intercept: event => this.#intercept(event, this.#interceptors.length - 1),
-			onAppViewportSelectionCopy: text => void copyToClipboard(text),
-			onAppViewportPasteRequest: () => this.onAppViewportPasteRequest?.(),
+			onPasteRequest: () => this.onWorkspacePasteRequest?.(),
 			ansiWorkspaceMainMinimum: { minWidth: 40, minHeight: 8 },
 			...(options.native === undefined ? {} : { native: options.native }),
 			...(options.driver ? { driver: options.driver } : {}),
@@ -215,11 +205,13 @@ export class Shell {
 				const inline = this.#inlineMouse();
 				const backend = host.renderBackend;
 				const fullscreen = backend === "inline" && options.screen?.() === "fullscreen";
-				let tracking = inline;
-				if (host.ansiWorkspace?.pointerMotion()) tracking = "any";
-				else if (backend === "app-viewport" && inline === "off") tracking = "drag";
-				if (fullscreen)
-					tracking = options.fullscreenMouse?.() === false ? "off" : inline === "any" ? "any" : "drag";
+				const tracking = fullscreen
+					? options.fullscreenMouse?.() === false
+						? "off"
+						: inline === "any" || host.ansiWorkspace?.pointerMotion()
+							? "any"
+							: "drag"
+					: inline;
 				host.setMouse(this.overlays.mouse() ?? tracking);
 			});
 			return dispose;

@@ -1,10 +1,13 @@
-import type { MouseEvent } from "../driver/contract";
+import type { FramePlan, MouseEvent } from "../driver/contract";
+import { normalizeRow } from "../driver/output/ansi";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
 import { batch, computed, createRoot, signal } from "../reactive";
 import type { Surface } from "../surface";
 import { stripEscapes } from "../text/ansi";
 import { flattenLine, stripControl } from "../text/sanitize";
+import { padTo, sliceColumns, truncate, visibleWidth } from "../text/width";
+import type { Theme } from "../theme/contract";
 import type {
 	AnsiWorkspace,
 	WorkspaceEdge,
@@ -13,11 +16,28 @@ import type {
 	WorkspacePaneMinimum,
 	WorkspaceSurface,
 } from "../workspace";
-import type { AppViewport, ViewportHit } from "./app-viewport";
+import type { FullscreenWindow } from "./fullscreen-window";
+import type { Cell, Hit } from "./paint";
+import { petrifyRows } from "./petrification";
+
+export interface FrameHit {
+	readonly hit: Hit;
+	top: number;
+	left: number;
+}
+
+export interface PointerCover {
+	readonly top: number;
+	readonly bottom: number;
+	readonly left: number;
+	readonly right: number;
+	readonly firstHit: number;
+}
 
 export interface InputFrame {
 	readonly layer: readonly UiNode[];
-	readonly hits: readonly ViewportHit[];
+	readonly hits: readonly FrameHit[];
+	readonly covers: readonly PointerCover[];
 	readonly rail?: { readonly width: number; readonly inset: number };
 }
 
@@ -25,7 +45,7 @@ export interface WorkspacePane {
 	readonly mount: WorkspaceSurface;
 	readonly leaf: Leaf;
 	readonly label: string;
-	readonly viewport: AppViewport;
+	readonly window: FullscreenWindow;
 	input?: InputFrame;
 }
 
@@ -245,6 +265,7 @@ function contains(rect: WorkspaceRect, mouse: MouseEvent): boolean {
 
 /** Pane ownership and geometry; the terminal backend still owns painting, events and the only writer. */
 export class TerminalWorkspace implements AnsiWorkspace {
+	readonly main: WorkspacePane;
 	readonly #layout;
 	readonly #size = signal<WorkspaceRect>({ x: 0, y: 0, width: 1, height: 1 });
 	readonly #focused = signal(MAIN);
@@ -262,12 +283,13 @@ export class TerminalWorkspace implements AnsiWorkspace {
 
 	constructor(
 		main: WorkspaceSurface,
-		private readonly viewport: (mount: WorkspaceSurface) => AppViewport,
+		private readonly createWindow: (mount: WorkspaceSurface, id: string) => FullscreenWindow,
 		minimum?: WorkspacePaneMinimum,
 	) {
 		const entry = leaf(MAIN, minimum);
 		this.#layout = signal<Layout>(entry);
-		this.#panes.set(MAIN, { mount: main, leaf: entry, label: "Main", viewport: viewport(main) });
+		this.main = { mount: main, leaf: entry, label: "Main", window: createWindow(main, MAIN) };
+		this.#panes.set(MAIN, this.main);
 	}
 
 	active(): string {
@@ -282,8 +304,13 @@ export class TerminalWorkspace implements AnsiWorkspace {
 	}
 
 	visibleMain(surface: Surface): WorkspaceMainView | undefined {
-		for (const pane of this.#panes.values()) {
-			if (pane.mount.surface === surface) return pane.viewport.visibleMain();
+		return this.transcript(surface)?.visibleMain();
+	}
+
+	transcript(surface: Surface): FullscreenWindow | undefined {
+		for (const id of this.#geometry.read().panes.keys()) {
+			const pane = this.#panes.get(id);
+			if (pane?.mount.surface === surface) return pane.window;
 		}
 		return undefined;
 	}
@@ -342,7 +369,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			mount,
 			leaf: entry,
 			label: flattenLine(stripControl(options.label ?? id)),
-			viewport: this.viewport(mount),
+			window: this.createWindow(mount, id),
 		};
 		this.#panes.set(id, pane);
 		this.endPointer();
@@ -387,7 +414,8 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			this.#layout.set(replacePane(this.#layout.peek(), id)!);
 			if (this.#focused.peek() === id) this.#focused.set(MAIN);
 		});
-		pane.viewport.pause();
+		pane.window.closeSearch();
+		pane.window.hide();
 		pane.mount.surface.dispose();
 		pane.mount.dispose?.();
 		return true;
@@ -404,7 +432,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 	}
 
 	endPointer(): void {
-		if (this.#capture) this.#panes.get(this.#capture)?.viewport.endDrag();
+		if (this.#capture) this.#panes.get(this.#capture)?.window.blurPointer();
 		this.#drag = undefined;
 		this.#capture = undefined;
 	}
@@ -412,7 +440,84 @@ export class TerminalWorkspace implements AnsiWorkspace {
 	pause(): void {
 		this.endPointer();
 		this.#frame = undefined;
-		for (const pane of this.#panes.values()) pane.viewport.pause();
+		for (const pane of this.#panes.values()) {
+			pane.window.closeSearch();
+			pane.window.hide();
+			pane.input = undefined;
+		}
+	}
+
+	/** Compose the visible pane bodies, moving only the active pane's cursor into screen cells. */
+	paint(
+		paintPane: (pane: WorkspacePane, width: number, height: number) => FramePlan,
+		theme: Theme,
+		reduceMotion: boolean,
+	): FramePlan {
+		const frame = this.#geometry.read();
+		this.#frame = frame;
+		const { panes, sashes } = frame;
+		const active = this.active();
+		const fragments: { id?: string; rect: WorkspaceRect; rows: string[] }[] = [];
+		let cursor: Cell | null = null;
+		for (const [id, rect] of panes) {
+			const pane = this.#panes.get(id)!;
+			const plan = paintPane(pane, rect.width, rect.height - 1);
+			const title = `${active === id ? "›" : " "} ${pane.label}`;
+			const bar = id === MAIN ? title : `${padTo(truncate(title, rect.width - 2, ""), rect.width - 2)} ×`;
+			const rows = [theme.fg(active === id ? "accent" : "dim", bar), ...plan.fullscreen!];
+			const petrification = pane.mount.petrification?.();
+			fragments.push({
+				id,
+				rect,
+				rows:
+					petrification === undefined || reduceMotion ? rows : petrifyRows(rows, rect.width, petrification, theme),
+			});
+			if (active === id && plan.cursor && plan.cursor.row < rect.height - 1) {
+				cursor = {
+					row: rect.y + 1 + plan.cursor.row,
+					col: rect.x + Math.min(rect.width - 1, plan.cursor.col),
+				};
+			}
+		}
+		// The preview covers the target's painted rows without laying out or hit-testing the dragged pane there.
+		const drop = this.#dropPreview(id => fragments.find(fragment => fragment.id === id)!.rows);
+		if (drop) {
+			const { rect, rows } = fragments.find(fragment => fragment.id === drop.target)!;
+			const vertical = drop.edge === "top" || drop.edge === "bottom";
+			const width = vertical ? rect.width : Math.floor(rect.width / 2);
+			const height = vertical ? Math.floor(rect.height / 2) : rect.height;
+			const left = drop.edge === "right" ? rect.width - width : 0;
+			const top = drop.edge === "bottom" ? rect.height - height : 0;
+			const border = theme.fg("accent", "┃");
+			for (let row = 0; row < height; row++) {
+				let preview: string;
+				if (row === 0) preview = theme.fg("accent", `┏${"━".repeat(width - 2)}┓`);
+				else if (row === height - 1) preview = theme.fg("accent", `┗${"━".repeat(width - 2)}┛`);
+				else {
+					const ghost = padTo(normalizeRow(drop.snapshot[row] ?? "", width - 2), width - 2);
+					preview = `${border}${theme.fg("muted", ghost)}${border}`;
+				}
+				const line = padTo(normalizeRow(rows[top + row] ?? "", rect.width), rect.width);
+				const before = padTo(normalizeRow(sliceColumns(line, 0, left), left), left);
+				const after = sliceColumns(line, left + width, rect.width);
+				// A wide character crossing the cut is dropped without shifting the remaining cells.
+				const remaining = rect.width - left - width - visibleWidth(after);
+				rows[top + row] = `${before}${preview}${" ".repeat(Math.max(0, remaining))}${after}`;
+			}
+		}
+		for (const { rect, split: sash } of sashes) {
+			const line = theme.fg("border", sash.axis === "x" ? "│" : "─".repeat(rect.width));
+			fragments.push({ rect, rows: Array.from({ length: rect.height }, () => line) });
+		}
+		const rows = Array.from({ length: this.#size().height }, () => "");
+		// For any given row, the rectangles form disjoint columns from left to right.
+		for (const { rect, rows: lines } of fragments.sort((a, b) => a.rect.x - b.rect.x)) {
+			for (let row = 0; row < rect.height; row++) {
+				const line = normalizeRow(lines[row] ?? "", rect.width);
+				rows[rect.y + row] += padTo(line, rect.width);
+			}
+		}
+		return { viewport: [], cursor, fullscreen: rows };
 	}
 
 	dispose(): void {
@@ -421,13 +526,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		this.#geometry.dispose();
 	}
 
-	paintGeometry(): Geometry {
-		const frame = this.#geometry.read();
-		this.#frame = frame;
-		return frame;
-	}
-
-	dropPreview(
+	#dropPreview(
 		capture: (source: string) => readonly string[],
 	): { readonly target: string; readonly edge: WorkspaceEdge; readonly snapshot: readonly string[] } | undefined {
 		const drag = this.#drag;

@@ -8143,7 +8143,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	previewSubagentExitAnimation(): void {
 		const workspace = this.shell.host?.ansiWorkspace;
 		if (!workspace) {
-			this.showWarning("Petrification preview requires the app-viewport render backend");
+			this.showWarning("Petrification preview requires tui.screen: fullscreen");
 			return;
 		}
 		const key = "debug:petrify";

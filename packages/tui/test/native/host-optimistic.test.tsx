@@ -117,8 +117,8 @@ describe("startHost optimistic native start in a Tern pane", () => {
 		expect(before).not.toContain("\x1b[?1049h");
 	});
 
-	it("renders natively before and after the hello reply even with the app viewport opt-in", async () => {
-		const h = await start({ TERM_PROGRAM: "tern", PI_TUI_RENDER_BACKEND: "app-viewport" });
+	it("renders natively before and after the hello reply even with fullscreen configured", async () => {
+		const h = await start({ TERM_PROGRAM: "tern" }, () => "fullscreen");
 		// Nothing answered yet: the surface is already open and drawn natively.
 		expect(h.host.native).toBe(true);
 		expect(h.host.renderBackend).toBe("native");
@@ -179,11 +179,13 @@ describe("startHost optimistic native start in a Tern pane", () => {
 		expect(rows(h.out())).toContain("hello there");
 	});
 
-	it("uses the opted-in app viewport only after Tern declines", async () => {
-		const h = await start({ TERM_PROGRAM: "tern", PI_TUI_RENDER_BACKEND: "app-viewport" });
+	it("exposes the fullscreen workspace only after Tern declines", async () => {
+		const h = await start({ TERM_PROGRAM: "tern" }, () => "fullscreen");
 		expect(h.host.renderBackend).toBe("native");
+		expect(h.host.ansiWorkspace).toBeUndefined();
 		h.feed(DA1 + DA1 + DA1);
-		expect(h.host.renderBackend).toBe("app-viewport");
+		expect(h.host.renderBackend).toBe("inline");
+		expect(h.host.ansiWorkspace).toBeDefined();
 		expect(h.changes()).toBe(1);
 		expect(h.out()).toContain("\x1b[?1049h");
 		expect(rows(h.out())).toContain("hello there");

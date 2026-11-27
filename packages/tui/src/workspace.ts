@@ -2,6 +2,7 @@ import type { InputEvent, MouseEvent } from "./driver/contract";
 import type { KeyEvent } from "./events";
 import type { UiNode } from "./node";
 import type { Surface } from "./surface";
+import type { SelectionMotion, TranscriptScroll } from "./term/backend";
 
 /** A left rail drawn alongside one ANSI workspace surface, below the pane header. */
 export interface AnsiWorkspaceRail {
@@ -21,7 +22,9 @@ export interface WorkspaceSurface {
 	/** Consume input before the focused node. Replay keeps the event on this pane, even if focus moves. */
 	readonly intercept?: (event: InputEvent, replay: () => void) => boolean;
 	/** Right-click clipboard request from this pane when there is no selection to copy. */
-	readonly onAppViewportPasteRequest?: () => void;
+	readonly onPasteRequest?: () => void;
+	/** Whether a transcript block starts a semantic prompt. */
+	readonly isPrompt?: (node: UiNode) => boolean;
 	/** Progress of the ANSI pane's exit animation. Undefined paints the original content. */
 	readonly petrification?: () => number | undefined;
 	/** A user redocked this pane or changed its size by dragging a sash. */
@@ -57,6 +60,14 @@ export interface WorkspaceMainView {
 	readonly followingTail: boolean;
 }
 
+/** Commands for one fullscreen transcript, independent of the active pane. */
+export interface TranscriptControls {
+	scroll(by: TranscriptScroll): boolean;
+	openSearch(): boolean;
+	copySelection(): boolean;
+	extendSelection(motion: SelectionMotion): boolean;
+}
+
 export interface AnsiWorkspace {
 	/** Id of the focused pane (reactive). The original host surface is `main`. */
 	active(): string;
@@ -66,6 +77,8 @@ export interface AnsiWorkspace {
 	focus(id: string): boolean;
 	/** Query the visible transcript blocks of a mounted pane. */
 	visibleMain(surface: Surface): WorkspaceMainView | undefined;
+	/** Transcript commands for this surface when its pane is visible. */
+	transcript(surface: Surface): TranscriptControls | undefined;
 	/** Close a secondary pane without stopping its session or closing the main surface. */
 	close(id: string): boolean;
 	/**

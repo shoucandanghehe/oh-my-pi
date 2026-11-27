@@ -21,7 +21,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { ResizeScrollback, TerminalDriverOptions } from "@oh-my-pi/pi-tui/driver/index";
 import { staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
-import type { ScreenMode, SelectionMotion, TranscriptScroll } from "@oh-my-pi/pi-tui/term/backend";
+import type { ScreenMode } from "@oh-my-pi/pi-tui/term/backend";
 import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { setSymbolPreset } from "../../ui/theme/service";
@@ -53,6 +53,7 @@ import {
 	TrayModel,
 } from "../../ui/dock";
 import { actionKey, activeKeyStyle, formatTooltipKey } from "../../ui/keys/hints";
+import { handleTranscriptKey } from "../../ui/keys/transcript";
 import { holdSettle, type Shell, Shell as ShellClass, type TranscriptBlock, ViewList } from "../../ui/shell";
 import { type ComposerBarAction, type ComposerBarRoutes, composerFacts } from "../../ui/status/composer-facts";
 import { createStatusLine, shapePlacement } from "../../ui/status/status-line";
@@ -60,30 +61,6 @@ import { composerShape, type StatusAttachment } from "../../ui/styles/composer/s
 import { welcomeTip } from "../../ui/welcome/tips";
 import { Welcome, WelcomeModel } from "../../ui/welcome/welcome";
 import type { DockModels, StatusLineView } from "../types";
-
-/** Fullscreen transcript scroll actions and the scroll each asks for. */
-const TRANSCRIPT_SCROLL_KEYS: readonly (readonly [Keybinding, TranscriptScroll])[] = [
-	["app.transcript.pageUp", "page-up"],
-	["app.transcript.pageDown", "page-down"],
-	["app.transcript.halfPageUp", "half-up"],
-	["app.transcript.halfPageDown", "half-down"],
-	["app.transcript.previousPrompt", "previous-prompt"],
-	["app.transcript.nextPrompt", "next-prompt"],
-	["app.transcript.lineUp", "line-up"],
-	["app.transcript.lineDown", "line-down"],
-	["app.transcript.top", "start"],
-	["app.transcript.bottom", "end"],
-];
-
-const TRANSCRIPT_SELECTION_KEYS: readonly (readonly [Keybinding, SelectionMotion])[] = [
-	["app.transcript.selectLeft", "left"],
-	["app.transcript.selectRight", "right"],
-	["app.transcript.selectUp", "up"],
-	["app.transcript.selectDown", "down"],
-	["app.transcript.selectLineStart", "line-start"],
-	["app.transcript.selectLineEnd", "line-end"],
-	["app.transcript.clearSelection", "clear"],
-];
 
 /** How the frame starts. */
 export interface AppFrameOptions {
@@ -191,19 +168,12 @@ export class AppFrame {
 		// popup keeps its paging; inline no transcript window takes them), and a submitted prompt
 		// brings the transcript back to its live end.
 		this.composer.addKeyHandler(key => {
-			if (key.kind === "release" || this.composer.completing()) return false;
-			if (this.screen.peek() !== "fullscreen" || !this.shell.host || this.shell.host.native) return false;
-			const bindings = getKeybindings();
-			if (bindings.matches(key, "tui.input.submit")) {
-				this.shell.scrollTranscript("end");
-				return false;
-			}
-			if (bindings.matches(key, "app.transcript.search")) return this.shell.host?.openSearch() ?? false;
-			if (bindings.matches(key, "app.transcript.copySelection")) return this.shell.host?.copySelection() ?? false;
-			const by = TRANSCRIPT_SCROLL_KEYS.find(([action]) => bindings.matches(key, action))?.[1];
-			if (by !== undefined) return this.shell.scrollTranscript(by);
-			const motion = TRANSCRIPT_SELECTION_KEYS.find(([action]) => bindings.matches(key, action))?.[1];
-			return motion !== undefined && (this.shell.host?.extendSelection(motion) ?? false);
+			if (this.composer.completing() || this.screen.peek() !== "fullscreen") return false;
+			return handleTranscriptKey(
+				key,
+				getKeybindings(),
+				this.shell.host?.ansiWorkspace?.transcript(this.shell.surface),
+			);
 		});
 		this.welcome = new WelcomeModel(options.version, { intro: options.intro === true });
 		const todo = new TodoHudModel();

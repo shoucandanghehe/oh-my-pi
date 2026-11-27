@@ -460,7 +460,7 @@ export class InputController {
 		this.#keyHooks.push(() => composer.setAtomizer(undefined));
 		// Images restored without a link (a recalled or returned draft) get their chip link back.
 		composer.setImageLinkResolver(images => materializeImageChipLinks(images, this.ctx.sessionManager));
-		this.ctx.shell.onAppViewportPasteRequest = () => void this.handleImagePaste();
+		this.ctx.shell.onWorkspacePasteRequest = () => void this.handleImagePaste();
 		// Push-to-talk uses its own binding, separate from the STT toggle.
 		composer.setSpaceHold(
 			this.ctx.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),

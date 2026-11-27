@@ -147,8 +147,6 @@ exit "$code"`;
 						TERM_PROGRAM: undefined,
 						OMP_TUI_NATIVE: "0",
 						PI_TUI_NATIVE: "0",
-						// The fork's ANSI app viewport must not override either screen-mode fixture.
-						PI_TUI_RENDER_BACKEND: "inline",
 					},
 					terminal,
 				});

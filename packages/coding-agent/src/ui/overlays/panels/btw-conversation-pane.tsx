@@ -2,6 +2,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import {
+	type AnsiWorkspace,
 	batch,
 	computed,
 	createRoot,
@@ -66,6 +67,7 @@ import { imageAttachmentSource } from "../../../utils/image-source";
 import { Composer, type ComposerSlots } from "../../composer/composer";
 import { queuedLine } from "../../dock/queue";
 import { PaneExtensionWidgets } from "../../dock/widgets";
+import { handleTranscriptKey } from "../../keys/transcript";
 import { Overlays } from "../../shell/overlays";
 import { UserMessage } from "../../transcript/messages/user-message";
 import { SideToolCalls } from "../../transcript/side-tool-calls";
@@ -99,6 +101,7 @@ interface BtwPaneOptions {
 	readonly columns: () => number;
 	/** Presence distinguishes a Tern workspace surface from an ANSI pane. */
 	readonly nativeSupports?: (kind: string) => boolean;
+	readonly ansiWorkspace?: AnsiWorkspace;
 	readonly writeRaw?: (data: string) => void;
 	readonly editInTerminal?: (run: () => Promise<string | null>) => Promise<string | null>;
 	readonly copyText?: (text: string) => Promise<void>;
@@ -628,7 +631,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		this.options.select(key);
 	}
 
-	readonly onAppViewportPasteRequest = (): void => {
+	readonly onPasteRequest = (): void => {
 		this.#pasteClipboard("smart");
 	};
 
@@ -848,6 +851,11 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			}
 			return true;
 		}
+		if (
+			!this.#composer.completing() &&
+			handleTranscriptKey(key, keybindings, this.options.ansiWorkspace?.transcript(this.surface))
+		)
+			return true;
 		const empty = this.#composer.text().trim() === "" && !this.#composer.completing();
 		if (keybindings.matches(key, "app.message.dequeue")) {
 			const session = thread?.conversation.session;
@@ -940,7 +948,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			}
 		}
 		if (keybindings.matches(key, "app.clipboard.pasteImage")) return this.#pasteClipboard("smart");
-		if (empty && this.#scroll.handle(key)) return true;
+		if (!this.options.ansiWorkspace && empty && this.#scroll.handle(key)) return true;
 		this.#notice.set(undefined);
 		return false;
 	};

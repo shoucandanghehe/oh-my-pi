@@ -3,14 +3,17 @@ import { dropCutImages, holdsImage } from "../driver/images/anchor";
 import { clipViewportImages } from "../driver/images/viewport";
 import type { UiNode } from "../node";
 import { untrack } from "../reactive";
-import type { Surface } from "../surface";
+import type { MainScrollScope, Surface } from "../surface";
 import { truncate } from "../text/width";
+import type { WorkspaceMainView } from "../workspace";
 import type { SelectionMotion, TermBackendOptions, TranscriptScroll } from "./backend";
-import { type Block, type Cell, type Hit, type PaintEnvironment, paintNode } from "./paint";
+import { type Block, type Cell, type PaintEnvironment, paintNode } from "./paint";
+import { plainTranscriptText } from "./transcript-cells";
 import { type TranscriptDocument, type TranscriptIndex, transcriptIndex } from "./transcript-document";
 import { TranscriptPointer } from "./transcript-pointer";
 import { TranscriptSearch } from "./transcript-search";
 import type { WidgetContext } from "./widgets";
+import type { FrameHit } from "./workspace";
 
 /** The top of the fullscreen transcript window: a `main` node and a row of its entry (separator rows first). */
 interface ScrollAnchor {
@@ -27,7 +30,19 @@ interface SessionWindow {
 	readonly width: number;
 	/** The wheel scrolls it: no modal sheet owns the pointer. */
 	readonly wheel: boolean;
+	readonly nodes: readonly UiNode[];
 }
+
+/** The reading point survives a topic remount even though its nodes do not. */
+interface Bookmark {
+	readonly index: number;
+	readonly kind: UiNode["kind"];
+	readonly width: number;
+	readonly row: number;
+	readonly textOffset: number | undefined;
+}
+
+const contentLength = (line: string): number => plainTranscriptText(line).replace(/\s+/gu, "").length;
 
 interface FullscreenWindowHost extends Pick<
 	TermBackendOptions,
@@ -67,6 +82,9 @@ export class FullscreenWindow {
 	#window: SessionWindow | undefined;
 	#index: TranscriptIndex | undefined;
 	#pointer: TranscriptPointer | undefined;
+	#scope: MainScrollScope | undefined;
+	#bookmark: Bookmark | undefined;
+	readonly #bookmarks = new Map<string, Bookmark>();
 
 	constructor(readonly host: FullscreenWindowHost) {
 		this.#surface = host.surface;
@@ -78,6 +96,10 @@ export class FullscreenWindow {
 
 	get following(): boolean {
 		return this.painted && this.#anchor === undefined;
+	}
+
+	visibleMain(): WorkspaceMainView | undefined {
+		return this.#window && { nodes: this.#window.nodes, followingTail: this.following };
 	}
 
 	get wheel(): boolean {
@@ -124,6 +146,7 @@ export class FullscreenWindow {
 				const node = main[index]!;
 				if (!this.host.isPrompt(node)) continue;
 				this.#anchor = { node, row: 0 };
+				this.#remember(this.#index!.read(), view.width);
 				this.host.requestRender();
 				break;
 			}
@@ -243,11 +266,29 @@ export class FullscreenWindow {
 		this.#index?.dispose();
 		this.#index = undefined;
 	}
+
+	#remember(doc: TranscriptDocument, width: number): void {
+		if (!this.#scope) return;
+		const anchor = this.#anchor;
+		const entry = anchor && doc.entry(anchor.node);
+		this.#bookmark = undefined;
+		if (!anchor || !entry) return;
+		const row = anchor.row - entry.lead;
+		let textOffset: number | undefined;
+		if (row >= 0) {
+			const lines = doc.lines(anchor.node);
+			textOffset = 0;
+			for (let i = 0; i < row && i < lines.length; i++) textOffset += contentLength(lines[i]!);
+		}
+		this.#bookmark = { index: entry.index, kind: anchor.node.kind, row, width, textOffset };
+	}
+
 	#seek(offset: number, doc = this.#index?.read()): void {
 		if (!doc || !this.#window) return;
 		const target = Math.max(0, Math.trunc(offset));
 		const entry = target < doc.rows - this.#window.rows ? doc.at(target) : undefined;
 		this.#anchor = entry ? { node: entry.node, row: target - entry.top } : undefined;
+		this.#remember(doc, this.#window.width);
 		this.host.requestRender();
 	}
 
@@ -261,7 +302,9 @@ export class FullscreenWindow {
 			now: options.clock ?? (() => performance.now()),
 			wheelLines: options.wheelLines ?? (() => 0),
 			copyOnSelect: options.copyOnSelect ?? (() => true),
-			copy: options.copySelection,
+			get copy() {
+				return options.copySelection;
+			},
 		}));
 	}
 
@@ -286,10 +329,24 @@ export class FullscreenWindow {
 	paint(
 		screenWidth: number,
 		height: number,
-		hits: { hit: Hit; top: number; left: number }[],
+		hits: FrameHit[],
 		wheel: boolean,
 	): { rows: string[]; cursor: Cell | null } {
 		let cursor: Cell | null = null;
+		const scope = this.#surface.mainScrollScope?.();
+		const previousScope = this.#scope;
+		let bookmark: Bookmark | undefined;
+		if (scope?.key !== previousScope?.key || scope?.preview !== previousScope?.preview) {
+			if (previousScope && !previousScope.preview) {
+				if (this.#bookmark) this.#bookmarks.set(previousScope.key, this.#bookmark);
+				else this.#bookmarks.delete(previousScope.key);
+			}
+			this.#scope = scope;
+			bookmark = scope && this.#bookmarks.get(scope.key);
+			this.closeSearch();
+			this.#anchor = undefined;
+			this.resetPointer();
+		}
 		const search = this.#search;
 		const dock: { block: Block; top: number }[] = [];
 		let dockRows = search ? 1 : 0;
@@ -315,6 +372,23 @@ export class FullscreenWindow {
 		const width = lane ? screenWidth - 1 : screenWidth;
 		const doc = this.#document(width);
 		const size = (i: number): number => doc.entry(main[i]!)?.size ?? 0;
+		if (bookmark) {
+			const node = main[bookmark.index];
+			const entry = node?.kind === bookmark.kind ? doc.entry(node) : undefined;
+			if (entry && node) {
+				let row = bookmark.row;
+				if (width !== bookmark.width && bookmark.textOffset !== undefined) {
+					const lines = doc.lines(node);
+					let offset = bookmark.textOffset;
+					for (row = 0; row < lines.length - 1; row++) {
+						const length = contentLength(lines[row]!);
+						if (offset < length) break;
+						offset -= length;
+					}
+				}
+				this.#anchor = { node, row: Math.max(0, Math.min(entry.size - 1, row + entry.lead)) };
+			}
+		}
 
 		if (search) {
 			this.#anchor = search.reveal(main, i => this.#paint(main[i]!, width).rows, size, this.#anchor, room);
@@ -329,11 +403,13 @@ export class FullscreenWindow {
 		const skip = first ? offset - first.top : 0;
 		const below = offset < maxTop ? maxTop - offset + 1 : 0; // The indicator replaces the last content row.
 		this.#anchor = below && first ? { node: first.node, row: skip } : undefined;
+		this.#remember(doc, width);
 
 		// The window: entry rows from the top down, the indicator taking its last row while anchored.
 		const indicator = below > 0 && !lane && room > 1;
 		const content = indicator ? room - 1 : room;
 		const window: string[] = [];
+		const nodes: UiNode[] = [];
 		for (let i = index; i < main.length && window.length < content; i++) {
 			const rows = size(i);
 			if (rows === 0) continue;
@@ -342,6 +418,7 @@ export class FullscreenWindow {
 			const lead = rows - block.rows.length;
 			// Window row of the block's first row (negative: cut above the window).
 			const top = window.length + lead - (i === index ? skip : 0);
+			if (top < content && top + block.rows.length > 0) nodes.push(node);
 			for (let r = i === index ? skip : 0; r < rows && window.length < content; r++) {
 				const raw = r < lead ? "" : block.rows[r - lead]!;
 				window.push(search ? search.highlight(node, r, raw) : raw);
@@ -370,6 +447,7 @@ export class FullscreenWindow {
 			rows: room,
 			width,
 			wheel,
+			nodes,
 		};
 
 		this.#sessionPointer().update(

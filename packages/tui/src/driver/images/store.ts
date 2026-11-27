@@ -192,36 +192,6 @@ export class TerminalImages {
 		this.#dirty = true;
 	}
 
-	/** Layout of a potential placement without holding an image id or starting an encode. */
-	measure(source: ImageSource, request: ImageRequest): ImageRows {
-		const geometry = this.#layout(source, request, this.#capabilities());
-		return geometry
-			? { rows: reservedRows(geometry.box.rows), columns: geometry.box.columns, state: "pending" }
-			: this.#fallback(request);
-	}
-
-	#layout(
-		source: ImageSource,
-		request: ImageRequest,
-		caps: TerminalCapabilities,
-	): { box: ImageBox; placeholders: boolean; protocol: NonNullable<TerminalCapabilities["images"]> } | undefined {
-		const protocol = caps.images;
-		if (protocol === null) return undefined;
-		const cell = caps.cell ?? DEFAULT_CELL;
-		let box = fitImage(source.widthPx, source.heightPx, request, cell);
-		if (protocol === "sixel" || protocol === "iterm") {
-			// Taller than the screen, its first row would be above the top when its last row draws it.
-			const screenRows = this.#screenRows();
-			if (box.rows > screenRows) {
-				box = fitImage(source.widthPx, source.heightPx, { ...request, maxRows: screenRows }, cell);
-			}
-		}
-		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
-		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
-		if (request.cells && !placeholders) return undefined;
-		return { box, placeholders, protocol };
-	}
-
 	#fallback(request: ImageRequest, rows = 1): ImageRows {
 		const label =
 			request.maxColumns === undefined ? request.fallback : truncate(request.fallback, request.maxColumns);
@@ -241,9 +211,20 @@ export class TerminalImages {
 	rows(source: ImageSource, request: ImageRequest): ImageRows {
 		if (!getOwner()) throw new Error("pi-tui: TerminalImages.rows must run inside a painter (a reactive owner)");
 		const caps = this.#capabilities();
-		const geometry = this.#layout(source, request, caps);
-		if (!geometry) return this.#fallback(request);
-		const { box, placeholders, protocol } = geometry;
+		const protocol = caps.images;
+		if (protocol === null) return this.#fallback(request);
+		const cell = caps.cell ?? DEFAULT_CELL;
+		let box = fitImage(source.widthPx, source.heightPx, request, cell);
+		if (protocol === "sixel" || protocol === "iterm") {
+			// Taller than the screen, its first row would be above the top when its last row draws it.
+			const screenRows = this.#screenRows();
+			if (box.rows > screenRows) {
+				box = fitImage(source.widthPx, source.heightPx, { ...request, maxRows: screenRows }, cell);
+			}
+		}
+		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
+		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
+		if (request.cells && !placeholders) return this.#fallback(request);
 		const entry = this.#acquire(source);
 		const fallback = () => this.#fallback(request, box.rows);
 		if (!entry.live()) return fallback();

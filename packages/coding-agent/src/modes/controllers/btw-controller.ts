@@ -46,6 +46,7 @@ import {
 	type BtwQueueEdit,
 } from "../../ui/overlays/panels/btw-conversation-pane";
 import type { OverlayHandle, TranscriptBlock } from "../../ui/shell";
+import { isUserPrompt } from "../../ui/transcript/messages/user-message";
 import { actionKey } from "../../ui/keys/hints";
 import { canonicalKeyId } from "../../config/keybindings/key-id";
 import "../../ui/styles/apps/screen/look";
@@ -996,6 +997,7 @@ export class BtwController {
 					rows,
 					columns,
 					nativeSupports,
+					ansiWorkspace: nativeSupports ? undefined : this.ctx.shell?.host?.ansiWorkspace,
 					writeRaw,
 					editInTerminal: nativeSupports ? undefined : this.workspace?.editInTerminal,
 					keybindings: this.ctx.keybindings,
@@ -1045,8 +1047,9 @@ export class BtwController {
 					surface: pane.surface,
 					ansiRail: pane.ansiRail,
 					onKey: pane.onKey,
+					isPrompt: isUserPrompt,
 					intercept: pane.intercept,
-					onAppViewportPasteRequest: pane.onAppViewportPasteRequest,
+					onPasteRequest: pane.onPasteRequest,
 					dispose: () => {
 						if (this.#pane !== pane) return pane.dispose();
 						const pendingInput = new Set(pane.pendingPasteThreads());
