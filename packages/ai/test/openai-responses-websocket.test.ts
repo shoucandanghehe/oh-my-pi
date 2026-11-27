@@ -81,7 +81,7 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 			}
 			expect(fixture.httpRequests).toHaveLength(1);
 			expect(fixture.requests).toHaveLength(1);
-			expect(warn.mock.calls.filter(([message]) => message === "OpenAI Responses removed input reasoning")).toEqual([
+			expect(warn.mock.calls.filter(([message]) => /removed (?:input )?reasoning/u.test(message))).toEqual([
 				[
 					"OpenAI Responses removed input reasoning",
 					{

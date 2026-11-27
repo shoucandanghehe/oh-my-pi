@@ -1767,7 +1767,8 @@ export class TermBackend {
 			this.clearHover();
 			return;
 		}
-		const pointer = !pane && this.#window?.wheel && (!input.layer.length || this.#searchable()) ? this.#pointer : undefined;
+		const pointer =
+			!pane && this.#window?.wheel && (!input.layer.length || this.#searchable()) ? this.#pointer : undefined;
 		if (pointer?.capture(mouse, viewportRow)) return;
 		const appViewport = input.layer.length === 0 ? pane?.viewport : undefined;
 		const contentMouse = input.rail ? { ...mouse, col: Math.max(0, mouse.col - input.rail.inset) } : mouse;

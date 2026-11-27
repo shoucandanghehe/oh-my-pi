@@ -587,7 +587,6 @@ import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-sta
 import { type AiuTotals, sessionAiu } from "./aiu-billing";
 import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
 import type { AgentCostSnapshot, AgentTreeSpend } from "../modes/view-model/overlays/agent-hub-projection";
-import { registerPersistedSubagents } from "../registry/persisted-agents";
 import type { SessionObserverRegistry } from "../task/session-observer-registry";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
 import { resolveWebsocketPreference } from "./settings-stream-fn";

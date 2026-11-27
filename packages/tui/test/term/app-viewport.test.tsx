@@ -35,7 +35,7 @@ async function withHost(
 	use: (running: RunningHost) => Promise<void>,
 	options: Pick<
 		HostOptions,
-		"onAppViewportSelectionCopy" | "onAppViewportPasteRequest" | "onKey" | "ansiWorkspaceMainMinimum"
+		"onAppViewportSelectionCopy" | "onAppViewportPasteRequest" | "onKey" | "ansiWorkspaceMainMinimum" | "screen"
 	> & {
 		inline?: boolean;
 		shell?: string;
@@ -106,7 +106,7 @@ it("uses the terminal's scrollback by default", async () => {
 	);
 });
 
-it("scrolls only main, anchoring to the same text through upstream growth and rewrap", async () => {
+it("uses the app viewport over fullscreen settings and preserves the transcript anchor through rewrap", async () => {
 	const prefix = signal(["old0", "old1"]);
 	const output = signal(["live0", "live1", "live2", "live3", "live4", "live5", "live6", "live7"]);
 	const modal = signal(false);
@@ -168,7 +168,7 @@ it("scrolls only main, anchoring to the same text through upstream growth and re
 			expect(term.scrollbackLength).toBe(0);
 			expect(screen()).toEqual(["shell", "", "", "", ""]);
 		},
-		{ shell: "shell" },
+		{ shell: "shell", screen: () => "fullscreen" },
 	);
 });
 
