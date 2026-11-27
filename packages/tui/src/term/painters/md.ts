@@ -13,8 +13,9 @@
  * would open itself.
  */
 import type { TspMarkdownProps } from "@oh-my-pi/pi-wire";
+import type { UiNode } from "../../node";
 import { signal } from "../../reactive";
-import { renderMarkdownFrame, takeExtensionLinks } from "../../text/markdown";
+import { type MarkdownOptions, renderMarkdownFrame, takeExtensionLinks } from "../../text/markdown";
 import { definePainter, EMPTY_BLOCK, type Hit } from "../paint";
 
 const linkSchemes = signal<readonly string[]>([]);
@@ -31,6 +32,21 @@ export function setLinkSchemes(schemes: Iterable<string>): void {
 	if (next.length !== current.length || next.some((scheme, i) => scheme !== current[i])) linkSchemes.set(next);
 }
 
+const kTableWidths = Symbol("pi-tui.markdown.table-widths");
+
+interface MarkdownNode extends UiNode {
+	[kTableWidths]?: NonNullable<MarkdownOptions["tableWidths"]>;
+}
+
+/** A streaming node owns its table locks through final paint and releases them on disposal. */
+export function markdownTableWidths(node: MarkdownNode, stream: boolean): MarkdownOptions["tableWidths"] {
+	if (stream && !node[kTableWidths]) {
+		node[kTableWidths] = new Map();
+		node.onDispose(() => delete node[kTableWidths]);
+	}
+	return node[kTableWidths];
+}
+
 definePainter("md", (node, cx) => {
 	const props = node.props() as TspMarkdownProps;
 	const text = props.text ?? "";
@@ -40,6 +56,7 @@ definePainter("md", (node, cx) => {
 	const frame = renderMarkdownFrame(text, cx.width, {
 		theme: cx.theme,
 		stream,
+		tableWidths: markdownTableWidths(node, stream),
 		marks: props.marks,
 		hyperlinks: cx.hyperlinks,
 		textSizing: cx.textSizing,

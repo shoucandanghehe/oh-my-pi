@@ -120,6 +120,22 @@ const DOCUMENTS = [
 	["Report follows.", "", "```", "## Summary", "", "| a | b |", "|---|---|", "| 1 | 2 |"].join("\n"),
 ];
 
+it("keeps a streamed table's columns after it settles and finalizes", () => {
+	const header = "Intro.\n\n| Key | Value |\n| --- | --- |\n| a | b |\n";
+	const tableWidths = new Map<string, Map<number, readonly number[]>>();
+	const rows = (text: string, streaming: boolean) =>
+		plainRows(renderMarkdownFrame(text, 60, { ...stream, stream: streaming, tableWidths }).rows);
+	const first = rows(`${header}| a`, true);
+	const final = `${header}| abcdefghijk | b |\n\nNext paragraph`;
+	const narrower = " ┌─────┬───────┐";
+	expect(first).toContain(narrower);
+	expect(rows(final, true)).toContain(narrower);
+	const completed = rows(final, false);
+	expect(completed).toContain(narrower);
+	for (const part of ["abc", "def", "ghi", "jk"]) expect(completed.join("\n")).toContain(part);
+	expect(plainRows(renderMarkdownFrame(final, 60, { ...stream, stream: false }).rows)).not.toContain(narrower);
+});
+
 describe("stable prefix", () => {
 	for (const [index, document] of DOCUMENTS.entries()) {
 		for (const width of [20, 40, 80]) {

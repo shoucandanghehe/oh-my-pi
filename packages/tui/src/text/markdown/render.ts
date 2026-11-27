@@ -79,6 +79,8 @@ export interface MarkdownOptions {
 	 * at the end of a table keeps the table's layout and height.
 	 */
 	readonly stream?: boolean;
+	/** Per-document locks: keep a streamed table's width when it grows and finalizes. */
+	readonly tableWidths?: Map<string, Map<number, readonly number[]>>;
 	/**
 	 * Columns code fence bodies are indented by (default 2). 0 draws them and
 	 * their ``` fence rows literally: at the row's column 0 whatever quote,
@@ -123,6 +125,7 @@ interface Renderer {
 	readonly header: InlineContext;
 	/** The table whose last row is still being written, and its open cell. */
 	readonly growing?: { readonly table: Tokens.Table; readonly cell: number };
+	tableWidths?: Map<number, readonly number[]>;
 	/**
 	 * The fenced code block a streaming part consists of, and how many of its rows are final once
 	 * drawn ({@link streamingFence}): `renderCode` records the count as it draws them.
@@ -203,6 +206,7 @@ function renderBlock(r: Renderer, token: Token, width: number, ctx: InlineContex
 				token as Tokens.Table,
 				width,
 				r.growing?.table === token ? r.growing.cell : -1,
+				r.tableWidths,
 			);
 		case "hr":
 			return [renderRule(r, (token as unknown as RuleToken).char, width)];
@@ -604,6 +608,7 @@ function renderPart(
 	key: string | undefined | readonly (string | undefined)[],
 	open: boolean,
 	stable?: { rows: number },
+	offset = 0,
 ): Row[] {
 	const r = createRenderer(tokens, width, options);
 	const paddingX = options.paddingX ?? 0;
@@ -616,14 +621,31 @@ function renderPart(
 	let previous: Token | undefined;
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i]!;
+		const start = offset;
+		offset += token.raw.length;
 		if (isBlank(token)) {
 			previous = token;
 			continue;
 		}
+		r.tableWidths = undefined;
+		if (options.tableWidths && token.type === "table") {
+			const first = token.raw.indexOf("\n");
+			const delimiter = token.raw.indexOf("\n", first + 1);
+			if (first >= 0 && delimiter >= 0) {
+				const key = `${start}:${token.raw.slice(0, delimiter)}`;
+				let lock = options.tableWidths.get(key);
+				// Lock once a body row has finished, not at the header alone.
+				if (!lock && options.stream && open && i === uncachedAt && token.raw.includes("\n", delimiter + 1)) {
+					lock = new Map();
+					options.tableWidths.set(key, lock);
+				}
+				r.tableWidths = lock;
+			}
+		}
 		// A reference definition draws nothing but still ends the block before it with a blank row.
 		let rows: readonly Row[];
 		if (token.type === "def") rows = [];
-		else if ((typeof key === "object" ? key[i] : key) === undefined || i === uncachedAt) {
+		else if ((typeof key === "object" ? key[i] : key) === undefined || i === uncachedAt || r.tableWidths) {
 			rows = renderTopBlock(r, token, contentWidth, width, paddingX);
 		} else {
 			const blockKey = `${typeof key === "object" ? key[i] : key}\0${token.raw}`;
@@ -924,7 +946,8 @@ function renderPriorDefinitions(
 		if (!keys.has(links)) keys.set(links, blockKey(width, options, links));
 		return keys.get(links);
 	});
-	return renderPart(lexed.tokens, inner, width, options, blockKeys, open, stable);
+	const offset = blocks.slice(0, from).reduce((sum, token) => sum + token.raw.length, 0);
+	return renderPart(lexed.tokens, inner, width, options, blockKeys, open, stable, offset);
 }
 
 /** Rows of `source` at `width`, padded to the full width. Empty or blank sources have no rows. */
@@ -987,11 +1010,10 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 			fence.rows > 0 ? paddingY + fence.rows : 0,
 		);
 	}
-	// Rows of a settled head are a function of its source alone (each block resolves reference links
-	// against the definitions before it), so they never change as the document grows: the terminal may
-	// already hold them in history. Drawn once per prefix, options and width.
+	// Settled blocks resolve references only against prior definitions. A pinned table also depends
+	// on when it was first painted; such a head cannot share other documents' cached rows.
 	let headRows: readonly Row[] | undefined;
-	const headKey = blockKey(width, options, "");
+	const headKey = options.tableWidths?.size ? undefined : blockKey(width, options, "");
 	let settledKey: string | undefined;
 	if (headKey !== undefined) {
 		let prefix = head?.tokens.length === settled ? head.prefix : undefined;
@@ -1010,9 +1032,10 @@ export function renderMarkdownFrame(source: string, width: number, given: Markdo
 		if (settledKey !== undefined) settledHeads.set(settledKey, headRows);
 	}
 	const fence = { rows: 0 };
+	const offset = tokens.slice(0, settled).reduce((sum, token) => sum + token.raw.length, 0);
 	const tailRows = defined
 		? renderPriorDefinitions(tokens, settled, inner, width, options, true, fence)
-		: renderPart(tokens.slice(settled), inner, width, options, key, true, fence);
+		: renderPart(tokens.slice(settled), inner, width, options, key, true, fence, offset);
 	const separator = headRows.length > 0 && tailRows.length > 0;
 	const rows: Row[] = [];
 	for (let i = 0; i < paddingY; i++) rows.push(spaces(width));

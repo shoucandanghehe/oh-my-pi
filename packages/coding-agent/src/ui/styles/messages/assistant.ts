@@ -23,7 +23,7 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, type Hit, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { paintImage } from "@oh-my-pi/pi-tui/term/painters/image";
-import { routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
+import { markdownTableWidths, routedLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
 import {
 	type MarkdownFrame,
 	type MarkdownLook,
@@ -149,6 +149,7 @@ function markdownRows(child: MarkdownNode, cx: PaintContext, thinking: boolean):
 		codeIndent: thinking ? undefined : 0,
 		textStyle,
 		stream: props.stream === true,
+		tableWidths: markdownTableWidths(child, props.stream === true),
 		hyperlinks,
 		linkTarget: links?.size ? href => links.get(href) : undefined,
 		linkSchemes: schemes?.length ? schemes : undefined,

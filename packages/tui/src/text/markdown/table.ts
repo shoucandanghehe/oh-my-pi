@@ -124,7 +124,13 @@ function fitColumns(natural: readonly number[], words: readonly number[], availa
  * being written while streaming: it does not size its column (rows above
  * keep their layout) and its row keeps the height its finished cells need.
  */
-export function renderTable(env: TableEnvironment, token: Tokens.Table, width: number, openCell = -1): string[] {
+export function renderTable(
+	env: TableEnvironment,
+	token: Tokens.Table,
+	width: number,
+	openCell = -1,
+	widthsBySize?: Map<number, readonly number[]>,
+): string[] {
 	const count = token.header.length;
 	if (count === 0) return [];
 	const overhead = 3 * count + 1;
@@ -133,20 +139,24 @@ export function renderTable(env: TableEnvironment, token: Tokens.Table, width: n
 
 	const headerTexts = token.header.map(cell => env.cellText(cell, true));
 	const bodyTexts = token.rows.map(row => row.map(cell => env.cellText(cell, false)));
-	const natural = headerTexts.map(text => Math.max(0, ...lineWidths(text)));
-	const words = headerTexts.map(text => Math.max(1, longestWord(text)));
 	const lastRow = bodyTexts.length - 1;
 	const growing = lastRow > 0 ? openCell : -1;
-	for (const [index, row] of bodyTexts.entries()) {
-		row.forEach((text, i) => {
-			if (index === lastRow && i === growing) return;
-			natural[i] = Math.max(natural[i] ?? 0, ...lineWidths(text));
-			words[i] = Math.max(words[i] ?? 1, longestWord(text));
-		});
+	let widths = widthsBySize?.get(width);
+	if (!widths) {
+		const natural = headerTexts.map(text => Math.max(0, ...lineWidths(text)));
+		const words = headerTexts.map(text => Math.max(1, longestWord(text)));
+		for (const [index, row] of bodyTexts.entries()) {
+			row.forEach((text, i) => {
+				if (index === lastRow && i === growing) return;
+				natural[i] = Math.max(natural[i] ?? 0, ...lineWidths(text));
+				words[i] = Math.max(words[i] ?? 1, longestWord(text));
+			});
+		}
+		const naturalTotal = natural.reduce((a, b) => a + b, 0) + overhead;
+		widths =
+			naturalTotal <= width ? natural.map((w, i) => Math.max(w, words[i]!)) : fitColumns(natural, words, available);
+		widthsBySize?.set(width, widths);
 	}
-	const naturalTotal = natural.reduce((a, b) => a + b, 0) + overhead;
-	const widths =
-		naturalTotal <= width ? natural.map((w, i) => Math.max(w, words[i]!)) : fitColumns(natural, words, available);
 
 	const { box } = env;
 	const h = box.horizontal;
