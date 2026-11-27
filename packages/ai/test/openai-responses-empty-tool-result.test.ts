@@ -74,10 +74,14 @@ describe("Responses API empty tool result", () => {
 		expect(findFunctionCallOutput(items)).toBe("");
 	});
 
-	it("encodes an image-only result as native output content", () => {
+	it("encodes an image-only result without sending blank text blocks", () => {
 		const items = buildResponsesInput({
 			model,
-			context: makeContext([{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" }]),
+			context: makeContext([
+				{ type: "text", text: "" },
+				{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+				{ type: "text", text: " \t\n" },
+			]),
 			strictResponsesPairing: true,
 			supportsImageDetailOriginal: true,
 		});

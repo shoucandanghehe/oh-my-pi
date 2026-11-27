@@ -3043,6 +3043,7 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 					if (block.type === "image") return [convertResponsesInputImage(block, supportsImageDetailOriginal)];
 					if (block.type !== "text") return [];
 					const text = block.text.toWellFormed();
+					if (text.trim().length === 0) return [];
 					return [{ type: "input_text", text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text }];
 				})
 			: outputText;
