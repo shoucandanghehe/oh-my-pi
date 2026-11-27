@@ -11,6 +11,8 @@ import type { EmojiSupport } from "../theme/contract";
 /** A mouse report (SGR), in screen cells (0-based). */
 export interface MouseEvent {
 	readonly row: number;
+	/** Vertical position within this cell, from SGR pixel reports. */
+	readonly rowFraction?: number;
 	readonly col: number;
 	readonly button: "left" | "middle" | "right" | "wheel-up" | "wheel-down" | "wheel-left" | "wheel-right" | "none";
 	readonly action: "press" | "release" | "move" | "drag";

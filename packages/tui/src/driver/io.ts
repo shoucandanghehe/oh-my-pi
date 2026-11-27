@@ -63,8 +63,8 @@ export interface TerminalInput extends Pick<
 	drainInput?(flush: () => Promise<void>): Promise<void>;
 	/** Relinquish stdin synchronously (also works when a drain is in progress). */
 	stop(): void;
-	/** Current alternate-screen keyboard bytes (they change once the keyboard probe settles). */
-	keyboardScreenModes(): KeyboardScreenModes;
+	/** Keyboard bytes for this screen switch, accounting for replies first received in the alternate screen. */
+	keyboardScreenModes(enteringAlternate: boolean): KeyboardScreenModes;
 	setMouse(tracking: MouseTracking, reportFocus?: boolean): void;
 	/** Re-query the background color (OSC 11); the answer arrives through `onCapabilities`. */
 	refreshAppearance(): void;

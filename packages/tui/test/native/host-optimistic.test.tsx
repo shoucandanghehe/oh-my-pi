@@ -69,6 +69,7 @@ afterEach(async () => {
 /** A host on in-memory streams whose terminal answers nothing until the test feeds it. */
 async function start(env: Record<string, string>, screen?: () => "inline" | "fullscreen") {
 	const stdin = new Stdin();
+	const stdout = new Stdout();
 	const writes: string[] = [];
 	const surface = createSurface(() => ({ main: <text>hello there</text> }));
 	const host = await startHost({
@@ -83,7 +84,7 @@ async function start(env: Record<string, string>, screen?: () => "inline" | "ful
 			probeTimeoutMs: 1,
 			sink: { write: data => void writes.push(data), flush: () => Promise.resolve() },
 			stdin,
-			stdout: new Stdout(),
+			stdout,
 			events: new Emitter(),
 		},
 	});
@@ -97,6 +98,10 @@ async function start(env: Record<string, string>, screen?: () => "inline" | "ful
 		/** TSP messages of `verb` written so far. */
 		sent: (verb: string) => out().split(`\x1b_tsp;${verb};`).length - 1,
 		feed: (data: string) => stdin.emit("data", Buffer.from(data)),
+		resize: () => {
+			stdout.columns++;
+			stdout.emit("resize");
+		},
 		raw: () => stdin.isRaw,
 		changes: () => changes,
 	};
@@ -179,7 +184,7 @@ describe("startHost optimistic native start in a Tern pane", () => {
 		expect(rows(h.out())).toContain("hello there");
 	});
 
-	it("exposes the fullscreen workspace only after Tern declines", async () => {
+	it("hands a resizing fullscreen workspace back to Tern on late hello without popping the parent keyboard stack", async () => {
 		const h = await start({ TERM_PROGRAM: "tern" }, () => "fullscreen");
 		expect(h.host.renderBackend).toBe("native");
 		expect(h.host.ansiWorkspace).toBeUndefined();
@@ -189,6 +194,19 @@ describe("startHost optimistic native start in a Tern pane", () => {
 		expect(h.changes()).toBe(1);
 		expect(h.out()).toContain("\x1b[?1049h");
 		expect(rows(h.out())).toContain("hello there");
+		h.feed("\x1b[?0u");
+		h.resize();
+		const before = h.out().length;
+		h.feed(HELLO_REPLY);
+		expect(h.host.native).toBe(true);
+		expect(h.host.ansiWorkspace).toBeUndefined();
+		expect(h.out().slice(before)).toContain("\x1b[<u\x1b[?1049l\x1b[>5u");
+		expect(h.sent("o")).toBe(2);
+		const stopped = h.host.stop();
+		h.feed(DA1);
+		await stopped;
+		expect(h.out().match(/\x1b\[>5u/g)).toHaveLength(2);
+		expect(h.out().match(/\x1b\[<u/g)).toHaveLength(2);
 	});
 
 	it("falls back to rows when the terminal answers an unsupported version", async () => {

@@ -95,7 +95,7 @@ describe("ProcessTerminalInput lifecycle", () => {
 		expect(out).not.toContain("\x1b[?1004h");
 		expect(out).toContain("\x1b[?u\x1b[c");
 		expect(out).toContain("\x1b]11;?\x07\x1b[c");
-		for (const mode of [2026, 2048, 2031, 2004, 1010, 1011]) expect(out).toContain(`\x1b[?${mode}$p`);
+		for (const mode of [2026, 2048, 2031, 2004, 1010, 1011, 1016]) expect(out).toContain(`\x1b[?${mode}$p`);
 		expect(out).toContain("\x1b[>0q");
 		expect(out).toContain("\x1b[16t");
 		// Image support comes from the terminal's identity (and the SIXEL geometry query), never a Kitty graphics probe.
@@ -128,7 +128,7 @@ describe("ProcessTerminalInput lifecycle", () => {
 		await started;
 		h.writes.length = 0;
 		await h.input.stop();
-		expect(h.out()).toContain("\x1b[?2004l\x1b[?5522l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?1l\x1b>");
+		for (const mode of [2004, 5522, 1016, 1006, 1003, 1002, 1000, 1]) expect(h.out()).toContain(`\x1b[?${mode}l`);
 		expect(h.stdin.isRaw).toBe(false);
 		expect(h.stdin.paused).toBe(true);
 		expect(h.stdin.count("data")).toBe(0);
@@ -300,7 +300,7 @@ describe("ProcessTerminalInput keyboard negotiation", () => {
 			h.feed(DA1);
 			expect(h.out()).toContain("\x1b[>4;2m");
 			expect(h.input.capabilities.kittyKeyboard).toBe(false);
-			expect(h.input.keyboardScreenModes()).toEqual({
+			expect(h.input.keyboardScreenModes(true)).toEqual({
 				enterAlt: "\x1b[>4;2m",
 				leaveAltBefore: "",
 				leaveAltAfter: "",
@@ -330,7 +330,7 @@ describe("ProcessTerminalInput keyboard negotiation", () => {
 		const h = setup();
 		void h.input.start();
 		h.feed("\x1b[?1u", DA1, DA1, DA1);
-		expect(h.input.keyboardScreenModes()).toEqual({
+		expect(h.input.keyboardScreenModes(true)).toEqual({
 			enterAlt: "\x1b[>5u",
 			leaveAltBefore: "\x1b[<u",
 			leaveAltAfter: "\x1b[=5;1u",
@@ -627,9 +627,24 @@ describe("ProcessTerminalInput input, resize, title and mouse", () => {
 		h.input.setMouse("click");
 		h.input.setMouse("any");
 		h.input.setMouse("any");
-		expect(h.writes).toEqual(["\x1b[?1000h\x1b[?1006h", "\x1b[?1000l\x1b[?1003h\x1b[?1006h"]);
+		expect(h.writes).toEqual(["\x1b[?1000h\x1b[?1006h", "\x1b[?1000l\x1b[?1003h"]);
 		await h.input.stop();
 		expect(h.out()).toContain("\x1b[?1003l\x1b[?1006l");
+	});
+
+	it("only interprets SGR coordinates as pixels after both the mode and cell geometry are known", () => {
+		const h = setup();
+		void h.input.start();
+		h.input.setMouse("drag", true);
+		h.feed("\x1b[?1016;2$y", "\x1b[<0;4;3M");
+		expect(h.out()).not.toContain("\x1b[?1016h");
+		expect(h.received.at(-1)).toMatchObject({ mouse: { col: 3, row: 2 } });
+		h.feed("\x1b[6;16;8t", "\x1b[<32;4;3M", "\x1b[<32;17;25M");
+		expect(h.out()).toContain("\x1b[?1016h");
+		expect(h.received.at(-2)).toMatchObject({ mouse: { col: 0, row: 0, rowFraction: 0.125 } });
+		expect(h.received.at(-1)).toMatchObject({ mouse: { col: 2, row: 1, rowFraction: 0.5 } });
+		h.events.emit("exit");
+		expect(h.out()).toContain("\x1b[?1016l");
 	});
 
 	it("wraps passthrough for the multiplexer it runs in", () => {
@@ -671,7 +686,7 @@ describe("ProcessTerminalInput terminal quirks", () => {
 		h.writes.length = 0;
 		await h.input.stop();
 		// Paste modes off (bracketed, and the enhanced one an app may have asked for), mouse reporting, then the keypad.
-		expect(h.out()).toContain("\x1b[?2004l\x1b[?5522l\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?1l\x1b>");
+		expect(h.out()).toContain("\x1b[?1000l\x1b[?1l\x1b>");
 	});
 
 	it("re-asserts bracketed paste before reads inside tmux, never mid-paste", async () => {

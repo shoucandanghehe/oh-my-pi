@@ -135,7 +135,7 @@ export interface FrameWriterOptions {
 	/** Cursor position report, 0-based; null when the terminal does not answer in time. */
 	readonly queryCursor?: () => Promise<{ readonly row: number; readonly col: number } | null>;
 	/** Bytes keeping keyboard reporting alive across alternate-screen switches. */
-	readonly keyboardScreenModes?: () => KeyboardScreenModes;
+	readonly keyboardScreenModes?: (enteringAlternate: boolean) => KeyboardScreenModes;
 	readonly images?: FrameImages;
 	/** The frame source can answer `replay` invalidations (otherwise resizes never replay). */
 	readonly canReplay?: () => boolean;
@@ -770,11 +770,11 @@ export class FrameWriter {
 		this.#altShown = null;
 		this.#visible = undefined;
 		this.#expectEcho = this.#echoes();
-		return `${ALT_ENTER}${this.#options.keyboardScreenModes?.().enterAlt ?? ""}`;
+		return `${ALT_ENTER}${this.#options.keyboardScreenModes?.(true).enterAlt ?? ""}`;
 	}
 
 	#leaveAlt(): string {
-		const modes = this.#options.keyboardScreenModes?.();
+		const modes = this.#options.keyboardScreenModes?.(false);
 		this.#alt = false;
 		this.#fullscreen = false;
 		this.#altShown = null;

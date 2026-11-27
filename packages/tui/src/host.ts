@@ -37,10 +37,10 @@ import type { AnsiWorkspace, WorkspacePaneMinimum } from "./workspace";
 import type { Theme } from "./theme/contract";
 import type { FramePlan, InputEvent, TerminalDriver } from "./driver/contract";
 import type { MouseTracking } from "./driver/io";
-import { CURSOR_HIDE } from "./driver/output/ansi";
+import { CURSOR_HIDE, CURSOR_SHOW } from "./driver/output/ansi";
 import { logger } from "@oh-my-pi/pi-utils";
 import { markExpectedCleanupError } from "@oh-my-pi/pi-utils/postmortem";
-import { type Accessor, type Reactive, signal } from "./reactive";
+import { type Accessor, createRoot, effect, type Reactive, signal } from "./reactive";
 
 /** Configuration of {@link startHost}. */
 export interface HostOptions extends Pick<
@@ -289,7 +289,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 	let stopped = false;
 	let haltRenderer: (() => void) | undefined;
 	let cancelConfirmation: (() => void) | undefined;
-	let mouseTracking: MouseTracking | undefined;
+	const requestedMouse = signal<MouseTracking | undefined>(undefined);
 	const driver = createTerminalDriver(
 		{
 			isLoopStalled: () => watchdog.isStalled(),
@@ -366,9 +366,13 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			...(debug ? { onFrame: frame => debug.sent(frame) } : {}),
 		});
 		debug?.start({ surface: options.surface, driver, native: true, theme: options.theme, stop: host.stop });
+		const close = (): void => {
+			backend.stop(false);
+			driver.writeRaw(CURSOR_SHOW);
+		};
 		const halt = (): void => {
 			try {
-				backend.stop(false);
+				close();
 			} finally {
 				connection.close();
 				nativeConnection = undefined;
@@ -407,7 +411,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			extendSelection: () => false,
 			requestFrame: () => {},
 			async suspend(run) {
-				backend.stop(false);
+				close();
 				await driver.stop();
 				try {
 					return await run();
@@ -457,7 +461,21 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			environment: backend.environment,
 			stop: host.stop,
 		});
+		const watchMouse = (): (() => void) =>
+			createRoot(dispose => {
+				effect(() => {
+					const fullscreen = options.screen?.() === "fullscreen";
+					let tracking = requestedMouse() ?? (fullscreen ? "drag" : "off");
+					if (fullscreen && tracking === "drag" && backend.workspace?.pointerMotion()) tracking = "any";
+					driver.setMouse(tracking, fullscreen);
+				});
+				return dispose;
+			});
+		let stopMouse = watchMouse();
+		let released = false;
 		haltRenderer = () => {
+			released = true;
+			stopMouse();
 			debug?.stop();
 			backend.dispose();
 		};
@@ -477,7 +495,6 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			checkoutShown: () => false,
 			requestFrame: () => backend.requestRender(),
 			setMouse(tracking) {
-				driver.setMouse(tracking, options.screen?.() === "fullscreen");
 				if (tracking === "off") backend.clearHover();
 			},
 			scroll: by => backend.scroll(by),
@@ -486,6 +503,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			extendSelection: motion => backend.extendSelection(motion),
 			async suspend(run) {
 				backend.renderNow();
+				stopMouse();
 				backend.stop();
 				await driver.stop();
 				try {
@@ -493,16 +511,18 @@ export async function startHost(options: HostOptions): Promise<Host> {
 				} finally {
 					if (!stopped) {
 						await driver.start();
-						// Fullscreen-only sessions have no normal-screen content to replay.
-						const fullscreen = options.screen?.() === "fullscreen";
-						if (fullscreen) driver.setMouse(mouseTracking ?? "off", true);
-						if (!fullscreen || backend.wroteHistory) driver.resetDisplay();
-						backend.start();
+						if (!released) {
+							// A supported hello during restart may have already handed these rows to Tern.
+							stopMouse = watchMouse();
+							if (options.screen?.() !== "fullscreen" || backend.wroteHistory) driver.resetDisplay();
+							backend.start();
+						}
 					}
 				}
 			},
 			stop() {
 				// Only the original surface is flushed to normal-screen history.
+				stopMouse();
 				try {
 					backend.flush();
 				} finally {
@@ -548,7 +568,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			return () => changeListeners.delete(listener);
 		},
 		setMouse(tracking) {
-			mouseTracking = tracking;
+			requestedMouse.set(tracking);
 			renderer.setMouse(tracking);
 		},
 		scroll: by => renderer.scroll(by),
@@ -569,6 +589,25 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		},
 	};
 	renderer = connection ? nativeRenderer(connection) : termRenderer();
+	// A DA1 or startup deadline can win the race with Tern's reply. Keep listening to the
+	// original probe; do not open another native surface until a supported hello confirms it.
+	const listenLate = (): void => {
+		if (!native || !driver.tspExpected) return;
+		const late = TspConnection.assume(driver);
+		cancelConfirmation = () => late.close();
+		const off = late.onHello(confirmed => {
+			off();
+			cancelConfirmation = undefined;
+			if (!confirmed || stopped) return late.close();
+			// Do not flush the transcript into normal-screen history at a renderer handoff.
+			haltRenderer?.();
+			driver.finishFrames();
+			renderer = nativeRenderer(late);
+			renderer.setMouse(requestedMouse.peek() ?? "off");
+			changed();
+		});
+	};
+	if (!connection) listenLate();
 	offEarly();
 	for (const event of early) if (!options.intercept?.(event)) renderer.dispatch(event);
 	if (connection?.confirmation === "assumed") {
@@ -579,6 +618,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			logger.warn("TSP: terminal did not confirm the surface; falling back to rows", { reason });
 			renderer.stop();
 			renderer = termRenderer();
+			if (unconfirmed.confirmation !== "unsupported") listenLate();
 			changed();
 		};
 		const offHello = unconfirmed.onHello(confirmed => {

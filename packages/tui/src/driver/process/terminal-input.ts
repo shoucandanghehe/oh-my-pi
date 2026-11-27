@@ -225,6 +225,7 @@ export class ProcessTerminalInput implements TerminalInput {
 
 	// Keyboard negotiation.
 	#kittyFlags: number | null = null;
+	#enteredBeforeKitty = false;
 	#modifyOtherKeys = false;
 	#win32Input = false;
 	// Modes enabled after DECRQM confirmed them, restored on stop.
@@ -232,6 +233,8 @@ export class ProcessTerminalInput implements TerminalInput {
 	#colorSchemeReports = false;
 	#restoreModes: number[] = [];
 	#mouse: MouseTracking = "off";
+	#supportsPixelMouse = false;
+	#pixelMouse = false;
 	#reportFocus = false;
 	#titlePushed = false;
 	/** Re-assert bracketed paste before input and output: some hosts reset it (iTerm2's state toggle, tmux panes). */
@@ -535,6 +538,7 @@ export class ProcessTerminalInput implements TerminalInput {
 		}
 
 		this.#kittyFlags = null;
+		this.#enteredBeforeKitty = false;
 		this.#modifyOtherKeys = false;
 		this.#win32Input = false;
 		this.#decoder.kitty = false;
@@ -543,6 +547,8 @@ export class ProcessTerminalInput implements TerminalInput {
 		this.#colorSchemeReports = false;
 		this.#restoreModes = [];
 		this.#mouse = "off";
+		this.#supportsPixelMouse = false;
+		this.#pixelMouse = false;
 		this.#reportFocus = false;
 		this.#titlePushed = false;
 		this.#sixelAdvertised = false;
@@ -576,11 +582,31 @@ export class ProcessTerminalInput implements TerminalInput {
 			this.#reportFocus = reportFocus;
 			this.#port.write(reportFocus ? "\x1b[?1004h" : "\x1b[?1004l");
 		}
-		if (tracking === this.#mouse) return;
+		if (tracking === this.#mouse) {
+			this.#syncPixelMouse();
+			return;
+		}
 		let out = this.#mouse === "off" ? "" : `\x1b[?${MOUSE_MODES[this.#mouse]}l`;
-		out += tracking === "off" ? "\x1b[?1006l" : `\x1b[?${MOUSE_MODES[tracking]}h\x1b[?1006h`;
+		if (tracking === "off") out += "\x1b[?1006l";
+		else out += `\x1b[?${MOUSE_MODES[tracking]}h${this.#mouse === "off" ? "\x1b[?1006h" : ""}`;
 		this.#mouse = tracking;
 		this.#port.write(out);
+		this.#syncPixelMouse();
+	}
+
+	#syncPixelMouse(): void {
+		const cell = this.#capabilities.cell;
+		const pixel = !!(
+			this.#reportFocus &&
+			this.#supportsPixelMouse &&
+			this.#mouse !== "off" &&
+			cell &&
+			cell.w > 0 &&
+			cell.h > 0
+		);
+		if (pixel === this.#pixelMouse) return;
+		this.#pixelMouse = pixel;
+		this.#port.write(pixel ? "\x1b[?1016h" : "\x1b[?1016l");
 	}
 
 	refreshAppearance(): void {
@@ -639,14 +665,18 @@ export class ProcessTerminalInput implements TerminalInput {
 		return wrapPassthrough(sequence, this.#multiplexer);
 	}
 
-	keyboardScreenModes(): KeyboardScreenModes {
+	keyboardScreenModes(enteringAlternate: boolean): KeyboardScreenModes {
+		// When negotiation first pushed flags inside the alternate screen, the main stack has
+		// no push of ours yet. Establish it after leaving, so stop pops exactly what we own.
+		const pushMain = !enteringAlternate && this.#enteredBeforeKitty;
+		this.#enteredBeforeKitty = enteringAlternate && this.#kittyFlags === null;
 		if (this.#kittyFlags !== null) {
 			// Kitty flags are per screen: push on entry, pop before leaving, and re-assert the main
 			// screen's flags after (some Windows Terminal builds drop them on `?1049l`).
 			return {
 				enterAlt: `\x1b[>${this.#kittyFlags}u`,
 				leaveAltBefore: "\x1b[<u",
-				leaveAltAfter: `\x1b[=${this.#kittyFlags};1u`,
+				leaveAltAfter: pushMain ? `\x1b[>${this.#kittyFlags}u` : `\x1b[=${this.#kittyFlags};1u`,
 			};
 		}
 		// modifyOtherKeys is one global flag: re-assert on entry, never reset on exit.
@@ -696,7 +726,7 @@ export class ProcessTerminalInput implements TerminalInput {
 		// The user's own cursor shape: a Vim Normal-mode block must not outlive the session in their shell.
 		if (this.#cursorShape !== undefined && this.#cursorShape !== "default") out += "\x1b[0 q";
 		// Mouse reporting off whoever turned it on: a program that shared the terminal may have left it set.
-		out += `\x1b[?1006l\x1b[?1003l\x1b[?1000l${NORMAL_KEYS}`;
+		out += `\x1b[?1016l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l${NORMAL_KEYS}`;
 		if (this.#titlePushed) out += "\x1b[23;0t";
 		if (this.#graphemeClustering) out += "\x1b[?2027l";
 		if (this.#unicodeVersionPushed) out += WEZTERM_UNICODE_POP;
@@ -798,11 +828,25 @@ export class ProcessTerminalInput implements TerminalInput {
 		const next = { ...this.#capabilities, ...patch };
 		if (sameCapabilities(next, this.#capabilities)) return;
 		this.#capabilities = next;
+		if (patch.cell) this.#syncPixelMouse();
 		for (const listener of this.#capabilityListeners) listener(next);
 	}
 
 	#onInput(event: InputEvent): void {
 		if (!this.#started) return;
+		if (event.type === "mouse" && this.#pixelMouse) {
+			const cell = this.#capabilities.cell!;
+			const row = event.mouse.row / cell.h;
+			event = {
+				type: "mouse",
+				mouse: {
+					...event.mouse,
+					row: Math.floor(row),
+					col: Math.floor(event.mouse.col / cell.w),
+					rowFraction: (event.mouse.row % cell.h) / cell.h,
+				},
+			};
+		}
 		if (event.type === "tsp" && event.verb === "r" && !this.#capabilities.tsp) {
 			try {
 				const reply = JSON.parse(event.body) as { r?: unknown };
@@ -841,7 +885,7 @@ export class ProcessTerminalInput implements TerminalInput {
 	#modeQueries(): string {
 		// DECRQM: synchronized output, in-band resize, color-scheme reports, bracketed paste,
 		// xterm scroll-to-bottom on output/keypress.
-		let out = "\x1b[?2026$p\x1b[?2048$p\x1b[?2031$p\x1b[?2004$p\x1b[?1010$p\x1b[?1011$p";
+		let out = "\x1b[?2026$p\x1b[?2048$p\x1b[?2031$p\x1b[?2004$p\x1b[?1010$p\x1b[?1011$p\x1b[?1016$p";
 		// Grapheme clustering (emoji presentation widths); a multiplexer's grid decides those itself.
 		if (!insideMultiplexer(this.#env)) out += "\x1b[?2027$p";
 		// XTVERSION and the cell size in pixels.
@@ -1157,6 +1201,10 @@ export class ProcessTerminalInput implements TerminalInput {
 		// DECRPM: 1 set, 2 reset, 3 permanently set; 0 unrecognized, 4 permanently reset.
 		const on = status >= 1 && status <= 3;
 		switch (mode) {
+			case 1016:
+				this.#supportsPixelMouse = on;
+				this.#syncPixelMouse();
+				return;
 			case 2026: {
 				const override = synchronizedOutputOverride(this.#env);
 				// Herdr's pane honors 2026 whatever its DECRQM answer says.

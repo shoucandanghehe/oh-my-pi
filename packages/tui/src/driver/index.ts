@@ -62,6 +62,8 @@ export interface ProcessTerminalDriver extends TerminalDriver, Pick<TerminalInpu
 	onReplay(listener: () => void): () => void;
 	setMouse(tracking: MouseTracking, reportFocus?: boolean): void;
 	refreshAppearance(): void;
+	/** Relinquish ANSI frames before the native renderer takes the same driver. Raw output stays live. */
+	finishFrames(): void;
 	/** `sequence` wrapped so it reaches the outer terminal through a multiplexer. */
 	passthrough(sequence: string): string;
 	/** Deliver `event` to the input listeners as if the terminal sent it (debug-socket input injection). */
@@ -265,7 +267,7 @@ export function createTerminalDriver(
 		resizeScrollback,
 		settleMs: options.resizeSettleMs,
 		queryCursor: () => terminal.queryCursor(),
-		keyboardScreenModes: () => terminal.keyboardScreenModes(),
+		keyboardScreenModes: entering => terminal.keyboardScreenModes(entering),
 		images,
 		canReplay: () => replayListeners.size > 0,
 		onInvalidate: (request: Invalidation) => {
@@ -391,6 +393,7 @@ export function createTerminalDriver(
 			return undefined;
 		},
 		viewportRow: row => writer.viewportRow(row),
+		finishFrames: () => writer.stop(true),
 		replaysOnResize: () => writer.replaysOnWidthChange(),
 		writeRaw: (data: string) => {
 			if (running) writer.writeRaw(data);
