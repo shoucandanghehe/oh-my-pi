@@ -356,6 +356,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		const box = this.#size.peek();
 		for (const target of targets) {
 			if (!current.panes.has(target)) continue;
+			if (options.canSplit && !options.canSplit(target, this.#panes.size === 1)) continue;
 			for (const edge of edges) {
 				const layout = insertPane(this.#layout.peek(), target, entry, edge, ratio, this.#sequence + 1);
 				const prospective = geometry(layout, box);
@@ -363,7 +364,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 				if (rect && prospective.panes.size === current.panes.size + 1) return { layout, rect, splits: 1 };
 			}
 		}
-		if (options.target !== undefined || options.edge !== undefined) return undefined;
+		if (options.target !== undefined || options.edge !== undefined || options.canSplit) return undefined;
 		return gridPlacement([...this.#panes.values()].map(pane => pane.leaf).concat(entry), entry, box, this.#sequence);
 	}
 
@@ -459,6 +460,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 					if (drop) {
 						this.#sequence++;
 						this.#layout.set(drop.root);
+						this.#panes.get(drag.id)?.mount.onManualLayout?.();
 					}
 				}
 			} else if (mouse.action === "release") this.#drag = undefined;
@@ -466,7 +468,17 @@ export class TerminalWorkspace implements AnsiWorkspace {
 				const { sash, start } = drag;
 				const pointer = sash.split.axis === "x" ? mouse.col : mouse.row;
 				const first = Math.max(sash.minFirst, Math.min(sash.total - sash.minSecond, sash.first + pointer - start));
+				const before = this.#geometry.read();
+				const current = before.sashes.find(candidate => candidate.split.index === sash.split.index);
+				if (!current || first === current.first) return undefined;
 				this.#layout.set(setRatio(this.#layout.peek(), sash.split.index, first / sash.total));
+				const after = this.#geometry.read();
+				for (const [id, rect] of before.panes) {
+					const resized = after.panes.get(id);
+					if (resized && (resized.width !== rect.width || resized.height !== rect.height)) {
+						this.#panes.get(id)?.mount.onManualLayout?.();
+					}
+				}
 			}
 			return undefined;
 		}

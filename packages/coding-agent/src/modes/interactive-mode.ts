@@ -1449,6 +1449,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Native side panes use a relay and cannot run an editor on that PTY here.
 			editInTerminal: this.shell.native() ? undefined : run => this.suspend(run),
 			knownCommand: text => this.isKnownSlashCommand(text),
+			showHub: () => {
+				const native = this.nativeWorkspace;
+				if (!native) {
+					this.shell.host?.ansiWorkspace?.focus("main");
+					this.showAgentHub();
+					return;
+				}
+				void native.client.focus(native.main).then(
+					() => {
+						if (this.sessionManager.getSessionId() === owner) this.showAgentHub();
+					},
+					error => this.showError(`Could not focus Main: ${String(error)}`),
+				);
+			},
 		});
 	}
 

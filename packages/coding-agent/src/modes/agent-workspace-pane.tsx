@@ -132,6 +132,7 @@ interface AgentPaneOptions {
 	readonly knownCommand: (text: string) => boolean;
 	readonly copyText?: (text: string) => Promise<void>;
 	readonly editInTerminal?: (run: () => Promise<string | null>) => Promise<string | null>;
+	readonly showHub?: () => void;
 }
 
 export interface AgentWorkspaceSurface extends NativeWorkspaceSurface {
@@ -628,6 +629,14 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			return pasteNative();
 		}
 		if (overlays.open()) return false;
+		if (
+			options.showHub &&
+			(keybindings.matches(key, "app.agents.hub") || keybindings.matches(key, "app.session.observe"))
+		) {
+			interacted = true;
+			options.showHub();
+			return true;
+		}
 		if (key.id === "escape" || matchesAppInterrupt(key, keybindings) || keybindings.matches(key, "app.clear")) {
 			const clear = keybindings.matches(key, "app.clear");
 			if (!clear && (composer.completing() || composer.vimConsumesEscape())) return false;

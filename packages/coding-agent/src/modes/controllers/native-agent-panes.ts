@@ -54,6 +54,7 @@ export function animatePanePetrification(
 /** Follow the running roster without reopening a dismissed pane or auto-closing a pinned one. */
 export class NativeAgentPanes {
 	readonly #panes = new Map<string, AgentPane>();
+	readonly #running = new Set<string>();
 	readonly #dismissed = new Set<string>();
 	#generation = 0;
 
@@ -65,20 +66,30 @@ export class NativeAgentPanes {
 		const pane = this.#panes.get(ref.id);
 		const running = event.type !== "removed" && ref.status === "running";
 		if (running) {
+			this.#running.add(ref.id);
 			if (pane) {
 				pane.cancelClose?.();
 				pane.cancelClose = undefined;
-			} else if (!this.#dismissed.has(ref.id)) {
-				void this.#open(ref.id, false).catch(this.options.error);
 			}
+			if ("get" in this.options.workspace) {
+				if (!pane && !this.#dismissed.has(ref.id)) void this.#open(ref.id, false).catch(this.options.error);
+			} else this.#fillVacancies();
 			return;
 		}
+		this.#running.delete(ref.id);
 		this.#dismissed.delete(ref.id);
 		if (pane) this.#scheduleClose(ref.id, pane);
 	}
 
 	open(id: string): Promise<void> {
 		return this.#open(id, true);
+	}
+
+	#fillVacancies(): void {
+		for (const id of this.#running) {
+			if (this.#panes.has(id) || this.#dismissed.has(id) || !this.options.isRunning(id)) continue;
+			void this.#open(id, false).catch(this.options.error);
+		}
 	}
 
 	async #open(id: string, manual: boolean): Promise<void> {
@@ -102,6 +113,11 @@ export class NativeAgentPanes {
 				entry.cancelClose?.();
 				this.#panes.delete(id);
 				if (this.options.isRunning(id)) this.#dismissed.add(id);
+				if (!("get" in workspace)) {
+					queueMicrotask(() => {
+						if (generation === this.#generation) this.#fillVacancies();
+					});
+				}
 			};
 			if ("get" in workspace) {
 				await workspace.open(
@@ -132,6 +148,12 @@ export class NativeAgentPanes {
 						return {
 							...mounted,
 							petrification,
+							onManualLayout: () => {
+								if (entry.manual) return;
+								entry.manual = true;
+								entry.cancelClose?.();
+								entry.cancelClose = undefined;
+							},
 							dispose: () => {
 								try {
 									mounted.dispose?.();
@@ -141,7 +163,20 @@ export class NativeAgentPanes {
 							},
 						};
 					},
-					{ label: id, focus: manual, minWidth: manual ? 24 : 36, minHeight: 6 },
+					{
+						label: id,
+						focus: manual,
+						minWidth: manual ? 24 : 36,
+						minHeight: 6,
+						canSplit: manual
+							? undefined
+							: (target, onlyPane) => {
+									if (target === "main") return onlyPane;
+									if (!target.startsWith("agent:")) return false;
+									const candidate = this.#panes.get(target.slice(6));
+									return candidate !== undefined && !candidate.manual && !candidate.protect?.();
+								},
+					},
 				);
 				if (!opened) {
 					if (!entry.protect) this.#panes.delete(id);
@@ -196,6 +231,7 @@ export class NativeAgentPanes {
 		const open = [...this.#panes];
 		this.#panes.clear();
 		this.#dismissed.clear();
+		this.#running.clear();
 		for (const [id, pane] of open) {
 			pane.cancelClose?.();
 			this.options.workspace.close(`agent:${id}`);

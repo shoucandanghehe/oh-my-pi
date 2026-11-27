@@ -317,6 +317,7 @@
 - Switching or previewing BTW topics in ANSI preserves each topic's reading position. New reuses the current blank topic and keeps its draft.
 - BTW follow-ups keep their original context and read-only tool results in the inline view and over RPC, including results collected before cancellation.
 - BTW panes edit the selected queued entry.
+- ANSI subagent panes refill available space and stay open after you rearrange them; the Agent Hub shortcut works from a subagent pane.
 - Subagents retain their scoped MCP tools when browser settings change.
 - HTML exports from preview binaries embed the matching viewer for offline use.
 - Resuming an idle GPT-6.2 session retains earlier reasoning across superseded tool results ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).

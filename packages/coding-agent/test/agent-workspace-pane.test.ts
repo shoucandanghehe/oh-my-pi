@@ -81,7 +81,16 @@ async function display(mount: AgentWorkspaceSurface) {
 	};
 }
 
-function workspaceAgent(id: string, options: { cwd?: string; assistant?: AssistantMessage; parkedFile?: string } = {}) {
+function workspaceAgent(
+	id: string,
+	options: {
+		cwd?: string;
+		assistant?: AssistantMessage;
+		parkedFile?: string;
+		showHub?: () => void;
+		nativeScroll?: boolean;
+	} = {},
+) {
 	const draft = new AgentPaneDraft();
 	const prompts: { text: string; options?: PromptOptions }[] = [];
 	const copied: string[] = [];
@@ -279,6 +288,7 @@ function workspaceAgent(id: string, options: { cwd?: string; assistant?: Assista
 					copyText: async text => {
 						copied.push(text);
 					},
+					showHub: options.showHub,
 				}),
 			);
 		},
@@ -503,6 +513,19 @@ test("a queued chip selects the second of identical texts and rejects a stale id
 	}
 });
 
+test("native agent pane routes Hub shortcuts", async () => {
+	let hubOpens = 0;
+	const agent = workspaceAgent("native keys", { showHub: () => hubOpens++ });
+	const pane = await agent.mount();
+	try {
+		pane.press("alt+a");
+		pane.press("ctrl+s");
+		expect(hubOpens).toBe(2);
+	} finally {
+		pane.close();
+	}
+});
+
 test("agent transcript controls copy and retry only that pane, beside its own model and extension status", async () => {
 	const first = workspaceAgent("CopyAgent", { assistant: answer("partial agent answer", "fixture failure") });
 	const second = workspaceAgent("OtherAgent");
@@ -673,7 +696,7 @@ test("idle automatic agent panes close unless pinned, being used or still focuse
 test("ANSI background panes gray while closing, and focusing one restores its live colors", async () => {
 	const clock = new ManualClock();
 	const surface = createSurface(() => ({}));
-	const memory = memoryTerminal({ columns: 120, rows: 20, env: { PI_TUI_RENDER_BACKEND: "app-viewport" } });
+	const memory = memoryTerminal({ columns: 120, rows: 12, env: { PI_TUI_RENDER_BACKEND: "app-viewport" } });
 	const theme = loadThemeSync("dark", { depth: "truecolor" });
 	const host = await startHost({ surface, driver: memory.options, theme: () => theme, native: false });
 	const workspace = host.ansiWorkspace!;
@@ -728,7 +751,9 @@ test("ANSI background panes gray while closing, and focusing one restores its li
 		const active = await nextFrame(() => {
 			status("used", true);
 			status("unattended", true);
+			status("replacement", true);
 		});
+		expect(Bun.stripANSI(active.viewport.join("\n"))).not.toContain("transcript for replacement");
 		const original = transcriptRow(active);
 		expect(Bun.stripANSI(original)).toContain("transcript for used");
 		const fading = await nextFrame(() => {
@@ -746,6 +771,75 @@ test("ANSI background panes gray while closing, and focusing one restores its li
 		const remaining = await nextFrame(() => clock.advance(3100));
 		expect(Bun.stripANSI(remaining.viewport.join("\n"))).toContain("transcript for used");
 		expect(Bun.stripANSI(remaining.viewport.join("\n"))).not.toContain("transcript for unattended");
+		expect(Bun.stripANSI(remaining.viewport.join("\n"))).toContain("transcript for replacement");
+		expect(workspace.active()).toBe("agent:used");
+	} finally {
+		policy.reset();
+		await host.stop();
+		surface.dispose();
+	}
+});
+
+test.each([
+	["resize", ["first", "second"]],
+	["redock", ["first"]],
+] as const)("ANSI %s keeps only the automatic panes the user actually operated", async (action, keep) => {
+	const clock = new ManualClock();
+	const surface = createSurface(() => ({}));
+	const memory = memoryTerminal({ columns: 200, rows: 25, env: { PI_TUI_RENDER_BACKEND: "app-viewport" } });
+	const theme = loadThemeSync("dark", { depth: "truecolor" });
+	const host = await startHost({ surface, driver: memory.options, theme: () => theme, native: false });
+	const workspace = host.ansiWorkspace!;
+	const ids = action === "resize" ? (["first", "second"] as const) : (["first", "second", "third"] as const);
+	const running = new Set<string>(ids);
+	const policy = new NativeAgentPanes({
+		clock,
+		workspace,
+		create: id => ({
+			surface: createSurface(() => ({ main: jsx("text", { text: `body for ${id}` }) })),
+			protectedFromAutoClose: () => false,
+		}),
+		isRunning: id => running.has(id),
+		error: error => {
+			throw error;
+		},
+	});
+	const status = (id: string, state: "running" | "idle") =>
+		policy.handle({ type: "status_changed", ref: { id, kind: "sub", status: state } as AgentRef });
+	const nextFrame = (change: () => void) => {
+		const { promise, resolve } = Promise.withResolvers<PresentedFrame>();
+		const off = host.onFrame(frame => {
+			off();
+			resolve(frame);
+		});
+		change();
+		return promise;
+	};
+	try {
+		const visible = await nextFrame(() => {
+			for (const id of ids) status(id, "running");
+		});
+		for (const id of ids) expect(Bun.stripANSI(visible.viewport.join("\n"))).toContain(`body for ${id}`);
+		const rows = visible.viewport.map(row => Bun.stripANSI(row));
+		await nextFrame(() => {
+			const drag = (x: number, y: number, toX: number, toY: number) =>
+				memory.feed(`\x1b[<0;${x};${y}M\x1b[<32;${toX};${toY}M\x1b[<0;${toX};${toY}m`);
+			const header = rows[0]!;
+			if (action === "resize") {
+				const sash = header.lastIndexOf("│") + 1;
+				const row = Math.floor(rows.length / 2);
+				drag(sash, row, sash - 3, row);
+			} else {
+				const source = header.indexOf("first") + 1;
+				const target = Math.floor(header.indexOf("│") / 2);
+				drag(source, 1, target, rows.length);
+			}
+		});
+		expect(workspace.focus("main")).toBe(true);
+		running.clear();
+		for (const id of ids) status(id, "idle");
+		clock.advance(3100);
+		expect(ids.filter(id => workspace.focus(`agent:${id}`))).toEqual([...keep]);
 	} finally {
 		policy.reset();
 		await host.stop();

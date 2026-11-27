@@ -24,6 +24,8 @@ export interface WorkspaceSurface {
 	readonly onAppViewportPasteRequest?: () => void;
 	/** Progress of the ANSI pane's exit animation. Undefined paints the original content. */
 	readonly petrification?: () => number | undefined;
+	/** A user redocked this pane or changed its size by dragging a sash. */
+	readonly onManualLayout?: () => void;
 	/** Release application resources in addition to the surface, which the workspace disposes. */
 	readonly dispose?: () => void;
 }
@@ -39,6 +41,8 @@ export interface WorkspacePaneMinimum {
 export interface WorkspaceOpenOptions extends WorkspacePaneMinimum {
 	/** Split this pane. Defaults to the active pane, then tries other visible panes if it cannot fit. */
 	readonly target?: string;
+	/** Restrict automatic placement to permitted splits, without reflowing the existing tree. */
+	readonly canSplit?: (id: string, onlyPane: boolean) => boolean;
 	/** Defaults to a right-hand split, then a bottom split if there is not enough width. */
 	readonly edge?: WorkspaceEdge;
 	/** Fraction of the available cells initially allocated to the new pane. Default 0.5. */
