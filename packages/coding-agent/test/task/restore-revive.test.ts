@@ -23,6 +23,7 @@ import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent
 import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const AGENT_ID = "Restored";
 const MOCK_API_SOURCE = "test/restore-revive";
@@ -173,6 +174,7 @@ async function restoreInterruptedChild(options: { transcript?: "handoff" | "fall
 		defaultThinkingLevel: Effort.Medium,
 	});
 	const session = {
+		...createSessionDefaults(),
 		sessionManager: {
 			getSessionFile: () => mainFile,
 			getCwd: () => cwd,

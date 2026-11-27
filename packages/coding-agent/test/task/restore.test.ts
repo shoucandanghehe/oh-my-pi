@@ -12,6 +12,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { restoreSession } from "@oh-my-pi/pi-coding-agent/task/restore";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const zeroUsage = {
 	input: 0,
@@ -119,6 +120,7 @@ describe("restoreSession (omp --restore)", () => {
 		const followUp = vi.spyOn(executorModule, "runSubagentFollowUpTurn").mockResolvedValue(result);
 		const restoreTurn = vi.fn(async () => true);
 		const session = {
+			...createSessionDefaults(),
 			sessionManager: { getSessionFile: () => mainFile },
 			asyncJobManager: manager,
 			settings: Settings.isolated(),

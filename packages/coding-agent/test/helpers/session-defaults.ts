@@ -12,6 +12,7 @@ export function createSessionDefaults() {
 		getLastAssistantMessage: () => undefined,
 		isRunActive: false,
 		wakeSources: undefined,
+		hasPausedAgents: () => false,
 		waitForRunEnd: async () => {},
 		abort: async () => {},
 		dispose: async () => {},
