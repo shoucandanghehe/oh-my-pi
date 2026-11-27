@@ -5,6 +5,7 @@ import type { Shell } from "@oh-my-pi/pi-coding-agent/ui/shell/shell";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { nativeShell } from "./helpers/native-shell";
 
 const TEXT_MIME = Buffer.from("text/plain").toString("base64");
 let shell: Shell | undefined;
@@ -88,5 +89,24 @@ describe("enhanced paste order through the terminal driver", () => {
 		term.feed(listing() + "c" + delivery("next ", 2));
 		await Promise.resolve();
 		expect(ctx.composer.text()).toBe("abnext c");
+	});
+
+	it("holds a native Send until enhanced paste completes without putting the pasted text in the next draft", async () => {
+		const ctx = createInteractiveModeContext({ session: { prewarmModelConnection: () => {} } });
+		ctx.interceptInput = handler => ctx.shell.interceptInput(handler);
+		ctx.addGlobalKeyHandler = handler => ctx.shell.addGlobalKeyHandler(handler);
+		await using ui = await nativeShell(ctx.shell);
+		new InputController(ctx).setupKeyHandlers();
+		const submitted: string[] = [];
+		ctx.composer.onSubmit = text => submitted.push(text);
+
+		ui.type(listing());
+		ui.send({ ev: "send", sf: ui.sf, id: ui.node("editor").id, text: "message" });
+		expect(submitted).toEqual([]);
+
+		ui.type(delivery("late"));
+		await Promise.resolve();
+		expect(submitted).toEqual(["message"]);
+		expect(ctx.composer.text()).toBe("");
 	});
 });

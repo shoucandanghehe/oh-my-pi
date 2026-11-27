@@ -461,9 +461,11 @@ export class Composer {
 	#replacing: ReplacementPicker | undefined;
 	readonly #decorators = signal<readonly ComposerDecorator[]>([]);
 	#submitTransform: SubmitTransform | undefined;
+	#deferSubmit: ComposerOptions["deferSubmit"];
 
 	constructor(options: ComposerOptions = {}) {
 		this.#options = options;
+		this.#deferSubmit = options.deferSubmit;
 		const text = options.text ?? "";
 		this.#text = signal(text);
 		this.#cursor = signal(text.length);
@@ -1822,7 +1824,7 @@ export class Composer {
 	/** Send the draft: atoms expanded, the submit transform applied, then the draft cleared into history. */
 	submit(): void {
 		if (this.#disableSubmit()) return;
-		if (this.#options.deferSubmit?.(() => this.submit())) return;
+		if (this.#deferSubmit?.(() => this.submit())) return;
 		const raw = this.#text();
 		if (raw.trim() === "" && !this.onSubmit) return;
 		let text = expandAtoms(raw, this.#atoms());
@@ -1859,7 +1861,7 @@ export class Composer {
 	/** A Tern `send`: `text` goes through the submission path; the draft stays for local recall. */
 	#send(text: string): void {
 		if (!this.#nativeSendable() || text.trim() === "") return;
-		if (this.#options.deferSubmit?.(() => this.#send(text))) return;
+		if (this.#deferSubmit?.(() => this.#send(text))) return;
 		this.clearDraft();
 		this.setCollapsedText(text);
 		this.submit();
@@ -1987,6 +1989,11 @@ export class Composer {
 	/** Rewrite (or cancel) what a submission sends. */
 	setSubmitTransform(transform: SubmitTransform | undefined): void {
 		this.#submitTransform = transform;
+	}
+
+	/** Keep submit actions behind a paste that still owns this draft. */
+	setSubmitDeferral(defer: ComposerOptions["deferSubmit"]): void {
+		this.#deferSubmit = defer;
 	}
 
 	// ─── View ───────────────────────────────────────────────────────────────

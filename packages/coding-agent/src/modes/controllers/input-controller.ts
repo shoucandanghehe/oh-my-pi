@@ -334,10 +334,10 @@ export class InputController {
 	// submission disarms it; a session switch invalidates it, so a word armed in
 	// one session can never run on a single Enter in another.
 	#armedBareCommand: { text: string; sessionId: string } | undefined;
-	/** Image pastes still landing (clipboard reads, path loads); input meanwhile waits in {@link #heldInput}. */
+	/** Asynchronous pastes still landing; input meanwhile waits in {@link #heldInput}. */
 	#imagePastes = 0;
-	/** Keys and pastes that arrived while an image paste was landing, replayed in order once it settles. */
-	readonly #heldInput: InputEvent[] = [];
+	/** Keys, pastes and programmatic submits, replayed in arrival order once the paste settles. */
+	readonly #heldInput: (InputEvent | (() => void))[] = [];
 	/**
 	 * A large paste whose menu waits for the rest of its stdin read: a submit key sent with the
 	 * paste stages it instead (nobody could answer the menu before that submit).
@@ -404,7 +404,9 @@ export class InputController {
 		for (const remove of this.#keyHooks.splice(0)) remove();
 		const composer = this.ctx.composer;
 		this.#draftText ??= composer.text();
+		composer.setSubmitDeferral(this.#deferInput);
 		this.#keyHooks.push(
+			() => composer.setSubmitDeferral(undefined),
 			composer.addKeyHandler(key => this.#onComposerKey(key)),
 			composer.addPasteHandler(paste => this.#onComposerPaste(paste)),
 			this.ctx.addGlobalKeyHandler(key => this.#onGlobalKey(key)),
@@ -760,10 +762,13 @@ export class InputController {
 		return true;
 	}
 
-	/** Holds key and paste input while an image paste lands (see {@link #trackImagePaste}). */
-	readonly #holdInput = (event: InputEvent): boolean => {
-		if (this.#imagePastes === 0 || (event.type !== "key" && event.type !== "paste")) return false;
-		this.#heldInput.push(event);
+	/** Hold keys and pastes, but let OSC packets through to finish or cancel the paste. */
+	readonly #holdInput = (event: InputEvent): boolean =>
+		(event.type === "key" || event.type === "paste") && this.#deferInput(event);
+
+	readonly #deferInput = (input: InputEvent | (() => void)): boolean => {
+		if (this.#imagePastes === 0) return false;
+		this.#heldInput.push(input);
 		return true;
 	};
 
@@ -783,7 +788,9 @@ export class InputController {
 	/** Replay held input through the hooks after the hold, then the focus path; a new image paste holds the rest again. */
 	#replayHeldInput(): void {
 		while (this.#imagePastes === 0 && this.#heldInput.length > 0) {
-			this.ctx.shell.input(this.#heldInput.shift()!, { after: this.#holdInput });
+			const input = this.#heldInput.shift()!;
+			if (typeof input === "function") input();
+			else this.ctx.shell.input(input, { after: this.#holdInput });
 		}
 	}
 
