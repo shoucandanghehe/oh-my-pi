@@ -601,6 +601,22 @@ describe("InputController keybinding setup", () => {
 		expect(spies.handleBtwCopyKey).not.toHaveBeenCalled();
 	});
 
+	it("leaves typing to an otherwise empty composer that has a pending attachment instead of taking BTW shortcuts", () => {
+		const { ctx, editor, press, spies } = createContext();
+		spies.handlesBtwBranchKey.mockReturnValue(true);
+		spies.canCopyBtw.mockReturnValue(true);
+		spies.canFollowUpBtw.mockReturnValue(true);
+		editor.pendingImages.push({ type: "image", mimeType: "image/png", data: TINY_PNG });
+		new InputController(ctx).setupKeyHandlers();
+
+		expect(press("b")).toBe("unhandled");
+		expect(press("c")).toBe("unhandled");
+		expect(press("f")).toBe("unhandled");
+		expect(spies.handleBtwBranchKey).not.toHaveBeenCalled();
+		expect(spies.handleBtwCopyKey).not.toHaveBeenCalled();
+		expect(spies.handleBtwFollowUpKey).not.toHaveBeenCalled();
+	});
+
 	it("lets c fall through when /btw is not copyable", () => {
 		const { ctx, press, spies } = createContext();
 		new InputController(ctx).setupKeyHandlers();

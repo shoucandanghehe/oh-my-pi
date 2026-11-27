@@ -484,12 +484,8 @@ export class InputController {
 			this.#handleLeftAtStart();
 			return true;
 		}
-		if (empty && key.kind === "press") {
-			if (
-				key.id === "enter" &&
-				this.ctx.composer.pendingImages.length === 0 &&
-				this.ctx.handleBtwOpenThreadKey?.()
-			) {
+		if (empty && this.ctx.composer.pendingImages.length === 0 && key.kind === "press") {
+			if (key.id === "enter" && this.ctx.handleBtwOpenThreadKey?.()) {
 				return true;
 			}
 			if (key.id === "b" && this.ctx.handlesBtwBranchKey()) {
