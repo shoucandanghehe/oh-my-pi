@@ -201,9 +201,17 @@ export function extractPastePathsFromText(text: string): string[] | undefined {
  * image or video path, else the whole text as one such path (a dropped macOS screenshot whose
  * name has unescaped spaces, #6578). Undefined for any other paste.
  */
-export function extractImagePastePathsFromText(text: string): string[] | undefined {
+export function extractImagePastePathsFromText(
+	text: string,
+	options?: { allowRelativeFile?: boolean },
+): string[] | undefined {
 	const paths = extractPastePathsFromText(text);
 	if (paths !== undefined) return paths.every(isPreviewableAttachmentPath) ? paths : undefined;
+	if (options?.allowRelativeFile && !/[\r\n]/.test(text)) {
+		const segments = splitPastedPathSegments(text.trim());
+		const relative = segments?.length === 1 ? normalizePastedPath(segments[0]!) : undefined;
+		if (relative && !URI_SCHEME_REGEX.test(relative) && isPreviewableAttachmentPath(relative)) return [relative];
+	}
 	const wholePath = extractWholeTextAttachmentPath(text);
 	return wholePath ? [wholePath] : undefined;
 }

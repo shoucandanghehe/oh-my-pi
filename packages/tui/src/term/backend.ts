@@ -1687,11 +1687,12 @@ export class TermBackend {
 		if (!this.#searchInput(event)) this.#onInput(event, intercept);
 	}
 
-	#onInput(event: InputEvent, intercept: boolean): void {
+	#onInput(event: InputEvent, intercept: boolean, originId?: string): void {
 		batch(() => {
 			const workspace = this.workspace;
-			let id = workspace?.active() ?? "main";
+			let id = originId ?? workspace?.active() ?? "main";
 			let pane = workspace?.pane(id);
+			if (originId !== undefined && workspace && !pane) return;
 			if (workspace && event.type === "mouse") {
 				const screenRow = this.#driver.viewportRow ? this.#driver.viewportRow(event.mouse.row) : event.mouse.row;
 				const target = screenRow === null ? undefined : workspace.pointer({ ...event.mouse, row: screenRow });
@@ -1706,10 +1707,10 @@ export class TermBackend {
 				event = { type: "mouse", mouse: target.mouse };
 			}
 			if (event.type === "focus" && !event.focused) this.clearHover();
-			if (event.type === "key" && workspace?.key(event.key)) return;
+			if (originId === undefined && event.type === "key" && workspace?.key(event.key)) return;
 			const mount = pane?.mount ?? this.#options;
-			if (intercept && mount.intercept?.(event)) return;
 			const { surface } = mount;
+			if (intercept && mount.intercept?.(event, () => this.#onInput(event, true, id))) return;
 			switch (event.type) {
 				case "key": {
 					const focused = surface.focused();

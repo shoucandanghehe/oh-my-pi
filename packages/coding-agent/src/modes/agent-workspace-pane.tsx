@@ -42,6 +42,7 @@ import { EnhancedPasteController } from "../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { htmlToPaste } from "../utils/html-paste";
 import { ensureSupportedImageInput } from "../utils/image-input";
+import { tagImageAttachmentSource } from "../utils/image-source";
 import { agentTranscriptSource } from "./agent-hub-runtime";
 import { firstOfKind } from "./controllers/selector-views";
 import { SessionStatusLine } from "./interactive/status-line";
@@ -49,6 +50,8 @@ import { cfgAutocompleteMaxVisible, cfgTuiVimMode, cfgTuiVimStartMode, cfgTuiVim
 import type { NativeWorkspaceSurface } from "./native-workspace/workspace";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import { compactImageMarkers, shiftImageMarkers } from "./view-model/prompt/composer-attachments";
+import { extractImagePastePathsFromText } from "./view-model/prompt/custom-editor";
+import { PanePaste, pastePaneImagePaths } from "./view-model/prompt/pane-paste";
 import {
 	formatQueueShorthand,
 	mergeQueueEntries,
@@ -75,6 +78,14 @@ interface Draft {
 	images?: ImageContent[];
 	links?: (string | undefined)[];
 	cursor?: number;
+}
+
+interface AgentPanePasteTarget {
+	readonly session: AgentViewSession | undefined;
+	isCurrent(): boolean;
+	pasteText(text: string): void;
+	attach(image: ImageContent, sourcePath?: string): Promise<void>;
+	showError(error: unknown): void;
 }
 
 /** A draft outlives its renderer; asynchronous failures still go back to this agent's draft. */
@@ -162,6 +173,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	let generation = 0;
 	let submissionTail = Promise.resolve();
 	let preparingAdmissions = 0;
+	const pasteBarrier = new PanePaste();
 	let submitMode: "steer" | "followUp" = "steer";
 	let composer: Composer;
 	const sendable = ref()?.kind !== "advisor" && (lifecycle !== undefined || remote !== undefined);
@@ -671,12 +683,14 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		}
 		if (keybindings.matches(key, "app.clipboard.pasteTextRaw")) {
 			if (!takesPaste() || !isClipboardTerminalLocal()) return false;
-			void readTextFromClipboard().then(
-				text => {
-					if (text && takesPaste()) composer.insertText(text);
-				},
-				error => notice(`Paste failed: ${String(error)}`),
-			);
+			const target = capturePasteTarget();
+			const release = pasteBarrier.begin();
+			void readTextFromClipboard()
+				.then(text => {
+					if (text) target.pasteText(text);
+				})
+				.catch(target.showError)
+				.finally(release);
 			return true;
 		}
 		const editInTerminal = options.editInTerminal;
@@ -730,10 +744,18 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 
 	let paste: EnhancedPasteController | undefined;
 	const surface = createSurface(() => {
-		composer = new Composer({ sendable: false, placeholder: `Message ${agentId}` });
+		composer = new Composer({
+			sendable: false,
+			placeholder: `Message ${agentId}`,
+			deferSubmit: replay => pasteBarrier.hold(replay),
+		});
 		composer.setNativePlaceholder(`Message ${agentId}`);
 		composer.onSubmit = text => submit(text, submitMode);
 		composer.addKeyHandler(onKey);
+		composer.addPasteHandler(({ text }) => {
+			if (!text) return pasteNative();
+			return pastePaths(text, capturePasteTarget());
+		});
 		if (sendable) draft.attach(composer);
 		composer.addEditListener(() => {
 			interacted = true;
@@ -843,48 +865,97 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 	else surface.focus(surface.dock()[0] ?? null);
 
 	const takesPaste = () => sendable && !disposed && surface.focused() === composer.field;
-	async function pasteImage(image: ImageContent): Promise<void> {
-		const target = current();
-		if (!takesPaste() || remote) return;
-		try {
-			const normalized = await ensureSupportedImageInput(image);
-			if (!normalized) throw new Error(`Unsupported pasted image format: ${image.mimeType}`);
-			const link = target ? (await materializeImageChipLinks([normalized], target.sessionManager))[0] : undefined;
-			if (!takesPaste() || current() !== target) return;
-			const n = composer.pendingImages.length + 1;
-			composer.insertAtom(composer.chipLabel("image", n), `[Image #${n}]`, {
-				kind: "image",
-				image: normalized,
-				link,
-			});
-		} catch (error) {
-			notice(String(error));
-		}
+	function capturePasteTarget(): AgentPanePasteTarget {
+		const session = current();
+		const isCurrent = () => !disposed && ref() !== undefined && current() === session;
+		return {
+			session,
+			isCurrent,
+			pasteText(text) {
+				if (isCurrent()) composer.insertText(text);
+			},
+			async attach(image, sourcePath) {
+				if (!isCurrent() || remote) return;
+				const normalized = await ensureSupportedImageInput(image);
+				if (!normalized) throw new Error(`Unsupported pasted image format: ${image.mimeType}`);
+				if (!isCurrent()) return;
+				const attachment = sourcePath ? tagImageAttachmentSource(normalized, sourcePath, "image") : normalized;
+				const link = session
+					? (await materializeImageChipLinks([attachment], session.sessionManager))[0]
+					: undefined;
+				if (!isCurrent()) return;
+				const n = composer.pendingImages.length + 1;
+				composer.insertAtom(composer.chipLabel("image", n), `[Image #${n}]`, {
+					kind: "image",
+					image: attachment,
+					link,
+				});
+			},
+			showError(error) {
+				if (isCurrent()) notice(`Paste failed: ${String(error)}`);
+			},
+		};
+	}
+	function pastePaths(text: string, target: AgentPanePasteTarget): boolean {
+		if (!local || !target.session) return false;
+		const paths = extractImagePastePathsFromText(text, { allowRelativeFile: true });
+		if (!paths) return false;
+		const release = pasteBarrier.begin();
+		void pastePaneImagePaths(paths, target.session.sessionManager.getCwd(), target)
+			.catch(target.showError)
+			.finally(release);
+		return true;
 	}
 	function pasteNative(): boolean {
 		if (!takesPaste() || !isClipboardTerminalLocal()) return false;
+		const target = capturePasteTarget();
+		const release = pasteBarrier.begin();
 		void readClipboardContent()
-			.then(({ image, text }) => {
+			.then(async ({ fileUrls, image, text }) => {
+				if (local && fileUrls.length) {
+					// Finder supplies absolute file URLs even when the pane's session is parked.
+					const cwd = target.session?.sessionManager.getCwd() ?? model.cwd() ?? process.cwd();
+					if (await pastePaneImagePaths(fileUrls, cwd, target, "finder")) return;
+				}
 				if (image && !remote)
-					return pasteImage({ type: "image", data: image.data.toBase64(), mimeType: image.mimeType });
-				if (text && takesPaste()) composer.insertText(text);
+					return target.attach({ type: "image", data: image.data.toBase64(), mimeType: image.mimeType });
+				if (text && target.isCurrent() && !pastePaths(text, target)) target.pasteText(text);
 			})
-			.catch(error => notice(String(error)));
+			.catch(target.showError)
+			.finally(release);
 		return true;
 	}
 	if (sendable && options.writeRaw) {
 		paste = new EnhancedPasteController({
 			write: options.writeRaw,
-			pasteText: text => {
-				if (takesPaste()) composer.insertText(text);
+			beginPaste() {
+				if (!takesPaste()) return { isCurrent: () => false, finish() {} };
+				interacted = true;
+				const target = capturePasteTarget();
+				const release = pasteBarrier.begin();
+				return {
+					isCurrent: target.isCurrent,
+					finish(text) {
+						try {
+							if (text && target.isCurrent() && !pastePaths(text, target)) target.pasteText(text);
+						} finally {
+							release();
+						}
+					},
+				};
 			},
-			pasteImage,
-			acceptsHtml: takesPaste,
+			pasteText: text => capturePasteTarget().pasteText(text),
+			async pasteImage(image) {
+				const target = capturePasteTarget();
+				await target.attach(image).catch(target.showError);
+			},
+			acceptsHtml: () => sendable,
 			async pasteHtml(html) {
+				const target = capturePasteTarget();
 				for (const part of htmlToPaste(html) ?? []) {
-					if (!takesPaste()) break;
-					if (typeof part === "string") composer.insertText(part);
-					else await pasteImage(part);
+					if (!target.isCurrent()) break;
+					if (typeof part === "string") target.pasteText(part);
+					else await target.attach(part).catch(target.showError);
 				}
 			},
 			showStatus: notice,
@@ -898,7 +969,8 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		surface,
 		onKey,
 		onAppViewportPasteRequest: pasteNative,
-		intercept(event) {
+		intercept(event, replay) {
+			if ((event.type === "key" || event.type === "paste") && takesPaste() && pasteBarrier.hold(replay)) return true;
 			if (
 				event.type === "key" ||
 				event.type === "paste" ||
@@ -912,6 +984,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			interacted || overlays.open() || Boolean(composer.text() || composer.pendingImages.length),
 		dispose() {
 			disposed = true;
+			pasteBarrier.reset();
 			paste?.disable();
 			overlays.closeAll();
 			if (sendable) draft.detach(composer);

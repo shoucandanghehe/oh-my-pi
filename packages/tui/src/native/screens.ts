@@ -28,7 +28,7 @@ import type { UiNode } from "../node";
 import { type Accessor, computed, createRoot, effect } from "../reactive";
 import type { Surface } from "../surface";
 import type { PageProps } from "../types";
-import { NativeBackend } from "./backend";
+import { NativeBackend, type NativeBackendOptions } from "./backend";
 import type { TspConnection } from "./connection";
 
 /** Options of {@link NativeSurfaces}. */
@@ -41,7 +41,7 @@ export interface NativeSurfacesOptions {
 	/** Keys nothing on the focus path consumed (global shortcuts). Return true when handled. */
 	readonly onKey?: (key: KeyEvent) => boolean;
 	/** Sees every decoded input event before routing; true consumes it. */
-	readonly intercept?: (event: InputEvent) => boolean;
+	readonly intercept?: NativeBackendOptions["intercept"];
 	/** Sees every frame after it is sent. */
 	readonly onFrame?: (frame: TspFrame) => void;
 }

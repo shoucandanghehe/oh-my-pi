@@ -66,6 +66,7 @@ export interface BtwWorkspaceAdapter {
 			rows: () => number,
 			columns: () => number,
 			nativeSupports?: (kind: string) => boolean,
+			writeRaw?: (data: string) => void,
 		) => NativeWorkspaceSurface,
 	): Promise<boolean>;
 	close(): void;
@@ -950,12 +951,13 @@ export class BtwController {
 		const { manager } = workspace;
 		try {
 			if (key && !manager.select(key)) return false;
-			const opened = await this.workspace.open((close, rows, columns, nativeSupports) => {
+			const opened = await this.workspace.open((close, rows, columns, nativeSupports, writeRaw) => {
 				const pane = new BtwConversationPane({
 					cwd: workspace.owner.sessionManager.getCwd(),
 					rows,
 					columns,
 					nativeSupports,
+					writeRaw,
 					keybindings: this.ctx.keybindings,
 					revision: this.#durableRevision,
 					threads: () => manager.children,

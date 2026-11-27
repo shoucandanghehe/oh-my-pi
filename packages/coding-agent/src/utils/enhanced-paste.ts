@@ -265,11 +265,11 @@ export class EnhancedPasteController {
 			}
 			const selected = choosePasteMime(listing.mimes, this.#handlers.acceptsHtml());
 			if (!selected) {
-				listing.reservation?.finish();
 				// Native readers use the regular clipboard, not the terminal's primary selection.
 				if (listing.loc === "primary" || !this.#handlers.pasteNative()) {
 					this.#handlers.showStatus("Clipboard paste has no supported text or image data");
 				}
+				listing.reservation?.finish();
 				continue;
 			}
 			const id = `paste-${++this.#nextReadId}`;

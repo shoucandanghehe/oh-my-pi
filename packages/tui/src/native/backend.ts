@@ -66,7 +66,7 @@ export interface NativeBackendOptions {
 	/** Keys nothing on the focus path consumed (global shortcuts). Return true when handled. */
 	readonly onKey?: (key: KeyEvent) => boolean;
 	/** Sees every decoded input event before routing; true consumes it. */
-	readonly intercept?: (event: InputEvent) => boolean;
+	readonly intercept?: (event: InputEvent, replay: () => void) => boolean;
 	/** Delay before a requested frame, ms. Default 0. */
 	readonly frameInterval?: number;
 	/** Timers; defaults to the connection's clock. */
@@ -227,7 +227,10 @@ export class NativeBackend {
 			connection.onEvent(event => this.#onEvent(event)),
 			connection.driver.onInput(event => {
 				if (this.#options.active?.() === false) return;
-				if (!this.#options.intercept?.(event)) this.#onInput(event);
+				const replay = () => {
+					if (this.#running && !this.#options.intercept?.(event, replay)) this.#onInput(event);
+				};
+				replay();
 			}),
 		);
 		this.#open(adopt);

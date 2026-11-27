@@ -1462,7 +1462,11 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 	};
 	const press = (id: string, more?: { afterPaste?: boolean }): boolean => {
 		const key = keyEvent(id, more);
-		return mounted?.intercept?.({ type: "key", key }) || mounted?.surface.focused()?.handlers.onKey?.(key) || false;
+		return (
+			mounted?.intercept?.({ type: "key", key }, () => {}) ||
+			mounted?.surface.focused()?.handlers.onKey?.(key) ||
+			false
+		);
 	};
 	const send = (text: string) => {
 		mounted?.surface.focused()?.handlers.onSend?.(text, { type: "send", key: "", text });

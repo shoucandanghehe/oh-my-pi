@@ -304,6 +304,8 @@ export interface ComposerOptions {
 	readonly dictating?: Accessor<boolean>;
 	/** Ready to accept an atomic `send` (Tern). */
 	readonly sendable?: boolean;
+	/** Keep submit actions behind a paste that still owns this draft. */
+	readonly deferSubmit?: (replay: () => void) => boolean;
 	readonly autocomplete?: AutocompleteProvider;
 	/** Popup rows (default 10). */
 	readonly autocompleteMaxVisible?: number;
@@ -1820,6 +1822,7 @@ export class Composer {
 	/** Send the draft: atoms expanded, the submit transform applied, then the draft cleared into history. */
 	submit(): void {
 		if (this.#disableSubmit()) return;
+		if (this.#options.deferSubmit?.(() => this.submit())) return;
 		const raw = this.#text();
 		if (raw.trim() === "" && !this.onSubmit) return;
 		let text = expandAtoms(raw, this.#atoms());
@@ -1856,6 +1859,7 @@ export class Composer {
 	/** A Tern `send`: `text` goes through the submission path; the draft stays for local recall. */
 	#send(text: string): void {
 		if (!this.#nativeSendable() || text.trim() === "") return;
+		if (this.#options.deferSubmit?.(() => this.#send(text))) return;
 		this.clearDraft();
 		this.setCollapsedText(text);
 		this.submit();

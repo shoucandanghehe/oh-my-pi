@@ -1812,6 +1812,7 @@ export class InteractiveMode implements InteractiveModeContext {
 								() => driver.rows,
 								() => driver.columns,
 								supports,
+								data => driver.writeRaw(data),
 							),
 						() => {},
 					);

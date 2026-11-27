@@ -14,9 +14,10 @@ import {
 	type Surface,
 	untrack,
 } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatNumber, logger } from "@oh-my-pi/pi-utils";
 import { CombinedAutocompleteProvider } from "../../../autocomplete/autocomplete";
 import type { KeybindingsManager } from "../../../config/keybindings/keybindings";
+import { canonicalKeyId } from "../../../config/keybindings/key-id";
 import {
 	appFollowUpKeys,
 	appToolsExpandKeys,
@@ -24,12 +25,16 @@ import {
 	matchesAnyKey,
 	matchesAppInterrupt,
 } from "../../../config/keybindings/matchers";
-import { canonicalKeyId } from "../../../config/keybindings/key-id";
 import type { SpaceHoldHandler } from "../../../config/keybindings/space-hold";
+import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
+import { resolveMarkdownLinkHrefs } from "../../../internal-urls/hyperlink-targets";
 import { firstOfKind } from "../../../modes/controllers/selector-views";
+import type { NativeWorkspaceSurface } from "../../../modes/native-workspace/workspace";
+import { materializeImageChipLinks } from "../../../modes/utils/ui-helpers";
 import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
-import type { NativeWorkspaceSurface } from "../../../modes/native-workspace/workspace";
+import { extractImagePastePathsFromText } from "../../../modes/view-model/prompt/custom-editor";
+import { PanePaste, pastePaneImagePaths } from "../../../modes/view-model/prompt/pane-paste";
 import type { AgentSession } from "../../../session/agent-session";
 import type { BtwThread } from "../../../session/btw-manager";
 import { projectBtwMessages } from "../../../session/ephemeral-conversation";
@@ -39,24 +44,36 @@ import {
 	sessionCommandQueue,
 	type YieldCompaction,
 } from "../../../session/session-command-queue";
-import { isClipboardTerminalLocal, readClipboardContent, readImageFromClipboard } from "../../../utils/clipboard";
+import {
+	getAssistantMessageLinkTargets,
+	type LinkTargetHost,
+	refreshAssistantMessageLinkTargets,
+} from "../../../session/transcript/link-targets";
+import {
+	isClipboardTerminalLocal,
+	readClipboardContent,
+	readTextFromClipboard,
+} from "../../../utils/clipboard";
+import { EnhancedPasteController } from "../../../utils/enhanced-paste";
+import { htmlToPaste } from "../../../utils/html-paste";
+import { ensureSupportedImageInput } from "../../../utils/image-input";
+import { imageAttachmentSource } from "../../../utils/image-source";
 import { Composer, type ComposerSlots } from "../../composer/composer";
 import { queuedLine } from "../../dock/queue";
 import { PaneExtensionWidgets } from "../../dock/widgets";
 import { Overlays } from "../../shell/overlays";
-import { SideToolCalls } from "../../transcript/side-tool-calls";
 import { UserMessage } from "../../transcript/messages/user-message";
+import { SideToolCalls } from "../../transcript/side-tool-calls";
 import {
 	SideMessage,
 	SideReply,
 	type SideTranscriptDisplay,
 	sideTranscriptDisplay,
 } from "../../transcript/side-transcript";
-import { ActionButton } from "./common";
-import { BtwTopicRail } from "./btw-topic-rail";
-import { TreeSelector } from "../pickers/tree-selector";
 import { SelectSheet } from "../pickers/select-sheet";
-import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
+import { TreeSelector } from "../pickers/tree-selector";
+import { BtwTopicRail } from "./btw-topic-rail";
+import { ActionButton } from "./common";
 import "../../styles/messages";
 import "../../styles/tools";
 
@@ -77,6 +94,7 @@ interface BtwPaneOptions {
 	readonly columns: () => number;
 	/** Presence distinguishes a Tern workspace surface from an ANSI pane. */
 	readonly nativeSupports?: (kind: string) => boolean;
+	readonly writeRaw?: (data: string) => void;
 	readonly keybindings: KeybindingsManager;
 	readonly revision: () => number;
 	threads(): readonly BtwThread[];
@@ -105,6 +123,14 @@ interface SummaryApproval {
 	readonly title: string;
 	readonly summary: string;
 	finish(approved: boolean): void;
+}
+
+interface DraftPasteTarget {
+	readonly cwd: string;
+	isCurrent(): boolean;
+	attach(image: ImageContent, sourcePath?: string): Promise<void>;
+	pasteText(text: string): void;
+	showError(error: unknown): void;
 }
 
 const COMMANDS = [
@@ -138,9 +164,12 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	readonly #approval = signal<SummaryApproval | undefined>(undefined);
 	readonly #menu = signal<{ key: string; active: string } | undefined>(undefined);
 	readonly #lifetime = new AbortController();
+	readonly #paste = new PanePaste();
+	readonly #enhancedPaste: EnhancedPasteController | undefined;
 	#approvalTail = Promise.resolve();
 	#mode: "steer" | "followUp" = "steer";
 	#draftKey: string | undefined;
+	#draftGeneration = 0;
 	#loadingDraft = false;
 	#disposed = false;
 
@@ -159,6 +188,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			composer = new Composer({
 				placeholder: "Ask BTW…",
 				autocomplete: new CombinedAutocompleteProvider(COMMANDS, options.cwd),
+				deferSubmit: replay => this.#paste.hold(replay),
 			});
 			if (options.nativeSupports) composer.setSlots(this.#nativeStatus());
 			else {
@@ -218,8 +248,13 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		this.surface.focus(composer.field);
 		composer.onSubmit = text => this.#submit(text);
 		composer.addPasteHandler(paste => {
-			if (paste.text) return false;
-			void this.#pasteClipboard(true);
+			if (!paste.text) return this.#pasteClipboard("image");
+			const paths = extractImagePastePathsFromText(paste.text, { allowRelativeFile: true });
+			if (!paths) return false;
+			const target = this.#capturePasteTarget();
+			if (!target.isCurrent()) return false;
+			const finish = this.#paste.begin();
+			void pastePaneImagePaths(paths, target.cwd, target).catch(target.showError).finally(finish);
 			return true;
 		});
 		composer.addActionHandler(action => {
@@ -228,6 +263,54 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			if (thread?.phase === "running" || thread?.conversation.session?.isCompacting) options.cancel(thread.key);
 			return true;
 		});
+		if (isClipboardTerminalLocal()) composer.readClipboard = readTextFromClipboard;
+		composer.setImageLinkResolver(async images => {
+			const generation = this.#draftGeneration;
+			const manager = this.#thread()?.conversation.sessionManager;
+			if (!manager) return [];
+			const links = await materializeImageChipLinks(images, manager);
+			if (this.#disposed || generation !== this.#draftGeneration) return [];
+			return this.#thread()?.conversation.sessionManager === manager ? links : [];
+		});
+		if (options.writeRaw) {
+			this.#enhancedPaste = new EnhancedPasteController({
+				write: options.writeRaw,
+				beginPaste: () => {
+					const target = this.#capturePasteTarget();
+					const release = target.isCurrent() ? this.#paste.begin() : undefined;
+					return {
+						isCurrent: target.isCurrent,
+						finish: text => {
+							if (text === undefined || !target.isCurrent()) release?.();
+							else void this.#pasteText(text, target).catch(target.showError).finally(release);
+						},
+					};
+				},
+				pasteText: text => this.#capturePasteTarget().pasteText(text),
+				pasteImage: image => {
+					const target = this.#capturePasteTarget();
+					return target.attach(image).catch(target.showError);
+				},
+				acceptsHtml: () => this.#acceptsPaste(),
+				pasteHtml: async html => {
+					const target = this.#capturePasteTarget();
+					try {
+						for (const part of htmlToPaste(html) ?? []) {
+							if (!target.isCurrent()) break;
+							if (typeof part === "string") target.pasteText(part);
+							else await target.attach(part);
+						}
+					} catch (error) {
+						target.showError(error);
+					}
+				},
+				showStatus: options.showError,
+				pasteNative: () => this.#pasteClipboard("smart"),
+			});
+			queueMicrotask(() => {
+				if (!this.#disposed) this.#enhancedPaste?.enable();
+			});
+		}
 		composer.setSpaceHold(
 			options.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
 			options.dictation?.(composer),
@@ -390,6 +473,9 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			const previous = this.#draftKey;
 			const draft = this.#draft();
 			this.#menu.set(undefined);
+			this.#draftGeneration++;
+			this.#paste.reset();
+			this.#enhancedPaste?.cancel();
 			this.#loadDraft();
 			this.ansiRail?.selectionChanged(thread?.key);
 			if (previous !== undefined) {
@@ -466,6 +552,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		if (!sent && this.#draftKey === key) {
 			this.#composer.setDraft(input.text, input.images);
 			this.#composer.pendingImageLinks.splice(0, Infinity, ...input.imageLinks);
+			this.#composer.relinkImages();
+			this.saveDraft(false);
 		} else if (sent) {
 			this.#composer.addToHistory(text);
 			// A send can synchronously select a different thread. Never clear its draft.
@@ -480,37 +568,76 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	}
 
 	readonly onAppViewportPasteRequest = (): void => {
-		void this.#pasteClipboard(false);
+		this.#pasteClipboard("smart");
 	};
 
-	async #pasteClipboard(imageOnly: boolean): Promise<void> {
-		if (!isClipboardTerminalLocal() || this.surface.focused() !== this.#composer.field) return;
-		const key = this.#draftKey;
-		try {
-			const { image, text } = imageOnly
-				? { image: await readImageFromClipboard(), text: "" }
-				: await readClipboardContent();
-			if (
-				this.#disposed ||
-				key !== this.#draftKey ||
-				this.surface.focused() !== this.#composer.field ||
-				this.#approval.peek() ||
-				this.#overlays.open()
-			)
-				return;
-			if (image) {
+	#acceptsPaste(): boolean {
+		return (
+			!this.#disposed &&
+			this.surface.focused() === this.#composer.field &&
+			!this.#approval.peek() &&
+			!this.#menu.peek() &&
+			!this.#overlays.open()
+		);
+	}
+
+	#capturePasteTarget(): DraftPasteTarget {
+		const generation = this.#draftGeneration;
+		const manager = this.#thread()?.conversation.sessionManager;
+		const isCurrent = () =>
+			generation === this.#draftGeneration &&
+			this.#acceptsPaste() &&
+			this.#thread()?.conversation.sessionManager === manager;
+		return {
+			cwd: manager?.getCwd() ?? this.options.cwd,
+			isCurrent,
+			attach: async (image, sourcePath) => {
+				if (!isCurrent()) return;
+				const normalized = sourcePath ? image : await ensureSupportedImageInput(image);
+				if (!normalized) throw new Error(`Unsupported pasted image format: ${image.mimeType}`);
+				const link = sourcePath ?? (manager && (await materializeImageChipLinks([normalized], manager))[0]);
+				if (!isCurrent()) return;
+				const kind = imageAttachmentSource(normalized)?.kind ?? "image";
 				const number = this.#composer.pendingImages.length + 1;
-				this.#composer.insertAtom(this.#composer.chipLabel("image", number), formatVisionMarker("image", number), {
-					kind: "image",
-					image: { type: "image", data: image.data.toBase64(), mimeType: image.mimeType },
+				this.#composer.insertAtom(this.#composer.chipLabel(kind, number), formatVisionMarker(kind, number), {
+					kind,
+					image: normalized,
+					link,
 				});
-			} else if (text) {
-				this.#composer.insertText(text);
-			} else return;
-			this.saveDraft();
-		} catch (error) {
-			this.options.showError(error);
-		}
+				this.saveDraft();
+			},
+			pasteText: text => {
+				if (isCurrent()) this.#composer.insertText(text);
+			},
+			showError: error => {
+				if (isCurrent()) this.options.showError(error);
+			},
+		};
+	}
+
+	async #pasteText(text: string, target: DraftPasteTarget): Promise<void> {
+		const paths = extractImagePastePathsFromText(text, { allowRelativeFile: true });
+		if (paths) await pastePaneImagePaths(paths, target.cwd, target);
+		else target.pasteText(text);
+	}
+
+	#pasteClipboard(mode: "image" | "smart" | "raw"): boolean {
+		if (!isClipboardTerminalLocal()) return false;
+		const target = this.#capturePasteTarget();
+		if (!target.isCurrent()) return false;
+		const finish = this.#paste.begin();
+		const read = async () => {
+			if (mode === "raw") {
+				target.pasteText(await readTextFromClipboard());
+				return;
+			}
+			const { image, text, fileUrls } = await readClipboardContent();
+			if (fileUrls.length && (await pastePaneImagePaths(fileUrls, target.cwd, target, "finder"))) return;
+			if (image) await target.attach({ type: "image", data: image.data.toBase64(), mimeType: image.mimeType });
+			else if (mode === "smart" && text) await this.#pasteText(text, target);
+		};
+		void read().catch(target.showError).finally(finish);
+		return true;
 	}
 
 	async approve(title: string, summary: string, signal?: AbortSignal): Promise<boolean> {
@@ -536,6 +663,9 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			this.#overlays.closeAll();
 			this.surface.focus(null);
 			this.#approval.set({ title, summary, finish });
+			this.#draftGeneration++;
+			this.#paste.reset();
+			this.#enhancedPaste?.cancel();
 			return await answer.promise;
 		} finally {
 			finished.resolve();
@@ -578,6 +708,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			if (thread) this.options.dequeue(thread.key);
 			return true;
 		}
+		if (keybindings.matches(key, "app.clipboard.pasteTextRaw")) return this.#pasteClipboard("raw");
 		if (matchesAnyKey(key, appFollowUpKeys(keybindings))) {
 			this.#mode = "followUp";
 			try {
@@ -626,14 +757,14 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				return true;
 			}
 		}
-		if (keybindings.matches(key, "app.clipboard.pasteImage")) {
-			void this.#pasteClipboard(true);
-			return true;
-		}
+		if (keybindings.matches(key, "app.clipboard.pasteImage")) return this.#pasteClipboard("smart");
 		return false;
 	};
 
-	readonly intercept: NonNullable<NativeWorkspaceSurface["intercept"]> = event => {
+	readonly intercept: NonNullable<NativeWorkspaceSurface["intercept"]> = (event, replay) => {
+		if (event.type === "osc") return this.#enhancedPaste?.handleInput(event.raw) ?? false;
+		if ((event.type === "key" || event.type === "paste") && this.#acceptsPaste() && this.#paste.hold(replay))
+			return true;
 		if (event.type === "key") return this.onKey(event.key);
 		return event.type === "paste" && (this.#approval.peek() !== undefined || this.#menu.peek() !== undefined);
 	};
@@ -845,6 +976,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		if (this.#disposed) return;
 		this.saveDraft();
 		this.#disposed = true;
+		this.#paste.reset();
+		this.#enhancedPaste?.disable();
 		this.#lifetime.abort();
 		this.ansiRail?.dispose();
 		this.#overlays.closeAll();
@@ -906,6 +1039,25 @@ function ThreadTranscriptBody(props: {
 	options: BtwPaneOptions;
 }): JSXNode {
 	const { thread, conversation, session } = props.source;
+	const manager = conversation.sessionManager;
+	const linkHost: LinkTargetHost = {
+		viewSession: manager,
+		resolveAssistantMessageLinkHrefs: hrefs =>
+			resolveMarkdownLinkHrefs(hrefs, {
+				cwd: manager.getCwd(),
+				sessionFile: manager.getSessionFile(),
+				settings: session?.settings,
+				localProtocolOptions: {
+					getArtifactsDir: () => manager.getArtifactsDir(),
+					getSessionId: () => manager.getSessionId(),
+				},
+				skills: session?.skills,
+				rules: session?.ttsrManager?.getRules(),
+			}),
+	};
+	const linkTargets = signal(getAssistantMessageLinkTargets(linkHost));
+	let mounted = true;
+	let linkTail = Promise.resolve();
 	const display = sideTranscriptDisplay(
 		() => conversation.extensionRunner,
 		() => session?.settings,
@@ -919,12 +1071,15 @@ function ThreadTranscriptBody(props: {
 		onSessionChange: () => eventRevision.update(value => value + 1),
 	});
 	tools.bind(session);
-	onCleanup(() => tools.dispose());
+	onCleanup(() => {
+		mounted = false;
+		tools.dispose();
+	});
 	effect(() => {
 		eventRevision();
 		// Read the selected thread's revision, but never adopt another thread's session.
 		if (props.thread() !== thread || thread.conversation !== conversation || conversation.session !== session) return;
-		const projected = projectBtwMessages(conversation.sessionManager, session);
+		const projected = projectBtwMessages(manager, session);
 		untrack(() =>
 			batch(() => {
 				const previous = messages();
@@ -933,15 +1088,26 @@ function ThreadTranscriptBody(props: {
 						previous.length <= projected.length &&
 						previous.every((message, index) => message === projected[index]);
 					if (!append) tools.clearCommitted();
+					const resolveLinks: AssistantMessage[] = [];
 					for (let i = append ? previous.length : 0; i < projected.length; i++) {
 						const message = projected[i]!;
 						if (message.role === "assistant") {
+							resolveLinks.push(message);
 							for (const part of message.content) {
 								if (part.type === "toolCall") tools.commit(part, message);
 							}
 						} else if (message.role === "toolResult") {
 							tools.finish(message.toolCallId, message);
 						}
+					}
+					if (resolveLinks.length) {
+						linkTail = linkTail
+							.then(async () => {
+								if (!mounted) return;
+								const targets = await refreshAssistantMessageLinkTargets(linkHost, resolveLinks);
+								if (mounted) linkTargets.set(targets);
+							})
+							.catch(error => logger.debug("BTW transcript link resolution failed", { error: String(error) }));
 					}
 				}
 				const live = tools.stream(session?.agent.state.streamMessage ?? thread.request?.streamMessage, projected);
@@ -956,12 +1122,21 @@ function ThreadTranscriptBody(props: {
 		<>
 			{() => !messages().length && <text text="Ask a side question without interrupting Main." tone="muted" />}
 			<For each={messages}>
-				{message => <ThreadMessage message={message} options={props.options} tools={tools} display={display} />}
+				{message => (
+					<ThreadMessage
+						message={message}
+						options={props.options}
+						tools={tools}
+						display={display}
+						linkTargets={linkTargets}
+					/>
+				)}
 			</For>
 			<SideReply
 				message={stream}
 				tools={tools}
 				display={display}
+				linkTargets={linkTargets}
 				live
 				hideThinking={props.options.hideThinking}
 				proseOnlyThinking={props.options.proseOnlyThinking()}
@@ -992,6 +1167,7 @@ function ThreadMessage(props: {
 	options: BtwPaneOptions;
 	tools: SideToolCalls;
 	display: SideTranscriptDisplay;
+	linkTargets(): ReadonlyMap<string, string>;
 }): JSXNode {
 	const { message } = props;
 	if (message.role === "toolResult") return undefined;
@@ -1015,6 +1191,7 @@ function ThreadMessage(props: {
 			message={() => message}
 			tools={props.tools}
 			display={props.display}
+			linkTargets={props.linkTargets}
 			hideThinking={props.options.hideThinking}
 			proseOnlyThinking={props.options.proseOnlyThinking()}
 		/>

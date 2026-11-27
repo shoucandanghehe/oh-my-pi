@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { SgrState, tokens } from "@oh-my-pi/pi-tui/text/ansi";
 import { sliceColumns } from "@oh-my-pi/pi-tui/text/width";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { FakeTern, ManualClock } from "../../tui/test/native/fake-tern";
 import { ModelRegistry } from "../src/config/model-registry";
@@ -26,6 +27,7 @@ import type { AgentViewSession } from "../src/session/agent-session-handle";
 import type { DequeuedMessage, PromptOptions, RestoredQueuedInput } from "../src/session/agent-session-types";
 import type { SessionTreeNode } from "../src/session/session-entries";
 import { SessionManager } from "../src/session/session-manager";
+import * as clipboard from "../src/utils/clipboard";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { waitFor } from "./collab/helpers/throttled-host";
 
@@ -35,12 +37,19 @@ const PANE_PNG: ImageContent = {
 	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
 };
 
-async function display(mount: AgentWorkspaceSurface) {
-	const tern = new FakeTern();
+async function display(
+	create: (supports: (kind: string) => boolean, write: (data: string) => void) => AgentWorkspaceSurface,
+	scroll: boolean,
+) {
+	const tern = new FakeTern({ features: scroll ? ["settle", "scroll"] : ["settle"] });
 	const clock = new ManualClock();
 	const connecting = TspConnection.connect(tern, { clock });
 	tern.pump();
 	const connection = (await connecting)!;
+	const mount = create(
+		kind => kind === "scroll" && connection.hasFeature(kind),
+		data => tern.writeRaw(data),
+	);
 	const renderer = new NativeSurfaces(mount);
 	renderer.start(connection);
 	const doc = [...tern.docs.values()][0]!;
@@ -58,6 +67,14 @@ async function display(mount: AgentWorkspaceSurface) {
 		},
 		press(id: string) {
 			tern.input({ type: "key", key: { id, kind: "press", raw: id } });
+			refresh();
+		},
+		paste(text: string) {
+			tern.input({ type: "paste", paste: { text } });
+			refresh();
+		},
+		osc(raw: string) {
+			tern.input({ type: "osc", raw });
 			refresh();
 		},
 		act(act: string, index = 0) {
@@ -151,6 +168,7 @@ function workspaceAgent(
 			getLeafId: () => "leaf",
 			getTree: () => roots,
 			getBranch: () => roots[0]!.children.map(node => node.entry),
+			putBlob: async () => ({ displayPath: path.join(options.cwd ?? os.tmpdir(), "preview.png") }),
 		},
 		hasPausedAgents: () => false,
 		get isStreaming() {
@@ -269,27 +287,30 @@ function workspaceAgent(
 		},
 		async mount() {
 			return await display(
-				mountAgentWorkspacePane({
-					agentId: id,
-					close: () => {},
-					rows: () => 32,
-					columns: () => 100,
-					registry,
-					lifecycle: {
-						async ensureLive(key) {
-							if (key !== id) throw new Error(`Pane changed target to ${key}`);
-							return session;
+				(_supports, writeRaw) =>
+					mountAgentWorkspacePane({
+						agentId: id,
+						close: () => {},
+						rows: () => 32,
+						columns: () => 100,
+						registry,
+						lifecycle: {
+							async ensureLive(key) {
+								if (key !== id) throw new Error(`Pane changed target to ${key}`);
+								return session;
+							},
 						},
-					},
-					settings,
-					draft,
-					isCurrent: () => true,
-					knownCommand: text => text.startsWith("/settings"),
-					copyText: async text => {
-						copied.push(text);
-					},
-					showHub: options.showHub,
-				}),
+						settings,
+						draft,
+						isCurrent: () => true,
+						knownCommand: text => text.startsWith("/settings"),
+						copyText: async text => {
+							copied.push(text);
+						},
+						showHub: options.showHub,
+						writeRaw,
+					}),
+				options.nativeScroll ?? true,
 			);
 		},
 	};
@@ -510,6 +531,70 @@ test("a queued chip selects the second of identical texts and rejects a stale id
 	} finally {
 		await session.dispose();
 		auth.close();
+	}
+});
+
+test("native composer resolves relative image paths in its own cwd before an immediate submit", async () => {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-agent-image-path-"));
+	const agent = workspaceAgent("path attachment", { cwd: dir });
+	const pane = await agent.mount();
+	try {
+		await Bun.write(path.join(dir, "pane-image.png"), Buffer.from(PANE_PNG.data, "base64"));
+		pane.paste("pane-image.png");
+		pane.press("enter");
+		await waitFor(() => agent.prompts.length === 1, "pending pane image did not reach the prompt");
+		expect(agent.prompts[0]?.text).toBe("[Image #1]");
+		expect(agent.prompts[0]?.options?.images?.[0]?.data).toBe(PANE_PNG.data);
+	} finally {
+		pane.close();
+		await fs.rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("native paste submits every Finder image when the pasteboard contains only file URLs", async () => {
+	using temp = TempDir.createSync("@pi-agent-finder-");
+	const first = temp.join("first shot.png");
+	const second = temp.join("second.png");
+	for (const file of [first, second]) await Bun.write(file, Buffer.from(PANE_PNG.data, "base64"));
+	using _local = vi.spyOn(clipboard, "isClipboardTerminalLocal").mockReturnValue(true);
+	using _clipboard = vi.spyOn(clipboard, "readClipboardContent").mockResolvedValue({
+		fileUrls: [pathToFileURL(first).href, temp.join("document.pdf"), second],
+		image: null,
+		text: "",
+	});
+	const agent = workspaceAgent("Finder selection", { cwd: temp.path() });
+	const pane = await agent.mount();
+	try {
+		pane.press("ctrl+v");
+		pane.paste("evidence");
+		pane.press("enter");
+		await waitFor(() => agent.prompts.length === 1, "pending Finder selection did not reach its agent");
+		expect(agent.prompts[0]?.text).toBe("[Image #1] [Image #2] evidence");
+		expect(agent.prompts[0]?.options?.images?.map(image => image.data)).toEqual([PANE_PNG.data, PANE_PNG.data]);
+	} finally {
+		pane.close();
+	}
+});
+
+test("native enhanced paste inserts the image before a queued paste and submit", async () => {
+	const agent = workspaceAgent("enhanced attachment");
+	const pane = await agent.mount();
+	const mime = Buffer.from("image/png").toString("base64");
+	try {
+		pane.osc("\x1b]5522;type=read:status=OK\x07");
+		pane.osc(`\x1b]5522;type=read:status=DATA:mime=${mime}\x07`);
+		pane.osc("\x1b]5522;type=read:status=DONE\x07");
+		pane.paste("with evidence");
+		pane.press("enter");
+		await admit();
+		expect(agent.prompts).toEqual([]);
+		pane.osc(`\x1b]5522;type=read:status=DATA:id=paste-1:mime=${mime};${PANE_PNG.data}\x07`);
+		pane.osc("\x1b]5522;type=read:status=DONE:id=paste-1\x07");
+		await waitFor(() => agent.prompts.length === 1, "enhanced paste did not release the pane's submit");
+		expect(agent.prompts[0]?.text).toBe("[Image #1] with evidence");
+		expect(agent.prompts[0]?.options?.images).toEqual([expect.objectContaining(PANE_PNG)]);
+	} finally {
+		pane.close();
 	}
 });
 

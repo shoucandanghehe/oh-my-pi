@@ -18,8 +18,8 @@ export interface WorkspaceSurface {
 	readonly surface: Surface;
 	readonly ansiRail?: AnsiWorkspaceRail;
 	readonly onKey?: (key: KeyEvent) => boolean;
-	/** Consume decoded input before it reaches this surface's focused node. Pointer cells are pane-local. */
-	readonly intercept?: (event: InputEvent) => boolean;
+	/** Consume input before the focused node. Replay keeps the event on this pane, even if focus moves. */
+	readonly intercept?: (event: InputEvent, replay: () => void) => boolean;
 	/** Right-click clipboard request from this pane when there is no selection to copy. */
 	readonly onAppViewportPasteRequest?: () => void;
 	/** Progress of the ANSI pane's exit animation. Undefined paints the original content. */
