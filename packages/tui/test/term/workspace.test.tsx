@@ -17,6 +17,7 @@ import {
 import { ALT_ENTER, ALT_LEAVE } from "@oh-my-pi/pi-tui/driver/output/ansi";
 import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { type MemoryTerminal, memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
 import { KittyTerminal } from "kitty-vt-wasm";
@@ -306,6 +307,39 @@ it("shows the transcript tail at both widths", async () => {
 		});
 		expect(visibleTranscript()).toEqual(tail);
 	});
+});
+
+it("calibrates cold split-pane transcript heights after the first frame", () => {
+	const count = 128;
+	const measured = new Set<number>();
+	const terminal = createTestTerminal(() => ({ main: <text>Main</text> }), {
+		columns: 120,
+		rows: 10,
+		screen: () => "fullscreen",
+	});
+	try {
+		terminal.backend.workspace!.open("long side", () => ({
+			surface: createSurface(() => ({
+				main: Array.from({ length: count }, (_, index) => (
+					<canvas
+						key={`${index}`}
+						paint={() => {
+							measured.add(index);
+							return [`entry ${index}`];
+						}}
+					/>
+				)),
+			})),
+		}));
+		terminal.render();
+		expect(terminal.screen().some(row => row.includes("entry 127"))).toBe(true);
+		expect(measured.has(0)).toBe(false); // First paint does not touch the cold head.
+		for (let frame = 0; frame < count && !measured.has(0); frame++) terminal.render();
+		expect(measured.has(0)).toBe(true); // Idle frames still calibrate the scrollbar against the full history.
+		expect(terminal.screen().some(row => row.includes("entry 127"))).toBe(true);
+	} finally {
+		terminal.dispose();
+	}
 });
 
 it("drags the transcript thumb across content and returns to a live tail from the rail", async () => {

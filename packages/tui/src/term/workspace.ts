@@ -54,6 +54,7 @@ export interface WorkspacePane {
 		height: number;
 		read: Accessor<FramePlan>;
 		revision: Signal<number>;
+		dirty: boolean;
 		cells: { source: string; padded: string }[];
 		dispose(): void;
 	};
@@ -322,8 +323,12 @@ export class TerminalWorkspace implements AnsiWorkspace {
 	}
 
 	invalidate(id?: string): void {
-		if (id !== undefined) this.#panes.get(id)?.snapshot?.revision.update(n => n + 1);
-		else for (const pane of this.#panes.values()) pane.snapshot?.revision.update(n => n + 1);
+		if (id !== undefined) {
+			const snapshot = this.#panes.get(id)?.snapshot;
+			if (snapshot) snapshot.dirty = true;
+		} else {
+			for (const { snapshot } of this.#panes.values()) if (snapshot) snapshot.dirty = true;
+		}
 	}
 
 	updateTailMotion(scrollbar: boolean, split: boolean): void {
@@ -510,8 +515,13 @@ export class TerminalWorkspace implements AnsiWorkspace {
 						revision();
 						return paintPane(pane, width, height);
 					});
-					return { width, height, read, revision, cells: [], dispose };
+					return { width, height, read, revision, dirty: false, cells: [], dispose };
 				});
+			}
+			// A pane may request another frame while painting, before its computed has subscribed.
+			if (pane.snapshot.dirty) {
+				pane.snapshot.dirty = false;
+				pane.snapshot.revision.update(n => n + 1);
 			}
 			const plan = pane.snapshot.read();
 			const focused = active === id;
