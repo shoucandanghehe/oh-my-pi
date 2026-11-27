@@ -110,6 +110,7 @@ const SETTINGS_ENTRIES: Readonly<Record<string, true>> = {
 	session_init: true,
 	ttsr_injection: true,
 	mode_change: true,
+	context_revision: true,
 	reset_boundary: true,
 };
 
