@@ -136,6 +136,42 @@ async function mount(cwd: string, threads: readonly BtwThread[]) {
 	};
 }
 
+test("Tern Ctrl+Enter edits the BTW draft; clear and scroll stay in that pane", async () => {
+	const current = topic("current", process.cwd());
+	const ui = await mount(process.cwd(), [current]);
+	try {
+		ui.paste("first");
+		ui.key("ctrl+enter");
+		ui.paste("second");
+		expect(ui.submitted).toEqual([]);
+		expect(ui.draft()).toBe("first\nsecond");
+		ui.key("alt+shift+c");
+		ui.key("alt+shift+l");
+		expect(ui.copied).toEqual(["first\nsecond", "second"]);
+		current.phase = "running";
+		ui.key("ctrl+c");
+		expect(ui.cancelled).toEqual(["current"]);
+		expect(ui.draft()).toBe("first\nsecond");
+		current.phase = "ready";
+		ui.key("ctrl+c");
+		expect(ui.draft()).toBe("");
+		const transcript = [...ui.doc.nodes.values()].find(node => node.p.role === "omp.btw.transcript")!;
+		ui.key("pageUp");
+		ui.key("home");
+		expect(ui.doc.scrolls).toEqual([
+			[transcript.id, "page-up"],
+			[transcript.id, "start"],
+		]);
+		ui.tern.event({ ev: "features", features: [] });
+		ui.refresh();
+		ui.key("end");
+		expect(ui.doc.scrolls).toHaveLength(2);
+		expect(JSON.stringify(ui.doc.shape("dock"))).toContain("does not support keyboard transcript scrolling");
+	} finally {
+		ui.close();
+	}
+});
+
 test("BTW submits a topic-relative image paste before later typing and Enter", async () => {
 	using temp = TempDir.createSync("@pi-btw-pane-");
 	const main = temp.path();

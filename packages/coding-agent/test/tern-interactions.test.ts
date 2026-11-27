@@ -135,7 +135,13 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			await ctl("key", "Enter");
 			await chip("alpha");
 			await enterText("discard me");
-			await draft("discard me");
+			const singleLine = await draft("discard me");
+			await ctl("key", "Ctrl+Enter");
+			await visible(
+				".sf-editor",
+				n => n.text === "discard me" && n.rect[3] > singleLine.rect[3],
+				"draft on two lines after Ctrl+Enter",
+			);
 			await ctl("key", process.platform === "darwin" ? "Meta+a" : "Ctrl+a");
 			await enterText("keep @sample-no");
 			await click(await visible(".pk-row", n => n.text?.includes("sample-note.txt") === true, "file suggestion"));
@@ -154,7 +160,7 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 			await visible(".pk-search", n => n.text === "smoke/beta", "rendered model search");
 			await click(await visible(".pk-row.sel", n => n.text?.includes("beta") === true, "selected beta result"));
 			await chip("beta");
-			await draft(kept);
+			await visible(".sf-editor.focused", n => n.text === kept, "draft focused again after changing the model");
 			// The chip update and closing the native picker are separate frames.
 			const closeDeadline = performance.now() + 10_000;
 			let pickers = (await ctl("tree", ".sf-layer > .sf-picker")).nodes;

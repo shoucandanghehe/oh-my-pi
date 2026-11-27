@@ -34,6 +34,7 @@ import { materializeImageChipLinks } from "../../../modes/utils/ui-helpers";
 import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "../../../modes/view-model/prompt/custom-editor";
+import { NativePaneScroll } from "../../../modes/view-model/prompt/native-pane-scroll";
 import { PanePaste, pastePaneImagePaths } from "../../../modes/view-model/prompt/pane-paste";
 import type { AgentSession } from "../../../session/agent-session";
 import type { BtwThread } from "../../../session/btw-manager";
@@ -169,7 +170,9 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	readonly #approval = signal<SummaryApproval | undefined>(undefined);
 	readonly #menu = signal<{ key: string; active: string } | undefined>(undefined);
 	readonly #lifetime = new AbortController();
+	readonly #notice = signal<string | undefined>(undefined);
 	readonly #paste = new PanePaste();
+	readonly #scroll: NativePaneScroll;
 	readonly #enhancedPaste: EnhancedPasteController | undefined;
 	#approvalTail = Promise.resolve();
 	#mode: "steer" | "followUp" = "steer";
@@ -179,6 +182,9 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 	#disposed = false;
 
 	constructor(private readonly options: BtwPaneOptions) {
+		this.#scroll = new NativePaneScroll(options.nativeSupports, options.keybindings, message =>
+			this.#notice.set(message),
+		);
 		this.#selected = computed(() => {
 			options.revision();
 			return options.selected()?.key;
@@ -217,9 +223,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			return {
 				main: () => {
 					const approval = this.#approval();
-					return approval ? (
-						<md key="btw-summary" text={approval.summary} />
-					) : (
+					if (approval) return <md key="btw-summary" text={approval.summary} />;
+					const transcript = (
 						<ThreadTranscript
 							key={this.#displayed()?.key}
 							thread={this.#displayed}
@@ -228,6 +233,14 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 							onAction={this.#onTurnAction}
 							canRetry={() => this.#displayed() === this.#thread()}
 						/>
+					);
+					// Scroll requests target a stable native container as the selected topic changes.
+					return options.nativeSupports ? (
+						<col key="btw-transcript" role="omp.btw.transcript" gap="sm" scroll={this.#scroll.request}>
+							{transcript}
+						</col>
+					) : (
+						transcript
 					);
 				},
 				mainScrollScope: options.nativeSupports
@@ -477,6 +490,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		const thread = this.#thread();
 		if (thread?.key !== this.#draftKey) {
 			const previous = this.#draftKey;
+			this.#notice.set(undefined);
+			this.#scroll.request.set(undefined);
 			const draft = this.#draft();
 			this.#menu.set(undefined);
 			this.#draftGeneration++;
@@ -717,6 +732,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			this.ansiRail?.clearHover();
 			this.#menu.set(undefined);
 			this.#overlays.closeAll();
+			this.#scroll.request.set(undefined);
 			this.surface.focus(null);
 			this.#approval.set({ title, summary, finish });
 			this.#draftGeneration++;
@@ -760,8 +776,24 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			}
 			return true;
 		}
+		const empty = this.#composer.text().trim() === "" && !this.#composer.completing();
 		if (keybindings.matches(key, "app.message.dequeue")) {
-			if (thread) this.options.dequeue(thread.key);
+			const session = thread?.conversation.session;
+			const queue = session && sessionCommandQueue(session);
+			if (
+				!empty ||
+				!this.options.nativeSupports ||
+				key.id !== "shift+up" ||
+				session?.queuedMessageCount ||
+				queue?.request ||
+				queue?.messages.length
+			) {
+				if (thread) this.options.dequeue(thread.key);
+				return true;
+			}
+		}
+		if (this.options.nativeSupports && key.id === "ctrl+enter") {
+			this.#composer.insertText("\n");
 			return true;
 		}
 		if (keybindings.matches(key, "app.clear")) {
@@ -836,6 +868,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			}
 		}
 		if (keybindings.matches(key, "app.clipboard.pasteImage")) return this.#pasteClipboard("smart");
+		if (empty && this.#scroll.handle(key)) return true;
+		this.#notice.set(undefined);
 		return false;
 	};
 
@@ -871,6 +905,10 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			queued.push({ label: "After compaction", text: message.text, action: { kind: "held", message } });
 		return (
 			<col key="btw-actions" gap="xs" onAction={act => this.#action(act)} role="omp.btw.workspace">
+				{() => {
+					const notice = this.#notice();
+					return notice && <text key="btw-notice" tone="warning" text={notice} />;
+				}}
 				{thread && queued.length > 0 && (
 					<col
 						role="omp.btw.queue"
@@ -1092,14 +1130,7 @@ function ThreadTranscript(props: {
 		return [{ thread, conversation, session }];
 	});
 	return (
-		<For
-			each={source}
-			fallback={
-				<col role="omp.btw.transcript" gap="sm">
-					<text text="Ask a side question without interrupting Main." tone="muted" />
-				</col>
-			}
-		>
+		<For each={source} fallback={<text text="Ask a side question without interrupting Main." tone="muted" />}>
 			{current => (
 				<ThreadTranscriptBody
 					source={current}
@@ -1204,7 +1235,7 @@ function ThreadTranscriptBody(props: {
 	});
 
 	const last = computed(() => messages().findLast(message => message.role === "assistant" || message.role === "user"));
-	const blocks = (
+	return (
 		<>
 			{() => !messages().length && <text text="Ask a side question without interrupting Main." tone="muted" />}
 			<For each={messages}>
@@ -1259,14 +1290,6 @@ function ThreadTranscriptBody(props: {
 					return <text text="BTW thread paused · /continue to resume" tone="muted" />;
 			}}
 		</>
-	);
-	// The ANSI viewport indexes top-level blocks; keep Tern's semantic grouping.
-	return props.options.nativeSupports ? (
-		<col role="omp.btw.transcript" gap="sm">
-			{blocks}
-		</col>
-	) : (
-		blocks
 	);
 }
 

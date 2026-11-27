@@ -319,6 +319,7 @@
 - BTW follow-ups keep their original context and read-only tool results in the inline view and over RPC, including results collected before cancellation.
 - BTW panes can copy and retry individual messages, edit the selected queued entry, and continue only the selected topic.
 - Side panes keep pasted images and image paths with the submitted draft and show clickable BTW file and image links.
+- Tern's Ctrl+Enter inserts a newline, and keyboard scrolling works in BTW and subagent transcripts.
 - ANSI subagent panes refill available space and stay open after you rearrange them; the Agent Hub shortcut works from a subagent pane.
 - Subagents retain their scoped MCP tools when browser settings change.
 - HTML exports from preview binaries embed the matching viewer for offline use.

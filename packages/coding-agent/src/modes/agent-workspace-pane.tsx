@@ -51,6 +51,7 @@ import type { NativeWorkspaceSurface } from "./native-workspace/workspace";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
 import { compactImageMarkers, shiftImageMarkers } from "./view-model/prompt/composer-attachments";
 import { extractImagePastePathsFromText } from "./view-model/prompt/custom-editor";
+import { NativePaneScroll } from "./view-model/prompt/native-pane-scroll";
 import { PanePaste, pastePaneImagePaths } from "./view-model/prompt/pane-paste";
 import {
 	formatQueueShorthand,
@@ -144,6 +145,7 @@ interface AgentPaneOptions {
 	readonly copyText?: (text: string) => Promise<void>;
 	readonly editInTerminal?: (run: () => Promise<string | null>) => Promise<string | null>;
 	readonly showHub?: () => void;
+	readonly nativeSupports?: (kind: string) => boolean;
 }
 
 export interface AgentWorkspaceSurface extends NativeWorkspaceSurface {
@@ -214,6 +216,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		model.notice = message;
 		model.touch();
 	}
+	const scroll = new NativePaneScroll(options.nativeSupports, keybindings, notice);
 
 	function copy(text: string): void {
 		if (!text || disposed || !ref()) return;
@@ -668,7 +671,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			else if (!clear) close();
 			return true;
 		}
-		if (!sendable) return false;
+		if (!sendable) return scrollEmptyTranscript(key);
 		if (keybindings.matches(key, "app.clipboard.copyPrompt")) {
 			copy(composer.expandedText());
 			return true;
@@ -709,7 +712,11 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			}
 			return true;
 		}
-		if (!local) return false;
+		if (options.nativeSupports && key.id === "ctrl+enter") {
+			composer.insertText("\n");
+			return true;
+		}
+		if (!local) return scrollEmptyTranscript(key);
 		if (matchesAnyKey(key, appFollowUpKeys(keybindings))) {
 			submitMode = "followUp";
 			try {
@@ -739,8 +746,12 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			current()?.cycleThinkingLevel();
 			return true;
 		}
-		return false;
+		return scrollEmptyTranscript(key);
 	};
+
+	function scrollEmptyTranscript(key: KeyEvent): boolean {
+		return !composer.text().trim() && composer.pendingImages.length === 0 && scroll.handle(key);
+	}
 
 	let paste: EnhancedPasteController | undefined;
 	const surface = createSurface(() => {
@@ -811,7 +822,12 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		const presentation = useExtensionPresentation(presentationSource);
 		const size = () => ({ rows: rows(), columns: options.columns() });
 		return {
-			main: <AgentWorkspaceTranscript model={model} />,
+			main: (
+				<>
+					{options.nativeSupports && <col key="agent-transcript-scroll" scroll={scroll.request} />}
+					<AgentWorkspaceTranscript model={model} />
+				</>
+			),
 			dock: (
 				<>
 					<QueuedMessages model={queueModel} />

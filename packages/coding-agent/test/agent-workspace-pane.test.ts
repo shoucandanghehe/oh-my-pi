@@ -287,7 +287,7 @@ function workspaceAgent(
 		},
 		async mount() {
 			return await display(
-				(_supports, writeRaw) =>
+				(nativeSupports, writeRaw) =>
 					mountAgentWorkspacePane({
 						agentId: id,
 						close: () => {},
@@ -308,6 +308,7 @@ function workspaceAgent(
 							copied.push(text);
 						},
 						showHub: options.showHub,
+						nativeSupports,
 						writeRaw,
 					}),
 				options.nativeScroll ?? true,
@@ -598,7 +599,7 @@ test("native enhanced paste inserts the image before a queued paste and submit",
 	}
 });
 
-test("native agent pane routes Hub shortcuts", async () => {
+test("native agent pane routes Hub shortcuts and empty-draft scrolling without sending on Ctrl+Enter", async () => {
 	let hubOpens = 0;
 	const agent = workspaceAgent("native keys", { showHub: () => hubOpens++ });
 	const pane = await agent.mount();
@@ -606,8 +607,24 @@ test("native agent pane routes Hub shortcuts", async () => {
 		pane.press("alt+a");
 		pane.press("ctrl+s");
 		expect(hubOpens).toBe(2);
+		pane.press("pageUp");
+		pane.press("end");
+		expect(pane.doc.scrolls.map(([, by]) => by)).toEqual(["page-up", "end"]);
+		pane.type("multiline");
+		pane.press("ctrl+enter");
+		await admit();
+		expect(agent.prompts).toEqual([]);
+		expect(pane.doc.nodes.get(pane.doc.focus!)?.p.text).toBe("multiline\n");
 	} finally {
 		pane.close();
+	}
+	const unsupported = await workspaceAgent("no scroll", { nativeScroll: false }).mount();
+	try {
+		unsupported.press("pageUp");
+		expect(unsupported.doc.scrolls).toEqual([]);
+		expect(JSON.stringify(unsupported.doc.shape("dock"))).toContain("does not support keyboard transcript scrolling");
+	} finally {
+		unsupported.close();
 	}
 });
 

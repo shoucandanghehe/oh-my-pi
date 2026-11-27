@@ -587,7 +587,13 @@ export class InputController {
 			["app.session.tree", () => void this.ctx.showTreeSelector()],
 			["app.session.fork", () => void this.ctx.showUserMessageSelector()],
 			["app.session.resume", () => this.ctx.showSessionSelector()],
-			["app.message.followUp", () => void this.handleFollowUp()],
+			[
+				"app.message.followUp",
+				() => {
+					if (key.id === "ctrl+enter" && this.ctx.shell.native()) this.ctx.composer.insertText("\n");
+					else void this.handleFollowUp();
+				},
+			],
 			["app.stt.toggle", () => void this.ctx.handleSTTToggle()],
 			["app.live.toggle", () => void this.ctx.handleLiveCommand()],
 			["app.clipboard.copyLine", () => this.handleCopyCurrentLine()],

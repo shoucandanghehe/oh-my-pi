@@ -1424,6 +1424,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		rows: () => number,
 		columns: () => number,
 		writeRaw?: (data: string) => void,
+		nativeSupports?: (kind: string) => boolean,
 	): AgentWorkspaceSurface {
 		if (!this.#agentPaneRef(agentId)) throw new Error(`Agent ${agentId} is not available in this session`);
 		const owner = this.sessionManager.getSessionId();
@@ -1437,6 +1438,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			rows,
 			columns,
 			writeRaw,
+			nativeSupports,
 			registry: { get: id => this.#agentPaneRef(id) },
 			remote,
 			lifecycle: this.collabGuest ? undefined : AgentLifecycleManager.global(),
@@ -1977,8 +1979,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#nativeWorkspace = workspace;
 			this.#nativeAgentPanes = new NativeAgentPanes({
 				workspace,
-				create: (id, close, rows, columns, writeRaw) =>
-					this.createAgentWorkspaceSurface(id, close, rows, columns, writeRaw),
+				create: (id, close, rows, columns, writeRaw, supports) =>
+					this.createAgentWorkspaceSurface(id, close, rows, columns, writeRaw, supports),
 				isRunning: id => this.#agentPaneRef(id)?.status === "running",
 				error: error =>
 					this.showError(`Native agent pane failed: ${error instanceof Error ? error.message : String(error)}`),

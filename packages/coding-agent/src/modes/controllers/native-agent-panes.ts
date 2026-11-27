@@ -19,6 +19,7 @@ interface NativeAgentPaneOptions {
 		rows: () => number,
 		columns: () => number,
 		writeRaw?: (data: string) => void,
+		nativeSupports?: (kind: string) => boolean,
 	): AgentWorkspaceSurface;
 	isRunning(id: string): boolean;
 	error(error: unknown): void;
@@ -123,13 +124,14 @@ export class NativeAgentPanes {
 				await workspace.open(
 					key,
 					id,
-					(close, _supports, driver) => {
+					(close, supports, driver) => {
 						const mounted = this.options.create(
 							id,
 							close,
 							() => driver.rows,
 							() => driver.columns,
 							data => driver.writeRaw(data),
+							supports,
 						);
 						entry.protect = mounted.protectedFromAutoClose;
 						return mounted;
