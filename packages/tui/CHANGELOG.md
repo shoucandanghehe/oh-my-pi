@@ -27,6 +27,7 @@
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.
+- Fullscreen split panes display SIXEL, iTerm2 and direct Kitty images without painting over neighboring panes. Kitty images release their data when the last visible copy leaves fullscreen.
 - Fixed fast Vietnamese Telex input on Windows so characters are no longer dropped or duplicated.
 - Streaming code blocks now enter terminal scrollback as they move off screen, rather than waiting until the block is complete.
 - Reduced idle CPU usage on Windows after `/restart`.

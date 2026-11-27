@@ -24,7 +24,9 @@
  *
  * Budget: at most `budget` images are drawn at once, the most recently
  * added ones; older referenced images show their text fallback in the rows
- * the image took, so nothing below moves. Kitty keeps transmitted data
+ * the image took, so nothing below moves. On fullscreen frames only the
+ * final visible Kitty images are retained in the alternate screen's store.
+ * Kitty keeps transmitted data on the normal screen
  * (so scrollback copies stay visible) for at most `budget` images; the
  * oldest images no longer drawn are freed first.
  */
@@ -202,17 +204,21 @@ export class TerminalImages {
 		};
 	}
 
-	/**
-	 * The rows `source` takes under `request`, for the current terminal.
-	 * Must run inside a reactive owner (a painter): the image stays
-	 * referenced until that computation reruns or is disposed, and the rows
-	 * depend on the capabilities, the budget and pending SIXEL encodes.
-	 */
-	rows(source: ImageSource, request: ImageRequest): ImageRows {
-		if (!getOwner()) throw new Error("pi-tui: TerminalImages.rows must run inside a painter (a reactive owner)");
-		const caps = this.#capabilities();
+	/** Measure a potential placement without holding an image id or starting an encode. */
+	measure(source: ImageSource, request: ImageRequest): ImageRows {
+		const layout = this.#layout(source, request, this.#capabilities());
+		return layout
+			? { rows: reservedRows(layout.box.rows), columns: layout.box.columns, state: "pending" }
+			: this.#fallback(request);
+	}
+
+	#layout(
+		source: ImageSource,
+		request: ImageRequest,
+		caps: TerminalCapabilities,
+	): { box: ImageBox; placeholders: boolean; protocol: NonNullable<TerminalCapabilities["images"]> } | undefined {
 		const protocol = caps.images;
-		if (protocol === null) return this.#fallback(request);
+		if (protocol === null) return;
 		const cell = caps.cell ?? DEFAULT_CELL;
 		let box = fitImage(source.widthPx, source.heightPx, request, cell);
 		if (protocol === "sixel" || protocol === "iterm") {
@@ -223,8 +229,22 @@ export class TerminalImages {
 			}
 		}
 		const placeholders = protocol === "kitty" && this.#placeholders() && kittyPlaceholdersFit(box.columns, box.rows);
-		// Placements and SIXEL/iTerm2 sequences address the screen: nothing else can share their rows.
-		if (request.cells && !placeholders) return this.#fallback(request);
+		if (request.cells && !placeholders) return;
+		return { box, placeholders, protocol };
+	}
+
+	/**
+	 * The rows `source` takes under `request`, for the current terminal.
+	 * Must run inside a reactive owner (a painter): the image stays
+	 * referenced until that computation reruns or is disposed, and the rows
+	 * depend on the capabilities, the budget and pending SIXEL encodes.
+	 */
+	rows(source: ImageSource, request: ImageRequest): ImageRows {
+		if (!getOwner()) throw new Error("pi-tui: TerminalImages.rows must run inside a painter (a reactive owner)");
+		const caps = this.#capabilities();
+		const layout = this.#layout(source, request, caps);
+		if (!layout) return this.#fallback(request);
+		const { box, placeholders, protocol } = layout;
 		const entry = this.#acquire(source);
 		const fallback = () => this.#fallback(request, box.rows);
 		if (!entry.live()) return fallback();
@@ -300,8 +320,10 @@ export class TerminalImages {
 	 * images, then (kitty) the data of drawn images the terminal does not
 	 * hold yet and the virtual placements their placeholders need. Each
 	 * transmit happens once per image until it is freed.
+	 * Only fullscreen has a complete frame's ids; the main screen retains
+	 * images outside the viewport because they may still be in scrollback.
 	 */
-	takeSequences(screen: Screen = "main"): string {
+	takeSequences(screen: Screen = "main", visibleImages?: ReadonlySet<number>): string {
 		let out = this.#queued[screen];
 		this.#queued[screen] = "";
 		const caps = this.#capabilities();
@@ -310,6 +332,13 @@ export class TerminalImages {
 			const placeholders = this.#placeholders();
 			const ordered = [...this.#entries.values()].sort((a, b) => a.seq - b.seq);
 			for (const entry of ordered) {
+				if (screen === "alternate" && visibleImages && !visibleImages.has(entry.id)) {
+					if (entry.held.delete(screen)) {
+						out += kittyDelete(entry.id, multiplexer);
+						entry.virtual[screen].clear();
+					}
+					continue;
+				}
 				if (entry.refs === 0 || !entry.live.peek()) continue;
 				const data = this.#kittyData(entry, false);
 				if (!data) continue;

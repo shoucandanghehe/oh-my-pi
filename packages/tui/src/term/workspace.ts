@@ -1,5 +1,7 @@
 import type { FramePlan, MouseEvent } from "../driver/contract";
-import { normalizeRow } from "../driver/output/ansi";
+import { DEFAULT_CELL } from "../driver/images/fit";
+import { maskOverlayImages, paneImage, splitImageRow } from "../driver/images/viewport";
+import { column, normalizeRow } from "../driver/output/ansi";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
 import { batch, computed, createRoot, signal } from "../reactive";
@@ -457,6 +459,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		this.#frame = frame;
 		const { panes, sashes } = frame;
 		const active = this.active();
+		const cell = this.main.window.host.images?.cell() ?? DEFAULT_CELL;
 		const fragments: { id?: string; rect: WorkspaceRect; rows: string[] }[] = [];
 		let cursor: Cell | null = null;
 		for (const [id, rect] of panes) {
@@ -488,6 +491,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			const height = vertical ? Math.floor(rect.height / 2) : rect.height;
 			const left = drop.edge === "right" ? rect.width - width : 0;
 			const top = drop.edge === "bottom" ? rect.height - height : 0;
+			const restore = maskOverlayImages(rows, top, height, left, width, cell.w);
 			const border = theme.fg("accent", "┃");
 			for (let row = 0; row < height; row++) {
 				let preview: string;
@@ -504,19 +508,32 @@ export class TerminalWorkspace implements AnsiWorkspace {
 				const remaining = rect.width - left - width - visibleWidth(after);
 				rows[top + row] = `${before}${preview}${" ".repeat(Math.max(0, remaining))}${after}`;
 			}
+			restore?.();
 		}
 		for (const { rect, split: sash } of sashes) {
 			const line = theme.fg("border", sash.axis === "x" ? "│" : "─".repeat(rect.width));
 			fragments.push({ rect, rows: Array.from({ length: rect.height }, () => line) });
 		}
 		const rows = Array.from({ length: this.#size().height }, () => "");
+		const images: string[] = [];
 		// For any given row, the rectangles form disjoint columns from left to right.
 		for (const { rect, rows: lines } of fragments.sort((a, b) => a.rect.x - b.rect.x)) {
 			for (let row = 0; row < rect.height; row++) {
-				const line = normalizeRow(lines[row] ?? "", rect.width);
-				rows[rect.y + row] += padTo(line, rect.width);
+				const raw = lines[row] ?? "";
+				const split = splitImageRow(raw);
+				const y = rect.y + row;
+				rows[y] += padTo(normalizeRow(split?.text ?? raw, rect.width), rect.width);
+				for (const image of split?.images ?? []) {
+					// A body image may not reach above the pane's title.
+					if (image.above >= row) continue;
+					const bytes = paneImage(image, rect.width - image.x, cell.w, cell.h);
+					if (bytes) images[y] = (images[y] ?? "") + column(rect.x + image.x) + bytes;
+				}
 			}
 		}
+		// Draw graphics after all text on the scanline; trailing pads from neighboring panes
+		// must not move the image cursor or cross its painted cells.
+		for (let row = 0; row < rows.length; row++) rows[row] += images[row] ?? "";
 		return { viewport: [], cursor, fullscreen: rows };
 	}
 
@@ -531,7 +548,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 	): { readonly target: string; readonly edge: WorkspaceEdge; readonly snapshot: readonly string[] } | undefined {
 		const drag = this.#drag;
 		if (drag?.kind !== "move" || !drag.moved) return undefined;
-		drag.snapshot ??= capture(drag.id).map(stripEscapes);
+		drag.snapshot ??= capture(drag.id).map(line => stripEscapes(splitImageRow(line)?.text ?? line));
 		if (drag.drop) return { target: drag.drop.target, edge: drag.drop.edge, snapshot: drag.snapshot };
 	}
 

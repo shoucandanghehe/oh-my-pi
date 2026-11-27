@@ -2,6 +2,8 @@
 import { describe, expect, it } from "bun:test";
 import { decodeSixelToPng } from "@oh-my-pi/pi-natives";
 import { createSurface, signal, startHost } from "@oh-my-pi/pi-tui";
+import { anchoredRows } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { kittyDelete, kittyDeletePlacement } from "@oh-my-pi/pi-tui/driver/images/kitty";
 import { emergencyTerminalRestore } from "@oh-my-pi/pi-tui/driver/session";
 import { registerBlob, releaseBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
@@ -11,16 +13,21 @@ import { KittyTerminal } from "kitty-vt-wasm";
 const theme = loadThemeSync("dark");
 const palette = "#1;2;100;0;0#2;2;0;0;100";
 /** One fully opaque red/blue stripe per six-pixel band. */
-function stripes(colors: number[]): string {
-	return `\x1bP9;1;0q"1;1;72;${6 * colors.length}${palette}${colors.map(n => `#${n}!72~$-`).join("")}\x1b\\`;
+function stripes(colors: number[], width = 72): string {
+	return `\x1bP9;1;0q"1;1;${width};${6 * colors.length}${palette}${colors.map(n => `#${n}!${width}~$-`).join("")}\x1b\\`;
 }
 const png = (sequence: string): Uint8Array => decodeSixelToPng(Buffer.from(sequence));
 const blue = Array<number>(6).fill(2);
 const pixels = png(stripes([...Array<number>(6).fill(1), ...blue]));
 const shell = "old shell output\r\npartial> ";
 
-async function session(protocol: "kitty" | "sixel" | "iterm", exitTranscript = true, placeholders = false) {
-	const vt = KittyTerminal.createSync({ columns: 16, rows: 6, scrollback: 100 });
+async function session(
+	protocol: "kitty" | "sixel" | "iterm",
+	exitTranscript = true,
+	placeholders = false,
+	columns = 16,
+) {
+	const vt = KittyTerminal.createSync({ columns, rows: 6, scrollback: 100 });
 	vt.write(shell);
 	const terminal = memoryTerminal({
 		columns: vt.columns,
@@ -68,6 +75,7 @@ async function session(protocol: "kitty" | "sixel" | "iterm", exitTranscript = t
 		host,
 		terminal,
 		vt,
+		blob,
 		next,
 		tail,
 		sheet,
@@ -88,6 +96,7 @@ const ALT_ENTER = "\x1b[?1049h";
 const ALT_LEAVE = "\x1b[?1049l";
 const UPLOAD = "\x1b_Ga=t,";
 const PLACE = "\x1b_Ga=p,";
+const raster = (bytes: string) => /\x1bP[\d;]*q[\s\S]*?\x1b\\/.exec(bytes)?.[0];
 
 function expectUploadAfterSwitch(bytes: string, change: string): void {
 	const switched = bytes.indexOf(change);
@@ -98,7 +107,7 @@ function expectUploadAfterSwitch(bytes: string, change: string): void {
 }
 
 describe("fullscreen image frames on a real terminal grid", () => {
-	it("uploads Kitty images into the destination buffer and retires only hidden bands when scrolling, resizing or opening a sheet", async () => {
+	it("uploads Kitty images into the destination buffer, retiring the data only after the last band disappears", async () => {
 		const s = await session("kitty");
 		const bands = (): number[][] => {
 			// The wasm host records every parsed placement command. On a terminal the last placement
@@ -142,9 +151,11 @@ describe("fullscreen image frames on a real terminal grid", () => {
 				[0, 8, 1],
 				[1, 8, 1],
 			]);
-			await s.next(() => s.tail.set(["a", "b", "c", "d", "e"]));
+			const gone = await s.next(() => s.tail.set(["a", "b", "c", "d", "e"]));
+			const id = Number(/a=t,[^;]*\bi=(\d+)/.exec(s.terminal.output.join(""))?.[1]);
+			expect(gone).toContain(kittyDelete(id));
 			expect(bands()).toEqual([]);
-			await s.next(() => s.tail.set([]));
+			expect(await s.next(() => s.tail.set([]))).toContain(UPLOAD);
 			await s.next(() => {
 				s.vt.resize(5, 6);
 				s.terminal.resize(5, 6);
@@ -185,7 +196,6 @@ describe("fullscreen image frames on a real terminal grid", () => {
 
 	it("draws just the visible SIXEL source pixels above the dock and restores the full raster after uncovering it", async () => {
 		const s = await session("sixel");
-		const raster = (bytes: string) => /\x1bP[\d;]*q[\s\S]*?\x1b\\/.exec(bytes)?.[0];
 		try {
 			await s.host.driver.images.whenEncoded();
 			await s.next();
@@ -219,6 +229,111 @@ describe("fullscreen image frames on a real terminal grid", () => {
 			expect(png(raster(restored)!)).toEqual(pixels);
 		} finally {
 			await s.dispose();
+		}
+	});
+
+	it("clips a side SIXEL in both axes and masks it without losing a neighboring raster", async () => {
+		const s = await session("sixel", false, false, 41);
+		const cover = signal(false);
+		const left = " ".repeat(16); // 4 columns (36 px) remain in the 20-cell pane.
+		const source = anchoredRows(stripes([...Array<number>(6).fill(1), ...blue]), 4);
+		source[3] = left + source[3]!;
+		const side = createSurface(() => ({
+			main: [<rows lines={source} />, <rows lines={["side first", "side second"]} />],
+			dock: <text>side dock</text>,
+			layer: () => (cover() ? <overlay anchor="top" size="lg" head="cover" /> : undefined),
+		}));
+		try {
+			await s.host.driver.images.whenEncoded();
+			await s.next();
+			const split = await s.next(() =>
+				expect(s.host.ansiWorkspace!.open("side", () => ({ surface: side }), { edge: "right" })).toBe(true),
+			);
+			const sideAnchor = "\x1b[38G\x1b7\x1b[1A";
+			expect(split).toContain(sideAnchor);
+			expect(png(raster(split.slice(split.indexOf(sideAnchor)))!)).toEqual(png(stripes(blue, 36)));
+			expect(s.vt.line(0)).toContain("│");
+			expect(s.vt.line(3)).toContain("side first");
+			expect(s.vt.line(5)).toContain("side dock");
+
+			const masked = await s.next(() => cover.set(true));
+			expect(masked).not.toContain(sideAnchor);
+			expect(s.vt.line(1)).toContain("cover");
+			// The changed rows also cleared cells of Main's picture: its unchanged anchor must be drawn again.
+			expect(png(raster(masked)!)).toEqual(pixels);
+			expect(await s.next(() => cover.set(false))).toContain(sideAnchor);
+		} finally {
+			await s.dispose();
+			side.dispose();
+		}
+	});
+
+	it.each([false, true])("keeps the same Kitty image alive in both panes (placeholders=%s)", async placeholders => {
+		const s = await session("kitty", false, placeholders, 41);
+		const show = signal(true);
+		const side = createSurface(() => ({
+			main: () => (show() ? <image w={72} h={72} blob={s.blob} /> : <text>no side image</text>),
+		}));
+		try {
+			const first = s.terminal.output.join("");
+			const id = Number(/a=t,[^;]*\bi=(\d+)/.exec(first)?.[1]);
+			const split = await s.next(() =>
+				expect(s.host.ansiWorkspace!.open("side", () => ({ surface: side }), { edge: "right" })).toBe(true),
+			);
+			expect(split).not.toContain(UPLOAD);
+			if (placeholders) {
+				expect(s.vt.cell(0, 1)?.ch).toBe("\u{10EEEE}");
+				expect(s.vt.cell(21, 1)).toEqual(s.vt.cell(0, 1));
+			} else {
+				expect(split).toMatch(/\x1b\[1G\x1b_Ga=p,[^\x1b]+\x1b\\\x1b\[22G\x1b_Ga=p,/);
+				const ids = [...split.matchAll(new RegExp(`\\x1b_Ga=p,q=2,C=1,i=${id},p=(\\d+),`, "g"))].map(match =>
+					Number(match[1]),
+				);
+				expect(ids).toHaveLength(8);
+				expect(new Set(ids).size).toBe(8);
+				const firstRow = s.vt.graphicsPlacements().filter(p => p.imageId === id && p.row === 1);
+				expect([...new Set(firstRow.map(p => p.col))]).toEqual([0, 21]);
+				const hidden = await s.next(() => show.set(false));
+				expect(hidden).not.toContain(kittyDelete(id));
+				// Keep the four Main bands; remove only the four positions in the side pane.
+				for (const [index, placement] of ids.entries()) {
+					if (index % 2 === 0) expect(hidden).not.toContain(kittyDeletePlacement(id, placement));
+					else expect(hidden).toContain(kittyDeletePlacement(id, placement));
+				}
+			}
+			const onlySide = await s.next(() => s.tail.set(["a", "b", "c", "d", "e"]));
+			if (placeholders) expect(onlySide).not.toContain(kittyDelete(id));
+			else expect(onlySide).toContain(kittyDelete(id));
+			const last = await s.next(() => s.host.ansiWorkspace!.close("side"));
+			if (placeholders) expect(last).toContain(kittyDelete(id));
+			else expect(last).not.toContain(kittyDelete(id));
+		} finally {
+			await s.dispose();
+			side.dispose();
+		}
+	});
+
+	it("retains the visible rows of an indivisible iTerm File in a pane until it fits", async () => {
+		const s = await session("iterm", false, false, 41);
+		const tail = signal<readonly string[]>(["side footer"]);
+		const side = createSurface(() => ({
+			main: [<image w={72} h={72} blob={s.blob} alt="no iTerm" />, <rows lines={tail} />],
+			dock: <text>side dock</text>,
+		}));
+		try {
+			const file = "\x1b]1337;File=inline=1;width=8;height=4:";
+			const sideFile = `\x1b[22G\x1b7\x1b[3A${file}`;
+			const clipped = await s.next(() =>
+				expect(s.host.ansiWorkspace!.open("side", () => ({ surface: side }), { edge: "right" })).toBe(true),
+			);
+			expect(clipped).not.toContain(sideFile);
+			expect(clipped).not.toContain("no iTerm");
+			expect(s.vt.line(4)).toContain("side footer");
+			expect(s.vt.line(5)).toContain("side dock");
+			expect(await s.next(() => tail.set([]))).toContain(sideFile);
+		} finally {
+			await s.dispose();
+			side.dispose();
 		}
 	});
 

@@ -75,7 +75,15 @@ const ids = (sequences: string, action: string) =>
 describe("TerminalImages: kitty", () => {
 	it("transmits once by id and draws rows of per-row placements", () => {
 		const { images } = rig();
-		const block = paint(images, image("a"), { maxColumns: 4, maxRows: 2, fallback: "[a]" });
+		const source = image("a");
+		const request = { maxColumns: 4, maxRows: 2, fallback: "[a]" };
+		expect(images.measure(source, request)).toEqual({
+			rows: [RESERVED_ROW, RESERVED_ROW],
+			columns: 2,
+			state: "pending",
+		});
+		expect(images.takeSequences()).toBe("");
+		const block = paint(images, source, request);
 		const first = frame(images, [block]);
 		const [id] = ids(first.sequences, "t");
 		expect(first.sequences).toBe(kittyTransmit(PNG_1PX, id!));
@@ -336,10 +344,12 @@ describe("TerminalImages: fallback and SIXEL", () => {
 			},
 		);
 		const source = { ...image("s"), widthPx: 900, heightPx: 220 };
-		const block = paint(images, source, { maxColumns: 90, maxRows: 11, fallback: "[s]" });
-		const pending = block.block();
-		expect(pending.state).toBe("pending");
-		expect(pending.rows).toEqual(Array.from({ length: 11 }, () => RESERVED_ROW));
+		const request = { maxColumns: 90, maxRows: 11, fallback: "[s]" };
+		const measured = images.measure(source, request);
+		expect(measured).toEqual({ state: "pending", columns: 90, rows: Array.from({ length: 11 }, () => RESERVED_ROW) });
+		expect(requests).toEqual([]);
+		const block = paint(images, source, request);
+		expect(block.block()).toEqual(measured);
 		await images.whenEncoded();
 		const drawn = block.block();
 		expect(drawn.state).toBe("image");

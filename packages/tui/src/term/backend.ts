@@ -37,8 +37,9 @@ import type {
 import { dropCutImages } from "../driver/images/anchor";
 import { DEFAULT_CELL } from "../driver/images/fit";
 import { KITTY_PLACEHOLDER } from "../driver/images/kitty";
-import { maskOverlayImages } from "../driver/images/viewport";
-import { normalizeRow } from "../driver/output/ansi";
+import type { TerminalImages } from "../driver/images/store";
+import { maskOverlayImages, splitImageRow } from "../driver/images/viewport";
+import { column, normalizeRow } from "../driver/output/ansi";
 import { bubbleEvent, bubbleKey, bubblePaste, keypathOf, pathTo } from "../dispatch";
 import type { ScrollRequest, UiNode } from "../node";
 import {
@@ -189,9 +190,13 @@ interface Placed {
  * The paint seam over a driver's image store: its rows, measured in the
  * terminal's reported cell size (a default until the terminal reports one).
  */
-export function driverImages(images: Pick<PaintImages, "rows">, capabilities: () => TerminalCapabilities): PaintImages {
+export function driverImages(
+	images: Pick<TerminalImages, "rows" | "measure">,
+	capabilities: () => TerminalCapabilities,
+): PaintImages & Pick<TerminalImages, "measure"> {
 	return {
 		rows: (source, request) => images.rows(source, request),
+		measure: (source, request) => images.measure(source, request),
 		cell: () => capabilities().cell ?? DEFAULT_CELL,
 	};
 }
@@ -230,12 +235,15 @@ function composite(
 	left: number,
 	width: number,
 	fullscreenSession: boolean,
+	splitGraphics: boolean,
 ): void {
 	for (let i = 0; i < block.rows.length; i++) {
 		const target = top + i;
 		if (target < 0 || target >= rows.length) continue;
 		const base = padTo(rows[target] ?? "", width);
-		const cell = block.rows[i]!;
+		const raw = block.rows[i]!;
+		const images = splitGraphics ? splitImageRow(raw) : undefined;
+		const cell = images?.text ?? raw;
 		const cellWidth = visibleWidth(cell);
 		const before = padTo(base, left);
 		const afterStart = left + cellWidth;
@@ -250,6 +258,7 @@ function composite(
 					: sliceAfter(full, afterStart);
 		}
 		rows[target] = `${before}\x1b[0m${cell}\x1b[0m${after}`;
+		for (const image of images?.images ?? []) rows[target] += column(left + image.x) + image.bytes;
 	}
 }
 
@@ -410,15 +419,6 @@ export class TermBackend {
 		this.#textSizing = signal(options.driver.capabilities.textSizing);
 		const terminalTextSizing = this.#textSizing;
 		const allowTextSizing = options.textSizing;
-		const images = options.images;
-		// Full-width placements cannot share composed panes, including during layout.
-		const paintImages: PaintImages | undefined =
-			images && options.screen
-				? {
-						cell: () => images.cell(),
-						rows: (source, request) => images.rows(source, this.#split() ? { ...request, cells: true } : request),
-					}
-				: images;
 		this.#env = {
 			theme: options.theme,
 			clock: smooth => {
@@ -433,7 +433,7 @@ export class TermBackend {
 			hover: this.#hover,
 			hyperlinks,
 			...(allowTextSizing ? { textSizing: () => !this.#split() && allowTextSizing() && terminalTextSizing() } : {}),
-			...(paintImages ? { images: paintImages } : {}),
+			...(options.images ? { images: options.images } : {}),
 		};
 		const split = this.#split;
 		const copyOsc52 = (text: string): void =>
@@ -858,7 +858,7 @@ export class TermBackend {
 				fullscreenSession && this.#options.images
 					? maskOverlayImages(rows, top, block.rows.length, left, overlayCols, this.#options.images.cell().w)
 					: undefined;
-			composite(rows, block, top, left, width, fullscreenSession);
+			composite(rows, block, top, left, width, fullscreenSession, pane !== undefined);
 			restore?.();
 			if (block.cursor) cursor = { row: top + block.cursor.row, col: left + block.cursor.col };
 			for (const hit of block.hits ?? []) hits.push({ hit, top, left });
@@ -891,6 +891,9 @@ export class TermBackend {
 				const railWidth = railLayout.width;
 				const block = this.#paint(rail.node, railWidth, height);
 				const cut = railWidth - inset;
+				const restore = this.#options.images
+					? maskOverlayImages(rows, 0, rows.length, 0, cut, this.#options.images.cell().w, inset)
+					: undefined;
 				for (let row = 0; row < rows.length; row++) {
 					const base = rows[row]!;
 					const prefix = padTo(normalizeRow(block.rows[row] ?? "", railWidth), railWidth);
@@ -901,6 +904,7 @@ export class TermBackend {
 						rows[row] = `${prefix}${" ".repeat(Math.max(0, gap))}${tail.text}`;
 					}
 				}
+				restore?.();
 				for (const hit of hits) hit.left += inset;
 				if (cursor) cursor = cursor.col + inset < railWidth ? null : { ...cursor, col: cursor.col + inset };
 			}

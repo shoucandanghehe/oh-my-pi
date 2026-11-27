@@ -23,7 +23,7 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { FramePlan } from "../contract";
-import { alternatePlacement, rasterDamage } from "../images/viewport";
+import { alternatePlacements, rasterDamage } from "../images/viewport";
 import type { KeyboardScreenModes } from "../io";
 import {
 	ALT_ENTER,
@@ -83,8 +83,9 @@ export interface FrameImages {
 	/**
 	 * Sequences to write before rows drawn on `screen`. kitty and Ghostty keep
 	 * one image store per screen, so data sent on one is unknown to the other.
+	 * A fullscreen frame supplies its visible Kitty image ids; the alternate screen has no scrollback.
 	 */
-	takeSequences(screen: Screen): string;
+	takeSequences(screen: Screen, visibleImages?: ReadonlySet<number>): string;
 	/** The alternate screen was entered: kitty and Ghostty start it with an empty image store. */
 	enteredAlternate?(): void;
 	/**
@@ -796,19 +797,18 @@ export class FrameWriter {
 		const width = this.#columns;
 		const shown = this.#altShown ?? [];
 		const next: string[] = [];
-		let placements: Set<string> | undefined;
+		const placements = new Set<string>();
+		const visibleImages = new Set<number>();
 		let anchors = false;
 		for (let row = 0; row < height; row++) {
 			const text = normalizeRow(rows[row] ?? "", width);
 			anchors ||= text.includes("\x1b7\x1b[");
-			const placement = alternatePlacement(text, row);
-			next.push(placement?.row ?? text);
-			if (placement) (placements ??= new Set()).add(placement.deletion);
+			next.push(alternatePlacements(text, row, visibleImages, placements));
 		}
 		if (this.#altPlacements) {
-			for (const deletion of this.#altPlacements) if (!placements?.has(deletion)) lead += deletion;
+			for (const deletion of this.#altPlacements) if (!placements.has(deletion)) lead += deletion;
 		}
-		this.#altPlacements = placements;
+		this.#altPlacements = placements.size > 0 ? placements : undefined;
 		const damaged = this.#altShown && (anchors || this.#altAnchors) ? rasterDamage(shown, next) : undefined;
 		this.#altAnchors = anchors;
 		for (let row = 0; row < height; row++) {
@@ -819,7 +819,7 @@ export class FrameWriter {
 		this.#altShown = next;
 		const show = cursor !== null && cursor.row >= 0 && cursor.row < height;
 		const park = show ? position(cursor.row, Math.min(cursor.col, width - 1)) : body ? position(height - 1, 0) : "";
-		this.#write(body, park, show, lead);
+		this.#write(body, park, show, lead, fullscreen ? visibleImages : undefined);
 	}
 
 	/** The viewport tail, bottom-anchored on the borrowed alternate screen. */
@@ -993,8 +993,8 @@ export class FrameWriter {
 	 * One frame write: `lead` (a screen switch and erase), images, rows with
 	 * autowrap off, cursor parked and shown/hidden inside the update.
 	 */
-	#write(body: string, park: string, show: boolean, lead = ""): void {
-		const images = this.#options.images?.takeSequences(this.#alt ? "alternate" : "main") ?? "";
+	#write(body: string, park: string, show: boolean, lead = "", visibleImages?: ReadonlySet<number>): void {
+		const images = this.#options.images?.takeSequences(this.#alt ? "alternate" : "main", visibleImages) ?? "";
 		const visibility = show === this.#visible ? "" : show ? CURSOR_SHOW : CURSOR_HIDE;
 		if (!lead && !images && !body && !park && !visibility) return;
 		const sync = this.#options.synchronizedOutput();
