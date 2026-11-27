@@ -4,10 +4,10 @@ import { maskOverlayImages, paneImage, splitImageRow } from "../driver/images/vi
 import { column, normalizeRow } from "../driver/output/ansi";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
-import { batch, computed, createRoot, signal } from "../reactive";
+import { type Accessor, batch, computed, createRoot, type Signal, signal } from "../reactive";
 import type { Surface } from "../surface";
 import { stripEscapes } from "../text/ansi";
-import { flattenLine, stripControl } from "../text/sanitize";
+import { flattenLine, singleLine, stripControl } from "../text/sanitize";
 import { padTo, sliceColumns, truncate, visibleWidth } from "../text/width";
 import type { Theme } from "../theme/contract";
 import type {
@@ -49,6 +49,14 @@ export interface WorkspacePane {
 	readonly label: string;
 	readonly window: FullscreenWindow;
 	input?: InputFrame;
+	snapshot?: {
+		width: number;
+		height: number;
+		read: Accessor<FramePlan>;
+		revision: Signal<number>;
+		cells: { source: string; padded: string }[];
+		dispose(): void;
+	};
 }
 
 export interface WorkspaceRect {
@@ -281,6 +289,8 @@ export class TerminalWorkspace implements AnsiWorkspace {
 	#sequence = 0;
 	#drag: PointerDrag | undefined;
 	#capture: string | undefined;
+	#hoverWindow: FullscreenWindow | undefined;
+	readonly tailMotion = signal(false);
 	#disposed = false;
 
 	constructor(
@@ -302,7 +312,28 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		for (const id of this.#geometry.read().panes.keys()) {
 			if (this.#panes.get(id)?.mount.ansiRail) return true;
 		}
-		return false;
+		return this.tailMotion();
+	}
+
+	mainSize(): { columns: number; rows: number } {
+		const { panes } = this.#geometry.read();
+		const rect = panes.get(MAIN)!;
+		return { columns: rect.width, rows: rect.height - (panes.size > 1 ? 1 : 0) };
+	}
+
+	invalidate(id?: string): void {
+		if (id !== undefined) this.#panes.get(id)?.snapshot?.revision.update(n => n + 1);
+		else for (const pane of this.#panes.values()) pane.snapshot?.revision.update(n => n + 1);
+	}
+
+	updateTailMotion(scrollbar: boolean, split: boolean): void {
+		const anchored = (pane: WorkspacePane) => pane.window.wheel && !pane.window.following;
+		this.tailMotion.set(
+			scrollbar &&
+				(split
+					? [...this.#geometry.read().panes.keys()].some(id => anchored(this.#panes.get(id)!))
+					: anchored(this.main)),
+		);
 	}
 
 	visibleMain(surface: Surface): WorkspaceMainView | undefined {
@@ -411,6 +442,8 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		const pane = this.#panes.get(id);
 		if (!pane) return false;
 		this.#panes.delete(id);
+		pane.snapshot?.dispose();
+		if (this.#hoverWindow === pane.window) this.#hoverWindow = undefined;
 		this.endPointer();
 		batch(() => {
 			this.#layout.set(replacePane(this.#layout.peek(), id)!);
@@ -442,7 +475,10 @@ export class TerminalWorkspace implements AnsiWorkspace {
 	pause(): void {
 		this.endPointer();
 		this.#frame = undefined;
+		this.#hoverWindow = undefined;
 		for (const pane of this.#panes.values()) {
+			pane.snapshot?.dispose();
+			pane.snapshot = undefined;
 			pane.window.closeSearch();
 			pane.window.hide();
 			pane.input = undefined;
@@ -464,10 +500,29 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		let cursor: Cell | null = null;
 		for (const [id, rect] of panes) {
 			const pane = this.#panes.get(id)!;
-			const plan = paintPane(pane, rect.width, rect.height - 1);
-			const title = `${active === id ? "›" : " "} ${pane.label}`;
-			const bar = id === MAIN ? title : `${padTo(truncate(title, rect.width - 2, ""), rect.width - 2)} ×`;
-			const rows = [theme.fg(active === id ? "accent" : "dim", bar), ...plan.fullscreen!];
+			const width = rect.width;
+			const height = rect.height - 1;
+			if (!pane.snapshot || pane.snapshot.width !== width || pane.snapshot.height !== height) {
+				pane.snapshot?.dispose();
+				pane.snapshot = createRoot(dispose => {
+					const revision = signal(0);
+					const read = computed(() => {
+						revision();
+						return paintPane(pane, width, height);
+					});
+					return { width, height, read, revision, cells: [], dispose };
+				});
+			}
+			const plan = pane.snapshot.read();
+			const focused = active === id;
+			let label = theme.style(focused ? "accent strong" : "muted", `${focused ? "●" : "○"} ${pane.label}`);
+			for (const span of pane.mount.titleDetail?.(focused, width) ?? [])
+				label += theme.style(span.s, singleLine(stripControl(span.t)));
+			const bar =
+				id === MAIN
+					? label
+					: `${padTo(truncate(label, rect.width - 2, ""), rect.width - 2)} ${theme.fg("muted", "×")}`;
+			const rows = [bar, ...plan.fullscreen!];
 			const petrification = pane.mount.petrification?.();
 			fragments.push({
 				id,
@@ -517,12 +572,17 @@ export class TerminalWorkspace implements AnsiWorkspace {
 		const rows = Array.from({ length: this.#size().height }, () => "");
 		const images: string[] = [];
 		// For any given row, the rectangles form disjoint columns from left to right.
-		for (const { rect, rows: lines } of fragments.sort((a, b) => a.rect.x - b.rect.x)) {
+		for (const { id, rect, rows: lines } of fragments.sort((a, b) => a.rect.x - b.rect.x)) {
+			const cache = id ? this.#panes.get(id)!.snapshot!.cells : undefined;
 			for (let row = 0; row < rect.height; row++) {
 				const raw = lines[row] ?? "";
 				const split = splitImageRow(raw);
 				const y = rect.y + row;
-				rows[y] += padTo(normalizeRow(split?.text ?? raw, rect.width), rect.width);
+				const source = split?.text ?? raw;
+				const old = cache?.[row];
+				const padded = old?.source === source ? old.padded : padTo(normalizeRow(source, rect.width), rect.width);
+				if (cache && old?.source !== source) cache[row] = { source, padded };
+				rows[y] += padded;
 				for (const image of split?.images ?? []) {
 					// A body image may not reach above the pane's title.
 					if (image.above >= row) continue;
@@ -608,6 +668,14 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			return undefined;
 		}
 		const frame = this.#frame;
+		if (mouse.action === "move") {
+			const body = frame && [...frame.panes].find(([, rect]) => contains(rect, mouse) && mouse.row > rect.y);
+			const next = body && this.#panes.get(body[0])?.window;
+			if (next !== this.#hoverWindow) {
+				this.#hoverWindow?.leavePointer();
+				this.#hoverWindow = next;
+			}
+		}
 		if (!frame || frame !== this.#geometry.read()) return undefined;
 		const press = mouse.action === "press";
 		const leftPress = press && mouse.button === "left";

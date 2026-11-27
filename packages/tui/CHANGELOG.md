@@ -27,6 +27,8 @@
 ### Fixed
 
 - Fullscreen transcripts draw the visible rows first on open and resize, and stop animating spinners scrolled off screen.
+- Fullscreen panes keep unchanged bodies between frames, distinguish the focused title, and request pointer motion for hover controls. Supported terminals use pixel-accurate mouse input.
+- A late Tern handshake now hands the live surface over from ANSI without losing the draft or unbalancing terminal keyboard modes.
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
 - Fixed SIXEL and iTerm2 images overflowing rows, scrolling the terminal unexpectedly, or rendering incorrectly when they extend beyond the visible screen.

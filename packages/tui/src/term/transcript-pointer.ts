@@ -444,7 +444,7 @@ export class TranscriptPointer {
 	}
 
 	/** Continue the existing press before hit-testing the current pointer location. */
-	capture(mouse: MouseEvent & { readonly rowFraction?: number }, row: number): boolean {
+	capture(mouse: MouseEvent, row: number): boolean {
 		const view = this.#view;
 		const hover =
 			!!view?.scrollbar && view.top < view.doc.rows - view.rows && row === view.rows - 1 && mouse.col === view.width;
@@ -490,7 +490,7 @@ export class TranscriptPointer {
 	}
 
 	/** A report not consumed by a widget or layer. Only unmodified left presses start a drag. */
-	input(mouse: MouseEvent & { readonly rowFraction?: number }, row: number): void {
+	input(mouse: MouseEvent, row: number): void {
 		const view = this.#view;
 		if (!view || mouse.action !== "press") return;
 		if (mouse.button === "wheel-up" || mouse.button === "wheel-down") {

@@ -11,6 +11,7 @@ import {
 	signal,
 	startHost,
 	type Surface,
+	type UiNode,
 	type WorkspaceSurface,
 } from "@oh-my-pi/pi-tui";
 import { ALT_ENTER, ALT_LEAVE } from "@oh-my-pi/pi-tui/driver/output/ansi";
@@ -138,6 +139,7 @@ it("uses fullscreen, keeps its reading point and flushes the transcript only on 
 			expect(memory.output.join("")).toContain("\x1b[?1002h");
 			await afterFrame(host, () => memory.feed("\x1b[<64;1;2M"));
 			expect(transcript()).toEqual(["live1", "live2", "live3", "live4", "dock"]);
+			expect(memory.output.join("")).toContain("\x1b[?1003h");
 			await afterFrame(host, () => {
 				expect(host.scroll("start")).toBe(true);
 				expect(host.scroll("page-down")).toBe(true);
@@ -176,6 +178,63 @@ it("uses fullscreen, keeps its reading point and flushes the transcript only on 
 			expect(screen()).toEqual(["live7", "live8", "live9", "dock", ""]);
 		},
 		{ shell: "shell", screen: () => "fullscreen" },
+	);
+});
+
+it("keeps a resting pane's painted layout through sibling edits, scrolling and animation", async () => {
+	const draft = signal("draft");
+	const surface = createSurface(() => ({
+		main: <rows lines={Array.from({ length: 70 }, (_, i) => `line ${i}`)} />,
+		dock: (
+			<editor
+				text={draft}
+				onEdit={edit => {
+					if (edit.type === "edit") draft.set(draft.peek() + edit.text);
+				}}
+			/>
+		),
+	}));
+	surface.focus(surface.dock()[0]!);
+	await withHost(
+		surface,
+		async ({ host, memory, screen }) => {
+			const workspace = host.ansiWorkspace!;
+			const step = signal(0);
+			const counts = [0, 0];
+			await afterFrame(host, () => {
+				for (const n of [0, 1]) {
+					workspace.open(
+						`side${n}`,
+						() => ({
+							surface: createSurface(() => ({
+								main: <text text={() => (n ? `animated ${step()}` : "steady")} />,
+							})),
+							ansiRail: {
+								node: (<text>r</text>) as UiNode,
+								layout: () => {
+									counts[n]++;
+									return { width: 1, inset: 1 };
+								},
+								pointer: () => false,
+								leave() {},
+							},
+						}),
+						{ focus: false },
+					);
+				}
+			});
+			expect(screen().join("\n")).toContain("animated 0");
+			counts.fill(0);
+			await afterFrame(host, () => memory.feed("x"));
+			expect(screen().join("\n")).toContain("draftx");
+			await afterFrame(host, () => host.scroll("start"));
+			expect(screen().join("\n")).toContain("line 0");
+			expect(counts).toEqual([0, 0]);
+			await afterFrame(host, () => step.set(1));
+			expect(screen().join("\n")).toContain("animated 1");
+			expect(counts).toEqual([0, 1]);
+		},
+		{ columns: 120, rows: 10 },
 	);
 });
 
@@ -661,7 +720,7 @@ it("composes a recursive workspace, scopes scrolling and attachments, and closes
 			});
 			expect(workspace.active()).toBe("b");
 			expect(sizes).toEqual({ b: 4, c: 4 });
-			expect(screen()[0]).toMatch(/Main\s+│› Agent B/);
+			expect(screen()[0]).toMatch(/○ Main\s+│● Agent B/);
 			expect(screen()[1]).toMatch(/^main3\s+[│┃]│b9/);
 			expect(screen()[4]).toContain("b dock");
 			expect(screen()[6]).toContain("Agent C");
@@ -765,6 +824,7 @@ it("previews and redocks a dragged pane without remounting it", async () => {
 	const theme = loadThemeSync("dark");
 	const surface = createSurface(() => ({ main: <text>main body</text> }));
 	const body = signal("side before");
+	const status = signal("running");
 	let released = 0;
 	await withHost(
 		surface,
@@ -776,6 +836,7 @@ it("previews and redocks a dragged pane without remounting it", async () => {
 						"side",
 						() => ({
 							surface: createSurface(() => ({ main: <text text={body} /> })),
+							titleDetail: () => [{ t: ` ${status()}`, s: "success" }],
 							intercept: event => event.type === "key" && event.key.id === "escape",
 							dispose: () => released++,
 						}),
@@ -783,10 +844,14 @@ it("previews and redocks a dragged pane without remounting it", async () => {
 					),
 				).toBe(true);
 			});
+			expect(screen()[0]).toMatch(/○ Main\s+│● Side running/);
+			expect(memory.output.join("")).toContain(theme.style("accent strong", "● Side"));
+			await afterFrame(host, () => status.set("idle"));
+			expect(screen()[0]).toContain("● Side idle");
 			expect(screen()[1]).toMatch(/^main body\s+│side before$/);
 			const written = memory.output.length;
 			await afterFrame(host, () => memory.feed("\x1b[<0;41;1M\x1b[<32;2;5M"));
-			expect(screen()[0]).toMatch(/^┏━+┓ +│› Side/);
+			expect(screen()[0]).toMatch(/^┏━+┓ +│● Side/);
 			expect(screen()[1]).toMatch(/^┃side before +┃ +│side before$/);
 			const preview = memory.output.slice(written).join("");
 			expect(preview).toContain(`${theme.fgSgr("accent")}┏`);
@@ -797,7 +862,7 @@ it("previews and redocks a dragged pane without remounting it", async () => {
 			expect(screen()[1]).toMatch(/^main body\s+│side after$/);
 			await afterFrame(host, () => memory.feed("\x1b[<0;41;1M\x1b[<32;2;5M"));
 			await afterFrame(host, () => memory.feed("\x1b[<0;2;5m"));
-			expect(screen()[0]).toMatch(/^› Side.*│  Main$/);
+			expect(screen()[0]).toMatch(/^● Side.*│○ Main$/);
 			expect(screen()[1]).toMatch(/^side after\s+│main body$/);
 			expect(workspace.active()).toBe("side");
 			expect(released).toBe(0);

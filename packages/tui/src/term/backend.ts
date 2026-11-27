@@ -451,7 +451,10 @@ export class TermBackend {
 						const input = split.peek() ? this.#workspace.pane(id)?.input : this.#inlineInput;
 						return this.#running && this.#pointerFocused && surface.layer() === input?.layer;
 					},
-					requestRender: () => this.requestRender(),
+					requestRender: () => {
+						this.#workspace.invalidate(id);
+						this.requestRender();
+					},
 					settleFrame: () => {
 						if (this.#frameRequested) this.renderNow();
 					},
@@ -491,6 +494,7 @@ export class TermBackend {
 			}),
 			this.#driver.onCapabilities(capabilities => {
 				this.#hyperlinks.set(capabilities.hyperlinks);
+				this.#workspace.invalidate();
 				this.#textSizing.set(capabilities.textSizing);
 				this.requestRender();
 			}),
@@ -591,7 +595,11 @@ export class TermBackend {
 		this.#lastFrame = performance.now();
 		let plan = this.#composeWatched();
 		// An image budget change after painting means the rows it painted are stale.
-		for (let pass = 0; pass < 3 && this.#driver.images?.settle(); pass++) plan = this.#composeWatched();
+		for (let pass = 0; pass < 3 && this.#driver.images?.settle(); pass++) {
+			this.#workspace.invalidate();
+			plan = this.#composeWatched();
+		}
+		if (this.workspace) this.#workspace.updateTailMotion(this.#options.scrollbar?.() ?? true, this.#split.peek());
 		const written = this.#driver.present(plan);
 		// A frame whose history the driver did not write was not drawn inline either: the screen is as it was.
 		if (!plan.history || written === plan.history.id) this.#pin = this.#nextPin;
@@ -641,7 +649,10 @@ export class TermBackend {
 
 	#scheduleTick(smooth: boolean): void {
 		if (!this.#running || this.#options.clock) return;
-		const delay = smooth ? SMOOTH_TICK_MS : (this.#options.tickInterval ?? 80);
+		const delay = Math.max(
+			smooth ? SMOOTH_TICK_MS : (this.#options.tickInterval ?? 80),
+			this.workspace ? read(this.#options.frameInterval ?? 0) : 0,
+		);
 		if (this.#tick !== undefined) {
 			if (this.#tickDelay <= delay) return;
 			clearTimeout(this.#tick);
@@ -1327,6 +1338,7 @@ export class TermBackend {
 					break;
 				}
 				case "mouse":
+					if (pane) this.#workspace.invalidate(id);
 					this.#onMouse(event.mouse, surface, id, pane);
 					break;
 				default:

@@ -1,3 +1,4 @@
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { InputEvent, MouseEvent } from "./driver/contract";
 import type { KeyEvent } from "./events";
 import type { UiNode } from "./node";
@@ -17,6 +18,8 @@ export interface AnsiWorkspaceRail {
 /** A pane is an ordinary reactive surface with its own input callbacks. */
 export interface WorkspaceSurface {
 	readonly surface: Surface;
+	/** Reactive detail shown after the ANSI pane title, e.g. the agent's status and model. */
+	readonly titleDetail?: (focused: boolean, width: number) => readonly TspSpan[];
 	readonly ansiRail?: AnsiWorkspaceRail;
 	readonly onKey?: (key: KeyEvent) => boolean;
 	/** Consume input before the focused node. Replay keeps the event on this pane, even if focus moves. */
@@ -71,6 +74,8 @@ export interface TranscriptControls {
 export interface AnsiWorkspace {
 	/** Id of the focused pane (reactive). The original host surface is `main`. */
 	active(): string;
+	/** Body of Main in cells (excluding its split title). */
+	mainSize(): { readonly columns: number; readonly rows: number };
 	/** Whether any visible pane needs hover reports (reactive). */
 	pointerMotion(): boolean;
 	/** Focus an existing visible pane. */
