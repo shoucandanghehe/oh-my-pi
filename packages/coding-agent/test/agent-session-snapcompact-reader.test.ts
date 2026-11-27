@@ -22,7 +22,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { CompactionEntry, SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -256,19 +256,25 @@ describe("snapcompact archive read by another model", () => {
 		await session.prompt("Continue.");
 		const variantFrames = expectVariantSent(sessionManager, original, mock.calls[0]?.context);
 
-		// Both archives' frames persist as blob references, and a resume reads
-		// the stored variant without rendering it again.
+		// The raw archive stays intact. Its branch revision stores both sets of
+		// frames as blob references, so reopening need not render the view again.
 		await sessionManager.flush();
 		const sessionFile = sessionManager.getSessionFile()!;
-		const persisted = (await Bun.file(sessionFile).text())
-			.split("\n")
-			.filter(Boolean)
-			.map(line => JSON.parse(line))
-			.find(entry => entry.type === "compaction");
-		const slot = persisted.preserveData[snapcompact.PRESERVE_KEY];
-		const refs = [...slot.frames, ...slot.withoutThinking.archive.frames].map(frame => frame.data as string);
-		expect(refs.length).toBeGreaterThan(slot.frames.length);
-		expect(refs.every(data => data.startsWith("blob:sha256:"))).toBe(true);
+		const entries = Bun.JSONL.parse(await Bun.file(sessionFile).text()) as SessionEntry[];
+		const persisted = entries.find(entry => entry.type === "compaction");
+		const originalArchive = snapcompact.getPreservedArchive(persisted?.preserveData);
+		expect(originalArchive?.withoutThinking).toBeUndefined();
+		const revised = entries
+			.flatMap(entry => (entry.type === "context_revision" ? entry.revisions : []))
+			.find(entry => entry.type === "compaction" && entry.id === persisted?.id);
+		const archive = revised?.type === "compaction" && snapcompact.getPreservedArchive(revised.preserveData);
+		if (!originalArchive || !archive || !archive.withoutThinking)
+			throw new Error("Expected both persisted archive views");
+		const originalRefs = archive.frames.map(frame => frame.data);
+		const variantRefs = archive.withoutThinking.archive.frames.map(frame => frame.data);
+		expect(originalRefs).toEqual(originalArchive.frames.map(frame => frame.data));
+		expect(variantRefs.length).toBeGreaterThan(0);
+		expect([...originalRefs, ...variantRefs].every(data => data.startsWith("blob:sha256:"))).toBe(true);
 
 		const resumedManager = await SessionManager.open(sessionFile, sessionDir, undefined, {
 			suppressBreadcrumb: true,

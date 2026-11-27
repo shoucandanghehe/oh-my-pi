@@ -1866,10 +1866,14 @@ describe("AgentSession auto-compaction progress guard", () => {
 		// The dead-end is also stamped on the compaction entry so the transcript
 		// divider badges the pause and carries the warning across rebuilds/resume.
 		const compactionEntry = sessionManager
-			.getEntries()
+			.getBranch()
 			.filter((e): e is CompactionEntry => e.type === "compaction")
 			.at(-1);
-		expect(compactionEntry?.warning).toBe(noProgress[0].message);
+		if (!compactionEntry) throw new Error("Expected a compaction on the active branch");
+		expect(compactionEntry.warning).toBe(noProgress[0].message);
+		const original = sessionManager.getEntry(compactionEntry.id);
+		if (original?.type !== "compaction") throw new Error("Expected the original compaction record");
+		expect(original.warning).toBeUndefined();
 	});
 
 	it("auto-continues (no warning) when the image-drop tier frees an image-only tail", async () => {
