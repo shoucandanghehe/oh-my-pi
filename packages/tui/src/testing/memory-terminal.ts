@@ -63,7 +63,6 @@ class MemoryStdout extends Emitter {
 }
 
 const DA1_QUERY = "\x1b[c";
-const CURSOR_QUERY = "\x1b[6n";
 
 /** How {@link memoryTerminal} starts. */
 export interface MemoryTerminalInit {
@@ -109,13 +108,14 @@ export function memoryTerminal(init: MemoryTerminalInit): MemoryTerminal {
 				output.push(data);
 				bytes += Buffer.byteLength(data);
 				init.onWrite?.(data);
-				// Answer after the write returns, as a terminal would.
+				// Answer every query in wire order: DA1 closes the preceding probe.
 				let replies = "";
-				for (let at = data.indexOf(DA1_QUERY); at !== -1; at = data.indexOf(DA1_QUERY, at + 1))
-					replies += "\x1b[?62c";
-				if (data.includes(CURSOR_QUERY)) {
-					const cursor = init.cursor?.();
-					replies += `\x1b[${(cursor?.y ?? 0) + 1};${(cursor?.x ?? 0) + 1}R`;
+				for (const [query] of data.matchAll(/\x1b\[(?:c|6n)/gu)) {
+					if (query === DA1_QUERY) replies += "\x1b[?62c";
+					else {
+						const cursor = init.cursor?.();
+						replies += `\x1b[${(cursor?.y ?? 0) + 1};${(cursor?.x ?? 0) + 1}R`;
+					}
 				}
 				if (replies) queueMicrotask(() => feed(replies));
 			},
