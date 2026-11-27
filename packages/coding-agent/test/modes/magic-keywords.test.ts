@@ -82,12 +82,15 @@ describe("workflow notice", () => {
 		const both = renderWorkflowNotice(base);
 
 		expect(pyOnly).toContain("schema_mode=None");
+		expect(pyOnly).toContain('`agent="default"` or `agent="slow"`');
 		expect(pyOnly).not.toContain("```js");
 		expect(pyOnly).not.toContain("raiseErrors");
 		expect(pyOnly).not.toContain("JS:");
 
 		expect(jsOnly).toContain("await workpool(");
 		expect(jsOnly).toContain("schemaMode?");
+		expect(jsOnly).toContain('`{ agent: "default" }` or `{ agent: "slow" }`');
+		expect(jsOnly).not.toContain('`agent="default"`');
 		expect(jsOnly).not.toContain("```python");
 		expect(jsOnly).not.toContain("raise_errors");
 		expect(jsOnly).not.toContain("@tool");
@@ -96,6 +99,7 @@ describe("workflow notice", () => {
 		expect(both).toContain("```python");
 		expect(both).toContain("```js");
 		expect(both).toContain("JS: `await workpool(");
+		expect(both).toContain('`agent="default"` or `agent="slow"` (JS: `{ agent: "default" }` or `{ agent: "slow" }`)');
 		expect(both).toContain("raise_errors");
 		expect(both).toContain("raiseErrors");
 	});
