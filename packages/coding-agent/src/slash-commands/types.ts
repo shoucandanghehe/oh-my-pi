@@ -160,7 +160,7 @@ export interface TuiSlashCommandRuntime {
 	ctx: InteractiveModeContext;
 	/** Post-extension-hook attachments belonging to the submitted slash draft. */
 	input?: Pick<SubmittedUserInput, "images" | "imageLinks">;
-	/** The editor snapshot was cleared before asynchronous input hooks ran. */
+	/** The submitted draft is no longer the live editor draft. */
 	draftDetached?: boolean;
 	/** Submitted with the follow-up key from this conversation position: queue behind the active run
 	 *  rather than interrupt it. */

@@ -45,14 +45,12 @@ describe("flushCompactionQueue failure", () => {
 		await tempDir?.remove();
 	});
 
-	/** A session whose first turn is still streaming (a 60 s mock delay the abort cancels). */
-	async function startStreamingSession(): Promise<{ live: AgentSession; running: Promise<boolean> }> {
-		const started = Promise.withResolvers<void>();
+	async function createSession(onStreamStart?: () => void): Promise<AgentSession> {
 		const mock = createMockModel({
 			responses: [
 				() => {
-					started.resolve();
-					return { content: ["working"], delayMs: 60_000 };
+					onStreamStart?.();
+					return { content: ["working"], delayMs: onStreamStart ? 60_000 : 0 };
 				},
 			],
 		});
@@ -72,9 +70,26 @@ describe("flushCompactionQueue failure", () => {
 			modelRegistry: new ModelRegistry(authStorage, tempDir.join("models.yml")),
 		});
 		session = live;
+		return live;
+	}
+
+	/** A session whose first turn is still streaming (the mock stream's delay is cancelled by abort). */
+	async function startStreamingSession(): Promise<{ live: AgentSession; running: Promise<boolean> }> {
+		const started = Promise.withResolvers<void>();
+		const live = await createSession(started.resolve);
 		const running = live.prompt("first task");
 		await started.promise;
 		return { live, running };
+	}
+
+	/** Real idle prompt setup claims the turn before it looks up its credential. */
+	function holdSetupFailure(live: AgentSession): () => void {
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(live.modelRegistry, "getApiKey").mockImplementationOnce(async () => {
+			await release.promise;
+			throw new Error("credential lookup failed");
+		});
+		return release.resolve;
 	}
 
 	function flushContext(
@@ -127,16 +142,8 @@ describe("flushCompactionQueue failure", () => {
 	});
 
 	it("keeps messages queued after the flush returned when its first prompt fails later", async () => {
-		const { live, running } = await startStreamingSession();
-
-		// The first typed prompt is fire-and-forget; its setup fails only after the flush returns.
-		const setupFails = Promise.withResolvers<void>();
-		const prompted = Promise.withResolvers<void>();
-		vi.spyOn(live, "prompt").mockImplementation(async () => {
-			prompted.resolve();
-			await setupFails.promise;
-			throw new Error("No API key found");
-		});
+		const live = await createSession();
+		const failSetup = holdSetupFailure(live);
 		const typed: CompactionQueuedMessage[] = [
 			{ text: "typed first", mode: "steer" },
 			{ text: "typed second", mode: "steer" },
@@ -146,56 +153,48 @@ describe("flushCompactionQueue failure", () => {
 		const ctx = flushContext(live, typed, () => reported.resolve());
 
 		await new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
-		await prompted.promise;
 		expect(live.getQueuedMessages().steering).toEqual(["typed second"]);
 
 		// Something else queues a prompt while the first prompt is still being set up.
 		await live.sendUserMessage("queued afterwards", { deliverAs: "followUp" });
-		setupFails.resolve();
+		failSetup();
 		await reported.promise;
 		expect(ctx.compactionQueuedMessages).toEqual(typed);
 
 		// The flush took back its own delivered message, not the one queued after it.
 		expect(live.getQueuedMessages().steering).toEqual([]);
 		expect(live.getQueuedMessages().followUp).toEqual(["queued afterwards"]);
-
-		await live.abort();
-		await running.catch(() => {});
 	});
 
-	it("stops delivering and takes back the rest when the first prompt fails mid-delivery", async () => {
+	it("does not let a later steer overtake the first while its session admission is deferred", async () => {
 		const { live, running } = await startStreamingSession();
 
-		// The first typed prompt fails while the second typed message is still being delivered.
-		vi.spyOn(live, "prompt").mockImplementation(async () => {
-			throw new Error("No API key found");
-		});
-		const steer = live.steer.bind(live);
-		const steerStarted = Promise.withResolvers<void>();
-		const steerRelease = Promise.withResolvers<void>();
-		vi.spyOn(live, "steer").mockImplementation(async (text, images, options) => {
-			steerStarted.resolve();
-			await steerRelease.promise;
-			return steer(text, images, options);
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		live.setDeferredExtensionLoader(async () => {
+			entered.resolve();
+			await release.promise;
 		});
 		const typed: CompactionQueuedMessage[] = [
 			{ text: "typed first", mode: "steer" },
 			{ text: "typed second", mode: "steer" },
-			{ text: "typed third", mode: "steer" },
 		];
-		const reported = Promise.withResolvers<void>();
-		const ctx = flushContext(live, typed, () => reported.resolve());
+		const ctx = flushContext(live, typed, () => {});
+		const firstQueued = Promise.withResolvers<void>();
+		const off = live.subscribe(event => {
+			if (event.type === "queue_update" && event.steering.includes("typed first")) firstQueued.resolve();
+		});
 
 		const flushing = new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
-		await steerStarted.promise;
-		await reported.promise;
-		steerRelease.resolve();
-		await flushing;
+		await entered.promise;
+		await live.followUp("unrelated input");
+		release.resolve();
+		await Promise.all([flushing, firstQueued.promise]);
+		off();
 
-		// The batch is back in the compaction queue once, and none of it stays in the session queue
-		// to be sent now and again on the next flush.
-		expect(ctx.compactionQueuedMessages).toEqual(typed);
-		expect(live.getQueuedMessages().steering).toEqual([]);
+		expect(ctx.compactionQueuedMessages).toEqual([]);
+		expect(live.getQueuedMessages().steering).toEqual(["typed first", "typed second"]);
+		expect(live.getQueuedMessages().followUp).toEqual(["unrelated input"]);
 
 		await live.abort();
 		await running.catch(() => {});
@@ -231,13 +230,8 @@ describe("flushCompactionQueue failure", () => {
 	});
 
 	it("keeps an extension prompt queued during the rest delivery when the first prompt fails", async () => {
-		const { live, running } = await startStreamingSession();
-
-		// The first typed prompt fails while the second typed message is still being delivered,
-		// and an extension queues its own prompt in that window.
-		vi.spyOn(live, "prompt").mockImplementation(async () => {
-			throw new Error("No API key found");
-		});
+		const live = await createSession();
+		const failSetup = holdSetupFailure(live);
 		const steer = live.steer.bind(live);
 		const steerStarted = Promise.withResolvers<void>();
 		const steerRelease = Promise.withResolvers<void>();
@@ -249,23 +243,22 @@ describe("flushCompactionQueue failure", () => {
 		const typed: CompactionQueuedMessage[] = [
 			{ text: "typed first", mode: "steer" },
 			{ text: "typed second", mode: "steer" },
+			{ text: "typed third", mode: "steer" },
 		];
 		const reported = Promise.withResolvers<void>();
 		const ctx = flushContext(live, typed, () => reported.resolve());
 
 		const flushing = new UiHelpers(ctx).flushCompactionQueue({ willRetry: false });
 		await steerStarted.promise;
-		await reported.promise;
 		await live.sendUserMessage("from the extension", { deliverAs: "followUp" });
+		failSetup();
+		await reported.promise;
 		steerRelease.resolve();
 		await flushing;
 
 		expect(ctx.compactionQueuedMessages).toEqual(typed);
 		expect(live.getQueuedMessages().steering).toEqual([]);
 		expect(live.getQueuedMessages().followUp).toEqual(["from the extension"]);
-
-		await live.abort();
-		await running.catch(() => {});
 	});
 
 	it("does not send an already-sent first prompt again when a later message fails", async () => {

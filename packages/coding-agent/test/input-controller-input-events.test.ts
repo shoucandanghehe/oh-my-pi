@@ -53,6 +53,8 @@ async function createHarness(factory: ExtensionFactory) {
 	const input = createInputHarness();
 	const prompt = vi.fn(async (_text: string, _options?: PromptOptions) => true);
 	const session = {
+		customCommands: [],
+		promptTemplates: [],
 		extensionRunner: runner,
 		isStreaming: true,
 		isCompacting: false,
@@ -106,7 +108,7 @@ async function createHarness(factory: ExtensionFactory) {
 	ctx.queueCompactionMessage = (text, mode, images, options) =>
 		helpers.queueCompactionMessage(text, mode, images, options);
 	const controller = new InputController(ctx);
-	ctx.handleQueueCommand = (message, detached) => controller.handleQueueCommand(message, detached);
+	ctx.handleQueueCommand = (...args) => controller.handleQueueCommand(...args);
 	controller.setupKeyHandlers();
 	controller.setupEditorSubmitHandler();
 	const onSubmit = editor.onSubmit;
@@ -271,6 +273,38 @@ describe("interactive native input ingress", () => {
 			{ text: "queued after compaction", mode: "followUp", images: undefined },
 		]);
 		expect(h.editor.expandedText()).toBe("new draft");
+	});
+
+	it.each(["/queue", "->", "=>"])("%s Enter queues only its own image and link after a hook", async prefix => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.session.isCompacting = true;
+		h.draftWithImage(`${prefix} inspect [Image #1]`);
+		const submitting = h.pressSubmit(ENTER);
+		await entered.promise;
+		h.editor.pendingImages.push(newerImage);
+		h.editor.pendingImageLinks.push("local://new.jpg");
+		h.editor.setText("newer [Image #2]");
+		release.resolve();
+		await submitting;
+
+		expect(h.ctx.compactionQueuedMessages).toEqual([
+			{
+				text: "inspect [Image #1]",
+				mode: "followUp",
+				images: [originalImage],
+				imageLinks: ["local://original.png"],
+			},
+		]);
+		expect(h.editor.expandedText()).toBe("newer [Image #1]");
+		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://new.jpg"]);
 	});
 
 	it("Ctrl+Enter /queue queues the attachments of its detached draft", async () => {

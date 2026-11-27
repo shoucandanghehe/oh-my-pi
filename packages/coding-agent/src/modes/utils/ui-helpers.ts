@@ -1206,6 +1206,7 @@ export class UiHelpers {
 		const builtin = await executeBuiltinSlashCommand(message.text, {
 			ctx: this.ctx,
 			input: message.images ? { images: message.images, imageLinks: message.imageLinks } : undefined,
+			draftDetached: true,
 		});
 		if (builtin === true) {
 			this.#parkLoopOnLocalConsume(message.text, false);

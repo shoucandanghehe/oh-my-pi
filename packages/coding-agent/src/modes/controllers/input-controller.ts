@@ -1302,15 +1302,18 @@ export class InputController {
 				hooksDone.resolve();
 			}
 			const submittedMode = parseSlashCommand(text)?.name;
-			const draftDetached = submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode);
+			const queueBody = parseQueueShorthand(text);
+			const localQueue = !this.ctx.collabGuest && (submittedMode === "queue" || queueBody !== undefined);
+			const draftDetached =
+				localQueue || (submittedMode !== undefined && DETACHED_DRAFT_COMMANDS.has(submittedMode));
 			if (draftDetached) this.#dropSubmittedPending(submittedImages);
 
 			if (!text && !hasInputImages) return;
 
-			const queueBody = parseQueueShorthand(text);
 			if (queueBody !== undefined) {
 				await this.#queueForYield(queueBody, {
 					historyText: text,
+					detachedText: draftDetached ? text : undefined,
 					images: inputImages,
 					imageLinks: inputImageLinks,
 				});
@@ -2154,7 +2157,8 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
-		if (options.detachedText === undefined) this.#clearDraft(options.historyText);
+		if (options.historyText !== undefined) this.ctx.composer.addToHistory(options.historyText);
+		if (options.detachedText === undefined) this.#clearDraft();
 
 		this.releaseStaleYieldCompaction();
 		const session = this.ctx.session;
