@@ -9,11 +9,11 @@
  * (`canFollowUp`, `canBranch`, `canInject`) are asked whenever the state
  * changes, not continuously.
  */
-import { type JSXNode, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
+import { type JSXNode, nativeRendering, type Signal, signal, untrack } from "@oh-my-pi/pi-tui";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { BtwAnswerBody, flatError } from "./btw-answer";
-import { Hints, type KeyHint } from "./common";
+import { ActionButton, Hints, type KeyHint } from "./common";
 import { matchesAppInterrupt } from "../../../config/keybindings/matchers";
 import { interruptKbd } from "../../keys/hints";
 
@@ -88,9 +88,15 @@ export interface BtwPanelProps {
 }
 
 /** What the footer says beside its hints. */
+interface FooterAction extends KeyHint {
+	readonly id: string;
+	readonly button: string;
+	readonly run?: () => void;
+}
+
 interface Footer {
 	readonly status?: TspSpan;
-	readonly hints: readonly KeyHint[];
+	readonly hints: readonly FooterAction[];
 	/** Replaces status and hints (branching). */
 	readonly note?: TspSpan;
 }
@@ -100,32 +106,52 @@ function footerOf(props: BtwPanelProps): Footer {
 	const status = state.status();
 	const copied = state.copied();
 	const hasText = state.answer().trim() !== "";
-	const open = props.onOpenThread ? [{ keys: ["enter"], label: "to open thread" }] : [];
+	const open: FooterAction[] = props.onOpenThread
+		? [{ id: "open", button: "Open thread", keys: ["enter"], label: "to open thread", run: props.onOpenThread }]
+		: [];
+	const close: FooterAction = {
+		id: "close",
+		button: "Close",
+		keys: interruptKbd(),
+		label: "to close",
+		run: props.onClose,
+	};
 	const symbols = currentTheme().symbols;
 	return untrack(() => {
 		switch (status) {
 			case "streaming":
-				return { hints: [...open, { keys: interruptKbd(), label: "to cancel" }] };
+				return {
+					hints: [...open, { ...close, button: "Cancel", label: "to cancel", run: props.onCancel }],
+				};
 			case "branching":
 				return { hints: [], note: { s: "muted", t: `${symbols.symbol("status.pending")} Branching to chat…` } };
 			case "aborted":
 				return {
 					status: { s: "warning", t: `${symbols.symbol("status.warning")} Cancelled` },
-					hints: [...open, { keys: interruptKbd(), label: "to close" }],
+					hints: [...open, close],
 				};
 			case "error":
 				return {
 					status: { s: "error", t: `${symbols.symbol("status.error")} Error` },
-					hints: [...open, { keys: interruptKbd(), label: "to close" }],
+					hints: [...open, close],
 				};
 		}
-		if (!hasText) return { hints: [...open, { keys: interruptKbd(), label: "to close" }] };
-		const hints: KeyHint[] = [...open];
-		if (props.canInject?.()) hints.push({ keys: ["alt", "i"], label: "to inject" });
-		hints.push({ keys: ["c"], label: copied ? "to copy again" : "to copy" });
-		if (props.canBranch?.() ?? true) hints.push({ keys: ["b"], label: "to branch" });
-		if (props.canFollowUp()) hints.push({ keys: ["f"], label: "to follow up" });
-		hints.push({ keys: interruptKbd(), label: "to close" });
+		if (!hasText) return { hints: [...open, close] };
+		const hints = [...open];
+		if (props.canInject?.())
+			hints.push({ id: "inject", button: "Inject", keys: ["alt", "i"], label: "to inject", run: props.onInject });
+		hints.push({
+			id: "copy",
+			button: copied ? "Copied" : "Copy",
+			keys: ["c"],
+			label: copied ? "to copy again" : "to copy",
+			run: props.onCopy,
+		});
+		if (props.canBranch?.() ?? true)
+			hints.push({ id: "promote", button: "Promote", keys: ["b"], label: "to branch", run: props.onBranch });
+		if (props.canFollowUp())
+			hints.push({ id: "follow-up", button: "Follow up", keys: ["f"], label: "to follow up", run: props.onFollowUp });
+		hints.push(close);
 		return copied ? { status: { s: "success", t: "✓ Copied to clipboard" }, hints } : { hints };
 	});
 }
@@ -173,6 +199,7 @@ export function BtwPanel(props: BtwPanelProps): JSXNode {
 				const copied = title === undefined && state.copied() && state.status() === "complete";
 				return { title: title ?? `/btw ${props.question}`, copied };
 			}}
+			onAction={act => footer().hints.find(hint => hint.id === act)?.run?.()}
 			onKey={key => {
 				if (key.kind === "release") return false;
 				const status = untrack(state.status);
@@ -214,6 +241,22 @@ export function BtwPanel(props: BtwPanelProps): JSXNode {
 			{() => {
 				const { status, hints, note } = footer();
 				if (note) return <text spans={[note]} />;
+				const actions = nativeRendering() ? hints.filter(hint => hint.run) : [];
+				if (actions.length > 0)
+					return (
+						<row key="actions" role="omp.actions" align="center" gap="sm" wrap>
+							{status && <text spans={[status]} />}
+							{actions.map(action => (
+								<ActionButton
+									key={action.id}
+									id={action.id}
+									label={action.button}
+									keys={action.keys}
+									tone={action.id === "open" ? "accent" : undefined}
+								/>
+							))}
+						</row>
+					);
 				if (!status) return <Hints hints={hints} />;
 				return (
 					<row align="center" gap="md" wrap>

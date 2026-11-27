@@ -1,5 +1,7 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
+import { expect, test } from "bun:test";
 import { signal } from "@oh-my-pi/pi-tui";
+import { Settings } from "../../../../src/config/settings";
 import type { BtwInjectState } from "../../../../src/modes/view-model/overlays/btw-inject";
 import type { BtwNoteHost } from "../../../../src/modes/view-model/overlays/btw-note";
 import { type BtwHistoryRecord, splitBtwInject } from "../../../../src/session/btw-history-model";
@@ -8,6 +10,8 @@ import { BtwNote } from "../../../../src/ui/overlays/panels/btw-note";
 import { BtwPanel, BtwPanelState } from "../../../../src/ui/overlays/panels/btw-panel";
 import { CleansePanel, CleanseRun } from "../../../../src/ui/overlays/panels/cleanse-panel";
 import { OmfgPanel, OmfgPanelState } from "../../../../src/ui/overlays/panels/omfg-panel";
+import { Shell } from "../../../../src/ui/shell/index";
+import { nativeShell } from "../../../helpers/native-shell";
 import { type Driver, panelSuite } from "./harness";
 
 const INJECT_ANSWERS: Record<string, string> = {
@@ -153,6 +157,35 @@ panelSuite({
 			},
 		};
 	},
+});
+
+test("the native BTW quick card routes its visible Copy and Close controls", async () => {
+	await Settings.init({ inMemory: true });
+	const shell = new Shell();
+	const state = new BtwPanelState();
+	const calls: string[] = [];
+	await using ui = await nativeShell(shell);
+	shell.dock.slot("btw").set(() => (
+		<BtwPanel
+			question="Where is this configured?"
+			state={state}
+			canFollowUp={() => false}
+			onCopy={() => calls.push("copy")}
+			onClose={() => calls.push("close")}
+			onCancel={() => calls.push("cancel")}
+		/>
+	));
+	const click = (action: string) => {
+		const buttons = ui.children(ui.node("row", "actions"));
+		const button = buttons.find(node => node.id.endsWith(`/${action}`))!;
+		ui.click(button.k, action);
+	};
+	click("close");
+	state.setAnswer("See settings.yml.");
+	state.markComplete();
+	click("copy");
+	click("close");
+	expect(calls).toEqual(["cancel", "copy", "close"]);
 });
 
 panelSuite({
