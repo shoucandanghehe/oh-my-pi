@@ -16,7 +16,7 @@ import {
 	BtwHistoryStore,
 	getBtwLatestTurn,
 } from "../../session/btw-history";
-import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
+import { beginBtwTurn, type BtwTurnCheckpoint, patchLatestBtwTurn } from "../../session/btw-turn";
 import type { RpcBtwDeltaFrame, RpcBtwHistoryRecord, RpcBtwRecordFrame } from "./rpc-types";
 
 type RpcBtwOutputFrame =
@@ -28,6 +28,7 @@ interface RunningBtw {
 	record: BtwHistoryRecord;
 	store: BtwHistoryStore;
 	abort: AbortController;
+	terminal?: PromiseWithResolvers<BtwTurnCheckpoint | undefined>;
 }
 
 const CANCELLED_WHILE_STARTING = "The /btw question was cancelled before it started";
@@ -38,7 +39,7 @@ function toRpcRecord({ title: _title, ...record }: BtwHistoryRecord): RpcBtwHist
 }
 
 export class RpcBtwController {
-	readonly #session: Pick<AgentSession, "model" | "runEphemeralTurn" | "sessionManager">;
+	readonly #session: Pick<AgentSession, "model" | "runBtwTurn" | "sessionManager">;
 	readonly #output: (frame: RpcBtwOutputFrame) => void;
 	#store: BtwHistoryStore | undefined;
 	/** `sessionId \0 artifactsDir` the store was opened for. */
@@ -49,12 +50,12 @@ export class RpcBtwController {
 	/** Bumped by every cancel and session change; a `btw` still starting from before gives up. */
 	#epoch = 0;
 	/** Terminal checkpoint writes still in flight. */
-	readonly #writes = new Set<Promise<void>>();
+	readonly #writes = new Set<Promise<boolean>>();
 	/** Terminal checkpoints that failed, keyed by record id (latest wins); retried before any move. */
 	readonly #unsaved = new Map<string, RunningBtw>();
 
 	constructor(
-		session: Pick<AgentSession, "model" | "runEphemeralTurn" | "sessionManager">,
+		session: Pick<AgentSession, "model" | "runBtwTurn" | "sessionManager">,
 		output: (frame: RpcBtwOutputFrame) => void,
 	) {
 		this.#session = session;
@@ -215,10 +216,23 @@ export class RpcBtwController {
 	): Promise<void> {
 		if (this.#running !== running) return;
 		try {
-			const { replyText } = await runBtwTurn(this.#session, {
+			const checkpoint = running.store.getLoadedConversation(running.record.id);
+			const { replyText } = await this.#session.runBtwTurn({
 				question,
 				history,
 				conversationKey,
+				checkpoint,
+				source: { threadKey: running.record.id, threadTitle: running.record.title ?? running.record.question },
+				onCheckpoint: async (checkpoint, phase) => {
+					if (phase === "terminal") {
+						running.terminal?.resolve(checkpoint);
+						return;
+					}
+					running.abort.signal.throwIfAborted();
+					running.terminal = Promise.withResolvers();
+					running.store.stageConversation(running.record.id, checkpoint);
+					if (!(await this.#persist(running))) throw new Error("Could not save frozen BTW context");
+				},
 				signal: running.abort.signal,
 				onTextDelta: delta => {
 					if (this.#running !== running) return;
@@ -233,6 +247,9 @@ export class RpcBtwController {
 			this.#finish(running, { answer: replyText, status: "complete", updatedAt: Date.now() });
 		} catch (error) {
 			this.#finish(running, { status: "error", error: toError(error).message, updatedAt: Date.now() });
+		} finally {
+			// A frozen turn can fail before provider dispatch, without a terminal callback.
+			running.terminal?.resolve(undefined);
 		}
 	}
 
@@ -242,18 +259,25 @@ export class RpcBtwController {
 		this.#running = undefined;
 		running.record = patchLatestBtwTurn(running.record, patch);
 		this.#output({ type: "btw_record", record: toRpcRecord(running.record) });
-		const write = running.store.upsert(running.record).then(
+		void this.#persist(running, running.terminal?.promise);
+	}
+
+	#persist(running: RunningBtw, terminal?: Promise<BtwTurnCheckpoint | undefined>): Promise<boolean> {
+		const write = running.store.upsert(running.record, terminal).then(
 			() => {
 				this.#unsaved.delete(running.record.id);
+				return true;
 			},
 			error => {
 				this.#unsaved.set(running.record.id, running);
 				const message = `Could not save /btw history: ${toError(error).message}`;
 				logger.error(message);
 				this.#output({ type: "notice", level: "error", message, source: "btw-history" });
+				return false;
 			},
 		);
 		this.#writes.add(write);
 		void write.finally(() => this.#writes.delete(write));
+		return write;
 	}
 }

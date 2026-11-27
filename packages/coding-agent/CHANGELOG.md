@@ -314,6 +314,7 @@
 - Relative transcript links in subagent panes open against the subagent's working directory, including after it parks.
 - BTW and subagent panes show session-local extension widgets; worker-homed panes also run input hooks on their own worker.
 - Switching or previewing BTW topics in ANSI preserves each topic's reading position. New reuses the current blank topic and keeps its draft.
+- BTW follow-ups keep their original context and read-only tool results in the inline view and over RPC, including results collected before cancellation.
 - Subagents retain their scoped MCP tools when browser settings change.
 - HTML exports from preview binaries embed the matching viewer for offline use.
 - Resuming an idle GPT-6.2 session retains earlier reasoning across superseded tool results ([#19721](https://github.com/can1357/oh-my-pi/issues/19721)).

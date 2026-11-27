@@ -214,8 +214,11 @@ const probe: FocusProbe = {
 			sessionManager,
 			settings: Settings.isolated(overrides),
 			modelRegistry: registry,
+			sideStreamFn: heldStream,
 			toolRegistry: new Map([[lookup.name, lookup]]),
 			extensionRunner: new ExtensionRunner([extension], runtime, process.cwd(), sessionManager, registry),
+			// The fixture's directly registered UI hook is not inherited by BTW.
+			preparedExtensions: [],
 			agentId: id,
 		});
 		// Do not connect to a real provider when the mirror routes a prewarm here.

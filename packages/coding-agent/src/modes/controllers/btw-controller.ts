@@ -17,7 +17,7 @@ import {
 	getBtwTurnKey,
 	getBtwTurns,
 } from "../../session/btw-history";
-import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
+import { beginBtwTurn, type BtwTurnCheckpoint, patchLatestBtwTurn, runTextOnlyBtwTurn } from "../../session/btw-turn";
 import { BtwManager, type BtwThread } from "../../session/btw-manager";
 import { BtwSessionStore } from "../../session/btw-session-store";
 import type { BtwPromotionLifecycle, BtwPromotionRequest } from "../../session/btw-thread";
@@ -108,8 +108,11 @@ interface BtwRequest {
 	/** Manager of the view that asked; the request outlives focus changes. */
 	sessionManager: AgentViewSessionManager;
 	store: BtwHistoryStore;
+	terminal?: PromiseWithResolvers<BtwTurnCheckpoint | undefined>;
 	record: BtwHistoryRecord;
 	history?: readonly BtwHistoryTurn[];
+	/** A collab guest sees a replica and must not execute side tools. */
+	textOnly: boolean;
 	/** At least one checkpoint belongs to this request; later failures must block lifecycle changes. */
 	persisted: boolean;
 	conversationKey: string;
@@ -1608,6 +1611,7 @@ export class BtwController {
 				return false;
 			}
 			await this.#sessionManager.ensureOnDisk();
+			const textOnly = Boolean(this.ctx.collabGuest);
 			if (signal?.aborted || generation !== this.#generation || sessionId !== this.#sessionManager.getSessionId())
 				return false;
 			this.#dismissQuick(false);
@@ -1629,6 +1633,7 @@ export class BtwController {
 				store,
 				record,
 				history,
+				textOnly,
 				conversationKey,
 				persisted: false,
 				injectEnabled,
@@ -1814,7 +1819,8 @@ export class BtwController {
 	}
 
 	#persist(request: BtwRequest, retry = false): Promise<boolean> {
-		const pending = retry ? request.store.retry(request.record) : request.store.upsert(request.record);
+		const terminal = getBtwLatestTurn(request.record).status !== "running" ? request.terminal?.promise : undefined;
+		const pending = retry ? request.store.retry(request.record) : request.store.upsert(request.record, terminal);
 		const write = pending.then(
 			() => {
 				request.persisted = true;
@@ -1846,14 +1852,14 @@ export class BtwController {
 
 	async #runRequest(request: BtwRequest): Promise<void> {
 		try {
-			const { replyText, assistantMessage } = await runBtwTurn(request.session, {
+			const options = {
 				question: request.question,
 				images: request.images,
 				history: request.history,
 				// The same eligibility as the block and the key: no instruction where a block could never be sent.
 				inject: request.injectEnabled,
 				conversationKey: request.conversationKey,
-				onTextDelta: delta => {
+				onTextDelta: (delta: string) => {
 					const latest = getBtwLatestTurn(request.record);
 					if (latest.status !== "running") return;
 					this.#updateRequest(request, { answer: latest.answer + delta, updatedAt: Date.now() });
@@ -1864,7 +1870,27 @@ export class BtwController {
 					}
 				},
 				signal: request.abortController.signal,
-			});
+			};
+			const { replyText, assistantMessage } = request.textOnly
+				? await runTextOnlyBtwTurn(request.session, options)
+				: await request.session.runBtwTurn({
+						...options,
+						checkpoint: request.store.getLoadedConversation(request.record.id),
+						source: {
+							threadKey: request.record.id,
+							threadTitle: request.record.title ?? request.record.question,
+						},
+						onCheckpoint: async (checkpoint, phase) => {
+							if (phase === "terminal") {
+								request.terminal?.resolve(checkpoint);
+								return;
+							}
+							options.signal.throwIfAborted();
+							request.terminal = Promise.withResolvers();
+							request.store.stageConversation(request.record.id, checkpoint);
+							if (!(await this.#persist(request))) throw new Error("Could not save frozen BTW context");
+						},
+					});
 			if (getBtwLatestTurn(request.record).status !== "running") return;
 			this.#updateRequest(request, { answer: replyText, status: "complete", updatedAt: Date.now() });
 			// Only an answer asked with the inject instruction can be sent, even if the setting is turned on later.
@@ -1905,6 +1931,7 @@ export class BtwController {
 				else request.panel.markError(message);
 			}
 		} finally {
+			request.terminal?.resolve(undefined);
 			this.ctx.terminalActivity.release(request);
 		}
 		this.#persist(request);

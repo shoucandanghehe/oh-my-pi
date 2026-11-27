@@ -94,6 +94,7 @@ import {
 	runningJobWidgets,
 } from "../session/async-job-views";
 import { BlobStore, type BlobPutOptions, type BlobPutResult, lazyImageDataSync } from "../session/blob-store";
+import type { BtwTurnOptions } from "../session/btw-turn";
 import { readAgentsPaused } from "../session/exit-diagnostics";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
@@ -880,6 +881,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 		return this.#command("runEphemeralTurn", args);
+	}
+
+	runBtwTurn(args: BtwTurnOptions): Promise<EphemeralTurnResult> {
+		return this.#command("runBtwTurn", args);
 	}
 
 	ephemeralMaxTokensPreservesRequest(): boolean {

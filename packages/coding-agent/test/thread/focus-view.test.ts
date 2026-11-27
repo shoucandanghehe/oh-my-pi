@@ -244,6 +244,32 @@ describe("focused view of a worker-homed agent session", () => {
 		expect((await probe.report("W2")).prewarmCount).toBe(0);
 	});
 
+	it("runs a focused BTW on the owner's Worker and returns both checkpoint callbacks and text", async () => {
+		const probe = await startWorker();
+		const registry = await mainRegistry();
+		await probe.open("W1", registry, {});
+		await probe.prompt("W1", "worker-only context");
+
+		const events: string[] = [];
+		const result = await mirrorOf("W1").runBtwTurn({
+			question: "private side question",
+			conversationKey: "worker-btw-test",
+			source: { threadKey: "worker-test-topic", threadTitle: "Worker BTW" },
+			signal: new AbortController().signal,
+			onTextDelta: text => events.push(`text:${text}`),
+			onCheckpoint: async (checkpoint, phase) => {
+				expect(checkpoint.baseMessages.map(textOf)).toContain("worker-only context");
+				expect(checkpoint.turns.map(turn => turn.input)).toEqual(
+					phase === "frozen" ? [] : ["private side question"],
+				);
+				events.push(phase);
+			},
+		});
+		expect(result.replyText).toBe("ok");
+		expect(events).toEqual(["frozen", "text:ok", "terminal"]);
+		expect((await probe.report("W1")).userTexts).toEqual(["worker-only context"]);
+	});
+
 	it("submits pane input through the owning worker and shows that worker's extension presentation", async () => {
 		const probe = await startWorker();
 		const registry = await mainRegistry();

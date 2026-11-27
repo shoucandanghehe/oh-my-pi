@@ -2,11 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwTurns } from "@oh-my-pi/pi-coding-agent/session/btw-history";
+import type { BtwTurnOptions } from "@oh-my-pi/pi-coding-agent/session/btw-turn";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
@@ -21,21 +22,13 @@ import { Shell } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
 import { btwShellMembers, historySheet, inlineText } from "./helpers/btw-ui";
 import { keyEvent } from "./helpers/input-harness";
 
-interface TurnArgs {
-	promptText: string;
-	history?: readonly Message[];
-	conversationKey?: string;
-	onTextDelta?: (delta: string) => void;
-	signal?: AbortSignal;
-}
-
 interface TurnResult {
 	replyText: string;
 	assistantMessage: AssistantMessage;
 }
 
 interface PendingTurn {
-	args: TurnArgs;
+	args: BtwTurnOptions;
 	resolve: (result: TurnResult) => void;
 	reject: (error: Error) => void;
 }
@@ -88,7 +81,7 @@ async function harness() {
 	const manager = SessionManager.create(directory, directory);
 	const managers = [manager];
 	const requests: PendingTurn[] = [];
-	const runEphemeralTurn = vi.fn((args: TurnArgs) => {
+	const runBtwTurn = vi.fn((args: BtwTurnOptions) => {
 		const pending = Promise.withResolvers<TurnResult>();
 		requests.push({ args, resolve: pending.resolve, reject: pending.reject });
 		return pending.promise;
@@ -96,7 +89,7 @@ async function harness() {
 	const session = {
 		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 		isStreaming: false,
-		runEphemeralTurn,
+		runBtwTurn,
 	} as unknown as InteractiveModeContext["session"];
 	const shell = new Shell();
 	const handleImagePathPaste = vi.fn(async (_path: string) => {});
@@ -106,6 +99,7 @@ async function harness() {
 		settings: Settings.isolated(),
 		keybindings: KeybindingsManager.inMemory(),
 		sessionManager: manager,
+		terminalActivity: { set: vi.fn(), release: vi.fn() },
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		handleBtwBranch: vi.fn(async () => {}),
@@ -151,7 +145,7 @@ async function harness() {
 		ctx,
 		controller,
 		requests,
-		runEphemeralTurn,
+		runBtwTurn,
 		complete,
 		root,
 		speech,
@@ -170,7 +164,7 @@ describe("BTW follow-up lifecycle", () => {
 
 		expect(await h.controller.startFollowUp(topic.id, "How do I fix it?")).toBe(true);
 
-		expect(h.requests.at(-1)?.args.history?.[0]?.content).toContainEqual(screenshot);
+		expect(h.requests.at(-1)?.args.history?.[0]?.images).toContainEqual(screenshot);
 	});
 
 	it("blocks flushing, relocation, branching and disposal after a terminal CAS failure without losing the answer", async () => {
@@ -309,7 +303,7 @@ describe("BTW follow-up lifecycle", () => {
 			],
 		});
 		expect(await h.controller.startFollowUp(topic.id, "Stale question")).toBe(false);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(h.runBtwTurn).toHaveBeenCalledTimes(1);
 		expect((await records(h.manager))[0]?.followUps?.map(turn => turn.question)).toEqual(["Other process question"]);
 
 		const originalStart = h.controller.startFollowUp.bind(h.controller);
@@ -508,7 +502,7 @@ describe("BTW follow-up lifecycle", () => {
 				release.resolve();
 				expect(await settled.promise).toBe(false);
 				await h.controller.flush();
-				expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+				expect(h.runBtwTurn).toHaveBeenCalledTimes(1);
 				const saved = (await records(h.manager))[0]!;
 				expect(saved.answer).toBe("Original answer");
 				if (boundary === "BTW checkpoint") {
@@ -526,7 +520,7 @@ describe("BTW follow-up lifecycle", () => {
 				panel.paste("Accepted follow-up");
 				panel.press("enter");
 				expect(await settled.promise).toBe(true);
-				expect(h.runEphemeralTurn).toHaveBeenCalledTimes(2);
+				expect(h.runBtwTurn).toHaveBeenCalledTimes(2);
 				expect(h.requests.at(-1)!.args.signal?.aborted).toBe(false);
 				await h.complete("Accepted answer");
 				expect((await records(h.manager))[0]!.followUps?.at(-1)).toMatchObject({
@@ -628,7 +622,7 @@ describe("BTW follow-up lifecycle", () => {
 		expect(h.controller.handleFollowUp()).toBe(true);
 		expect(h.controller.hasActiveRequest()).toBe(false);
 		const panel = historySheet(h.ctx.shell);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(2);
+		expect(h.runBtwTurn).toHaveBeenCalledTimes(2);
 		const started = Promise.withResolvers<boolean>();
 		const start = h.controller.startFollowUp.bind(h.controller);
 		vi.spyOn(h.controller, "startFollowUp").mockImplementation(async (...args) => {
@@ -639,7 +633,7 @@ describe("BTW follow-up lifecycle", () => {
 		panel.paste("Continue this topic");
 		panel.press("enter");
 		expect(await started.promise).toBe(true);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(3);
+		expect(h.runBtwTurn).toHaveBeenCalledTimes(3);
 		const request = h.requests.at(-1)!.args;
 		expect(JSON.stringify(request.history)).toContain("Current answer");
 		expect(JSON.stringify(request.history)).not.toContain("Earlier answer");
@@ -655,7 +649,6 @@ describe("BTW follow-up lifecycle", () => {
 		const leaf = h.manager.getLeafId();
 		const context = JSON.stringify(h.manager.buildSessionContext());
 		const root = await h.root("Selected root question", "Selected root answer");
-		const originalPrompt = h.requests[0]!.args.promptText;
 		const originalConversationKey = h.requests[0]!.args.conversationKey;
 		await h.root("Unrelated private question", "Unrelated private answer");
 		expect(h.requests.at(-1)!.args.conversationKey).not.toBe(originalConversationKey);
@@ -685,27 +678,12 @@ describe("BTW follow-up lifecycle", () => {
 		expect(await h.controller.startFollowUp(root.id, "Continue after cancellation")).toBe(true);
 		const request = h.requests.at(-1)!.args;
 		expect(request.conversationKey).not.toBe(originalConversationKey);
-		expect(request.history?.map(message => message.role)).toEqual([
-			"user",
-			"assistant",
-			"user",
-			"assistant",
-			"user",
-			"assistant",
+		expect(request.history?.map(turn => [turn.question, turn.answer, turn.status])).toEqual([
+			["Selected root question", "Selected root answer", "complete"],
+			["First follow-up question", "First follow-up answer", "complete"],
+			["Cancelled follow-up question", "Cancelled partial answer", "cancelled"],
 		]);
-		const texts = request.history?.map(message =>
-			typeof message.content === "string"
-				? message.content
-				: message.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join(""),
-		);
-		expect(texts?.[0]).toBe(originalPrompt);
-		expect(texts?.[1]).toBe("Selected root answer");
-		expect(texts?.[2]).toContain("First follow-up question");
-		expect(texts?.[3]).toBe("First follow-up answer");
-		expect(texts?.[4]).toContain("Cancelled follow-up question");
-		expect(texts?.[5]).toBe("Cancelled partial answer");
-		expect(request.promptText).toContain("Continue after cancellation");
-		expect(request.promptText).not.toContain("Selected root question");
+		expect(request.question).toBe("Continue after cancellation");
 		const combined = JSON.stringify(request);
 		expect(combined).not.toContain("Unrelated private question");
 		expect(combined).not.toContain("Unrelated private answer");
@@ -768,7 +746,7 @@ describe("BTW follow-up lifecycle", () => {
 		const before = await records(h.manager);
 		expect(await h.controller.startFollowUp(root.id, " \n\t ")).toBe(false);
 		expect(await records(h.manager)).toEqual(before);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(h.runBtwTurn).toHaveBeenCalledTimes(1);
 
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -783,7 +761,7 @@ describe("BTW follow-up lifecycle", () => {
 		expect(await starting).toBe(true);
 		await h.controller.start("Overlapping new root");
 		expect(await h.controller.startFollowUp(root.id, "Overlapping running turn")).toBe(false);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(2);
+		expect(h.runBtwTurn).toHaveBeenCalledTimes(2);
 		expect(h.requests.at(-1)!.args.signal?.aborted).toBe(false);
 		await h.complete("Accepted answer");
 		const saved = await records(h.manager);
@@ -796,11 +774,39 @@ describe("BTW follow-up lifecycle", () => {
 		const root = await h.root("Topic", "Original answer");
 		expect(await h.controller.startFollowUp(root.id, "Cancelled request")).toBe(true);
 		const cancelled = h.requests.at(-1)!;
+		const frozen = {
+			baseMessages: [],
+			turns: [],
+			sideSessionId: cancelled.args.conversationKey,
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+		};
+		await cancelled.args.onCheckpoint!(frozen, "frozen");
 		cancelled.args.onTextDelta?.("Partial answer");
 		expect(h.controller.handleCancel()).toBe(true);
-		expect(await h.controller.startFollowUp(root.id, "New request")).toBe(true);
+		const followUp = h.controller.startFollowUp(root.id, "New request");
+		// The UI has accepted cancellation, but native context arrives before the old transport returns.
+		await cancelled.args.onCheckpoint!(
+			{
+				...frozen,
+				trailingMessages: [
+					{
+						role: "toolResult",
+						toolName: "read",
+						toolCallId: "read-fact",
+						content: [{ type: "text", text: "a fact absent from the visible answer" }],
+						isError: false,
+						timestamp: 1,
+					},
+				],
+			},
+			"terminal",
+		);
+		expect(await followUp).toBe(true);
 		const current = h.requests.at(-1)!;
 		expect(current.args.conversationKey).not.toBe(cancelled.args.conversationKey);
+		expect(current.args.checkpoint?.trailingMessages).toMatchObject([
+			{ toolCallId: "read-fact", content: [{ text: "a fact absent from the visible answer" }] },
+		]);
 		cancelled.args.onTextDelta?.("Stale output");
 		cancelled.resolve(answer("Stale final answer"));
 		await h.complete("Current answer");
@@ -865,7 +871,7 @@ describe("BTW follow-up lifecycle", () => {
 		h.ctx.sessionManager = next;
 		release.resolve();
 		expect(await starting).toBe(false);
-		expect(h.runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(h.runBtwTurn).toHaveBeenCalledTimes(1);
 		expect(await records(next)).toEqual([]);
 		expect((await records(h.manager))[0]!.followUps ?? []).toEqual([]);
 	});

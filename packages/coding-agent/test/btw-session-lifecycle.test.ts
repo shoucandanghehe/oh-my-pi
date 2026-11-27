@@ -100,7 +100,7 @@ describe("BTW session boundaries", () => {
 		vi.spyOn(mode, "showStatus").mockImplementation(() => {});
 		vi.spyOn(mode, "showError").mockImplementation(() => {});
 		turns = [];
-		vi.spyOn(session, "runEphemeralTurn").mockImplementation(args => {
+		vi.spyOn(session, "runBtwTurn").mockImplementation(args => {
 			const pending = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
 			turns.push({ signal: args.signal, resolve: pending.resolve });
 			return pending.promise;

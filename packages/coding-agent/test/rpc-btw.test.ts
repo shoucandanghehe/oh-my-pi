@@ -26,7 +26,7 @@ describe("RPC /btw", () => {
 	});
 
 	async function start() {
-		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-btw-"));
+		directory ??= await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-btw-"));
 		const rpc = new RpcClient({
 			command: [process.execPath, path.join(import.meta.dir, "fixtures", "btw-rpc-agent.ts")],
 			cwd: directory,
@@ -100,6 +100,46 @@ describe("RPC /btw", () => {
 		expect(await rpc.getBtwHistory()).toHaveLength(1);
 	}, 30_000);
 
+	test("reopens a topic with its original Main context, model and read-only tool results", async () => {
+		const first = await start();
+		await Bun.write(path.join(directory!, "btw-fact.txt"), "The catalog says cerulean walrus.\n");
+		await first.rpc.prompt("before side question");
+		await first.rpc.waitForIdle();
+		const mainBefore = await first.rpc.getState();
+		const root = await first.rpc.btw("investigate fixture");
+		expect(await first.settled(root.id)).toMatchObject({ status: "complete", answer: "Found the cerulean walrus." });
+		expect((await first.rpc.getState()).messageCount).toBe(mainBefore.messageCount);
+		await first.rpc.getBtwHistory();
+		const checkpointPath = path.join(
+			mainBefore.sessionFile!.replace(/\.jsonl$/, ""),
+			"btw-history",
+			`entry-${root.id}.conversation`,
+		);
+		expect(await Bun.file(checkpointPath).json()).toMatchObject({
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			turns: [
+				expect.objectContaining({
+					assistantMessage: expect.objectContaining({ responseId: "fixture-response" }),
+					intermediateMessages: expect.arrayContaining([
+						expect.objectContaining({ role: "toolResult", toolCallId: "btw-read" }),
+					]),
+				}),
+			],
+		});
+
+		await first.rpc.prompt("after side question");
+		await first.rpc.waitForIdle();
+		await first.rpc.setModel("anthropic", "claude-haiku-4-5");
+		await first.rpc.stop();
+		const reopened = await start();
+		expect((await reopened.rpc.switchSession(mainBefore.sessionFile!)).cancelled).toBe(false);
+		expect((await reopened.rpc.getState()).model?.id).toBe("claude-haiku-4-5");
+		await reopened.rpc.btw("recall frozen fixture", root.id);
+		expect((await reopened.settled(root.id)).followUps).toEqual([
+			expect.objectContaining({ status: "complete", answer: "claude-sonnet-4-5: true/false/true" }),
+		]);
+	}, 30_000);
+
 	test("keeps a TUI topic's title heading off the wire, including across a follow-up", async () => {
 		const { rpc, settled } = await start();
 		const first = await rpc.btw("Expanded /sitrep template");
@@ -117,9 +157,10 @@ describe("RPC /btw", () => {
 		expect(await Bun.file(titlePath).text()).toBe("/sitrep");
 	}, 30_000);
 
-	test("one side question runs at a time and can be cancelled", async () => {
+	test("cancels an investigation without losing its tool result on the next follow-up", async () => {
 		const { rpc, deltas, until, settled } = await start();
-		const slow = await rpc.btw("slow one");
+		await Bun.write(path.join(directory!, "btw-fact.txt"), "cerulean walrus");
+		const slow = await rpc.btw("investigate fixture, slow answer");
 		await until(() => deltas[0]);
 		expect((await rejectionOf(rpc.btw("another"))).message).toContain("still running");
 		// The live partial answer is visible to a late reader.
@@ -129,13 +170,16 @@ describe("RPC /btw", () => {
 		expect(await rpc.cancelBtw(slow.id)).toBe(true);
 		expect(await settled(slow.id)).toMatchObject({ status: "cancelled", answer: "Thinking" });
 		expect(await rpc.cancelBtw()).toBe(false);
-		// The turn was really aborted, and its late chunk never reached the host.
-		expect(await Bun.file(path.join(directory!, "btw-aborted")).exists()).toBe(true);
 		expect(deltas).toEqual(["Thinking"]);
-
 		// The slot is free again; a cancelled topic accepts follow-ups.
-		await rpc.btw("follow after cancel", slow.id);
-		expect((await settled(slow.id)).followUps?.[0]?.status).toBe("complete");
+		expect((await rpc.getBtwHistory())[0]).toMatchObject({ status: "cancelled", answer: "Thinking" });
+		await rpc.btw("recall interrupted fixture", slow.id);
+		expect((await settled(slow.id)).followUps?.[0]).toMatchObject({
+			status: "complete",
+			answer: "Native read: true; partial answer: true.",
+		});
+		expect(await Bun.file(path.join(directory!, "btw-aborted")).exists()).toBe(true);
+		expect(deltas.join("")).toBe("ThinkingNative read: true; partial answer: true.");
 	}, 30_000);
 
 	test("a failed turn is recorded with its error", async () => {
@@ -152,10 +196,15 @@ describe("RPC /btw", () => {
 	}, 30_000);
 
 	test("a session change cancels the running question; history stays with its session", async () => {
-		const { rpc, deltas, until, settled } = await start();
+		const { rpc, settled } = await start();
 		const original = (await rpc.getState()).sessionFile!;
-		const slow = await rpc.btw("slow before switching");
-		await until(() => deltas[0]);
+		const setup = Promise.withResolvers<void>();
+		rpc.onSessionEvent(event => {
+			if (event.type === "notice" && event.source === "fixture-stream-setup") setup.resolve();
+		});
+		await Bun.write(path.join(directory!, "btw-fact.txt"), "cerulean walrus");
+		const slow = await rpc.btw("investigate fixture, hold setup");
+		await setup.promise;
 
 		expect((await rpc.newSession()).cancelled).toBe(false);
 		expect(await settled(slow.id)).toMatchObject({ status: "cancelled" });
@@ -164,6 +213,8 @@ describe("RPC /btw", () => {
 		expect((await rpc.switchSession(original)).cancelled).toBe(false);
 		const history = await rpc.getBtwHistory();
 		expect(history.map(record => [record.id, record.status])).toEqual([[slow.id, "cancelled"]]);
+		await rpc.btw("recall interrupted fixture", slow.id);
+		expect((await settled(slow.id)).followUps?.[0]?.answer).toBe("Native read: true; partial answer: false.");
 	}, 30_000);
 
 	test("a refused tree navigation leaves the running question alone", async () => {
@@ -300,7 +351,8 @@ describe("RPC /btw", () => {
 
 		send({ id: "state", type: "get_state" });
 		const state = frames[await frame(f => at(f, "type") === "response" && at(f, "id") === "state")];
-		send({ id: "slow", type: "btw", question: "slow at shutdown" });
+		await Bun.write(path.join(directory, "btw-fact.txt"), "cerulean walrus");
+		send({ id: "slow", type: "btw", question: "investigate fixture, slow at shutdown" });
 		const started = frames[await frame(f => at(f, "type") === "response" && at(f, "id") === "slow")];
 		await frame(f => at(f, "type") === "btw_delta");
 		child.stdin.end();
@@ -312,5 +364,10 @@ describe("RPC /btw", () => {
 			`entry-${String(at(started, "data", "record", "id"))}.json`,
 		);
 		expect(await Bun.file(entry).json()).toMatchObject({ status: "cancelled", answer: "Thinking" });
+		const resumed = await start();
+		await resumed.rpc.switchSession(String(at(state, "data", "sessionFile")));
+		const topic = String(at(started, "data", "record", "id"));
+		await resumed.rpc.btw("recall interrupted fixture", topic);
+		expect((await resumed.settled(topic)).followUps?.[0]?.answer).toBe("Native read: true; partial answer: true.");
 	}, 30_000);
 });

@@ -286,6 +286,11 @@ export class BtwHistoryStore {
 		return this.#snapshot;
 	}
 
+	/** `upsert` has already loaded and reconciled this topic's conversation with its display record. */
+	getLoadedConversation(recordId: string): BtwTurnCheckpoint | undefined {
+		return this.#conversations.get(recordId);
+	}
+
 	/** Native context stays outside the lightweight UI/wire record and survives focus/process changes. */
 	async readConversation(recordId: string): Promise<BtwTurnCheckpoint | undefined> {
 		if (!ID_PATTERN.test(recordId)) throw new Error("Invalid BTW history record id");
@@ -317,8 +322,9 @@ export class BtwHistoryStore {
 		this.#conversations.set(recordId, structuredClone(checkpoint));
 	}
 
-	upsert(record: BtwHistoryRecord): Promise<void> {
-		return this.#upsert(record, false);
+	/** Queue the native terminal checkpoint with its display record before releasing the topic lease. */
+	upsert(record: BtwHistoryRecord, terminal?: Promise<BtwTurnCheckpoint | undefined>): Promise<void> {
+		return this.#upsert(record, false, terminal);
 	}
 
 	/** Retry a failed checkpoint against the original revision, without rebasing onto disk changes. */
@@ -326,20 +332,33 @@ export class BtwHistoryStore {
 		return this.#upsert(record, true);
 	}
 
-	async #upsert(record: BtwHistoryRecord, retry: boolean): Promise<void> {
-		if (this.#writeError && !retry) throw this.#writeError;
+	async #upsert(
+		record: BtwHistoryRecord,
+		retry: boolean,
+		terminal?: Promise<BtwTurnCheckpoint | undefined>,
+	): Promise<void> {
+		// Even a failed store must keep the final native messages for an explicit retry.
+		if (this.#writeError && !retry && !terminal) throw this.#writeError;
 		// Capture before yielding: callers may keep mutating their streaming record.
 		const { title, ...fields } = record;
 		const saved = snapshotRecord(parseRecord(fields));
 		const snapshot = title === undefined ? saved : Object.freeze({ ...saved, title });
-		if (this.#directory === undefined) {
+		const publish = () => {
 			this.#records.set(snapshot.id, snapshot);
 			this.#refreshSnapshot();
-			return;
+		};
+		if (this.#directory === undefined) {
+			publish();
+			if (!terminal) return;
 		}
 		const directory = this.#directory;
 		const content = `${JSON.stringify(saved)}\n`;
 		const write = this.#pending.then(async () => {
+			if (terminal) {
+				const checkpoint = await terminal;
+				if (checkpoint) this.stageConversation(snapshot.id, checkpoint);
+			}
+			if (directory === undefined) return;
 			// Reset only at this queue boundary: earlier attempts and their error
 			// handlers must settle before an explicit retry can recover the store.
 			if (retry) this.#writeError = undefined;
@@ -392,8 +411,7 @@ export class BtwHistoryStore {
 			await writeFileAtomically(filePath, content);
 			this.#revisions.set(snapshot.id, new Bun.CryptoHasher("sha256").update(content).digest("hex"));
 			this.#conversationAnswers.set(snapshot.id, answers);
-			this.#records.set(snapshot.id, snapshot);
-			this.#refreshSnapshot();
+			publish();
 			if (getBtwLatestTurn(snapshot).status !== "running") this.#release(snapshot.id);
 		});
 		this.#track(write);

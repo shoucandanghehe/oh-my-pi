@@ -19,6 +19,7 @@ import { cfgBtwInject } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { BtwSessionStore } from "@oh-my-pi/pi-coding-agent/session/btw-session-store";
+import type { BtwTurnOptions } from "@oh-my-pi/pi-coding-agent/session/btw-turn";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { replaceTabs } from "@oh-my-pi/pi-coding-agent/utils/text-width";
 import { Shell, type TranscriptBlock } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
@@ -63,12 +64,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 	};
 }
 
-interface RunEphemeralTurnArgs {
-	promptText: string;
-	promptImages?: ImageContent[];
-	onTextDelta?: (delta: string) => void;
-	signal?: AbortSignal;
-}
+type RunEphemeralTurnArgs = BtwTurnOptions;
 
 interface RunEphemeralTurnResult {
 	replyText: string;
@@ -82,7 +78,7 @@ function makeFakeSession(
 		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 		isStreaming: false,
 		messages: [],
-		runEphemeralTurn,
+		runBtwTurn: runEphemeralTurn,
 	} as unknown as InteractiveModeContext["session"];
 }
 
@@ -311,7 +307,7 @@ describe("BtwController", () => {
 
 	it("in Tern sends composer drafts to the clicked note as its follow-ups", async () => {
 		const runEphemeralTurn = vi.fn(async (args: RunEphemeralTurnArgs) => ({
-			replyText: `Answer to ${args.promptText.length}`,
+			replyText: `Answer to ${args.question.length}`,
 			assistantMessage: createAssistantMessage("Answer"),
 		}));
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
@@ -328,7 +324,7 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 
 		expect(runEphemeralTurn).toHaveBeenCalledTimes(2);
-		expect(runEphemeralTurn.mock.calls[1]?.[0].promptText).toContain("More?");
+		expect(runEphemeralTurn.mock.calls[1]?.[0].question).toContain("More?");
 		// The same note carries the follow-up; no second note.
 		expect(notesIn(ctx.shell).map(each => each.block)).toEqual([note.block]);
 		expect(note.text()).toContain("More?");
@@ -437,7 +433,7 @@ describe("BtwController", () => {
 		expect(await controller.start("What colour is this? [Image #1]", [screenshot])).toBe(true);
 		await drainBtwRequest();
 
-		expect(runEphemeralTurn.mock.calls[0]?.[0]?.promptImages).toEqual([screenshot]);
+		expect(runEphemeralTurn.mock.calls[0]?.[0]?.images).toEqual([screenshot]);
 		await controller.dispose();
 	});
 
@@ -581,7 +577,7 @@ describe("BtwController", () => {
 			await drainBtwRequest();
 			await controller.flush();
 
-			expect(runEphemeralTurn.mock.calls[0]?.[0].promptText).toContain(template);
+			expect(runEphemeralTurn.mock.calls[0]?.[0].question).toContain(template);
 			const inline = inlineText(ctx.shell, 100);
 			expect(inline).toContain("/sitrep");
 			expect(inline).not.toContain("Sitrep template");
@@ -1062,7 +1058,7 @@ describe("BtwController inject", () => {
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
 
-		expect(runEphemeralTurn.mock.calls[0]?.[0].promptText).toContain("<inject>");
+		expect(runEphemeralTurn.mock.calls[0]?.[0].inject).toBe(true);
 		expect(shown(ctx)).toContain(BTW_INJECT_LABEL);
 		expect(shown(ctx)).not.toContain("<inject>");
 
@@ -1143,14 +1139,18 @@ describe("BtwController inject", () => {
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
 
-		expect(runEphemeralTurn.mock.calls[0]?.[0].promptText).not.toContain("<inject>");
+		expect(runEphemeralTurn.mock.calls[0]?.[0].inject).toBe(false);
 		expect(controller.handleInject()).toBe(false);
 		expect(session.prompt).not.toHaveBeenCalled();
 	});
 
 	it("gives collab guests neither the instruction nor the block, since their turns run on the host", async () => {
-		const runEphemeralTurn = steeringTurn();
-		const session = makeInjectSession(runEphemeralTurn);
+		const checkpointed = steeringTurn();
+		const runEphemeralTurn = vi.fn(async (_args: { promptText: string }) => ({
+			replyText: steeringReply,
+			assistantMessage: createAssistantMessage(steeringReply),
+		}));
+		const session = Object.assign(makeInjectSession(checkpointed), { runEphemeralTurn });
 		const ctx = Object.assign(makeCtx(session, { "btw.inject": true }), { collabGuest: {} });
 		const controller = new BtwController(ctx);
 
@@ -1158,6 +1158,7 @@ describe("BtwController inject", () => {
 		await drainBtwRequest();
 
 		expect(runEphemeralTurn.mock.calls[0]?.[0].promptText).not.toContain("<inject>");
+		expect(checkpointed).not.toHaveBeenCalled();
 		expect(shown(ctx)).not.toContain(BTW_INJECT_LABEL);
 		expect(controller.handleInject()).toBe(false);
 		expect(session.prompt).not.toHaveBeenCalled();
@@ -1184,7 +1185,7 @@ describe("BtwController inject", () => {
 		await controller.start("What is the worker doing?");
 		await drainBtwRequest();
 
-		expect(focusedTurn.mock.calls[0]?.[0].promptText).not.toContain("<inject>");
+		expect(focusedTurn.mock.calls[0]?.[0].inject).toBe(false);
 		expect(controller.handleInject()).toBe(false);
 		expect(main.prompt).not.toHaveBeenCalled();
 	});

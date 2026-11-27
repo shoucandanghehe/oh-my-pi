@@ -21,7 +21,7 @@ import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/setting
  */
 interface LoaderRecoveryContextOptions {
 	terminalProgress?: boolean;
-	runEphemeralTurn?: AgentSession["runEphemeralTurn"];
+	runBtwTurn?: AgentSession["runBtwTurn"];
 }
 
 function createContext(options: LoaderRecoveryContextOptions = {}) {
@@ -42,7 +42,7 @@ function createContext(options: LoaderRecoveryContextOptions = {}) {
 			},
 			getToolByName: () => undefined,
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
-			runEphemeralTurn: options.runEphemeralTurn ?? vi.fn(async () => Promise.withResolvers<never>().promise),
+			runBtwTurn: options.runBtwTurn ?? vi.fn(async () => Promise.withResolvers<never>().promise),
 		},
 	});
 	return { ctx, streamState, setProgress, setTitleState };
@@ -284,7 +284,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		const sideRequest = Promise.withResolvers<never>();
 		const { ctx, streamState, setProgress, setTitleState } = createContext({
 			terminalProgress: true,
-			runEphemeralTurn: () => sideRequest.promise,
+			runBtwTurn: () => sideRequest.promise,
 		});
 		const eventController = new EventController(ctx);
 		const btwController = new BtwController(ctx);
@@ -306,7 +306,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		const sideRequest = Promise.withResolvers<EphemeralTurnResult>();
 		const { ctx, streamState, setProgress, setTitleState } = createContext({
 			terminalProgress: true,
-			runEphemeralTurn: () => sideRequest.promise,
+			runBtwTurn: () => sideRequest.promise,
 		});
 		const eventController = new EventController(ctx);
 		const btwController = new BtwController(ctx);

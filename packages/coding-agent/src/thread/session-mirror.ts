@@ -69,6 +69,7 @@ import type {
 	SessionStats,
 	SteerOptions,
 } from "../session/agent-session-types";
+import type { BtwTurnOptions } from "../session/btw-turn";
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
@@ -316,6 +317,7 @@ export type SessionHostProtocol = {
 	applyRoleModel: RpcMethod<[entry: ResolvedRoleModel], void>;
 	fetchUsageReports: RpcMethod<[signal?: AbortSignal], UsageReport[] | null>;
 	runEphemeralTurn: RpcMethod<[args: EphemeralTurnOptions], EphemeralTurnResult>;
+	runBtwTurn: RpcMethod<[args: BtwTurnOptions], EphemeralTurnResult>;
 	exportToHtml: RpcMethod<[outputPath?: string, useUserThemes?: boolean], string>;
 	enableIdleMaintenance: RpcMethod<[options: IdleMaintenanceOptions], void>;
 	refreshIdleMaintenance: RpcMethod<[], void>;

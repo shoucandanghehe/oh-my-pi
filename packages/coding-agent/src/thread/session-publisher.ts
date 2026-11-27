@@ -688,6 +688,7 @@ export const SESSION_HOST_SERVE: RpcServe<SessionPublisher, SessionHostProtocol>
 		),
 	fetchUsageReports: async (publisher, signal) => toWireData(await publisher.session.fetchUsageReports(signal)),
 	runEphemeralTurn: async (publisher, args) => toWireData(await publisher.session.runEphemeralTurn(args)),
+	runBtwTurn: async (publisher, args) => toWireData(await publisher.session.runBtwTurn(args)),
 	exportToHtml: async (publisher, outputPath, useUserThemes) =>
 		publisher.session.exportToHtml(outputPath, useUserThemes),
 	enableIdleMaintenance: (publisher, options) => publisher.session.enableIdleMaintenance(options),

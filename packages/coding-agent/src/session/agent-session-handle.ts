@@ -50,6 +50,7 @@ import type {
 	SteerOptions,
 } from "./agent-session-types";
 import type { BlobPutOptions, BlobPutResult } from "./blob-store";
+import type { BtwTurnOptions } from "./btw-turn";
 import type { IdleMaintenanceOptions } from "./idle-maintenance";
 import type { CustomMessage } from "./messages";
 import type { ServingModel } from "./retry-fallback-chains";
@@ -439,6 +440,8 @@ export interface AgentViewSession extends AgentSessionHandle {
 	abortCompaction(reason?: unknown): void;
 	/** Run a side turn (e.g. /btw) against the session's model without touching its transcript. */
 	runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult>;
+	/** Run a read-only BTW history turn over frozen context on the owning thread. */
+	runBtwTurn(args: BtwTurnOptions): Promise<EphemeralTurnResult>;
 	/** Whether an ephemeral turn's `maxTokens` reaches the provider unchanged. */
 	ephemeralMaxTokensPreservesRequest(): boolean;
 	/** Export the transcript to HTML; returns the written path. */
