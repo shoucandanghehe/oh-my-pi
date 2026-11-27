@@ -24,6 +24,7 @@ import type {
 	AgentTranscriptSource,
 } from "../../../modes/view-model/overlays/agent-transcript-viewer";
 import type { ExtensionRunner } from "../../../extensibility/extensions/runner";
+import type { AgentHubSession } from "../../../registry/agent-hub-types";
 import { type TurnUsageSummary, TurnUsageTally } from "../../../modes/view-model/overlays/usage-row";
 import {
 	customMessageEntryMessage,
@@ -47,6 +48,7 @@ export interface ViewerAgentRef {
 	readonly status: ViewerAgentStatus;
 	readonly parentId?: string;
 	readonly sessionFile?: string | null;
+	readonly session?: Pick<AgentHubSession, "getSessionStats"> | null;
 }
 
 /**
@@ -311,7 +313,8 @@ export class AgentTranscriptViewerModel {
 
 	#metaSignature(): string {
 		const ref = this.ref();
-		const progress = this.progress();
+		// Workspace panes have their own status line.
+		const progress = this.deps.observers ? this.progress() : undefined;
 		// A running agent's time advances every poll: compare it as the stats row shows it, so the row redraws only when that text changes.
 		const shown = progress && { ...progress, durationMs: formatDuration(progress.durationMs) };
 		return JSON.stringify([ref?.status, ref?.kind, ref?.parentId, ref?.sessionFile, shown]);
@@ -334,10 +337,26 @@ export class AgentTranscriptViewerModel {
 
 	/** The latest progress; a running agent's elapsed time advances from the snapshot's arrival, as snapshots that would only advance the clock are not sent. */
 	progress(): ViewerProgress | undefined {
-		const session = this.deps.observers?.getSession(this.deps.agentId);
-		const progress = session?.progress;
-		if (!progress || session.status !== "active" || session.progressAt === undefined) return progress;
-		return { ...progress, durationMs: progress.durationMs + Math.max(0, Date.now() - session.progressAt) };
+		const observed = this.deps.observers?.getSession(this.deps.agentId);
+		const progress = observed?.progress;
+		const elapsed =
+			progress && observed.status === "active" && observed.progressAt !== undefined
+				? progress.durationMs + Math.max(0, Date.now() - observed.progressAt)
+				: progress?.durationMs;
+		const session = this.deps.liveSession?.() ?? this.ref()?.session;
+		if (session && !this.deps.remote) {
+			const stats = session.getSessionStats();
+			return {
+				contextTokens: stats.contextUsage?.tokens,
+				contextWindow: stats.contextUsage?.contextWindow,
+				toolCount: stats.toolCalls,
+				cost: stats.cost,
+				durationMs: elapsed ?? 0,
+			};
+		}
+		return progress && elapsed !== progress.durationMs && elapsed !== undefined
+			? { ...progress, durationMs: elapsed }
+			: progress;
 	}
 
 	/** What the body says while there are no messages. */
