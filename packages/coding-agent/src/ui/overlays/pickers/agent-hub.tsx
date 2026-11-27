@@ -538,30 +538,9 @@ export function AgentHub<T extends AgentRecordLike>(
 		touch();
 	};
 
-	const activate = (ref: T): void => {
+	const activateAndClose = (action: (id: string) => Promise<void>, id: string): void => {
 		notice = undefined;
-		const focusAgent = props.focusAgent;
-		// An advisor is a read-only transcript with nothing to revive.
-		if (ref.kind === "advisor" || props.remote || !focusAgent) {
-			openChat(ref.id);
-			touch();
-			return;
-		}
-		void focusAgent(ref.id).then(
-			() => props.onDone(),
-			(error: unknown) => {
-				notice = error instanceof Error ? error.message : String(error);
-				touch();
-			},
-		);
-		touch();
-	};
-
-	const openPane = (): void => {
-		const ref = rows[selectedRow];
-		if (!ref || !props.openAgentPane) return;
-		notice = undefined;
-		void props.openAgentPane(ref.id).then(
+		void action(id).then(
 			() => {
 				if (!disposed) props.onDone();
 			},
@@ -572,6 +551,24 @@ export function AgentHub<T extends AgentRecordLike>(
 			},
 		);
 		touch();
+	};
+
+	const activate = (ref: T): void => {
+		if (props.openAgentPane) {
+			activateAndClose(props.openAgentPane, ref.id);
+			return;
+		}
+		// An advisor is a read-only transcript with nothing to revive.
+		if (ref.kind === "advisor" || props.remote || !props.focusAgent) {
+			openChat(ref.id);
+			return;
+		}
+		activateAndClose(props.focusAgent, ref.id);
+	};
+
+	const openPane = (): void => {
+		const ref = rows[selectedRow];
+		if (ref && props.openAgentPane) activateAndClose(props.openAgentPane, ref.id);
 	};
 
 	const revive = (): void => {

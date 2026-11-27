@@ -185,11 +185,8 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
-	it("p opens the independent pane while Enter still selects the Main focus view", async () => {
-		for (const [key, expected] of [
-			["p", "pane"],
-			["enter", "focus"],
-		] as const) {
+	it("Enter and p both open the independent pane when the workspace supports it", async () => {
+		for (const key of ["p", "enter"]) {
 			const calls: string[] = [];
 			const { hub, done } = makeHub(
 				async id => {
@@ -202,7 +199,7 @@ describe("Agent hub Enter activation", () => {
 			try {
 				hub.press(key);
 				await done;
-				expect(calls).toEqual([`${expected}:${AGENT_ID}`]);
+				expect(calls).toEqual([`pane:${AGENT_ID}`]);
 			} finally {
 				hub.dispose();
 			}
