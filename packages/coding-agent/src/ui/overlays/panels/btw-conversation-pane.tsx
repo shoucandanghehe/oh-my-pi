@@ -488,6 +488,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		});
 		composer.addActionHandler(action => {
 			if (action !== "interrupt" || this.#draftView !== view) return false;
+			this.#cancelPaste();
 			this.#interruptOrClear();
 			return true;
 		});
@@ -940,6 +941,19 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 
 	readonly intercept: NonNullable<NativeWorkspaceSurface["intercept"]> = (event, replay) => {
 		if (event.type === "osc") return this.#enhancedPaste?.handleInput(event.raw) ?? false;
+		if (event.type === "key" && event.key.kind !== "release") {
+			const { key } = event;
+			const { keybindings } = this.options;
+			if (
+				key.id === "ctrl+c" ||
+				key.id === "escape" ||
+				keybindings.matches(key, "app.clear") ||
+				matchesAppInterrupt(key, keybindings)
+			) {
+				this.#cancelPaste();
+				return this.onKey(key);
+			}
+		}
 		if ((event.type === "key" || event.type === "paste") && this.#acceptsPaste() && this.#holdPaste(replay))
 			return true;
 		if (event.type === "key") return this.onKey(event.key);

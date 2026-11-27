@@ -185,9 +185,14 @@ test("Tern Ctrl+Enter edits the BTW draft; clear and scroll stay in that pane", 
 		ui.key("alt+shift+l");
 		expect(ui.copied).toEqual(["first\nsecond", "second"]);
 		current.phase = "running";
+		ui.announcePaste();
 		ui.key("ctrl+c");
 		expect(ui.cancelled).toEqual(["current"]);
+		ui.finishPaste(1, "stale");
 		expect(ui.draft()).toBe("first\nsecond");
+		ui.announcePaste();
+		ui.finishPaste(2, " fresh");
+		expect(ui.draft()).toBe("first\nsecond fresh");
 		current.phase = "ready";
 		ui.key("ctrl+c");
 		expect(ui.draft()).toBe("");
