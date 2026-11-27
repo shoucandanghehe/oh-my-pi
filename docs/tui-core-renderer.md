@@ -202,6 +202,11 @@ is left as it was.
   text in the editor. Matches are highlighted; Enter and Shift+Enter cycle
   them, Escape restores the reading position and draft. Inline and native
   hosts decline transcript actions.
+- A fullscreen terminal host can split Main with Agent and BTW panes. Each pane
+  paints its own dock and transcript with the same scroll, selection and
+  search; the workspace routes keys to the focused pane and wheel reports to
+  the pane under the pointer. Main's fullscreen pages cover the entire
+  workspace. Only Main is written back on exit.
 - Nothing reaches history until the shutdown flush, which composes the usual
   inline frame: the writer leaves the alternate screen and writes every block
   after the commit frontier below where the session started. With

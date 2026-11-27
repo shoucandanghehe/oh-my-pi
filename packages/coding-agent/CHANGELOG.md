@@ -13,6 +13,7 @@
 - Dropped discovery of GitHub Copilot (`.github/copilot-instructions.md`, `.github/instructions`, `.github/prompts`, `.github/skills`), Cursor (`.cursor/rules`, `.cursorrules`, `.cursor/mcp.json`), Windsurf (`.windsurf/`), VS Code (`.vscode/mcp.json`) and Cline (`.clinerules`) config
 - Project-level Claude Code, Codex and OpenCode config is limited to MCP servers, skills, commands and `.claude/CLAUDE.md`; `.claude/{tools,extensions,hooks,settings.json,SYSTEM.md}`, Codex commands, prompts, hooks, tools and settings, and OpenCode plugins and settings no longer load
 - Moonshot no longer accepts `KIMI_API_KEY` as a fallback alias for `MOONSHOT_API_KEY`: the alias silently authenticated Moonshot and exposed Moonshot models whenever a Kimi Code key was set. `KIMI_API_KEY` now belongs to the mainland `kimi-code` provider (global accounts use `KIMI_CODE_GLOBAL_API_KEY`); migrate Moonshot Open Platform keys from `KIMI_API_KEY` to `MOONSHOT_API_KEY` ([#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
+- Enable the terminal split workspace with `tui.screen: fullscreen` instead of `PI_TUI_RENDER_BACKEND=app-viewport`; by default, only Main’s transcript is written to terminal scrollback on exit.
 
 ### Added
 

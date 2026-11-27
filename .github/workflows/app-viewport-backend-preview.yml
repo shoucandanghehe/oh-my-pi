@@ -159,7 +159,7 @@ jobs:
               cat > "$MANIFEST_PATH" <<EOF
               {
                 "version": "$PREVIEW_VERSION",
-                "description": "Oh My Pi branch build with experimental app viewport backend",
+                "description": "Oh My Pi branch build with fullscreen terminal workspaces",
                 "homepage": "https://omp.sh",
                 "license": "MIT",
                 "architecture": {
@@ -167,9 +167,6 @@ jobs:
                     "url": "$download_base/omp-windows-x64.exe",
                     "hash": "$windows_hash"
                   }
-                },
-                "env_set": {
-                  "PI_TUI_RENDER_BACKEND": "app-viewport"
                 },
                 "bin": [
                   [
@@ -204,11 +201,13 @@ jobs:
               Install on Linux x64 / WSL with Bun:
 
               \`\`\`bash
-              mkdir -p ~/.omp/agent
-              touch ~/.omp/agent/.env
-              grep -qxF 'PI_TUI_RENDER_BACKEND=app-viewport' ~/.omp/agent/.env ||
-                printf '\\nPI_TUI_RENDER_BACKEND=app-viewport\\n' >> ~/.omp/agent/.env
               bun install -g --no-cache ${download_base}/omp-app-viewport-linux-x64.tgz
+              \`\`\`
+
+              On either platform, enable the split terminal workspace:
+
+              \`\`\`sh
+              omp config set tui.screen fullscreen
               \`\`\`
 
               Update an existing preview installation:

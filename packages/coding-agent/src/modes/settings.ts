@@ -416,7 +416,7 @@ export const cfgTuiScreen = register({
 		label: "Screen",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with the composer pinned to the bottom and the transcript scrolled in omp (PgUp/PgDn, Ctrl+Home/Ctrl+End, mouse wheel), written to the terminal on exit unless Fullscreen Exit Transcript is off. Drag to select text; double-click selects a word, triple-click a line. ${shift}+drag (Option+drag in iTerm2) bypasses omp selection`;
+			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with a pinned composer and independent Agent and BTW panes. PgUp/PgDn, Ctrl+Home/Ctrl+End, or the mouse wheel scroll a pane. Only Main is written to the terminal on exit unless Fullscreen Exit Transcript is off. Drag to select text; double-click selects a word, triple-click a line. ${shift}+drag (Option+drag in iTerm2) bypasses omp selection`;
 		},
 		options: [
 			{
@@ -427,7 +427,7 @@ export const cfgTuiScreen = register({
 			{
 				value: "fullscreen",
 				label: "Fullscreen",
-				description: "Alternate screen, composer pinned to the bottom, transcript scrolled in omp",
+				description: "Alternate screen with a pinned composer and independent Agent and BTW panes",
 			},
 		],
 	},
