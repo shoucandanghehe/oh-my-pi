@@ -329,10 +329,14 @@ describe("RPC queued-message editing", () => {
 		test("withdraws a steer the streaming response already claimed live", async () => {
 			await startStreamingTurn("live-steer");
 			await client.steer("live steer");
-			// Claimed: it left the pending queue but stays listed until the transcript records it.
+			// Accepted into the streaming response: it leaves the queue display at once, though the
+			// transcript has not recorded it yet, so the abort below still hands it back.
 			await untilState(
-				state => state.queuedMessageCount === 0 && state.queuedMessages.steering.includes("live steer"),
-				"Provider never claimed the steer",
+				state =>
+					state.queuedMessageCount === 0 &&
+					state.queuedMessages.steering.length === 0 &&
+					state.queuedMessages.liveSteered === 0,
+				"Provider never accepted the steer",
 			);
 
 			expect(await client.abortAndRestoreQueue()).toEqual({ steering: [{ text: "live steer" }], followUp: [] });
