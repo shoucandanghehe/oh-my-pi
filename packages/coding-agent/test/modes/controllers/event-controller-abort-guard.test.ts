@@ -19,9 +19,9 @@ import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { TerminalActivityController } from "@oh-my-pi/pi-coding-agent/modes/controllers/terminal-activity-controller";
 import { initTheme } from "../../../src/ui/theme/service";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import * as terminalSession from "@oh-my-pi/pi-tui/driver/session";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -314,17 +314,31 @@ function agentPause(yielded: boolean): Extract<AgentSessionEvent, { type: "agent
 	return { type: "agent_pause", messages: [makeAssistantMessage("stop")], yielded, awaiting: false };
 }
 
+function createTitleActivity() {
+	const stateSpy = vi.fn();
+	const terminalActivity = new TerminalActivityController({
+		isProgressEnabled: () => false,
+		setProgress: () => {},
+		setTitleState: stateSpy,
+	});
+	return { stateSpy, terminalActivity };
+}
+
 describe("EventController — terminal title across agent_pause", () => {
 	it("keeps the working title and skips teardown at a pause, but flushes a deferred model switch and queued command output", async () => {
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
-		const ctx = createInteractiveModeContext({ sessionManager: { getSessionName: () => "test-session" } });
+		const { stateSpy, terminalActivity } = createTitleActivity();
+		const ctx = createInteractiveModeContext({
+			sessionManager: { getSessionName: () => "test-session" },
+			terminalActivity,
+		});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const flushPendingModelSwitch = vi.spyOn(ctx, "flushPendingModelSwitch");
 		const flushPendingCommandOutput = vi.spyOn(ctx, "flushPendingCommandOutput");
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" });
 		await controller.handleEvent(agentPause(false));
 		// The agent's own continuation follows: never drop to `idle`, never run #finishAgentEnd teardown.
-		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(stateSpy.mock.calls).toEqual([["working"]]);
 		expect(markActivityEnd).not.toHaveBeenCalled();
 		// The automatic continuation must still pick up a queued plan-mode model switch.
 		expect(flushPendingModelSwitch).toHaveBeenCalledTimes(1);
@@ -332,25 +346,28 @@ describe("EventController — terminal title across agent_pause", () => {
 	});
 
 	it("keeps the working title at a yielded pause that queued input resumes", async () => {
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
+		const { stateSpy, terminalActivity } = createTitleActivity();
 		const ctx = createInteractiveModeContext({
 			sessionManager: { getSessionName: () => "test-session" },
 			session: { queuedMessageCount: 1, isRunActive: true },
+			terminalActivity,
 		});
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" });
 		await controller.handleEvent(agentPause(true));
-		expect(stateSpy).not.toHaveBeenCalledWith("idle");
+		expect(stateSpy.mock.calls).toEqual([["working"]]);
 		expect(markActivityEnd).not.toHaveBeenCalled();
 	});
 
 	it("transitions to idle and tears down on the terminal agent_end", async () => {
-		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
-		const ctx = makeTurnEndContext();
+		const { stateSpy, terminalActivity } = createTitleActivity();
+		const ctx = createInteractiveModeContext({ terminalActivity });
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
+		await controller.handleEvent({ type: "agent_start" });
 		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("stop")]));
-		expect(stateSpy).toHaveBeenCalledWith("idle");
+		expect(stateSpy.mock.calls).toEqual([["working"], ["idle"]]);
 		expect(markActivityEnd).toHaveBeenCalledTimes(1);
 	});
 });
