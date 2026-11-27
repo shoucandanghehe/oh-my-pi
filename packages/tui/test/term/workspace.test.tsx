@@ -44,7 +44,7 @@ async function withHost(
 		theme?: HostOptions["theme"];
 	} = {},
 ): Promise<void> {
-	const { inline, shell, columns = COLUMNS, rows = ROWS, theme, ...callbacks } = options;
+	const { inline, shell, columns = COLUMNS, rows = ROWS, theme, screen, ...callbacks } = options;
 	const term = KittyTerminal.createSync({ columns, rows, scrollback: 100 });
 	if (shell) term.write(`${shell}\r\n`);
 	const memory = memoryTerminal({
@@ -54,7 +54,7 @@ async function withHost(
 	});
 	const host = await startHost({
 		...callbacks,
-		screen: callbacks.screen ?? (() => (inline ? "inline" : "fullscreen")),
+		...(screen ? { screen } : inline ? {} : { screen: () => "fullscreen" }),
 		copyOnSelect: () => false,
 		wheelLines: () => 3,
 		surface,
@@ -554,6 +554,8 @@ it("composes a recursive workspace, scopes scrolling and attachments, and closes
 	const pasted: string[] = [];
 	const edits: string[] = [];
 	const disposed: string[] = [];
+	const pending = Promise.withResolvers<() => void>();
+	let hold = true;
 	const main = createSurface(() => ({
 		main: <rows lines={Array.from({ length: 12 }, (_, i) => `main${i}`)} />,
 		dock: (
@@ -599,7 +601,11 @@ it("composes a recursive workspace, scopes scrolling and attachments, and closes
 			});
 			return {
 				surface,
-				intercept(event) {
+				intercept(event, replay) {
+					if (hold && event.type === "paste" && event.paste.text === "held paste") {
+						pending.resolve(replay);
+						return true;
+					}
 					if (event.type !== "key" || event.key.id !== "q") return false;
 					edits.push(`${name}:intercept`);
 					return true;
@@ -635,16 +641,20 @@ it("composes a recursive workspace, scopes scrolling and attachments, and closes
 			memory.feed("qX\x1b[200~pasted\x1b[201~");
 			expect(edits).toEqual(["b:intercept", "b"]);
 			expect(pasted).toEqual(["b:pasted"]);
+			memory.feed("\x1b[200~held paste\x1b[201~");
+			const replay = await pending.promise;
 			// Click C's title and route an app-recovered paste (e.g. an attachment marker).
 			await afterFrame(host, () => memory.feed("\x1b[<0;43;7M\x1b[<0;43;7m"));
+			hold = false;
+			replay();
 			host.dispatch({ type: "paste", paste: { text: "attachment" } });
-			expect(pasted).toEqual(["b:pasted", "c:attachment"]);
+			expect(pasted).toEqual(["b:pasted", "b:held paste", "c:attachment"]);
 			expect(term.cursor.y).toBe(10);
 			await afterFrame(host, () => memory.feed("\x1b[1;4H")); // Alt+Shift+Home returns to Main only.
 			expect(workspace.active()).toBe("main");
 			expect(disposed).toEqual([]);
 			memory.feed("\x1b[200~main paste\x1b[201~");
-			expect(pasted).toEqual(["b:pasted", "c:attachment", "main:main paste"]);
+			expect(pasted).toEqual(["b:pasted", "b:held paste", "c:attachment", "main:main paste"]);
 			expect(workspace.focus("b")).toBe(true);
 			// Close C using its own header without dismantling B or the shared screen.
 			await afterFrame(host, () => memory.feed("\x1b[<0;77;7M"));
