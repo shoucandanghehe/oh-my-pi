@@ -596,7 +596,9 @@ export class UiHelpers {
 				for (const content of message.content) {
 					if (content.type !== "toolCall") continue;
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
-					if (options.preservedLiveToolCallIds?.has(content.id)) {
+					const preserved = options.preservedLiveTools?.get(content.id);
+					if (preserved) {
+						transcript.placeRetainedBlock(preserved.block);
 						appendAssistantSegment(content.id);
 						continue;
 					}
@@ -691,7 +693,7 @@ export class UiHelpers {
 					? turnElapsedMs(turnStartedAt, message)
 					: undefined;
 			} else if (message.role === "toolResult") {
-				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
+				if (options.preservedLiveTools?.has(message.toolCallId)) continue;
 				const pendingRead = ctx.pendingTools.get(message.toolCallId);
 				// Mirror the call side: resolve the wire toolName through the registry
 				// so aliased results route under the canonical name their call used.

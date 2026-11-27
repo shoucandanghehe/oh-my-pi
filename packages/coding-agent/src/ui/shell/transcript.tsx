@@ -220,6 +220,17 @@ export class Transcript {
 		this.#insertionPoint = anchor;
 	}
 
+	/** Place a retained block at the replay cursor without remounting it. */
+	placeRetainedBlock(block: TranscriptBlock): void {
+		const anchor = this.#insertionPoint;
+		if (!anchor) return;
+		const blocks = this.#blocks.peek();
+		const anchorIndex = blocks.indexOf(anchor);
+		if (anchorIndex < 0) return;
+		if (block === anchor) this.#insertionPoint = blocks[anchorIndex + 1];
+		else if (blocks.indexOf(block) > anchorIndex) this.#blocks.move(block, anchor);
+	}
+
 	/**
 	 * Remove every block but `keep`, in one pass; scrollback is rebuilt once when any removed
 	 * block had rows there.

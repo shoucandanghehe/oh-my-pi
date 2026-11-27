@@ -4248,10 +4248,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	rebuildChatFromMessages(): void {
-		// Mid-stream rebuilds (`/shake`, setting changes that touch the transcript) replay only
-		// committed `state.messages`. The in-flight reply and its pending tool calls live outside
-		// them until `message_end`, so their blocks stay live in place (#3656): every other block
-		// goes, the replay lands above them, and `pendingTools` keeps routing into them.
+		// Preserve mounted live blocks across a rebuild. Replay committed tool
+		// calls at their original positions; uncommitted blocks stay after replay.
 		const transcript = this.shell.transcript;
 		const live = new Set<TranscriptBlock>();
 		const livePendingTools = new Map<string, PendingTool>();
@@ -4271,27 +4269,46 @@ export class InteractiveMode implements InteractiveModeContext {
 		// their own mode.
 		const context = this.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: cfgDisplayCollapseCompacted.get(settings),
+			keepInFlightToolCalls: this.viewSession.isStreaming,
 		});
-		const preservedLiveToolCallIds = new Set<string>();
-		// A preserved call whose result already landed in the replayed transcript is drawn by the
-		// replay itself (#6516); keeping its live block too would draw the call twice. A background
-		// job's `running` result keeps its live block (later frames still fill it), and a read group
-		// another pending read still shares stays as one block.
+		const preservedLiveTools = new Map(livePendingTools);
+		// Replay owns terminal results (#6516), but a background job's running
+		// result keeps its live handle. Completed reads that share a block with
+		// a pending sibling still reference it for display, not update routing.
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
-			const resolved = livePendingTools.get(message.toolCallId);
-			if (!resolved) continue;
 			const details = message.details as { async?: { state?: string } } | undefined;
-			if (details?.async?.state === "running") {
-				preservedLiveToolCallIds.add(message.toolCallId);
-				continue;
+			if (details?.async?.state !== "running") livePendingTools.delete(message.toolCallId);
+		}
+		const pendingBlocks = new Set(Array.from(livePendingTools.values(), tool => tool.block));
+		for (const [id, tool] of preservedLiveTools) {
+			if (pendingBlocks.has(tool.block)) continue;
+			preservedLiveTools.delete(id);
+			live.delete(tool.block);
+		}
+
+		// A live call removed by display compaction predates the retained tail.
+		// Use its journal location to distinguish it from uncommitted live calls.
+		const compactedBlocks = new Set<TranscriptBlock>();
+		if (preservedLiveTools.size > 0 && context.messages.some(message => message.role === "compactionSummary")) {
+			const replayedCallIds = new Set<string>();
+			for (const message of context.messages) {
+				if (message.role !== "assistant") continue;
+				for (const content of message.content) {
+					if (content.type === "toolCall") replayedCallIds.add(content.id);
+				}
 			}
-			livePendingTools.delete(message.toolCallId);
-			if ([...livePendingTools.values()].includes(resolved)) {
-				preservedLiveToolCallIds.add(message.toolCallId);
-				continue;
+			const branch = this.viewSession.sessionManager.getBranch();
+			const boundary = branch.findLastIndex(entry => entry.type === "compaction");
+			for (let i = 0; i < boundary; i++) {
+				const entry = branch[i];
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				for (const content of entry.message.content) {
+					if (content.type !== "toolCall" || replayedCallIds.has(content.id)) continue;
+					const tool = preservedLiveTools.get(content.id);
+					if (tool) compactedBlocks.add(tool.block);
+				}
 			}
-			live.delete(resolved.block);
 		}
 		this.transcriptBlocks = new WeakMap();
 		this.#frame.welcomeBlock = undefined;
@@ -4305,7 +4322,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			try {
 				if (!cfgStartupQuiet.get(settings)) this.#frame.showWelcome();
 				this.#syncHeaderExtras();
-				this.renderSessionContext(context, { preservedLiveToolCallIds });
+				for (const block of transcript.blocks()) {
+					if (compactedBlocks.has(block)) transcript.placeRetainedBlock(block);
+				}
+				this.renderSessionContext(context, { preservedLiveTools });
 			} finally {
 				transcript.setInsertionPoint(undefined);
 			}

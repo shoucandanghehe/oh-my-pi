@@ -95,12 +95,14 @@ export class ViewList<T extends ViewEntry = ViewEntry> {
 		this.#entries.set(index < 0 ? [...list, entry] : [...list.slice(0, index), entry, ...list.slice(index)]);
 	}
 
-	/** Move listed `entry` to the end, keeping it mounted. */
-	move(entry: T): void {
+	/** Move listed `entry` before `anchor`, or to the end, keeping it mounted. */
+	move(entry: T, anchor?: T): void {
 		const list = this.#entries.peek();
 		const index = list.indexOf(entry);
-		if (index < 0) return;
-		this.#entries.set([...list.toSpliced(index, 1), entry]);
+		if (index < 0 || entry === anchor) return;
+		const remaining = list.toSpliced(index, 1);
+		const target = anchor === undefined ? -1 : remaining.indexOf(anchor);
+		this.#entries.set(remaining.toSpliced(target < 0 ? remaining.length : target, 0, entry));
 	}
 
 	/** Remove and dispose `entry`; false when it is not listed. */

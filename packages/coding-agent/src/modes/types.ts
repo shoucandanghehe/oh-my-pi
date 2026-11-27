@@ -368,7 +368,7 @@ export interface ResumeSessionOptions {
 export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
 	/** Tool calls whose existing live block remains the sole render owner across a rebuild. */
-	preservedLiveToolCallIds?: ReadonlySet<string>;
+	preservedLiveTools?: ReadonlyMap<string, PendingTool>;
 }
 
 export interface RenderInitialMessagesOptions {

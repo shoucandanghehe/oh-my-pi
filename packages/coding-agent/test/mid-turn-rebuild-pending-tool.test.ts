@@ -20,10 +20,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgDisplayCollapseCompacted, cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import type { PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -411,78 +411,90 @@ describe("InteractiveMode rebuild renders each tool call once", () => {
 		expect(mode.pendingTools.get("call-1")).toBe(live);
 	});
 
-	it("keeps a still-running background task's live handle across a rebuild", () => {
-		const runningDetails = { async: { state: "running", jobId: "job-1", type: "task" } };
-		const entries: SessionEntry[] = [
-			{
-				type: "message",
-				id: "m1",
-				parentId: null,
-				timestamp: Date.now(),
-				message: { role: "user", content: [{ type: "text", text: "spawn it" }], timestamp: 1 },
-			},
-			{
-				type: "message",
-				id: "m2",
-				parentId: "m1",
-				timestamp: Date.now(),
-				message: {
-					role: "assistant",
-					content: [
-						{ type: "toolCall", id: "call-1", name: "task", arguments: { description: "run", prompt: "go" } },
-					],
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-sonnet-4-5",
-					usage,
-					stopReason: "toolUse",
-					timestamp: 2,
+	it.each(["uncompacted", "retained", "compacted"] as const)(
+		"keeps the original live task at its history position (%s)",
+		async history => {
+			const runningDetails = { async: { state: "running", jobId: "job-1", type: "task" } };
+			const manager = session.sessionManager;
+			const first = manager.appendMessage({ role: "user", content: "spawn it", timestamp: 1 });
+			manager.appendMessage({
+				role: "assistant",
+				content: [
+					{ type: "toolCall", id: "call-1", name: "task", arguments: { description: "run", prompt: "go" } },
+				],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage,
+				stopReason: "toolUse",
+				timestamp: 2,
+			});
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "task",
+				content: [{ type: "text", text: "Review in progress" }],
+				details: runningDetails,
+				isError: false,
+				timestamp: 3,
+			});
+			if (history !== "uncompacted") {
+				const recent = manager.appendMessage({ role: "user", content: "Waiting on review", timestamp: 4 });
+				const boundary = history === "retained" ? first : recent;
+				manager.appendCompaction("Earlier work summarized", undefined, boundary, 1000, {
+					method: "soft",
+					tokensAfter: 100,
+				});
+				manager.appendMessage({ role: "user", content: "After compaction", timestamp: Date.now() + 1 });
+			}
+
+			Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+
+			const live = mode.presentToolCall({
+				name: "task",
+				args: { description: "run", prompt: "go" },
+				tool: undefined,
+				id: "call-1",
+				cwd: tempDir.path(),
+			});
+			live.updateResult(
+				{ content: [{ type: "text", text: "Review in progress" }], details: runningDetails, isError: false },
+				true,
+				"call-1",
+			);
+			mode.pendingTools.set("call-1", live);
+
+			mode.isInitialized = true;
+			mode.eventController.markBackgroundCalls(new Set(["call-1"]));
+			const collapse = cfgDisplayCollapseCompacted.get(settings);
+			cfgDisplayCollapseCompacted.set(settings, true);
+			try {
+				mode.rebuildChatFromMessages();
+			} finally {
+				cfgDisplayCollapseCompacted.set(settings, collapse);
+			}
+
+			expect(mode.pendingTools.get("call-1")).toBe(live);
+			expect(toolEntries()).toHaveLength(1);
+			if (history !== "uncompacted") {
+				const rendered = transcriptText(mode.shell);
+				const task = rendered.indexOf("Review in progress");
+				expect(task).toBeGreaterThanOrEqual(0);
+				expect(rendered.indexOf("soft-compacted")).toBeGreaterThan(task);
+			}
+			await mode.eventController.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "call-1",
+				toolName: "task",
+				result: {
+					content: [{ type: "text", text: "Review finished" }],
+					details: { async: { state: "completed", jobId: "job-1", type: "task" } },
 				},
-			},
-			{
-				type: "message",
-				id: "m3",
-				parentId: "m2",
-				timestamp: Date.now(),
-				message: {
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "task",
-					content: [{ type: "text", text: "running…" }],
-					details: runningDetails,
-					isError: false,
-					timestamp: 3,
-				},
-			},
-		] as unknown as SessionEntry[];
-
-		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
-		vi.spyOn(session, "buildTranscriptSessionContext").mockReturnValue(
-			buildSessionContext(entries, undefined, undefined, { transcript: true }),
-		);
-
-		const live = mode.presentToolCall({
-			name: "task",
-			args: { description: "run", prompt: "go" },
-			tool: undefined,
-			id: "call-1",
-			cwd: tempDir.path(),
-		});
-		live.updateResult(
-			{ content: [{ type: "text", text: "running…" }], details: runningDetails, isError: false },
-			true,
-			"call-1",
-		);
-		mode.pendingTools.set("call-1", live);
-
-		mode.rebuildChatFromMessages();
-
-		// The still-running task's live handle must survive the rebuild so a later
-		// tool_execution_update/_end settles it instead of stranding on "running",
-		// without also leaving the replayed snapshot on screen.
-		expect(mode.pendingTools.get("call-1")).toBe(live);
-		expect(toolEntries()).toHaveLength(1);
-	});
+				isError: false,
+			});
+			expect(transcriptText(mode.shell)).toContain("Review finished");
+		},
+	);
 
 	it("keeps a shared read group attached while a sibling read is still in flight", () => {
 		const entries: SessionEntry[] = [
