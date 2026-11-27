@@ -260,7 +260,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 - Image detection is metadata-based (`readImageMetadata()`).
 - Max accepted image size is `20 MiB` (`MAX_IMAGE_INPUT_BYTES`, re-exported as `MAX_IMAGE_SIZE`). Larger files throw.
-- `read <image>?q=<question>` loads the image for the resolved vision model and returns its answer as one text block.
+- `read <image>?q=<question>` returns the inline image when the active model can see it and no `modelRoles.vision` is configured. Otherwise it asks the resolved vision model and returns that model's answer as one text block.
 - Without `?q=`, image-capable active models receive a text note plus an inline image block.
 - Without `?q=`, text-only active models receive metadata (MIME, bytes, dimensions, channels, alpha) plus a `?q=<question>` hint.
 - `images.questionTimeoutMs` limits each delegated image question; `0` disables the timeout.

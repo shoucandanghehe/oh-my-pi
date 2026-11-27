@@ -25,5 +25,7 @@ Sources:
 - Directory: complete root; child listings cap at 12 (`… N more`), read child; page via :N-M/:-N.
 - URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.
 - PDF/DOCX/PPTX/XLSX/EPUB: extracted text; notebooks: editable cells; images: decoded inline.
+- If you can see images, MUST inspect the original with a bare image path, `attachment://N`, or `.svg:img`.
+- Use image `?q=<question>` only when direct viewing is unavailable or the user requests a separate opinion. With vision and no configured vision role, it returns the image itself. NEVER present a separate model's text answer as your own observation.
 - Also, with selectors in help://read/sources (read it before first use):
   - SQLite, archives (ZIP, TAR, 7z, RAR and more), JSON/JSONL by jq filter, executable metadata, video, SVG as image, merge conflicts.

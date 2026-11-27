@@ -16,6 +16,7 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type ImageContent, type MediaContent, type TextContent } from "@oh-my-pi/pi-ai";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,
@@ -1719,8 +1720,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	/**
-	 * Build content for an image: answer an explicit question, return metadata
-	 * to text-only models, or inline pixels for image-capable models.
+	 * Build content for an image: inline pixels for image-capable models, or
+	 * return metadata or an answer from the configured vision route.
 	 */
 	async #loadImageContent(options: {
 		readPath: string;
@@ -1735,7 +1736,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}): Promise<{ content: Array<TextContent | ImageContent>; details: ReadToolDetails; sourcePath: string }> {
 		const { readPath, absolutePath, mimeType, imageMetadata, fileSize, imageKind, question, questionPath, signal } =
 			options;
-		if (!question && !(this.session.getActiveModel?.()?.input.includes("image") ?? true)) {
+		const activeModel = this.session.getActiveModel?.();
+		const canSee = activeModel
+			? (activeModel.toolResultInput ?? activeModel.input).includes("image") && sendsImageInputOnWire(activeModel)
+			: undefined;
+		if (!question && canSee === false) {
 			const outputMime = imageMetadata?.mimeType ?? mimeType;
 			const imageQuestionPath = questionPath ?? formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const metadataLines = [
@@ -1767,14 +1772,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			throw new ToolError(`Image file too large: ${sizeStr} exceeds ${maxStr} limit.`);
 		}
 		try {
-			const resolved = question ? resolveImageQuestionModel(this.session) : undefined;
+			const resolved =
+				question && (!canSee || this.session.settings.getModelRole("vision")?.trim())
+					? resolveImageQuestionModel(this.session)
+					: undefined;
 			const imageLoadOptions = {
 				path: readPath,
 				cwd: this.session.cwd,
 				autoResize: cfgImagesAutoResize.get(this.session.settings),
 				maxBytes: MAX_IMAGE_SIZE,
 				resolvedPath: absolutePath,
-				excludeWebP: webpExclusionForModel(resolved?.model ?? this.session.getActiveModel?.()),
+				excludeWebP: webpExclusionForModel(resolved?.model ?? activeModel),
 			};
 			const imageInput =
 				imageKind === "svg"

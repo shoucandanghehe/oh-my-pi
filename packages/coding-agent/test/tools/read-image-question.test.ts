@@ -193,6 +193,47 @@ describe("read image questions", () => {
 		expect(parts[1]).toEqual({ type: "text", text: "What text is visible?" });
 	});
 
+	it("returns the original pixels instead of asking the default model when the active model can see", async () => {
+		const stub = createCompleteSimpleForbiddenStub();
+		const settings = Settings.isolated();
+		settings.setModelRole("default", `${reasoningVisionModel.provider}/${reasoningVisionModel.id}`);
+		const session = createSession(testDir, visionModel, "test-key", settings, {
+			configureVisionRole: false,
+			availableModels: [visionModel, reasoningVisionModel],
+		});
+		const result = await new ReadTool(session, stub.fn).execute("call", {
+			path: `${imagePath}?q=Describe the image`,
+		});
+		expect(result.content).toContainEqual({ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" });
+		expect(stub.calls).toHaveLength(0);
+	});
+
+	it("honors a configured vision role for a question even when the active model can see", async () => {
+		const stub = createCompleteSimpleSuccessStub("Separate visual opinion");
+		const session = createSession(testDir, reasoningVisionModel, "test-key", Settings.isolated(), {
+			activeModel: visionModel,
+			availableModels: [visionModel, reasoningVisionModel],
+		});
+		const result = await new ReadTool(session, stub.fn).execute("call", {
+			path: `${imagePath}?q=Describe the image`,
+		});
+		expect(result.content).toEqual([{ type: "text", text: "Separate visual opinion" }]);
+		expect(stub.calls[0]?.[0]).toBe(reasoningVisionModel);
+	});
+
+	it("answers through a separate request when the active model cannot see tool-result images", async () => {
+		const stub = createCompleteSimpleSuccessStub("Detected a rectangle");
+		const session = createSession(testDir, visionModel, "test-key", Settings.isolated(), {
+			activeModel: { ...visionModel, toolResultInput: ["text"] },
+			configureVisionRole: false,
+		});
+		const result = await new ReadTool(session, stub.fn).execute("call", {
+			path: `${imagePath}?q=Describe the image`,
+		});
+		expect(result.content).toEqual([{ type: "text", text: "Detected a rectangle" }]);
+		expect(stub.calls).toHaveLength(1);
+	});
+
 	it("answers questions about attachment URLs", async () => {
 		const image: ImageContent = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" };
 		const stub = createCompleteSimpleSuccessStub("Attached image");
