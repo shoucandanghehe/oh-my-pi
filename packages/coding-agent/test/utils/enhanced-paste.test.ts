@@ -313,6 +313,62 @@ describe("EnhancedPasteController", () => {
 		expect(statuses).toEqual([]);
 	});
 
+	it("delivers fallback, image and HTML to the host that reserved each notification, in order", async () => {
+		const nativeReady = Promise.withResolvers<boolean>();
+		const finished = Array.from({ length: 3 }, () => Promise.withResolvers<void>());
+		const deliveries: string[] = [];
+		const writes: string[] = [];
+		let next = 0;
+		const controller = new EnhancedPasteController({
+			write: data => writes.push(data),
+			acceptsHtml: () => true,
+			showStatus: message => deliveries.push(message),
+			pasteText: () => deliveries.push("global text"),
+			pasteImage: () => void deliveries.push("global image"),
+			pasteHtml: () => void deliveries.push("global HTML"),
+			pasteNative: () => {
+				deliveries.push("global fallback");
+				return true;
+			},
+			beginPaste: () => {
+				const index = next++;
+				return {
+					isCurrent: () => true,
+					finish: () => finished[index]!.resolve(),
+					pasteImage: () => void deliveries.push(`${index} image`),
+					pasteHtml: (html: string) => void deliveries.push(`${index} HTML: ${html}`),
+					pasteNative: () => {
+						deliveries.push(`${index} fallback`);
+						return nativeReady.promise;
+					},
+				};
+			},
+		});
+		const [tiff, png, html] = ["image/tiff", "image/png", "text/html"].map(mime =>
+			Buffer.from(mime).toString("base64"),
+		);
+		for (const mime of [tiff, png, html]) {
+			controller.handleInput(packet("type=read:status=OK"));
+			controller.handleInput(packet(`type=read:status=DATA:mime=${mime}`));
+			controller.handleInput(packet("type=read:status=DONE"));
+		}
+		expect(deliveries).toEqual(["0 fallback"]);
+		expect(writes).toEqual([]);
+
+		nativeReady.resolve(true);
+		await finished[0]!.promise;
+		expect(writes).toHaveLength(1);
+		const payload = Buffer.from("<b>sample</b>").toString("base64");
+		controller.handleInput(readReply(`type=read:status=DATA:mime=${png}`, payload));
+		controller.handleInput(readReply("type=read:status=DONE"));
+		await finished[1]!.promise;
+		expect(writes).toHaveLength(2);
+		controller.handleInput(readReply(`type=read:status=DATA:mime=${html}`, payload, 2));
+		controller.handleInput(readReply("type=read:status=DONE", undefined, 2));
+		await finished[2]!.promise;
+		expect(deliveries).toEqual(["0 fallback", "1 image", "2 HTML: <b>sample</b>"]);
+	});
+
 	it("holds the reservation until the asynchronous attachment has finished", async () => {
 		let released = false;
 		const imageReady = Promise.withResolvers<void>();

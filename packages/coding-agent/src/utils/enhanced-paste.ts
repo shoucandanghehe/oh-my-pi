@@ -18,17 +18,22 @@ export interface Osc5522Packet {
 	payload: string;
 }
 
-interface PasteReservation {
-	isCurrent(): boolean;
+/** One notification's captured destination, retained through the asynchronous read. */
+export interface EnhancedPasteDelivery {
+	isCurrent?(): boolean;
 	finish(text?: string): void;
+	pasteImage?(image: ImageContent): void | Promise<void>;
+	pasteHtml?(html: string): void | Promise<void>;
+	pasteNative?(): Promise<boolean>;
 }
 
 interface PasteListingState {
 	mimes: string[];
+	acceptsHtml: boolean;
 	kittyDotPayload?: true;
 	pw?: string;
 	loc?: string;
-	reservation?: PasteReservation;
+	reservation?: EnhancedPasteDelivery;
 }
 
 interface PasteReadState {
@@ -37,13 +42,13 @@ interface PasteReadState {
 	kind: PasteReadKind;
 	mimeType: string;
 	chunks: string[];
-	reservation?: PasteReservation;
+	reservation?: EnhancedPasteDelivery;
 }
 
 export interface EnhancedPasteHandlers {
 	write(data: string): void;
 	/** Reserve ordered delivery from the paste notification through the clipboard read. */
-	beginPaste?(): PasteReservation;
+	beginPaste?(): EnhancedPasteDelivery | undefined;
 	pasteText(text: string): void;
 	pasteImage(image: ImageContent): void | Promise<void>;
 	/** Whether the paste lands where styled text goes (the composer): HTML on the clipboard is then read. */
@@ -107,6 +112,7 @@ export class EnhancedPasteController {
 	#listing: PasteListingState | undefined;
 	#pending: PasteListingState[] = [];
 	#read: PasteReadState | undefined;
+	#nativePaste: PasteListingState | undefined;
 	#nextReadId = 0;
 	#handlers: EnhancedPasteHandlers;
 
@@ -132,6 +138,8 @@ export class EnhancedPasteController {
 		this.#listing = undefined;
 		const pending = this.#pending.splice(0);
 		const read = this.#read;
+		const nativePaste = this.#nativePaste;
+		this.#nativePaste = undefined;
 		if (read?.phase === "reading") {
 			read.phase = "cancelled";
 			read.chunks = [];
@@ -140,6 +148,7 @@ export class EnhancedPasteController {
 		}
 		listing?.reservation?.finish();
 		for (const paste of pending) paste.reservation?.finish();
+		nativePaste?.reservation?.finish();
 	}
 
 	handleInput(data: string): boolean {
@@ -174,11 +183,13 @@ export class EnhancedPasteController {
 		if (status === "OK") {
 			const loc = packet.metadata.get("loc");
 			this.#listing?.reservation?.finish();
+			const reservation = this.#handlers.beginPaste?.();
 			this.#listing = {
 				mimes: [],
+				acceptsHtml: this.#handlers.acceptsHtml(),
 				pw: packet.metadata.get("pw"),
 				loc: loc === "primary" ? loc : undefined,
-				reservation: this.#handlers.beginPaste?.(),
+				reservation,
 			};
 			return;
 		}
@@ -189,7 +200,7 @@ export class EnhancedPasteController {
 		} else if (status === "DONE") {
 			this.#listing = undefined;
 			this.#pending.push(listing);
-			this.#startRead();
+			await this.#startRead();
 		} else if (status) {
 			this.#listing = undefined;
 			this.#handlers.showStatus(`Enhanced paste failed: ${status}`);
@@ -223,7 +234,7 @@ export class EnhancedPasteController {
 		}
 		read.phase = "applying";
 		try {
-			if (read.reservation && !read.reservation.isCurrent()) return;
+			if (read.reservation?.isCurrent?.() === false) return;
 			const bytes = Buffer.concat(read.chunks.map(chunk => Buffer.from(chunk, "base64")));
 			if (bytes.byteLength === 0) {
 				this.#handlers.showStatus("Clipboard paste was empty");
@@ -235,13 +246,17 @@ export class EnhancedPasteController {
 				if (reservation) reservation.finish(bytes.toString("utf8"));
 				else this.#handlers.pasteText(bytes.toString("utf8"));
 			} else if (read.kind === "html") {
-				await this.#handlers.pasteHtml(bytes.toString("utf8"));
+				const html = bytes.toString("utf8");
+				if (read.reservation?.pasteHtml) await read.reservation.pasteHtml(html);
+				else await this.#handlers.pasteHtml(html);
 			} else {
-				await this.#handlers.pasteImage({
+				const image: ImageContent = {
 					type: "image",
 					data: bytes.toString("base64"),
 					mimeType: read.mimeType,
-				});
+				};
+				if (read.reservation?.pasteImage) await read.reservation.pasteImage(image);
+				else await this.#handlers.pasteImage(image);
 			}
 		} finally {
 			this.#endRead(read);
@@ -252,20 +267,36 @@ export class EnhancedPasteController {
 		if (this.#read !== read) return;
 		this.#read = undefined;
 		read.reservation?.finish();
-		this.#startRead();
+		void this.#startRead();
 	}
 
-	#startRead(): void {
-		if (this.#read) return;
+	async #startRead(): Promise<void> {
+		if (this.#read || this.#nativePaste) return;
 		let listing: PasteListingState | undefined;
 		while ((listing = this.#pending.shift())) {
-			if (listing.reservation && !listing.reservation.isCurrent()) {
-				listing.reservation.finish();
+			const reservation = listing.reservation;
+			if (reservation?.isCurrent?.() === false) {
+				reservation.finish();
 				continue;
 			}
-			const selected = choosePasteMime(listing.mimes, this.#handlers.acceptsHtml());
+			const selected = choosePasteMime(listing.mimes, listing.acceptsHtml);
 			if (!selected) {
 				// Native readers use the regular clipboard, not the terminal's primary selection.
+				if (listing.loc !== "primary" && reservation?.pasteNative) {
+					this.#nativePaste = listing;
+					try {
+						if (!(await reservation.pasteNative())) {
+							this.#handlers.showStatus("Clipboard paste has no supported text or image data");
+						}
+					} finally {
+						if (this.#nativePaste === listing) {
+							this.#nativePaste = undefined;
+							reservation.finish();
+							void this.#startRead();
+						}
+					}
+					return;
+				}
 				if (listing.loc === "primary" || !this.#handlers.pasteNative()) {
 					this.#handlers.showStatus("Clipboard paste has no supported text or image data");
 				}
