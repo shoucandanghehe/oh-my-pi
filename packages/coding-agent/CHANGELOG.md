@@ -329,6 +329,7 @@
 - Codex Responses-Lite uses native Alpha Search, including with a configured proxy ([#7319](https://github.com/can1357/oh-my-pi/issues/7319)).
 - `find` skips a rate-limited judge until its credential can retry and uses a healthy fallback ([#14970](https://github.com/can1357/oh-my-pi/issues/14970)).
 - New Hindsight mental-model refreshes replace or retain whole pages within the injection budget; `hindsight.mentalModelMaxTokens` controls the generation budget ([#6300](https://github.com/can1357/oh-my-pi/issues/6300)).
+- User-appended instructions keep their user label even when supplied alone and respect the instruction hierarchy and approval requirements.
 
 ### Removed
 

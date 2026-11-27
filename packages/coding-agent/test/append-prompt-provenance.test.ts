@@ -34,8 +34,11 @@ describe("composeAppendPrompt", () => {
 		expect(composed.slice(-user.length)).toBe(user);
 	});
 
-	it("leaves a lone user append prompt untouched", () => {
-		expect(composeAppendPrompt([], "Reply in English.")).toBe("Reply in English.");
+	it("identifies a lone append as user instructions and preserves its text", () => {
+		const user = "Reply in English.  \n{{literal}} <user> & value\n";
+		const composed = composeAppendPrompt([], user)!;
+		expect(composed.startsWith("## User Instructions\n\n")).toBe(true);
+		expect(composed.endsWith(user)).toBe(true);
 	});
 
 	it("leaves generated blocks untouched without a user append", () => {
