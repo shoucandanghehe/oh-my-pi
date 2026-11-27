@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { type KeyEvent, UiNode } from "@oh-my-pi/pi-tui";
 import { bubbleEvent } from "@oh-my-pi/pi-tui/dispatch";
 import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
@@ -17,6 +18,8 @@ import { isSettingsInitialized, Settings } from "../../../src/config/settings";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "../../../src/modes/types";
+import { authorizeAgentDelegation, delegationContext } from "../../../src/task/model-policy";
+import type { ToolSession } from "../../../src/tools";
 import { initTheme } from "../../../src/ui/theme/service";
 import * as externalEditor from "../../../src/utils/external-editor";
 import {
@@ -27,6 +30,7 @@ import {
 } from "../../../src/utils/run-status";
 import * as titleGenerator from "../../../src/utils/title-generator";
 import { attachTerminal, createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { rejectionOf } from "../../helpers/rejection";
 
 beforeAll(() => {
 	initTheme();
@@ -95,6 +99,39 @@ function makeHarness() {
 async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 4; i++) await Promise.resolve();
 }
+
+it("pages through model-upgrade details with both decisions visible and does not persist dismissal", async () => {
+	const harness = makeHarness();
+	const ui = await harness.init();
+	const session: ToolSession = {
+		cwd: process.cwd(),
+		hasUI: true,
+		settings: Settings.isolated(),
+		sessionManager: harness.ctx.sessionManager,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		getDelegationRole: () => "default",
+		getToolContext: () => ({ ui }) as AgentToolContext,
+	};
+	const assignment = Array.from({ length: 60 }, (_, i) => `detail ${String(i).padStart(2, "0")}`).join("\n");
+	const ask = () => authorizeAgentDelegation(session, { agent: "slow", assignment });
+	const pending = rejectionOf(ask());
+	expect(harness.screen()).toContain("detail 00");
+	expect(harness.screen()).not.toContain("detail 50");
+	harness.term.press("pageDown");
+	expect(harness.screen()).not.toContain("detail 00");
+	expect(harness.screen()).toContain("Approve");
+	expect(harness.screen()).toContain("Deny");
+
+	harness.term.press("escape");
+	expect(await pending).toEqual(expect.objectContaining({ message: expect.stringContaining("dismissed") }));
+	expect(delegationContext(session).approval).toBe("ask");
+	const retry = rejectionOf(ask());
+	harness.term.press("down");
+	harness.term.press("enter");
+	expect(await retry).toEqual(expect.objectContaining({ message: expect.stringContaining("denied") }));
+	expect(delegationContext(session).approval).toBe("denied");
+});
 
 describe("ExtensionUiController form dialog", () => {
 	const html = `<form>

@@ -15,6 +15,7 @@ const DIALOGS: Record<string, true> = {
 	localAskDialog: true,
 	formDialog: true,
 	approve: true,
+	approveModelUpgrade: true,
 };
 
 type Method = (...args: unknown[]) => unknown;

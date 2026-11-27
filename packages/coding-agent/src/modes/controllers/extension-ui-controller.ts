@@ -56,6 +56,7 @@ import { formatKeyHint, formatKeyHints } from "../../ui/keys/hints";
 import { type ApprovalChoice, ApprovalDialog } from "../../ui/overlays/panels/approval-dialog";
 import { AskDialog, AskDialogModel } from "../../ui/overlays/panels/ask-dialog";
 import { HookEditor, type HookEditorHandle, HookInput } from "../../ui/overlays/panels/hook-dialogs";
+import { ModelUpgradeDialog } from "../../ui/overlays/panels/model-upgrade-dialog";
 import { HookSelector } from "../../ui/overlays/pickers/hook-selector";
 import { type OverlayHandle, type OverlayOptions, within } from "../../ui/shell";
 import { findNode } from "../../ui/styles/panels/common";
@@ -252,6 +253,7 @@ export class ExtensionUiController {
 			timeoutStartsOnPresentation: true,
 			supportsEditor: true,
 			select: (title, options, dialogOptions) => this.showCollabAwareSelector(title, options, dialogOptions),
+			approveModelUpgrade: (title, explanation, signal) => this.#showModelUpgrade(title, explanation, signal),
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialogCapabilities: Object.freeze({ allowCustomInput: true }),
@@ -577,6 +579,26 @@ export class ExtensionUiController {
 	 */
 	setHookStatus(key: string, text: string | undefined): void {
 		this.ctx.statusLine.setHookStatus(key, text);
+	}
+
+	#showModelUpgrade(title: string, explanation: string, signal: AbortSignal): Promise<string | undefined> {
+		return this.#raceCollabDialog(
+			{ kind: "select", title: `${title}\n\n${explanation}`, options: ["Approve", "Deny"] },
+			signal,
+			localSignal =>
+				this.#presentDialog({ kind: "permission", msg: title }, localSignal, settle => {
+					this.ctx.closeLinkBrowser();
+					const handle = this.ctx.showEditorAreaDialog(() =>
+						ModelUpgradeDialog({
+							title,
+							explanation,
+							rows: () => this.ctx.shell.size().rows,
+							onAnswer: settle,
+						}),
+					);
+					return () => handle.close();
+				}),
+		);
 	}
 
 	async showCollabAwareSelector(

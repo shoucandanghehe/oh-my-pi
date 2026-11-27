@@ -402,6 +402,9 @@ export interface ExtensionUIContext {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined>;
 
+	/** Presents a session-wide model upgrade request; dismissal is not a denial. */
+	approveModelUpgrade?(title: string, explanation: string, signal: AbortSignal): Promise<string | undefined>;
+
 	/** Show a confirmation dialog. */
 	confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean>;
 	/** Create a pane or multiplexer group and run an argv command when the TUI host supports it. */

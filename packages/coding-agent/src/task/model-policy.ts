@@ -166,16 +166,18 @@ async function approveUpgrade(
 			if (!(session.canPromptUser ?? session.hasUI) || !ui) {
 				throw new Error("Higher-tier delegation needs user approval; no interactive approval UI is available.");
 			}
+			const [title, ...body] = prompt
+				.render(modelApprovalTemplate, {
+					current,
+					target,
+					assignment: replaceTabs(sanitizeText(delegation.assignment)),
+				})
+				.split("\n");
+			const explanation = body.join("\n").trim();
 			const answer = await untilAborted(controller.signal, () =>
-				ui.select(
-					prompt.render(modelApprovalTemplate, {
-						current,
-						target,
-						assignment: replaceTabs(sanitizeText(delegation.assignment)),
-					}),
-					["Approve", "Deny"],
-					{ signal: controller.signal },
-				),
+				ui.approveModelUpgrade
+					? ui.approveModelUpgrade(title!, explanation, controller.signal)
+					: ui.select(`${title}\n\n${explanation}`, ["Approve", "Deny"], { signal: controller.signal }),
 			);
 			controller.signal.throwIfAborted();
 			if (answer !== "Approve" && answer !== "Deny") {
