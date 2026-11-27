@@ -54,10 +54,12 @@ function createContext(options?: { threshold?: number; choice?: string; artifact
 
 /** Install the controller's input hooks with the composer focused. */
 function wireInput(ctx: InteractiveModeContext, controller: InputController, composer: Composer): void {
+	const session = { extensionRunner: undefined, prewarmModelConnection: () => {} };
 	Object.assign(ctx, {
 		shell: { focused: () => composer.field, host: undefined },
 		keybindings: KeybindingsManager.inMemory(),
-		session: { extensionRunner: undefined, prewarmModelConnection: () => {} },
+		session,
+		viewSession: session,
 		dictationSpaceHold: () => undefined,
 		syncIdleMaintenanceView: () => {},
 		updateEditorBorderColor: () => {},
