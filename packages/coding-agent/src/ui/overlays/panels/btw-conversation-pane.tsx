@@ -11,6 +11,7 @@ import {
 	For,
 	type JSXNode,
 	type KeyEvent,
+	Show,
 	onCleanup,
 	signal,
 	type Signal,
@@ -32,7 +33,9 @@ import type { SpaceHoldHandler } from "../../../config/keybindings/space-hold";
 import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
 import { resolveMarkdownLinkHrefs } from "../../../internal-urls/hyperlink-targets";
 import { firstOfKind } from "../../../modes/controllers/selector-views";
+import { SessionStatusLine } from "../../../modes/interactive/status-line";
 import type { NativeWorkspaceSurface } from "../../../modes/native-workspace/workspace";
+import { statusLineSettings } from "../../../modes/status-line-host";
 import { materializeImageChipLinks } from "../../../modes/utils/ui-helpers";
 import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import { compactImageMarkers, formatVisionMarker } from "../../../modes/view-model/prompt/composer-attachments";
@@ -69,6 +72,7 @@ import { queuedLine } from "../../dock/queue";
 import { PaneExtensionWidgets } from "../../dock/widgets";
 import { handleTranscriptKey } from "../../keys/transcript";
 import { Overlays } from "../../shell/overlays";
+import { createStatusLine } from "../../status/status-line";
 import { UserMessage } from "../../transcript/messages/user-message";
 import { SideToolCalls } from "../../transcript/side-tool-calls";
 import {
@@ -95,12 +99,10 @@ export type BtwQueueEdit =
 	| { kind: "held"; message: CompactionQueuedMessage }
 	| { kind: "compact"; request: YieldCompaction };
 
-interface BtwPaneOptions {
+type BtwPaneOptions = {
 	readonly cwd: string;
 	readonly rows: () => number;
 	readonly columns: () => number;
-	/** Presence distinguishes a Tern workspace surface from an ANSI pane. */
-	readonly nativeSupports?: (kind: string) => boolean;
 	readonly ansiWorkspace?: AnsiWorkspace;
 	readonly writeRaw?: (data: string) => void;
 	readonly editInTerminal?: (run: () => Promise<string | null>) => Promise<string | null>;
@@ -128,7 +130,10 @@ interface BtwPaneOptions {
 	dictation?(target: Composer): SpaceHoldHandler;
 	hideThinking(): boolean;
 	proseOnlyThinking(): boolean;
-}
+} & (
+	| { readonly nativeSupports: (kind: string) => boolean }
+	| { readonly nativeSupports?: undefined; readonly mainSession: AgentSession }
+);
 
 interface SummaryApproval {
 	readonly title: string;
@@ -236,6 +241,40 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 			const size = () => ({ rows: options.rows(), columns: options.columns() });
 			const above = <PaneExtensionWidgets runner={presentation} placement="aboveEditor" size={size} />;
 			const below = <PaneExtensionWidgets runner={presentation} placement="belowEditor" size={size} />;
+			const ansiStatus = !options.nativeSupports && (
+				<Show when={() => this.#displayed()?.conversation.session ?? options.mainSession}>
+					{session => {
+						const status = new SessionStatusLine(session, { workspacePane: true });
+						onCleanup(() => status.dispose());
+						onCleanup(statusLineSettings.listen(session.settings, () => status.reloadSettings()));
+						const line = createStatusLine({
+							settings: status.settings,
+							facts: () => {
+								const displayed = this.#displayed();
+								const facts = status.facts();
+								const hooks = displayed?.conversation.extensionStatuses;
+								return {
+									...facts,
+									sessionName: displayed?.title ?? facts.sessionName,
+									hooks: hooks
+										? [...hooks].sort(([a], [b]) => a.localeCompare(b)).map(([, text]) => text)
+										: facts.hooks,
+								};
+							},
+							placement: () => ({ bar: "none", gap: false, autocomplete: this.#composer.completing() }),
+						});
+						effect(() => {
+							const composer = this.#composer;
+							const focused =
+								(options.ansiWorkspace?.active() ?? "btw") === "btw" &&
+								this.surface.focused() === composer.field;
+							composer.setStatus(line.chrome.composerStatus);
+							composer.setBorderColor(focused ? "accent" : "muted");
+						});
+						return line.panel;
+					}}
+				</Show>
+			);
 			return {
 				main: () => {
 					const approval = this.#approval();
@@ -268,7 +307,9 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						},
 				dock: () => {
 					const approval = this.#approval();
-					return approval ? this.#confirmation(approval) : [this.#chrome, above, this.#composer.node, below];
+					return approval
+						? this.#confirmation(approval)
+						: [this.#chrome, ansiStatus, above, this.#composer.node, below];
 				},
 				layer: () => this.#overlays.nodes(),
 			};
@@ -425,7 +466,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 					)
 				);
 			},
-			extras: () => this.#statusLine(true),
+			extras: () => this.#nativeExtras(),
 			usage: () => {
 				const cost = this.#facts()?.cost;
 				return cost && <text key="usage" role="omp.composer.usage" text={cost} wrap="none" />;
@@ -433,22 +474,13 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		};
 	}
 
-	#statusLine(native = false): JSXNode {
+	#nativeExtras(): JSXNode {
 		const facts = this.#facts();
 		if (!facts) return undefined;
 		return (
-			<status
-				key="btw-status"
-				role={native ? "omp.composer.extras" : "omp.btw.status"}
-				transparent={native}
-				grow={native ? 1 : undefined}
-			>
-				{!native && <seg key="model" priority={2} min={{ w: "5ch" }} spans={[{ t: facts.model, s: "accent" }]} />}
-				{!native && facts.effort && <seg key="effort" priority={1} spans={[{ t: facts.effort }]} />}
+			<status key="btw-status" role="omp.composer.extras" transparent grow={1}>
 				<seg key="read-only" spans={[{ t: "Read-only", s: "muted" }]} />
-				{!native && facts.context && <seg key="context" spans={[{ t: facts.context }]} />}
 				{facts.tokens && <seg key="tokens" spans={[{ t: facts.tokens, s: "muted" }]} />}
-				{!native && facts.cost && <seg key="cost" spans={[{ t: facts.cost, s: "muted" }]} />}
 				{facts.requests && <seg key="requests" spans={[{ t: facts.requests, s: "muted" }]} />}
 				{facts.statuses &&
 					[...facts.statuses].map(([key, status]) => (
@@ -471,7 +503,12 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		const view = createRoot<BtwDraftView>(dispose => {
 			const paste = new PanePaste();
 			const composer = new Composer({
-				placeholder: thread ? "Reply in BTW…" : "Ask a side question without interrupting Main…",
+				placeholder: options.nativeSupports
+					? thread
+						? "Reply in BTW…"
+						: "Ask a side question without interrupting Main…"
+					: "Ask a side question…",
+				hideFocusedPlaceholder: !options.nativeSupports,
 				autocomplete: this.#autocomplete,
 				deferSubmit: replay => this.#holdPaste(replay),
 			});
@@ -1041,36 +1078,27 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						))}
 					</col>
 				)}
-				{!this.options.nativeSupports && this.#statusLine()}
-				<row gap="sm" wrap>
-					<text
-						grow={1}
-						truncate="end"
-						text={() => {
-							const displayed = this.#displayed();
-							return displayed
-								? `BTW · ${this.ansiRail?.preview() ? "Preview · " : ""}${sanitizeDisplayLine(displayed.title)}`
-								: "BTW";
-						}}
-					/>
-					<PaneButton id="threads" label="Threads" />
-					<PaneButton id="new" label="New" />
-					{this.options.nativeSupports ? (
-						thread &&
-						(this.options.nativeSupports("menu") ? (
-							this.#nativeActions(thread)
-						) : (
-							<ActionButton id="more" label="···" title="Thread actions" />
-						))
-					) : (
-						<>
-							{(thread?.phase === "running" || session?.isCompacting) && <PaneButton id="stop" label="Stop" />}
-							{thread && this.options.canPromote(thread.key) && <PaneButton id="promote" label="Promote" />}
-							{thread && <PaneButton id="delete" label="Delete" />}
-						</>
-					)}
-					<PaneButton id="close" label="Close" />
-				</row>
+				{this.options.nativeSupports && (
+					<row gap="sm" wrap>
+						<text
+							grow={1}
+							truncate="end"
+							text={() => {
+								const displayed = this.#displayed();
+								return displayed ? `BTW · ${sanitizeDisplayLine(displayed.title)}` : "BTW";
+							}}
+						/>
+						<PaneButton id="threads" label="Threads" />
+						<PaneButton id="new" label="New" />
+						{thread &&
+							(this.options.nativeSupports("menu") ? (
+								this.#nativeActions(thread)
+							) : (
+								<ActionButton id="more" label="···" title="Thread actions" />
+							))}
+						<PaneButton id="close" label="Close" />
+					</row>
+				)}
 			</col>
 		);
 	};
@@ -1264,7 +1292,16 @@ function ThreadTranscript(props: {
 		return [{ thread, conversation, session }];
 	});
 	return (
-		<For each={source} fallback={<text text="Ask a side question without interrupting Main." tone="muted" />}>
+		<For
+			each={source}
+			fallback={
+				props.options.nativeSupports ? (
+					<text text="Ask a side question without interrupting Main." tone="muted" />
+				) : (
+					<text spans={[{ t: " Ask a side question without interrupting Main.", s: "dim" }]} />
+				)
+			}
+		>
 			{current => (
 				<ThreadTranscriptBody
 					source={current}
@@ -1371,7 +1408,14 @@ function ThreadTranscriptBody(props: {
 	const last = computed(() => messages().findLast(message => message.role === "assistant" || message.role === "user"));
 	return (
 		<>
-			{() => !messages().length && <text text="Ask a side question without interrupting Main." tone="muted" />}
+			{() =>
+				!messages().length &&
+				(props.options.nativeSupports ? (
+					<text text="Ask a side question without interrupting Main." tone="muted" />
+				) : (
+					<text spans={[{ t: " Start this conversation with a question.", s: "dim" }]} />
+				))
+			}
 			<For each={messages}>
 				{message => (
 					<ThreadMessage

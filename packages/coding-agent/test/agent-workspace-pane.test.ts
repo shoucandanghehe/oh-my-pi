@@ -942,12 +942,12 @@ test.each([
 				memory.feed(`\x1b[<0;${x};${y}M\x1b[<32;${toX};${toY}M\x1b[<0;${toX};${toY}m`);
 			const header = rows[0]!;
 			if (action === "resize") {
-				const sash = header.lastIndexOf("│") + 1;
+				const sash = header.lastIndexOf("┃") + 1;
 				const row = Math.floor(rows.length / 2);
 				drag(sash, row, sash - 3, row);
 			} else {
 				const source = header.indexOf("first") + 1;
-				const target = Math.floor(header.indexOf("│") / 2);
+				const target = Math.floor(header.indexOf("┃") / 2);
 				drag(source, 1, target, rows.length);
 			}
 		});

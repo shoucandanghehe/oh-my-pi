@@ -67,6 +67,10 @@
 - In the ANSI viewport, Ctrl+C copies the selection before editing the draft, soft wraps copy as plain text, and multi-click and edge drag selections work across the transcript and fixed controls.
 - File and image links from OMP running in WSL open in Windows Tern.
 
+### Changed
+
+- Fullscreen terminal workspaces draw split dividers with heavy, accent-colored lines.
+
 ## [19.2.1] - 2026-11-25
 
 ### Breaking Changes

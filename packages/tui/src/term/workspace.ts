@@ -576,7 +576,7 @@ export class TerminalWorkspace implements AnsiWorkspace {
 			restore?.();
 		}
 		for (const { rect, split: sash } of sashes) {
-			const line = theme.fg("border", sash.axis === "x" ? "│" : "─".repeat(rect.width));
+			const line = theme.fg("borderAccent", sash.axis === "x" ? "┃" : "━".repeat(rect.width));
 			fragments.push({ rect, rows: Array.from({ length: rect.height }, () => line) });
 		}
 		const rows = Array.from({ length: this.#size().height }, () => "");

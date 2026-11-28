@@ -754,15 +754,16 @@ it("composes a recursive workspace, scopes scrolling and attachments, and closes
 			});
 			expect(workspace.active()).toBe("b");
 			expect(sizes).toEqual({ b: 4, c: 4 });
-			expect(screen()[0]).toMatch(/○ Main\s+│● Agent B/);
-			expect(screen()[1]).toMatch(/^main3\s+[│┃]│b9/);
+			expect(screen()[0]).toMatch(/○ Main\s+┃● Agent B/);
+			expect(screen()[1]).toMatch(/^main3\s+[│┃]┃b9/);
 			expect(screen()[4]).toContain("b dock");
+			expect(screen()[5]).toMatch(/┃━+$/);
 			expect(screen()[6]).toContain("Agent C");
 			expect(screen()[10]).toContain("c dock");
 			expect(term.cursor.y).toBe(4);
 			await afterFrame(host, () => memory.feed("\x1b[<64;43;8M")); // Wheel in C, while B is active.
-			expect(screen()[7]).toMatch(/│c6\s+[│┃]$/u);
-			expect(screen()[1]).toMatch(/│b9\s+[│┃]$/u);
+			expect(screen()[7]).toMatch(/┃c6\s+[│┃]$/u);
+			expect(screen()[1]).toMatch(/┃b9\s+[│┃]$/u);
 			expect(workspace.active()).toBe("b");
 			memory.feed("qX\x1b[200~pasted\x1b[201~");
 			expect(edits).toEqual(["b:intercept", "b"]);
@@ -820,9 +821,9 @@ it("clamps sash drags and parks panes through a too-small resize without losing 
 					),
 				).toBe(true);
 			});
-			expect(screen()[0]!.indexOf("│")).toBe(42);
+			expect(screen()[0]!.indexOf("┃")).toBe(42);
 			await afterFrame(host, () => memory.feed("\x1b[<0;43;2M\x1b[<32;76;2M\x1b[<0;76;2m"));
-			expect(screen()[0]!.indexOf("│")).toBe(54); // Leave the right pane's 22-column minimum.
+			expect(screen()[0]!.indexOf("┃")).toBe(54); // Leave the right pane's 22-column minimum.
 			await afterFrame(host, () => {
 				term.resize(24, 8);
 				memory.resize(24, 8);
@@ -846,7 +847,7 @@ it("clamps sash drags and parks panes through a too-small resize without losing 
 			});
 			expect(workspace.active()).toBe("main");
 			expect(measure?.()).toBe(10);
-			expect(screen()[0]!.indexOf("│")).toBe(54);
+			expect(screen()[0]!.indexOf("┃")).toBe(54);
 			expect(screen()[1]).toContain("side body");
 		},
 		{ columns: 77, rows: 11, ansiWorkspaceMainMinimum: { minWidth: 42 } },
@@ -878,26 +879,27 @@ it("previews and redocks a dragged pane without remounting it", async () => {
 					),
 				).toBe(true);
 			});
-			expect(screen()[0]).toMatch(/○ Main\s+│● Side running/);
+			expect(screen()[0]).toMatch(/○ Main\s+┃● Side running/);
 			expect(memory.output.join("")).toContain(theme.style("accent strong", "● Side"));
+			expect(memory.output.join("")).toContain(`${theme.fgSgr("borderAccent")}┃`);
 			await afterFrame(host, () => status.set("idle"));
 			expect(screen()[0]).toContain("● Side idle");
-			expect(screen()[1]).toMatch(/^main body\s+│side before$/);
+			expect(screen()[1]).toMatch(/^main body\s+┃side before$/);
 			const written = memory.output.length;
 			await afterFrame(host, () => memory.feed("\x1b[<0;41;1M\x1b[<32;2;5M"));
-			expect(screen()[0]).toMatch(/^┏━+┓ +│● Side/);
-			expect(screen()[1]).toMatch(/^┃side before +┃ +│side before$/);
+			expect(screen()[0]).toMatch(/^┏━+┓ +┃● Side/);
+			expect(screen()[1]).toMatch(/^┃side before +┃ +┃side before$/);
 			const preview = memory.output.slice(written).join("");
 			expect(preview).toContain(`${theme.fgSgr("accent")}┏`);
 			expect(preview).toContain(`${theme.fgSgr("muted")}side before`);
 			await afterFrame(host, () => body.set("side after"));
-			expect(screen()[1]).toMatch(/^┃side before +┃ +│side after$/);
+			expect(screen()[1]).toMatch(/^┃side before +┃ +┃side after$/);
 			await afterFrame(host, () => memory.feed("\x1b[27u"));
-			expect(screen()[1]).toMatch(/^main body\s+│side after$/);
+			expect(screen()[1]).toMatch(/^main body\s+┃side after$/);
 			await afterFrame(host, () => memory.feed("\x1b[<0;41;1M\x1b[<32;2;5M"));
 			await afterFrame(host, () => memory.feed("\x1b[<0;2;5m"));
-			expect(screen()[0]).toMatch(/^● Side.*│○ Main$/);
-			expect(screen()[1]).toMatch(/^side after\s+│main body$/);
+			expect(screen()[0]).toMatch(/^● Side.*┃○ Main$/);
+			expect(screen()[1]).toMatch(/^side after\s+┃main body$/);
 			expect(workspace.active()).toBe("side");
 			expect(released).toBe(0);
 		},
@@ -997,10 +999,10 @@ it("keeps search and a captured transcript selection inside their own panes", as
 			const ws = host.ansiWorkspace!;
 			await afterFrame(host, () => expect(ws.open("side", () => ({ surface: side }))).toBe(true));
 			const before = screen();
-			const offset = before[0]!.indexOf("│") + 1;
+			const offset = before[0]!.indexOf("┃") + 1;
 			await afterFrame(host, () => expect(host.openSearch()).toBe(true));
 			await afterFrame(host, () => memory.feed("find-target"));
-			expect(screen().at(-1)).toMatch(/^Main draft.*│Find: find-target.*1\/1/);
+			expect(screen().at(-1)).toMatch(/^Main draft.*┃Find: find-target.*1\/1/);
 			expect(screen()[1]!.slice(offset)).toContain("find-target");
 			expect(screen()[2]!.slice(0, offset)).toContain("main-only");
 			await afterFrame(host, () => memory.feed("\x1b[27u"));

@@ -26,7 +26,7 @@ import { Shell, type TranscriptBlock } from "@oh-my-pi/pi-coding-agent/ui/shell/
 import { jsx, type UiNode } from "@oh-my-pi/pi-tui";
 import { bubbleEvent, keypathOf, pathTo } from "@oh-my-pi/pi-tui/dispatch";
 import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
-import type { TspMenuProps } from "@oh-my-pi/pi-wire";
+import type { TspMenuProps, TspSegProps } from "@oh-my-pi/pi-wire";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 import {
@@ -40,6 +40,7 @@ import {
 	setNative,
 } from "../../helpers/btw-ui";
 import { keyEvent } from "../../helpers/input-harness";
+import { createModeTerminal } from "../../helpers/mode-terminal";
 import { nativeShell } from "../../helpers/native-shell";
 
 const usage: Usage = {
@@ -1379,6 +1380,68 @@ describe("BtwController inject", () => {
 	});
 });
 
+it("draws the ANSI BTW composer and rail at 200 columns", async () => {
+	using temp = TempDir.createSync("@pi-btw-chrome-");
+	const cwd = temp.path();
+	const auth = createInMemoryAuthStorage();
+	const registry = new ModelRegistry(auth, path.join(cwd, "models.yml"));
+	auth.keys.setRuntime("anthropic", "test-key");
+	const settings = Settings.isolated({ "compaction.enabled": false });
+	const sessionManager = SessionManager.inMemory(cwd);
+	sessionManager.appendMessage({ role: "user", content: "Main anchor", timestamp: 1 });
+	const main = new AgentSession({
+		agent: new Agent({ initialState: { model: registry.find("anthropic", "claude-sonnet-4-5")! } }),
+		sessionManager,
+		settings,
+		modelRegistry: registry,
+	});
+	const term = createModeTerminal({ columns: 200, rows: 45 });
+	term.frame.screen.set("fullscreen");
+	await term.start();
+	const shell = term.frame.shell;
+	const workspace = shell.host!.ansiWorkspace!;
+	let mounted: NativeWorkspaceSurface | undefined;
+	const controller = new BtwController(
+		{ ...makeCtx(main), shell, sessionManager },
+		{
+			async open(create) {
+				return workspace.open("btw", (close, rows, columns) => (mounted = create(close, rows, columns)), {
+					label: "BTW",
+					target: "main",
+				});
+			},
+			close() {
+				workspace.close("btw");
+			},
+		},
+	);
+	try {
+		expect(await controller.start("")).toBe(true);
+		await term.waitFor(rows => rows.some(row => row.includes("Ask a side question without interrupting Main.")));
+		mounted!.surface.focused()!.handlers.onSend?.("/new", { type: "send", key: "", text: "/new" });
+		await term.waitFor(rows => rows[1]?.includes("Start this conversation with a question.") === true, 2000);
+		const collapsed = term.screen().map(row => row.slice(100));
+		expect(collapsed[0]).toMatch(/^┃● BTW · 1 thread · BTW · focused/);
+		expect(collapsed.at(-2)).toMatch(/^┃│╭.*Sonnet 4\.5.*◀ BTW .*╮$/);
+		expect(collapsed.at(-1)).not.toContain("Ask a side question…");
+		expect(collapsed.join("\n")).not.toMatch(/Threads New|Read-only/);
+		term.press("alt+t");
+		await term.waitFor(
+			rows => rows[1]?.slice(100).startsWith("┃ ▸ ○ BTW                │ Start this conversation") === true,
+			2000,
+		);
+		expect(term.screen().at(-1)?.slice(100)).toMatch(/^┃ \[ \+ New BTW \]\s+│╰/);
+		expect(workspace.focus("main")).toBe(true);
+		await term.waitFor(rows => rows.at(-1)?.slice(100).includes("Ask a side question…") === true, 2000);
+	} finally {
+		await controller.dispose();
+		await shell.stop();
+		await main.dispose();
+		term.dispose();
+		auth.close();
+	}
+});
+
 it("opens a durable BTW pane, continues a quick answer once, and restores each draft without routing to Main", async () => {
 	using temp = TempDir.createSync("@pi-btw-workspace-");
 	const cwd = temp.path();
@@ -1508,15 +1571,20 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		[...(mounted?.surface.main() ?? []), ...(mounted?.surface.dock() ?? []), ...(mounted?.surface.layer() ?? [])]
 			.map(node => nodeText(node))
 			.join("\n");
+	const header = () =>
+		mounted
+			?.titleDetail?.(true, 120)
+			.map(part => part.t)
+			.join("") ?? "";
 	const drawn = async (text: string, expectSettled = false): Promise<void> => {
 		const deadline = performance.now() + 1500;
 		while (performance.now() < deadline) {
-			const view = draw();
-			if (view.includes(text) && (!expectSettled || !view.includes("Stop"))) break;
+			if ((draw().includes(text) || header().includes(text)) && (!expectSettled || !header().includes("streaming")))
+				break;
 			await yieldToIo();
 		}
-		if (expectSettled) expect(draw()).not.toContain("Stop");
-		expect(draw()).toContain(text);
+		if (expectSettled) expect(header()).not.toContain("streaming");
+		expect(`${header()}\n${draw()}`).toContain(text);
 	};
 	let controller = new BtwController(ctx, adapter);
 	try {
@@ -1551,7 +1619,7 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(handoff).toHaveBeenCalledWith(expect.stringContaining("quick question"), { deliverAs: "followUp" });
 
 		send("wait before yielding");
-		await drawn("Stop");
+		await drawn("streaming");
 		send("->\n1. keep this\n2. edit this");
 		await drawn("After yield · edit this");
 		expect(press("shift+up")).toBe(true);
@@ -1575,7 +1643,9 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(draw()).toContain("First topic extension status");
 		sideRunner.getUIContext().setWidget("fixture", ["First topic extension widget"], { placement: "belowEditor" });
 		expect(draw()).toContain("First topic extension widget");
-		expect(draw()).toContain("high");
+		await yieldToIo();
+		const model = dockNode(node => node.props().role === "omp.status.model");
+		expect((model?.props() as TspSegProps | undefined)?.spans).toContainEqual({ t: "high", s: "thinkingHigh" });
 		expect(draw()).not.toContain("reply for held after compact");
 		const newer = "unsent while compacting";
 		mounted?.surface.focused()?.handlers.onEdit?.({
@@ -1624,13 +1694,13 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 		expect(handoff).toHaveBeenCalledTimes(1);
 
 		send("wait before interruption");
-		await drawn("Stop");
+		await drawn("streaming");
 		for (const command of ["/stop", "/retry"]) {
 			const invalid = `${command} unexpected`;
 			send(invalid);
 			expect(showError).toHaveBeenLastCalledWith(expect.stringContaining(`Usage: ${command}`));
 			expect(nodeText(mounted!.surface.focused()!)).toContain(invalid);
-			expect(draw()).toContain("Stop");
+			expect(header()).toContain("streaming");
 		}
 		showError.mockClear();
 		mounted?.surface.focused()?.handlers.onEdit?.({
@@ -1722,26 +1792,30 @@ it("opens a durable BTW pane, continues a quick answer once, and restores each d
 			expect(layout().inset).toBe(1);
 			point("move", 1, 4);
 			expect(draw()).toContain("reply for second question");
-			expect(draw()).toContain("Preview · second question");
+			expect(header()).toContain("second question · preview");
+			expect(layout().inset).toBe(1);
+			const peek = nodeText(rail.node, layout().width).split("\n");
+			expect(peek[1]).toBe("│ › ○ second ques…│");
+			expect(peek[11]).toMatch(/^▶\s+│$/);
 			expect(draw()).toContain(draft);
 			rail.leave();
 			vi.advanceTimersByTime(175);
 			expect(draw()).toContain("reply for quick question");
-			expect(draw()).not.toContain("Preview · second question");
+			expect(header()).not.toContain("preview");
 			const closing = layout().width;
 			expect(closing).toBeGreaterThan(1);
 			// A click can pin the rail while it is sliding away without jumping to either endpoint.
 			point("press", 11, 0, "left");
-			expect(layout()).toEqual({ width: closing, inset: 1 });
+			expect(layout()).toEqual({ width: closing - 1, inset: 1 }); // The peek-only divider disappears.
 			vi.advanceTimersByTime(120);
 			expect(layout().inset).toBe(layout().width);
 			point("press", 1, 4, "left");
-			expect(draw()).toContain("BTW · second question");
+			expect(header()).toContain("second question · focused");
 			expect(draw()).not.toContain(draft);
 			expect(layout().inset).toBeGreaterThan(1);
 			point("press", 0, 4, "left");
 			expect(draw()).toContain(draft);
-			expect(press("escape")).toBe(true);
+			point("press", 11, layout().width - 1, "left");
 			vi.advanceTimersByTime(120);
 			expect(layout()).toEqual({ width: 1, inset: 1 });
 		} finally {

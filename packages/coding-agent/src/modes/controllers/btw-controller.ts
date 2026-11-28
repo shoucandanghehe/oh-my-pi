@@ -996,7 +996,7 @@ export class BtwController {
 					cwd: workspace.owner.sessionManager.getCwd(),
 					rows,
 					columns,
-					nativeSupports,
+					...(nativeSupports ? { nativeSupports } : { mainSession: workspace.owner }),
 					ansiWorkspace: nativeSupports ? undefined : this.ctx.shell?.host?.ansiWorkspace,
 					writeRaw,
 					editInTerminal: nativeSupports ? undefined : this.workspace?.editInTerminal,

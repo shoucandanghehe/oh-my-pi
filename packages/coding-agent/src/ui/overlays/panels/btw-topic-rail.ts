@@ -1,7 +1,7 @@
 import { type AnsiWorkspaceRail, signal, UiNode } from "@oh-my-pi/pi-tui";
 import type { MouseEvent } from "@oh-my-pi/pi-tui/driver/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
-import { padTo } from "@oh-my-pi/pi-tui/text/width";
+import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
 import type { BtwThread } from "../../../session/btw-manager";
 
@@ -23,6 +23,7 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 	readonly preview = signal<string | undefined>(undefined);
 	readonly #pinned = signal(false);
 	readonly #fraction = signal(0);
+	readonly #peekOverlay = signal(false);
 	readonly #offset = signal(0);
 	readonly #newHovered = signal(false);
 	#disposed = false;
@@ -35,12 +36,16 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 
 	layout(columns: number): { width: number; inset: number } {
 		if (columns < 2 || this.options.blocked()) return { width: 0, inset: 0 };
-		const expanded = Math.min(Math.max(1, columns - 12), Math.max(14, Math.min(24, Math.floor(columns * 0.3))));
+		const expanded = Math.min(
+			columns - 2,
+			Math.max(6, columns - 12),
+			Math.max(14, Math.min(24, Math.floor(columns * 0.3))),
+		);
 		const fraction = this.#fraction();
-		const width = 1 + Math.round((expanded - 1) * fraction);
-		// Opening a peek leaves the selected transcript in place. Once another topic is previewed,
-		// its transcript and the existing draft need room beside the rail to stay readable.
-		return { width, inset: (this.#pinned() && fraction === 1) || this.preview() !== undefined ? width : 1 };
+		const rail = Math.round(expanded * fraction);
+		const width = rail + 1 + (rail > 0 && this.#peekOverlay() ? 1 : 0);
+		// A peek or slide overlays the transcript. Only a fully pinned rail reserves its width.
+		return { width, inset: this.#pinned() && fraction === 1 ? width : 1 };
 	}
 
 	pointer(mouse: MouseEvent, width: number): boolean {
@@ -48,6 +53,9 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 		const { action, button, col, row } = mouse;
 		const rows = this.options.rows();
 		const handleDistance = Math.abs(row - this.#handleRow());
+		const peek = width > 1 && this.#peekOverlay.peek();
+		const handle = peek ? 0 : width - 1;
+		const inTopics = peek ? col > 0 && col < width - 1 : col < handle;
 		if (action === "move") {
 			if (!this.#pinned.peek() && this.options.threads().length && handleDistance <= 2 && col < 3) {
 				this.#peek();
@@ -55,9 +63,11 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 			if (col < width) {
 				clearTimeout(this.#leave);
 				this.#leave = undefined;
-				if (col > 0 && !this.#pinned.peek()) this.#peek();
-				this.#newHovered.set(col > 0 && row === rows - 1);
-				this.preview.set(col > 0 && row < rows - 1 ? this.options.threads()[this.#offset() + row]?.key : undefined);
+				if (inTopics && peek) this.#peek();
+				this.#newHovered.set(inTopics && row === rows - 1);
+				this.preview.set(
+					inTopics && row < rows - 1 ? this.options.threads()[this.#offset() + row]?.key : undefined,
+				);
 				return true;
 			}
 			if (this.#peeking && col <= width + 2) {
@@ -67,7 +77,7 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 			}
 			this.leave();
 		}
-		if (action === "press" && button === "left" && col === 0 && handleDistance <= 1) {
+		if (action === "press" && button === "left" && col === handle && handleDistance <= 1) {
 			this.toggle();
 			return true;
 		}
@@ -75,10 +85,11 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 			if (action === "press" && this.#peeking) this.dismiss();
 			return false;
 		}
-		if (width > 1 && action === "press" && (button === "wheel-up" || button === "wheel-down")) {
+		if (!inTopics) return true;
+		if (action === "press" && (button === "wheel-up" || button === "wheel-down")) {
 			this.#setOffset(this.#offset() + (button === "wheel-up" ? -1 : 1));
 			this.preview.set(row < rows - 1 ? this.options.threads()[this.#offset() + row]?.key : undefined);
-		} else if (action === "press" && button === "left" && col > 0) {
+		} else if (action === "press" && button === "left") {
 			this.preview.set(undefined);
 			if (row === rows - 1) this.options.newThread();
 			else {
@@ -97,6 +108,7 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 	toggle(): void {
 		const pinned = !this.#pinned.peek();
 		this.#pinned.set(pinned);
+		this.#peekOverlay.set(false);
 		this.clearHover();
 		if (pinned) this.#animate(1);
 	}
@@ -145,6 +157,7 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 	#peek(): void {
 		if (this.#peeking) return;
 		this.#peeking = true;
+		this.#peekOverlay.set(true);
 		this.#animate(1);
 	}
 
@@ -167,14 +180,18 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 		const threads = this.options.threads();
 		const selected = this.options.selected();
 		const pinned = this.#pinned();
+		const peek = width > 1 && this.#peekOverlay();
+		const railWidth = width - (peek ? 2 : 1);
+		const divider = theme.fg("dim", "│");
 		return Array.from({ length: rows }, (_, row) => {
-			const guide = row === handle ? theme.fg("accent", pinned ? "◀" : "▶") : theme.fg("dim", "│");
-			if (width === 1) return guide;
+			const guide = row === handle ? theme.fg("accent", pinned ? "◀" : "▶") : divider;
+			if (railWidth <= 0) return guide;
 			const topic = threads[this.#offset() + row];
-			let line = "";
-			if (row === rows - 1) {
-				line = padTo(theme.fg("accent", " + New BTW"), width - 1);
-				if (this.#newHovered()) line = theme.bg("selectedBg", line);
+			let line = " ".repeat(railWidth);
+			if (row === rows - 1 && rows > 1) {
+				const label = theme.style("strong", theme.fg("accent", "[ + New BTW ]"));
+				const button = this.#newHovered() ? theme.bg("selectedBg", ` ${label} `) : label;
+				line = truncate(` ${button}`, railWidth, "…", true);
 			} else if (topic) {
 				const active = topic.key === selected;
 				const preview = topic.key === this.preview();
@@ -186,13 +203,19 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 						: topic.unread
 							? "accent"
 							: "muted";
-				const title = sanitizeDisplayLine(topic.title);
-				const suffix = topic.unread ? ` · ${topic.unread}` : topic.draft ? " · draft" : "";
-				line = padTo(`${active ? "▸" : preview ? "›" : " "}${theme.fg(tone, glyph)} ${title}${suffix}`, width - 1);
+				const suffix = topic.unread ? ` ${topic.unread}` : topic.draft ? " d" : "";
+				const marker = active ? "▸" : preview ? "›" : " ";
+				const title = truncate(sanitizeDisplayLine(topic.title), Math.max(1, railWidth - 5 - suffix.length));
+				line = truncate(
+					` ${marker} ${theme.fg(tone, glyph)} ${title}${theme.fg("dim", suffix)}`,
+					railWidth,
+					"…",
+					true,
+				);
 				if (active) line = theme.style("strong", line);
 				if (preview) line = theme.bg("selectedBg", line);
 			}
-			return `${guide}${line}`;
+			return peek ? `${guide}${line}${divider}` : `${line}${guide}`;
 		});
 	}
 }
