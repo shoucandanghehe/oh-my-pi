@@ -57,7 +57,7 @@ export class BtwTopicRail implements AnsiWorkspaceRail {
 		const handle = peek ? 0 : width - 1;
 		const inTopics = peek ? col > 0 && col < width - 1 : col < handle;
 		if (action === "move") {
-			if (!this.#pinned.peek() && this.options.threads().length && handleDistance <= 2 && col < 3) {
+			if (!this.#pinned.peek() && handleDistance <= 2 && col < 3) {
 				this.#peek();
 			}
 			if (col < width) {
