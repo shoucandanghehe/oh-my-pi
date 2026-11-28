@@ -164,7 +164,8 @@ export class NativeWorkspace {
 			}
 			entry.mount = mount;
 			const renderer = createRoot(dispose => {
-				const surfaces = new NativeSurfaces({ ...mount, title });
+				// Each pane shows a session: Tern styles it as it styles Main's (`omp.session`).
+				const surfaces = new NativeSurfaces({ ...mount, title, role: "omp.session" });
 				entry.stopRenderer = () => {
 					try {
 						surfaces.stop(false);

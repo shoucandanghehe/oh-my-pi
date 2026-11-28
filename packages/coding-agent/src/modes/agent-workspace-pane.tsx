@@ -1,6 +1,15 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import { type AnsiWorkspace, createSurface, effect, type KeyEvent, onCleanup, Show, untrack } from "@oh-my-pi/pi-tui";
+import {
+	type AnsiWorkspace,
+	createSurface,
+	effect,
+	type JSXNode,
+	type KeyEvent,
+	onCleanup,
+	signal,
+	untrack,
+} from "@oh-my-pi/pi-tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { CombinedAutocompleteProvider } from "../autocomplete/autocomplete";
 import { getKeybindings } from "../config/keybindings/keybindings";
@@ -31,13 +40,12 @@ import { PaneExtensionWidgets, useExtensionPresentation } from "../ui/dock/widge
 import { handleTranscriptKey } from "../ui/keys/transcript";
 import { AgentTranscriptViewerModel } from "../ui/overlays/panels/agent-transcript-viewer-model";
 import {
-	AgentWorkspaceStatus,
+	AgentWorkspaceNotice,
 	AgentWorkspaceTranscript,
 	STATUS_TONE,
 } from "../ui/overlays/panels/agent-transcript-viewer";
 import { TreeSelector } from "../ui/overlays/pickers/tree-selector";
 import { Overlays } from "../ui/shell/overlays";
-import { StatusLine } from "../ui/status/status-line";
 import { isUserPrompt, syntheticReplayId } from "../ui/transcript/messages/user-message";
 import {
 	copyToClipboard,
@@ -52,8 +60,16 @@ import { ensureSupportedImageInput } from "../utils/image-input";
 import { tagImageAttachmentSource } from "../utils/image-source";
 import { agentTranscriptSource } from "./agent-hub-runtime";
 import { firstOfKind } from "./controllers/selector-views";
+import { bindComposerStatus } from "./interactive/frame";
 import { SessionStatusLine } from "./interactive/status-line";
-import { cfgAutocompleteMaxVisible, cfgTuiVimMode, cfgTuiVimStartMode, cfgTuiVimYankToClipboard } from "./settings";
+import {
+	cfgAutocompleteMaxVisible,
+	cfgComposerShape,
+	cfgComposerTokenRate,
+	cfgTuiVimMode,
+	cfgTuiVimStartMode,
+	cfgTuiVimYankToClipboard,
+} from "./settings";
 import { statusLineSettings } from "./status-line-host";
 import type { NativeWorkspaceSurface } from "./native-workspace/workspace";
 import type { AgentHubRemote } from "./view-model/overlays/agent-hub";
@@ -786,15 +802,19 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			deferSubmit: replay => pasteBarrier.hold(replay),
 		});
 		composer.setNativePlaceholder(`Message ${agentId}`);
-		if (!options.nativeSupports && !remote) {
-			composer.setStatus(({ theme }) =>
-				model.live()
-					? undefined
-					: { content: theme.fg("muted", MISSING_SESSION_STATUS), width: visibleWidth(MISSING_SESSION_STATUS) },
-			);
-		}
 		composer.onSubmit = text => submit(text, submitMode);
 		composer.addKeyHandler(onKey);
+		// Stop replaces Send while the agent runs, as on Main's composer; it interrupts as Esc does.
+		composer.addActionHandler(act => {
+			if (act !== "interrupt") return false;
+			void stop(local ? current() : undefined).catch(error => notice(String(error)));
+			return true;
+		});
+		effect(() => {
+			model.rev();
+			const running = local && model.ref()?.status === "running";
+			untrack(() => composer.setState(running ? { running } : {}));
+		});
 		composer.addPasteHandler(({ text }) => {
 			if (!text) return pasteNative();
 			return pastePaths(text, capturePasteTarget());
@@ -824,6 +844,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		effect(() => {
 			const settings = model.settings() ?? options.settings;
 			untrack(() => {
+				composer.setShape(cfgComposerShape.get(settings));
 				composer.setVimStartMode(cfgTuiVimStartMode.get(settings));
 				composer.setVim(cfgTuiVimMode.get(settings));
 				composer.setAutocompleteMaxVisible(cfgAutocompleteMaxVisible.get(settings));
@@ -852,6 +873,46 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 		});
 		const presentationSource = () => model.live()?.presentation;
 		const presentation = useExtensionPresentation(presentationSource);
+		// The agent's status line, drawn in its composer by the code that draws Main's.
+		const statusPanel = signal<JSXNode>(undefined);
+		effect(() => {
+			const session = model.live();
+			untrack(() => {
+				if (!session) {
+					if (!options.nativeSupports && !remote)
+						composer.setStatus(({ theme }) => ({
+							content: theme.fg("muted", MISSING_SESSION_STATUS),
+							width: visibleWidth(MISSING_SESSION_STATUS),
+						}));
+					return;
+				}
+				const status = new SessionStatusLine(session, { workspacePane: true });
+				onCleanup(statusLineSettings.listen(session.settings, () => status.reloadSettings()));
+				const line = bindComposerStatus(
+					composer,
+					{
+						settings: status.settings,
+						facts: () => ({
+							...status.facts(),
+							hooks: [...presentation().statuses].sort(([a], [b]) => a.localeCompare(b)).map(([, text]) => text),
+						}),
+					},
+					{
+						shape: () => cfgComposerShape.get(model.settings() ?? options.settings),
+						clickable: false,
+						rate: () =>
+							cfgComposerTokenRate.get(model.settings() ?? options.settings) ? status.composerRate() : undefined,
+					},
+				);
+				statusPanel.set(line.panel);
+				onCleanup(() => {
+					statusPanel.set(undefined);
+					composer.setStatus(undefined);
+					composer.setSlots({});
+					status.dispose();
+				});
+			});
+		});
 		const size = () => ({ rows: rows(), columns: options.columns() });
 		return {
 			main: (
@@ -863,7 +924,7 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 			dock: (
 				<>
 					<QueuedMessages model={queueModel} />
-					<AgentWorkspaceStatus model={model} />
+					<AgentWorkspaceNotice model={model} />
 					<PaneExtensionWidgets runner={presentationSource} placement="aboveEditor" size={size} />
 					{() =>
 						!model.live() &&
@@ -871,27 +932,9 @@ export function mountAgentWorkspacePane(options: AgentPaneOptions): AgentWorkspa
 						!remote && <text key="missing-session" text={MISSING_SESSION_STATUS} tone="muted" />
 					}
 					{sendable && composer.node}
+					{/* As under Main's composer: Tern draws the status in its composer, a plain terminal adds the bar. */}
+					{() => (options.nativeSupports && sendable ? undefined : statusPanel())}
 					<PaneExtensionWidgets runner={presentationSource} placement="belowEditor" size={size} />
-					<Show when={model.live}>
-						{session => {
-							const status = new SessionStatusLine(session, { workspacePane: true });
-							status.setSession(session, agentId);
-							onCleanup(() => status.dispose());
-							onCleanup(statusLineSettings.listen(session.settings, () => status.reloadSettings()));
-							return (
-								<StatusLine
-									settings={status.settings}
-									facts={() => ({
-										...status.facts(),
-										hooks: [...presentation().statuses]
-											.sort(([a], [b]) => a.localeCompare(b))
-											.map(([, text]) => text),
-									})}
-									placement={() => ({ bar: "full", gap: false, autocomplete: composer.completing() })}
-								/>
-							);
-						}}
-					</Show>
 				</>
 			),
 			layer: () => overlays.nodes(),

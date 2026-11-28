@@ -170,31 +170,11 @@ export function AgentWorkspaceTranscript(props: { readonly model: AgentTranscrip
 	);
 }
 
-export function AgentWorkspaceStatus(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
+/** A standalone agent pane's send or load failure, above its composer. */
+export function AgentWorkspaceNotice(props: { readonly model: AgentTranscriptViewerModel }): JSXNode {
 	const { model } = props;
 	return (
 		<>
-			<row
-				key="agent"
-				gap="sm"
-				align="center"
-				onAction={act => {
-					if (act === "close") model.deps.onClose();
-				}}
-			>
-				<text text={model.deps.agentId} tone="accent" grow={1} truncate="end" />
-				{() => {
-					model.rev();
-					const status = model.ref()?.status;
-					return (
-						<>
-							{!model.live() && model.model && <text text={model.model} tone="muted" truncate="end" />}
-							{status && <badge text={status} tone={STATUS_TONE[status]} />}
-						</>
-					);
-				}}
-				<EscCloseButton />
-			</row>
 			{() => {
 				model.rev();
 				const notice = model.shownNotice();

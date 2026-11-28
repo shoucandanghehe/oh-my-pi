@@ -251,123 +251,15 @@ export class AppFrame {
 			this.composer.setSlots({});
 			return;
 		}
-		const placement = computed(() => shapePlacement(composerShape(this.#shape()), this.composer.completing()));
-		const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement });
-		this.composer.setStatus(line.chrome.composerStatus);
+		const line = bindComposerStatus(this.composer, statusLine, {
+			shape: this.#shape,
+			clickable: live !== null,
+			...(live?.rate ? { rate: live.rate } : {}),
+			annotate: () => this.shell.native() && this.shell.host?.feature("annotate") === true,
+			dictation: { state: this.dictation, level: this.dictationLevel },
+		});
 		this.#statusPreview = line.preview;
 		this.#statusPanel.set(line.panel);
-		const click = (action: ComposerBarAction) => (live ? { click: action } : undefined);
-		const facts = composerFacts({ settings: statusLine.settings, facts: statusLine.facts, click });
-		this.composer.setSlots({
-			context: facts.context,
-			chips: (
-				<ComposerChips
-					composer={this.composer}
-					annotate={() => this.shell.native() && this.shell.host?.feature("annotate") === true}
-				/>
-			),
-			// The model chip. With `statusLine.compactThinkingLevel` the effort ring stands in for its icon
-			// (it keeps its own tooltip and click); otherwise the level gets a chip of its own.
-			model: (
-				<row
-					key="model"
-					role="omp.composer.model"
-					align="center"
-					gap="xs"
-					tone={facts.modelTone}
-					title={live ? () => keyedTitle("Switch model", "app.model.selectTemporary") : undefined}
-					actions={click("status.model")}
-				>
-					{() => {
-						const level = facts.effort();
-						return level !== undefined && statusLine.settings().compactThinkingLevel ? (
-							<effort
-								key="effort"
-								level={level}
-								role="omp.composer.model.effort"
-								title={keyedTitle(`Thinking effort: ${level}`, "app.thinking.cycle")}
-								actions={click("thinking.cycle")}
-							/>
-						) : (
-							<icon key="icon" name="model" />
-						);
-					}}
-					<text key="name" spans={facts.model} wrap="none" />
-					{live && <icon key="chev" name="chev" />}
-				</row>
-			),
-			effort: () => {
-				const level = facts.effort();
-				if (level === undefined || statusLine.settings().compactThinkingLevel) return undefined;
-				return (
-					<row
-						key="effort"
-						role="omp.composer.effort"
-						align="center"
-						gap="xs"
-						title={keyedTitle("Thinking effort", "app.thinking.cycle")}
-						actions={click("thinking.cycle")}
-					>
-						<effort key="glyph" level={level} />
-						<text key="level" text={level} wrap="none" />
-					</row>
-				);
-			},
-			rate: () => {
-				const value = live?.rate?.();
-				return value === undefined ? undefined : (
-					<rate key="rate" role="omp.composer.rate" value={value} unit="tok/s" title="Generation rate" />
-				);
-			},
-			extras: facts.extras,
-			usage: facts.usage,
-			dictation: () => {
-				const state = this.dictation();
-				if (state === undefined) return undefined;
-				const busy = state === "starting" || state === "transcribing";
-				return (
-					<row
-						key="dictation"
-						role="omp.composer.dictation"
-						align="center"
-						gap="xs"
-						tone={state === "recording" ? "error" : busy ? "pending" : undefined}
-						title={DICTATION_TITLES[state]}
-						// A start stays cancellable: the model can take a while to load on first use.
-						actions={state === "transcribing" ? undefined : click("dictation.toggle")}
-					>
-						{busy ? (
-							<spinner
-								key="pending"
-								style="orbit"
-								label={state === "starting" ? "Starting…" : "Transcribing…"}
-							/>
-						) : (
-							[
-								<icon key="icon" name={state === "recording" ? "stop" : "mic"} />,
-								state === "recording" &&
-									(nativeRendering() ? (
-										// Natively the voice as a wave and the time recorded say "recording".
-										[
-											<meter
-												key="wave"
-												role="omp.composer.dictation.wave"
-												value={() => this.dictationLevel()}
-												style="wave"
-												size="sm"
-												tone="error"
-											/>,
-											<elapsed key="time" age={0} format="clock" />,
-										]
-									) : (
-										<text key="label" text="Recording · Stop" wrap="none" />
-									)),
-							]
-						)}
-					</row>
-				);
-			},
-		});
 	}
 
 	readonly #statusPanel = signal<JSXNode>(undefined);
@@ -500,6 +392,140 @@ export class AppFrame {
 		dock.slot("pills").set(() => <HudPills model={hud.pills} />);
 		dock.slot("tray").set(() => <Tray model={hud.tray} />);
 	}
+}
+
+/** What {@link bindComposerStatus} draws beside the status line itself. */
+export interface ComposerStatusOptions {
+	/** The composer's shape id: whether its top chrome or the standalone bar takes the status. */
+	readonly shape: Accessor<string>;
+	/** The chips advertise their click actions (the composer's action handler routes them). */
+	readonly clickable: boolean;
+	/** The generation rate readout. */
+	readonly rate?: Accessor<number | undefined>;
+	/** Natively, the attachment chips offer annotation. */
+	readonly annotate?: () => boolean;
+	/** The speech-to-text control. */
+	readonly dictation?: { readonly state: Accessor<DictationState | undefined>; readonly level: Accessor<number> };
+}
+
+/**
+ * Draw `statusLine` in `composer` as Main's composer does: the top attachment its shape asks for, and the
+ * model, effort, context, rate, fact and usage chips. Panes showing another session reuse it so they look
+ * like Main. Returns the standalone bar (drawn under the composer in a plain terminal) and its preview.
+ */
+export function bindComposerStatus(
+	composer: Composer,
+	statusLine: StatusLineView,
+	options: ComposerStatusOptions,
+): { readonly panel: JSXNode; preview(attachment: StatusAttachment | undefined): UiNode } {
+	const placement = computed(() => shapePlacement(composerShape(options.shape()), composer.completing()));
+	const line = createStatusLine({ settings: statusLine.settings, facts: statusLine.facts, placement });
+	composer.setStatus(line.chrome.composerStatus);
+	const { clickable, dictation } = options;
+	const click = (action: ComposerBarAction) => (clickable ? { click: action } : undefined);
+	const facts = composerFacts({ settings: statusLine.settings, facts: statusLine.facts, click });
+	composer.setSlots({
+		context: facts.context,
+		chips: <ComposerChips composer={composer} {...(options.annotate ? { annotate: options.annotate } : {})} />,
+		// The model chip. With `statusLine.compactThinkingLevel` the effort ring stands in for its icon
+		// (it keeps its own tooltip and click); otherwise the level gets a chip of its own.
+		model: (
+			<row
+				key="model"
+				role="omp.composer.model"
+				align="center"
+				gap="xs"
+				tone={facts.modelTone}
+				title={clickable ? () => keyedTitle("Switch model", "app.model.selectTemporary") : undefined}
+				actions={click("status.model")}
+			>
+				{() => {
+					const level = facts.effort();
+					return level !== undefined && statusLine.settings().compactThinkingLevel ? (
+						<effort
+							key="effort"
+							level={level}
+							role="omp.composer.model.effort"
+							title={keyedTitle(`Thinking effort: ${level}`, "app.thinking.cycle")}
+							actions={click("thinking.cycle")}
+						/>
+					) : (
+						<icon key="icon" name="model" />
+					);
+				}}
+				<text key="name" spans={facts.model} wrap="none" />
+				{clickable && <icon key="chev" name="chev" />}
+			</row>
+		),
+		effort: () => {
+			const level = facts.effort();
+			if (level === undefined || statusLine.settings().compactThinkingLevel) return undefined;
+			return (
+				<row
+					key="effort"
+					role="omp.composer.effort"
+					align="center"
+					gap="xs"
+					title={keyedTitle("Thinking effort", "app.thinking.cycle")}
+					actions={click("thinking.cycle")}
+				>
+					<effort key="glyph" level={level} />
+					<text key="level" text={level} wrap="none" />
+				</row>
+			);
+		},
+		rate: () => {
+			const value = options.rate?.();
+			return value === undefined ? undefined : (
+				<rate key="rate" role="omp.composer.rate" value={value} unit="tok/s" title="Generation rate" />
+			);
+		},
+		extras: facts.extras,
+		usage: facts.usage,
+		dictation: () => {
+			const state = dictation?.state();
+			if (!dictation || state === undefined) return undefined;
+			const busy = state === "starting" || state === "transcribing";
+			return (
+				<row
+					key="dictation"
+					role="omp.composer.dictation"
+					align="center"
+					gap="xs"
+					tone={state === "recording" ? "error" : busy ? "pending" : undefined}
+					title={DICTATION_TITLES[state]}
+					// A start stays cancellable: the model can take a while to load on first use.
+					actions={state === "transcribing" ? undefined : click("dictation.toggle")}
+				>
+					{busy ? (
+						<spinner key="pending" style="orbit" label={state === "starting" ? "Starting…" : "Transcribing…"} />
+					) : (
+						[
+							<icon key="icon" name={state === "recording" ? "stop" : "mic"} />,
+							state === "recording" &&
+								(nativeRendering() ? (
+									// Natively the voice as a wave and the time recorded say "recording".
+									[
+										<meter
+											key="wave"
+											role="omp.composer.dictation.wave"
+											value={() => dictation.level()}
+											style="wave"
+											size="sm"
+											tone="error"
+										/>,
+										<elapsed key="time" age={0} format="clock" />,
+									]
+								) : (
+									<text key="label" text="Recording · Stop" wrap="none" />
+								)),
+						]
+					)}
+				</row>
+			);
+		},
+	});
+	return line;
 }
 
 /** `label`, then the key bound to `action` after two spaces (the hover title of a control). */

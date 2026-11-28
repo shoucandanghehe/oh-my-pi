@@ -651,7 +651,7 @@ test("agent transcript controls copy and retry only that pane, beside its own mo
 		const status = JSON.stringify(left.doc.shape("dock"));
 		expect(status).toContain("model-CopyAgent");
 		expect(status).toContain("high");
-		expect(status).toContain("25.0%");
+		expect(status).toContain("25%");
 		expect(status).toContain("copy agent hook");
 		expect(status).not.toContain("other agent hook");
 	} finally {
