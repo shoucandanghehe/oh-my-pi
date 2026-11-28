@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createSurface, signal, type UiEvent, UiNode } from "@oh-my-pi/pi-tui";
+import { createRoot, createSurface, effect, signal, type UiEvent, UiNode } from "@oh-my-pi/pi-tui";
 import { encodeTspJson } from "@oh-my-pi/pi-tui/native/apc";
 import { $which, isEnoent, TempDir } from "@oh-my-pi/pi-utils";
 import { TSP_VERSION } from "@oh-my-pi/pi-wire";
@@ -87,80 +87,123 @@ test("Tern lays out lanes by the main pane's physical aspect and combines the la
 	expect(landscape.reflow()).toEqual([{ block: 4, target: 2, dir: "below" }]);
 });
 
-test.skipIf(process.platform === "win32")(
-	"bracketed paste from one real relay is intercepted there even when another pane is focused",
-	async () => {
-		const relays = new Map<number, { terminal: Bun.Terminal; exited: Promise<number> }>();
-		let nextBlock = 1;
-		let focused = 1;
-		const hello = encodeTspJson("r", { r: "hello", v: TSP_VERSION, term: "tern", kinds: ["text"], cols: 80 });
-		const client: TernPaneControls = {
-			async open(endpoint) {
-				let output = "";
-				const terminal = new Bun.Terminal({
-					data(terminal, bytes) {
-						output += Buffer.from(bytes).toString("utf8");
-						if (output.includes("\x1b_tsp;q;")) {
-							terminal.write(hello);
-							output = "";
-						}
-					},
-				});
-				const process = Bun.spawn(relayArgv(endpoint), { terminal, timeout: 10_000 });
-				const block = ++nextBlock;
-				relays.set(block, { terminal, exited: process.exited });
-				return { block };
-			},
-			async splitPanes() {
-				return [1, ...relays.keys()].map(block => ({ block, columns: 120, rows: 40, shown: true }));
-			},
-			async focused() {
-				return focused;
-			},
-			async focus(block) {
-				focused = block;
-			},
-			async close() {},
-			async move() {},
-			async balance() {},
-		};
-		const workspace = new NativeWorkspace(client, 1);
-		const intercepted = Promise.withResolvers<{ key: string; text: string }>();
-		const dispatched: string[] = [];
-		try {
-			for (const key of ["source", "focused beside it"]) {
-				await workspace.open(
-					key,
-					key,
-					() => {
-						let node: UiNode;
-						const surface = createSurface(() => ({
-							dock: (node = new UiNode("text", { text: key, onPaste: () => dispatched.push(key) })),
-						}));
-						surface.focus(node!);
-						return {
-							surface,
-							intercept(event) {
-								if (event.type !== "paste") return false;
-								intercepted.resolve({ key, text: event.paste.text });
-								return true;
-							},
-						};
-					},
-					() => {},
-				);
-			}
-			expect(await workspace.isFocused("focused beside it")).toBe(true);
-			relays.get(2)!.terminal.write("\x1b[200~side-only clipboard\x1b[201~");
-			expect(await intercepted.promise).toEqual({ key: "source", text: "side-only clipboard" });
-			expect(dispatched).toEqual([]);
-		} finally {
+function realRelayWorkspace(features: readonly string[] = []) {
+	const relays = new Map<number, { terminal: Bun.Terminal; exited: Promise<number> }>();
+	let nextBlock = 1;
+	let focused = 1;
+	const hello = encodeTspJson("r", { r: "hello", v: TSP_VERSION, term: "tern", kinds: ["text"], features, cols: 80 });
+	const client: TernPaneControls = {
+		async open(endpoint) {
+			let output = "";
+			const terminal = new Bun.Terminal({
+				data(terminal, bytes) {
+					output += Buffer.from(bytes).toString("utf8");
+					if (output.includes("\x1b_tsp;q;")) {
+						terminal.write(hello);
+						output = "";
+					}
+				},
+			});
+			const process = Bun.spawn(relayArgv(endpoint), { terminal, timeout: 10_000 });
+			const block = ++nextBlock;
+			relays.set(block, { terminal, exited: process.exited });
+			return { block };
+		},
+		async splitPanes() {
+			return [1, ...relays.keys()].map(block => ({ block, columns: 120, rows: 40, shown: true }));
+		},
+		async focused() {
+			return focused;
+		},
+		async focus(block) {
+			focused = block;
+		},
+		async close() {},
+		async move() {},
+		async balance() {},
+	};
+	const workspace = new NativeWorkspace(client, 1);
+	return {
+		workspace,
+		write(block: number, bytes: string) {
+			relays.get(block)!.terminal.write(bytes);
+		},
+		async [Symbol.asyncDispose]() {
 			workspace.dispose();
 			for (const { terminal, exited } of relays.values()) {
 				await exited;
 				terminal.close();
 			}
+		},
+	};
+}
+
+test.skipIf(process.platform === "win32")(
+	"native workspace panes follow the tray feature negotiated by the real relay",
+	async () => {
+		await using relay = realRelayWorkspace(["tray"]);
+		const disabled = Promise.withResolvers<void>();
+		let trayAtMount: boolean | undefined;
+		let stopWatching: (() => void) | undefined;
+		try {
+			await relay.workspace.open(
+				"btw",
+				"BTW",
+				(_close, supports) => {
+					trayAtMount = supports("tray");
+					stopWatching = createRoot(dispose => {
+						effect(() => {
+							if (!supports("tray")) disabled.resolve();
+						});
+						return dispose;
+					});
+					return { surface: createSurface(() => ({ dock: new UiNode("text", { text: "BTW" }) })) };
+				},
+				() => {},
+			);
+			expect(trayAtMount).toBe(true);
+			relay.write(2, encodeTspJson("e", { ev: "features", features: [] }));
+			await disabled.promise;
+		} finally {
+			stopWatching?.();
 		}
+	},
+	20_000,
+);
+
+test.skipIf(process.platform === "win32")(
+	"bracketed paste from one real relay is intercepted there even when another pane is focused",
+	async () => {
+		await using relay = realRelayWorkspace();
+		const { workspace } = relay;
+		const intercepted = Promise.withResolvers<{ key: string; text: string }>();
+		const dispatched: string[] = [];
+		for (const key of ["source", "focused beside it"]) {
+			await workspace.open(
+				key,
+				key,
+				() => {
+					let node: UiNode;
+					const surface = createSurface(() => ({
+						dock: (node = new UiNode("text", { text: key, onPaste: () => dispatched.push(key) })),
+					}));
+					surface.focus(node!);
+					return {
+						surface,
+						intercept(event) {
+							if (event.type !== "paste") return false;
+							intercepted.resolve({ key, text: event.paste.text });
+							return true;
+						},
+					};
+				},
+				() => {},
+			);
+		}
+		expect(await workspace.isFocused("focused beside it")).toBe(true);
+		relay.write(2, "\x1b[200~side-only clipboard\x1b[201~");
+		expect(await intercepted.promise).toEqual({ key: "source", text: "side-only clipboard" });
+		expect(dispatched).toEqual([]);
 	},
 	20_000,
 );

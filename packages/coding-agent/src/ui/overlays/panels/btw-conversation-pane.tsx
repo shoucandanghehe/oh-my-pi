@@ -19,6 +19,7 @@ import {
 	untrack,
 } from "@oh-my-pi/pi-tui";
 import { formatNumber, logger } from "@oh-my-pi/pi-utils";
+import type { TspTrayStatus } from "@oh-my-pi/pi-wire";
 import { CombinedAutocompleteProvider } from "../../../autocomplete/autocomplete";
 import type { KeybindingsManager } from "../../../config/keybindings/keybindings";
 import { canonicalKeyId } from "../../../config/keybindings/key-id";
@@ -69,6 +70,7 @@ import { ensureSupportedImageInput } from "../../../utils/image-input";
 import { imageAttachmentSource } from "../../../utils/image-source";
 import { Composer, type ComposerSlots } from "../../composer/composer";
 import { queuedLine } from "../../dock/queue";
+import { Tray, TrayModel, type TrayAgentItem } from "../../dock/tray";
 import { PaneExtensionWidgets } from "../../dock/widgets";
 import { handleTranscriptKey } from "../../keys/transcript";
 import { Overlays } from "../../shell/overlays";
@@ -176,6 +178,15 @@ const COMMANDS = [
 	{ name: "delete", description: "Delete this durable thread" },
 ];
 
+function threadDisplayModel(
+	thread: BtwThread,
+	liveName: string | undefined,
+	branch = liveName === undefined ? thread.conversation.sessionManager.getBranch() : undefined,
+): string {
+	const saved = branch?.findLast(entry => entry.type === "model_change" && !entry.resolvedModelIsFallback);
+	return sanitizeDisplayLine(liveName ?? (saved?.type === "model_change" ? saved.model : thread.model.id));
+}
+
 /** The workspace owns this view; its manager owns the conversation and the draft. */
 export class BtwConversationPane implements NativeWorkspaceSurface {
 	readonly surface: Surface;
@@ -237,6 +248,29 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 				const key = this.#selected();
 				if (key !== undefined) untrack(() => options.loadPresentation(key));
 			});
+			const tray = options.nativeSupports && new TrayModel();
+			if (tray) {
+				tray.quiet.set(false);
+				tray.onAction = this.#onTrayAction;
+				effect(() => {
+					if (!this.#supportsTray()) return;
+					options.revision();
+					const selected = this.#selected();
+					tray.items.set(this.#threads().map(thread => this.#trayCard(thread, thread.key === selected)));
+				});
+				effect(() => {
+					if (this.#supportsTray()) this.#menu.set(undefined);
+				});
+			}
+			const nativeTray = tray && <Tray model={tray} />;
+			if (options.nativeSupports) {
+				effect(() => {
+					const thread = this.#thread();
+					this.#composer.setState({
+						running: thread?.phase === "running" || thread?.conversation.session?.isCompacting,
+					});
+				});
+			}
 			const presentation = () => this.#displayed()?.conversation.extensionRunner;
 			const size = () => ({ rows: options.rows(), columns: options.columns() });
 			const above = <PaneExtensionWidgets runner={presentation} placement="aboveEditor" size={size} />;
@@ -309,7 +343,14 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 					const approval = this.#approval();
 					return approval
 						? this.#confirmation(approval)
-						: [this.#chrome, ansiStatus, above, this.#composer.node, below];
+						: [
+								this.#chrome,
+								ansiStatus,
+								above,
+								() => this.#supportsTray() && nativeTray,
+								this.#composer.node,
+								below,
+							];
 				},
 				layer: () => this.#overlays.nodes(),
 			};
@@ -393,6 +434,78 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		];
 	};
 
+	#supportsTray(): boolean {
+		return this.options.nativeSupports?.("tray") === true;
+	}
+
+	#trayCard(thread: BtwThread, current: boolean): TrayAgentItem {
+		const { key, conversation, request } = thread;
+		const name = sanitizeDisplayLine(thread.title);
+		const turns = thread.turns;
+		const last = turns.at(-1);
+		const hasDraft = Boolean(thread.draft || thread.draftImages.length || thread.draftImageLinks.some(Boolean));
+		const running = thread.phase === "running" || conversation.session?.isCompacting === true;
+		const failed = thread.phase === "error";
+		const status: TspTrayStatus = running ? "running" : failed ? "failed" : last?.replyText ? "done" : "queued";
+		const state = running ? "Replying" : failed ? "Error" : last?.replyText ? "Ready" : hasDraft ? "Draft" : "Empty";
+		const text = sanitizeDisplayLine(
+			queuedLine((running ? request?.input : undefined) ?? last?.input ?? (hasDraft ? "Draft" : "")),
+		);
+		const live = conversation.status;
+		const model = threadDisplayModel(thread, live?.model.name);
+		const usage = live?.stats ?? conversation.committedUsage;
+		const tokens = usage.tokens.total ? `${formatNumber(usage.tokens.total)} tok` : undefined;
+		const cost = usage.cost ? formatCost(usage.cost) : undefined;
+		const created = new Date(thread.createdAt);
+		const today = created.toDateString() === new Date().toDateString();
+		const clock = created.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+		const date = today
+			? ""
+			: `${created.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })} `;
+		const start = running ? request?.timestamp : undefined;
+		return {
+			item: "agent",
+			key,
+			ref: key,
+			name,
+			status,
+			aria: [name, state, current ? "Current" : undefined, thread.unread ? `${thread.unread} unread` : undefined]
+				.filter(Boolean)
+				.join(", "),
+			title: `${name} · ${state}\nSees Main up to ${date}${clock}`,
+			current,
+			menu: this.#threadActions(thread).map(action => ({ ...action, id: `btw.${action.id}` })),
+			look: false,
+			acted: start ?? last?.timestamp ?? 0,
+			waiting: false,
+			unread: thread.unread,
+			type: "BTW",
+			model,
+			tools: undefined,
+			stats: [tokens, cost].filter(Boolean).join(" · "),
+			start,
+			duration: undefined,
+			openable: true,
+			tool: "",
+			text,
+			added: 0,
+			removed: 0,
+			callFailed: false,
+		};
+	}
+
+	readonly #onTrayAction = (action: string, key: string): void => {
+		if (!this.#supportsTray() || this.#approval.peek() || this.#overlays.open()) return;
+		const thread = this.#threads().find(candidate => candidate.key === key);
+		if (!thread) return;
+		if (action === "tray.open") {
+			this.#select(key);
+		} else if (action.startsWith("btw.")) {
+			const act = action.slice("btw.".length);
+			if (this.#threadActions(thread).some(item => item.id === act)) this.#action(act, thread);
+		}
+	};
+
 	readonly #facts = computed(() => {
 		const thread = this.#displayed();
 		if (!thread) return;
@@ -400,14 +513,11 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		const status = thread.conversation.status;
 		const liveModel = status?.model;
 		const branch = !liveModel ? thread.conversation.sessionManager.getBranch() : undefined;
-		const savedModel = branch?.findLast(entry => entry.type === "model_change" && !entry.resolvedModelIsFallback);
 		const savedEffort = branch?.findLast(entry => entry.type === "thinking_level_change");
 		const usage = status?.stats.contextUsage;
 		const stats = status?.stats;
 		return {
-			model: sanitizeDisplayLine(
-				liveModel?.name ?? (savedModel?.type === "model_change" ? savedModel.model : thread.model.id),
-			),
+			model: threadDisplayModel(thread, liveModel?.name, branch),
 			effort: liveModel
 				? liveModel.thinking
 					? ((session?.isAutoThinking ? session.autoResolvedThinkingLevel() : undefined) ??
@@ -476,10 +586,8 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 
 	#nativeExtras(): JSXNode {
 		const facts = this.#facts();
-		if (!facts) return undefined;
-		return (
+		const status = facts && (
 			<status key="btw-status" role="omp.composer.extras" transparent grow={1}>
-				<seg key="read-only" spans={[{ t: "Read-only", s: "muted" }]} />
 				{facts.tokens && <seg key="tokens" spans={[{ t: facts.tokens, s: "muted" }]} />}
 				{facts.requests && <seg key="requests" spans={[{ t: facts.requests, s: "muted" }]} />}
 				{facts.statuses &&
@@ -487,6 +595,25 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						<seg key={`extension:${key}`} spans={[{ t: sanitizeDisplayLine(status), s: "muted" }]} />
 					))}
 			</status>
+		);
+		return this.#supportsTray() ? (
+			<row key="btw-extras" align="center" gap="xs" grow={1}>
+				<button
+					key="new-thread"
+					text="+"
+					title="New BTW thread"
+					aria="New BTW thread"
+					size="sm"
+					variant="quiet"
+					actions={{ click: "btw.new" }}
+					onAction={action => {
+						if (action === "btw.new") this.#action("new");
+					}}
+				/>
+				{status}
+			</row>
+		) : (
+			status
 		);
 	}
 
@@ -503,16 +630,15 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		const view = createRoot<BtwDraftView>(dispose => {
 			const paste = new PanePaste();
 			const composer = new Composer({
-				placeholder: options.nativeSupports
-					? thread
-						? "Reply in BTW…"
-						: "Ask a side question without interrupting Main…"
-					: "Ask a side question…",
+				placeholder: "Ask a side question…",
 				hideFocusedPlaceholder: !options.nativeSupports,
 				autocomplete: this.#autocomplete,
 				deferSubmit: replay => this.#holdPaste(replay),
 			});
-			if (options.nativeSupports) composer.setSlots(this.#nativeStatus());
+			if (options.nativeSupports) {
+				composer.setNativePlaceholder("Ask a side question…");
+				composer.setSlots(this.#nativeStatus());
+			}
 			if (isClipboardTerminalLocal()) composer.readClipboard = readTextFromClipboard;
 			composer.setSpaceHold(
 				options.keybindings.keysFor("app.stt.pushToTalk").map(canonicalKeyId),
@@ -1078,7 +1204,7 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 						))}
 					</col>
 				)}
-				{this.options.nativeSupports && (
+				{this.options.nativeSupports && !this.#supportsTray() && (
 					<row gap="sm" wrap>
 						<text
 							grow={1}
@@ -1188,10 +1314,9 @@ export class BtwConversationPane implements NativeWorkspaceSurface {
 		);
 	}
 
-	#action(act: string): void {
+	#action(act: string, thread = this.#thread()): void {
 		if (this.#approval.peek() || this.#overlays.open()) return;
 		this.#menu.set(undefined);
-		const thread = this.#thread();
 		switch (act) {
 			case "threads":
 				if (this.ansiRail) this.ansiRail.toggle();

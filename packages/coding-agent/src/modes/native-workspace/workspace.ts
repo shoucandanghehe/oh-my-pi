@@ -154,7 +154,9 @@ export class NativeWorkspace {
 			const mount = create(
 				() => this.#close(entry),
 				capability =>
-					capability === "scroll" ? connection.hasFeature(capability) : connection.supports(capability),
+					capability === "scroll" || capability === "tray"
+						? connection.hasFeature(capability)
+						: connection.supports(capability),
 				driver,
 			);
 			if (this.#panes.get(entry.key) !== entry) {

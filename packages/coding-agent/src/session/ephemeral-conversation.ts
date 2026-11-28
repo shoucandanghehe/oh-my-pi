@@ -115,8 +115,6 @@ interface BtwProjectionCache {
 		tokens: EphemeralConversationStatus["stats"]["tokens"];
 		premiumRequests: number;
 		cost: number;
-		latest?: AssistantMessage;
-		context?: AssistantMessage;
 	};
 }
 
@@ -412,23 +410,15 @@ export class EphemeralConversation {
 		await this.#disposing;
 	}
 
-	get status(): EphemeralConversationStatus | undefined {
-		const session = this.session;
-		const model = session?.model;
-		if (!session || !model) return undefined;
+	/** Persisted usage owned by this BTW thread, available before its session is loaded. */
+	get committedUsage() {
 		const cache = projectionCache(this.sessionManager);
 		const usageFingerprint = JSON.stringify(this.sessionManager.getUsageStatistics());
 		if (!cache.usage || cache.usageFingerprint !== usageFingerprint) {
 			const origin = contextOrigin(this.sessionManager);
-			const messages = projectBtwMessages(this.sessionManager, session);
 			const tokens = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 			let premiumRequests = 0;
 			let cost = 0;
-			const latest = messages.findLast((message): message is AssistantMessage => message.role === "assistant");
-			const context = messages.findLast(
-				(message): message is AssistantMessage =>
-					message.role === "assistant" && hasContextTokenUsage(message.usage),
-			);
 			for (const entry of this.sessionManager.getEntries()) {
 				if (origin?.inheritedIds.has(entry.id)) continue;
 				const usage =
@@ -447,10 +437,18 @@ export class EphemeralConversation {
 				premiumRequests += usage.premiumRequests ?? 0;
 				cost += usage.cost.total;
 			}
-			cache.usage = { tokens, premiumRequests, cost, latest, context };
+			cache.usage = { tokens, premiumRequests, cost };
 			cache.usageFingerprint = usageFingerprint;
 		}
-		const committed = cache.usage;
+		return cache.usage;
+	}
+
+	get status(): EphemeralConversationStatus | undefined {
+		const session = this.session;
+		const model = session?.model;
+		if (!session || !model) return undefined;
+		const committed = this.committedUsage;
+		const messages = projectBtwMessages(this.sessionManager, session);
 		const stream = session.agent.state.streamMessage;
 		const assistant = stream?.role === "assistant" ? stream : undefined;
 		const streamUsage = assistant?.usage;
@@ -462,7 +460,13 @@ export class EphemeralConversation {
 			cacheWrite: committed.tokens.cacheWrite + (streamUsage?.cacheWrite ?? 0),
 			total: committed.tokens.total + (streamUsage?.totalTokens ?? 0),
 		};
-		const context = assistant && hasContextTokenUsage(assistant.usage) ? assistant : committed.context;
+		const context =
+			assistant && hasContextTokenUsage(assistant.usage)
+				? assistant
+				: messages.findLast(
+						(message): message is AssistantMessage =>
+							message.role === "assistant" && hasContextTokenUsage(message.usage),
+					);
 		const contextTokens = context ? calculateContextTokens(context.usage) : undefined;
 		const contextWindow = model.contextWindow ?? 0;
 		return {
@@ -470,7 +474,7 @@ export class EphemeralConversation {
 			model,
 			thinkingLevel: session.agent.state.thinkingLevel,
 			isStreaming: session.isStreaming,
-			latestAssistantMessage: assistant ?? committed.latest,
+			latestAssistantMessage: assistant ?? messages.findLast(message => message.role === "assistant"),
 			stats: {
 				tokens,
 				premiumRequests: committed.premiumRequests + (streamUsage?.premiumRequests ?? 0),

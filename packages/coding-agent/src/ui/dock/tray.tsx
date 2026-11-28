@@ -19,7 +19,7 @@
  */
 import { For, type JSXNode, signal, untrack } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { TspSpan, TspTrayMain, TspTrayStatus } from "@oh-my-pi/pi-wire";
+import type { TspMenuItem, TspSpan, TspTrayMain, TspTrayStatus } from "@oh-my-pi/pi-wire";
 import type { JobWidgetView } from "../../tools/details/job-widget";
 import { previewLine, shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { replaceTabs } from "../../utils/text-width";
@@ -71,11 +71,14 @@ export interface TrayAgentItem extends TrayFace, TrayDoing {
 	readonly tools: number | undefined;
 	/** `22%` (context fill), else `12K tok`; empty when neither is known. */
 	readonly stats: string;
-	/** Epoch ms its run clock counts from. */
-	readonly start: number;
+	/** Epoch ms its run clock counts from, if known. */
+	readonly start: number | undefined;
 	/** Its run's length once settled. */
 	readonly duration: number | undefined;
 	readonly openable: boolean;
+	readonly current?: boolean;
+	readonly title?: string;
+	readonly menu?: readonly TspMenuItem[];
 }
 
 /** A background job's card. */
@@ -269,15 +272,26 @@ function DoingRow(props: { readonly item: TrayAgentItem }): JSXNode {
 	);
 }
 
-function AgentCard(props: { readonly item: TrayAgentItem; readonly now: number }): JSXNode {
+function AgentCard(props: {
+	readonly item: TrayAgentItem;
+	readonly now: number;
+	readonly onMenuAction: (act: string, ref: string) => void;
+}): JSXNode {
 	const item = props.item;
 	return (
-		<col key={trayKey(item.key)} {...cardProps(item)}>
+		<col
+			key={trayKey(item.key)}
+			{...cardProps(item)}
+			title={item.title}
+			actions={item.menu && { menu: item.menu }}
+			onAction={item.menu && (act => props.onMenuAction(act, item.ref))}
+		>
 			<row key="head" role="omp.tray.head" gap="xs" align="center">
 				<Dot status={item.status} waiting={item.waiting} />
 				<text key="name" role="omp.tray.name" text={item.name} wrap="none" truncate="end" grow={1} />
 				{item.unread > 0 && <badge key="unread" role="omp.tray.unread" text={String(item.unread)} tone="warning" />}
-				<Clock start={item.start} duration={item.duration} now={props.now} />
+				{item.current && <badge key="current" text="Current" tone="accent" />}
+				{item.start !== undefined && <Clock start={item.start} duration={item.duration} now={props.now} />}
 				{item.tools !== undefined && (
 					<row key="tools" role="omp.tray.tools" align="center">
 						<text key="count" spans={[{ t: "/", s: "dim" }, { t: String(item.tools) }]} wrap="none" />
@@ -502,7 +516,9 @@ function Peek(props: {
 				{meta !== "" && (
 					<text key="meta" role="omp.tray.peek.meta" text={meta} wrap="none" truncate="end" grow={1} shrink={1} />
 				)}
-				{item.item !== "done" && <Clock start={item.start} duration={item.duration} now={props.now} />}
+				{item.item !== "done" && item.start !== undefined && (
+					<Clock start={item.start} duration={item.duration} now={props.now} />
+				)}
 				{peekButtons(item)}
 			</row>
 			{body}
@@ -532,7 +548,7 @@ export function Tray(props: { readonly model: TrayModel; readonly now?: () => nu
 			{item => {
 				const now = untrack(clock);
 				return item.item === "agent" ? (
-					<AgentCard item={item} now={now} />
+					<AgentCard item={item} now={now} onMenuAction={onAction} />
 				) : item.item === "job" ? (
 					<JobCard item={item} now={now} />
 				) : (

@@ -1,35 +1,15 @@
 /** Drive an installed Tern by screen coordinates; no user panes, credentials, or model requests. */
 import { expect, test } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
-import { $which, isEnoent, TempDir } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
+import { isEnoent, TempDir } from "@oh-my-pi/pi-utils";
 import { quotePosixArgv } from "../src/utils/shell-quote";
+import { skipWithoutTern, startHeadlessTern, type TernElement } from "./helpers/headless-tern";
 
-const element = type({ "text?": "string", "title?": "string", rect: ["number", "number", "number", "number"] });
-const reply = type({ ok: "boolean", "error?": "string", "nodes?": element.array() });
-type Element = typeof element.infer;
-
-const tern = $which("tern");
-const available = Boolean(tern) && process.platform !== "win32";
-test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
+test.skipIf(skipWithoutTern)(
 	"real Tern pointer controls change the model without losing the composed draft",
 	async () => {
-		if (!tern || !available)
-			throw new Error("test:tern requires Tern with `serve` and `ctl` on PATH and a POSIX shell");
 		await using dir = await TempDir.create("@omp-tern-");
-		const socket = dir.join("control.sock");
-		const home = dir.join("home");
 		const agent = dir.join("agent");
-		const env = {
-			PATH: Bun.env.PATH,
-			LANG: "en_US.UTF-8",
-			SHELL: "/bin/sh",
-			HOME: home,
-			TERN_CONFIG_DIR: dir.join("tern"),
-		};
-		await fs.mkdir(home);
 		await Bun.write(dir.join("sample-note.txt"), "Local completion target\n");
 		await Bun.write(
 			path.join(agent, "models.yml"),
@@ -51,67 +31,20 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 				},
 			}),
 		);
-		const log = Bun.file(dir.join("server.log"));
-		const server = Bun.spawn([tern, "serve", "--control", socket, "--out", dir.path()], {
-			cwd: dir.path(),
-			env,
-			stdin: "ignore",
-			stdout: "ignore",
-			stderr: log,
-			timeout: 90_000,
-		});
-
-		async function ctl(...args: string[]) {
-			const response = await $`${tern} ctl --control ${socket} ${args}`.env(env).quiet();
-			const data = reply.assert(response.json());
-			if (!data.ok) throw new Error(`${args[0]}: ${data.error}`);
-			return data;
-		}
-
-		async function visible(
-			selector: string,
-			match: (node: Element) => boolean,
-			description: string,
-		): Promise<Element> {
-			const deadline = performance.now() + 10_000;
-			let nodes: Element[] = [];
-			do {
-				nodes = (await ctl("tree", selector)).nodes ?? [];
-				const found = nodes.find(match);
-				if (found) return found;
-				await Bun.sleep(25);
-			} while (performance.now() < deadline && server.exitCode === null);
-			throw new Error(`Expected ${description}; visible ${selector}: ${JSON.stringify(nodes).slice(0, 1000)}`);
-		}
-
-		function click({ rect: [x, y, w, h] }: Element) {
-			return ctl("click", String(x + w / 2), String(y + h / 2));
-		}
-		const enterText = (text: string) => ctl("type", JSON.stringify(text));
+		await using ui = await startHeadlessTern(dir);
+		const { ctl, visible, click, enterText, env, server, log } = ui;
 		const draft = (text: string) =>
 			visible(".sf-editor", n => n.text === text, `composer draft ${JSON.stringify(text)}`);
 		const chip = (name: string) =>
 			visible(".sf-row.sf-act", n => n.text === `Smoke ${name}`, `model chip Smoke ${name}`);
 
 		try {
-			const deadline = performance.now() + 10_000;
-			for (;;) {
-				try {
-					await fs.access(socket);
-					break;
-				} catch (error) {
-					if (!isEnoent(error) || performance.now() >= deadline || server.exitCode !== null) throw error;
-					await Bun.sleep(25);
-				}
-			}
-			await ctl("size", "1200", "800", "2");
-			await ctl("ready");
 			await enterText(
 				`${quotePosixArgv(["cd", dir.path()])} && exec ${quotePosixArgv([
 					"env",
 					"-i",
 					`PATH=${env.PATH}`,
-					`HOME=${home}`,
+					`HOME=${env.HOME}`,
 					`LANG=${env.LANG}`,
 					`PI_CODING_AGENT_DIR=${agent}`,
 					"TERM=xterm-256color",
@@ -172,10 +105,227 @@ test.skipIf(!available && Bun.env.OMP_REQUIRE_TERN !== "1")(
 		} catch (error) {
 			if (await log.exists()) console.error((await log.text()).slice(-1600));
 			throw error;
-		} finally {
-			if (server.exitCode === null) await ctl("quit").catch(() => server.kill());
-			await server.exited;
 		}
 	},
 	100_000,
+);
+
+const TRAY = ".sf-dock .sf-tray";
+const CARD = `${TRAY} .sf-tray-card`;
+const COMPOSER = ".sf-dock [data-role^='omp.editor']";
+const NEW_THREAD = `${COMPOSER} [data-role='omp.composer.bar'] button`;
+const LEGACY_ACTIONS = ".sf-dock button, .sf-dock [data-role='omp.btn']";
+const MESSAGE = ".sf-main .sf-md";
+
+function only(nodes: TernElement[] | undefined, description: string): TernElement {
+	if (nodes?.length !== 1) throw new Error(`Expected one rendered ${description}; found ${nodes?.length ?? 0}`);
+	const [node] = nodes;
+	if (!node || node.rect[2] <= 0 || node.rect[3] <= 0) throw new Error(`Rendered ${description} has no area`);
+	return node;
+}
+
+function bottom({ rect: [, y, , h] }: TernElement) {
+	return y + h;
+}
+
+/** Await the observed clipboard or cancel write from the real PTY; its I/O is outside Bun's clock. */
+async function fixtureOutput(file: Bun.BunFile, description: string): Promise<string> {
+	const deadline = performance.now() + 5000;
+	do {
+		try {
+			const text = await file.text();
+			if (text) return text;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		await Bun.sleep(25);
+	} while (performance.now() < deadline);
+	throw new Error(`Missing fixture output: ${description}`);
+}
+
+async function startBtwFixture(dir: TempDir) {
+	const ui = await startHeadlessTern(dir);
+	const log = Bun.file(dir.join("fixture.log"));
+	try {
+		await ui.enterText(
+			`exec ${quotePosixArgv([
+				"env",
+				"-i",
+				`PATH=${ui.env.PATH}`,
+				`HOME=${ui.env.HOME}`,
+				`LANG=${ui.env.LANG}`,
+				"PI_TEST_RUNTIME=1",
+				"TERM=xterm-256color",
+				"TERM_PROGRAM=tern",
+				process.execPath,
+				path.join(import.meta.dir, "helpers/tern-btw-fixture.ts"),
+			])} 2>${quotePosixArgv([log.name!])}`,
+		);
+		await ui.ctl("key", "Enter");
+		await ui.visible(COMPOSER, node => node.text?.includes("tray-fixture-model") === true, "BTW dock composer");
+		await ui.visible(MESSAGE, node => node.text === "Geometry thread saved answer.", "selected thread transcript");
+		return ui;
+	} catch (error) {
+		const stderr = (await log.exists()) ? await log.text() : "";
+		await ui[Symbol.asyncDispose]();
+		throw new Error(`Headless BTW fixture did not render${stderr ? `:\n${stderr}` : ""}`, { cause: error });
+	}
+}
+
+test.skipIf(skipWithoutTern)(
+	"real Tern BTW renders its thread cards in the dock above the composer",
+	async () => {
+		await using dir = await TempDir.create("@omp-tern-btw-");
+		await using ui = await startBtwFixture(dir);
+		const tray = only((await ui.ctl("tree", `${TRAY} .sf-tray-strip`)).nodes, "BTW tray card strip in the dock");
+		const composer = only((await ui.ctl("tree", COMPOSER)).nodes, "BTW dock composer");
+		expect(bottom(tray)).toBeLessThanOrEqual(composer.rect[1]);
+		const cards = (await ui.ctl("tree", CARD)).nodes ?? [];
+		expect(cards).toHaveLength(2);
+		expect(cards[0]!.text).toContain("Geometry thread");
+		expect(cards[1]!.text).toContain("Notes thread");
+		expect(cards[0]!.rect[0]).toBeLessThan(cards[1]!.rect[0]);
+		expect(cards[0]!.rect[1]).toBeCloseTo(cards[1]!.rect[1]);
+		expect(cards.every(card => card.rect[3] > 0 && bottom(card) <= composer.rect[1])).toBe(true);
+	},
+	35_000,
+);
+
+test.skipIf(skipWithoutTern)(
+	"real Tern BTW activates a different thread by clicking its card or pressing Enter after an arrow key",
+	async () => {
+		await using dir = await TempDir.create("@omp-tern-btw-open-");
+		await using ui = await startBtwFixture(dir);
+		const notes = only((await ui.ctl("tree", `${CARD}:nth-child(2)`)).nodes, "Notes thread card");
+		expect(notes.text).toContain("Notes thread");
+		await ui.click(notes);
+		await ui.visible(
+			MESSAGE,
+			node => node.text === "Notes thread saved answer.",
+			"Notes thread transcript after clicking its card",
+		);
+		await ui.ctl("key", "Left");
+		await ui.visible(
+			`${CARD}[aria-selected='true']`,
+			node => node.text?.includes("Geometry thread") === true,
+			"keyboard cursor on the first card without activating it",
+		);
+		expect((await ui.ctl("tree", MESSAGE)).nodes?.map(node => node.text)).toContain("Notes thread saved answer.");
+		await ui.ctl("key", "Enter");
+		await ui.visible(MESSAGE, node => node.text === "Geometry thread saved answer.", "first transcript after Enter");
+	},
+	35_000,
+);
+
+test.skipIf(skipWithoutTern)(
+	"real Tern BTW creates a thread through the + next to the composer model chip",
+	async () => {
+		await using dir = await TempDir.create("@omp-tern-btw-new-");
+		await using ui = await startBtwFixture(dir);
+		const add = only(
+			(await ui.ctl("tree", NEW_THREAD)).nodes?.filter(node => node.text?.trim() === "+"),
+			"+ new thread button in the composer bar",
+		);
+		const model = only(
+			(await ui.ctl("tree", `${COMPOSER} [data-role='omp.composer.model']`)).nodes,
+			"composer model chip",
+		);
+		expect(add.rect[0]).toBeGreaterThanOrEqual(model.rect[0] + model.rect[2]);
+		expect(add.rect[1]).toBeLessThan(bottom(model));
+		expect(bottom(add)).toBeGreaterThan(model.rect[1]);
+		await ui.click(add);
+		await ui.visible(
+			CARD,
+			node => node.text?.includes("Created thread 1") === true && node.text.includes("Current"),
+			"new thread selected in the tray",
+		);
+		expect((await ui.ctl("tree", CARD)).nodes).toHaveLength(3);
+	},
+	35_000,
+);
+
+test.skipIf(skipWithoutTern)(
+	"real Tern BTW right-click Copy answer acts on the card's thread without selecting it",
+	async () => {
+		await using dir = await TempDir.create("@omp-tern-btw-menu-");
+		await using ui = await startBtwFixture(dir);
+		const notes = only((await ui.ctl("tree", `${CARD}:nth-child(2)`)).nodes, "right-clickable Notes thread card");
+		await ui.click(notes, "right");
+		const copy = await ui.visible(
+			"[role='menuitem']",
+			node => node.text?.trim() === "Copy answer",
+			"card context menu's Copy answer",
+		);
+		await ui.click(copy);
+		const clipboard = Bun.file(dir.join("clipboard"));
+		expect(await fixtureOutput(clipboard, "right-clicked card's copied reply")).toBe("Notes thread saved answer.");
+		expect((await ui.ctl("tree", MESSAGE)).nodes?.map(node => node.text)).toContain("Geometry thread saved answer.");
+	},
+	35_000,
+);
+
+test.skipIf(skipWithoutTern)(
+	"real Tern BTW swaps the tray for Threads / New / Close when Agents tray is disabled",
+	async () => {
+		await using dir = await TempDir.create("@omp-tern-btw-settings-");
+		await using ui = await startBtwFixture(dir);
+		const fallbackButtons = () =>
+			ui
+				.ctl("tree", LEGACY_ACTIONS)
+				.then(reply =>
+					reply.nodes
+						?.filter(node => node.rect[2] > 0 && node.rect[3] > 0)
+						.flatMap(node => (node.text && ["Threads", "New", "Close"].includes(node.text) ? [node.text] : [])),
+				);
+		expect(await fallbackButtons()).toEqual([]);
+		only((await ui.ctl("tree", TRAY)).nodes, "BTW tray before disabling it");
+		await ui.ctl("prefs", "search", "Agents tray");
+		const toggle = only(
+			(await ui.ctl("tree", "button.pf-sw.on[role='switch']")).nodes,
+			"enabled Agents tray preference",
+		);
+		await ui.click(toggle);
+		await ui.ctl("prefs", "close");
+		await ui.visible(
+			LEGACY_ACTIONS,
+			node => node.text === "Threads",
+			"fallback Threads button after turning the tray off",
+		);
+		expect(await fallbackButtons()).toEqual(expect.arrayContaining(["Threads", "New", "Close"]));
+		expect((await ui.ctl("tree", TRAY)).nodes ?? []).toEqual([]);
+	},
+	35_000,
+);
+
+test.skipIf(skipWithoutTern)(
+	"real Tern BTW MAIN is inert and Escape cancels a reply without creating a thread",
+	async () => {
+		await using dir = await TempDir.create("@omp-tern-btw-escape-");
+		await using ui = await startBtwFixture(dir);
+		const main = only((await ui.ctl("tree", `${TRAY} .sf-tray-main`)).nodes, "inert MAIN label on the BTW tray");
+		expect(main.text?.toUpperCase()).toBe("MAIN");
+		expect(main.title ?? "").not.toMatch(/back to main/i);
+		await ui.click(main);
+		const field = only((await ui.ctl("tree", `${COMPOSER} .sf-editor`)).nodes, "BTW editor before Escape");
+		await ui.click(field);
+		await ui.visible(`${COMPOSER} .sf-editor.focused`, node => node.rect[3] > 0, "focused BTW editor");
+		await ui.ctl("key", "Escape");
+		const cancelled = Bun.file(dir.join("cancelled-thread"));
+		expect(await fixtureOutput(cancelled, "selected thread cancelled by Escape")).toBe("geometry");
+		const cards = (await ui.ctl("tree", CARD)).nodes ?? [];
+		expect(cards).toHaveLength(2);
+		expect(cards.some(node => node.text?.includes("Created thread"))).toBe(false);
+	},
+	35_000,
+);
+
+test.skipIf(skipWithoutTern)(
+	"real Tern BTW draws no Read-only label when a thread is selected",
+	async () => {
+		await using dir = await TempDir.create("@omp-tern-btw-label-");
+		await using ui = await startBtwFixture(dir);
+		const labels = (await ui.ctl("tree", ".sf-main .sf, .sf-dock .sf, .sf-layer .sf")).nodes ?? [];
+		expect(labels.filter(node => node.text === "Read-only" && node.rect[2] > 0 && node.rect[3] > 0)).toEqual([]);
+	},
+	35_000,
 );
